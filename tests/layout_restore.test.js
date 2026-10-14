@@ -1505,7 +1505,7 @@ async function runLayoutRestoreSuite() {
     const sessionSource = fs.readFileSync('static/yomux.js', 'utf8');
     assert.equal(sessionSource.includes('panel-agent-slot'), false, 'DOIT.57 T1: the agent badge is removed from the Info Bar (the window buttons carry the agent fact)');
     assert.equal(/function sessionAgentBadgeHtml/.test(sessionSource), false, 'DOIT.57 T1: the unused agent-badge helper is gone');
-    assert.ok(/function terminalTabDisplayLabel\(session, info\)\s*\{\s*return t\('tab\.terminal\.short'\);\s*\}/.test(sessionSource), 'DOIT.56 N3: terminal tab visible label is static and localized');
+    assert.ok(/function terminalTabDisplayLabel\(session, info\)[\s\S]*?if \(tabberView\) return sessionLabel\(session\);[\s\S]*?return t\('tab\.terminal\.short'\);/.test(sessionSource), 'ordinary terminal tabs keep the localized label while Tabber window views use the source session label');
     assert.ok(/function terminalTabTitle\(session, info\)[\s\S]*terminalTabDetailLabel\(session, info\)/.test(sessionSource), 'DOIT.56 N3: terminal tab title still uses process/window detail');
   });
 
@@ -3302,6 +3302,9 @@ async function runLayoutRestoreSuite() {
     const source = fs.readFileSync('static/yomux.js', 'utf8');
     assert.ok(/const uploadResultRecords = new Map\(\)/.test(source), 'upload entries and cleanup timer have one session-keyed map owner');
     assert.equal(/uploadResultsBySession|uploadCleanupTimers/.test(source), false, 'parallel upload entry and timer maps are removed');
+    const uploadFlow = source.match(/async function uploadFiles\(session, fileList, options = \{\}\) \{([\s\S]*?)\n\}\n\nasync function uploadEditorFiles/);
+    assert.ok(uploadFlow, 'terminal upload flow remains a single source owner');
+    assert.doesNotMatch(uploadFlow[1], /emitNotification\(['"]uploadResult/, 'successful terminal uploads do not show the redundant Uploaded toast');
   });
 
   test('session rename moves the whole upload result record before old-session teardown', () => {
@@ -4861,7 +4864,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('function setLimitedMapEntry'), 'long-lived frontend maps share a bounded LRU setter');
     assert.ok(source.includes('fileExplorerMemoryCacheLimit = 512'), 'file explorer memory caches are capped');
     assert.ok(source.includes('commandPaletteRecentKeyLimit = 100'), 'command palette recent-key cache is capped');
-    assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-text,\s*\.command-palette-group,\s*\.repo-chip-menu \.repo-chip-branch[\s\S]*?overflow:\s*hidden;[\s\S]*?text-overflow:\s*ellipsis;[\s\S]*?white-space:\s*nowrap;/.test(css), 'long indexed-root group labels use the shared single-line ellipsis owner');
+    assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-text,\s*\.file-tree-row\.tabber-row \.tabber-normal-description,\s*\.command-palette-group,\s*\.repo-chip-menu \.repo-chip-branch[\s\S]*?overflow:\s*hidden;[\s\S]*?text-overflow:\s*ellipsis;[\s\S]*?white-space:\s*nowrap;/.test(css), 'advanced window labels and Normal Tabber descriptions use the shared single-line ellipsis owner');
     // The preview fixture above asserts restored vertical and horizontal scroll state.  Avoid
     // coupling that behavior to one helper call spelling.
     assert.equal(source.includes("const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});\n  installCodeMirrorDiffResizeObserver"), false, 'diff resize observer is not installed before the rebuild decision');

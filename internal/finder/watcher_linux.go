@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -41,6 +42,10 @@ type linuxNativeWatcher struct {
 	events    chan nativeWatchEvent
 	mu        sync.Mutex
 	watches   map[int]string
+	paths     map[string]int
+	scopes    map[string]bool
+	coverage  map[string]bool
+	visited   uint64
 	roots     map[int]string
 	closed    chan struct{}
 	done      chan struct{}
@@ -63,6 +68,7 @@ func newNativeWatcher() (nativeWatchController, nativeWatchStatus) {
 		fd:        fd,
 		events:    make(chan nativeWatchEvent, 256),
 		watches:   make(map[int]string),
+		paths:     make(map[string]int),
 		roots:     make(map[int]string),
 		closed:    make(chan struct{}),
 		done:      make(chan struct{}),
@@ -71,6 +77,26 @@ func newNativeWatcher() (nativeWatchController, nativeWatchStatus) {
 	}
 	go watcher.readLoop()
 	return watcher, nativeWatchStatus{available: true}
+}
+
+// Both directions change together under mu, including descriptor reuse and
+// ignored events. Scope coverage remains owned by the existing reconciliation.
+func (w *linuxNativeWatcher) rememberRegistration(wd int, path string) {
+	if w.paths == nil {
+		w.paths = make(map[string]int)
+	}
+	if path := w.watches[wd]; w.paths[path] == wd {
+		delete(w.paths, path)
+	}
+	w.watches[wd] = path
+	w.paths[path] = wd
+}
+
+func (w *linuxNativeWatcher) forgetRegistration(wd int) {
+	if path := w.watches[wd]; w.paths[path] == wd {
+		delete(w.paths, path)
+	}
+	delete(w.watches, wd)
 }
 
 func (w *linuxNativeWatcher) Events() <-chan nativeWatchEvent { return w.events }
@@ -87,32 +113,60 @@ func (w *linuxNativeWatcher) Close() {
 }
 
 func (w *linuxNativeWatcher) SetRoots(ctx context.Context, roots []string) nativeWatchStatus {
+	scopes := make(map[string]bool, len(roots))
+	for _, root := range roots {
+		scopes[root] = true
+	}
+	return w.SetScopes(ctx, scopes, true)
+}
+
+func (w *linuxNativeWatcher) SetScopes(ctx context.Context, scopes map[string]bool, force bool) nativeWatchStatus {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	for wd := range w.watches {
-		_, _ = syscall.InotifyRmWatch(w.fd, uint32(wd))
+	if w.scopes == nil {
+		w.scopes = map[string]bool{}
+		w.coverage = map[string]bool{}
 	}
-	w.watches = make(map[int]string)
-	w.roots = make(map[int]string)
-	status := nativeWatchStatus{available: true}
+	for wd, path := range w.watches {
+		needed := false
+		for root, recursive := range scopes {
+			if path == root || recursive && indexRootWithin(root, path) {
+				needed = true
+				break
+			}
+		}
+		if !needed {
+			_, _ = syscall.InotifyRmWatch(w.fd, uint32(wd))
+			w.forgetRegistration(wd)
+			delete(w.roots, wd)
+		}
+	}
+	roots := make([]string, 0, len(scopes))
+	for root := range scopes {
+		roots = append(roots, root)
+	}
+	sort.Strings(roots)
+	status := nativeWatchStatus{available: true, registrations: len(w.watches)}
 	visitedEntries := 0
 	for _, root := range roots {
+		if recursive, exists := w.scopes[root]; exists && recursive == scopes[root] && !force && w.coverage[root] {
+			continue
+		}
+		rootFailed := false
 		if ctx != nil {
 			select {
 			case <-ctx.Done():
+				rootFailed = true
 				status.degraded = true
 				status.reason = "registration-cancelled"
 				return status
 			default:
 			}
 		}
-		if status.registrations >= maxNativeWatchRegistrations {
-			status.degraded = true
-			status.reason = "native-capacity-exceeded"
-			break
-		}
+		w.coverage[root] = false
 		pinnedRoot, pinErr := openPinnedWatchDirectory(root)
 		if pinErr != nil {
+			rootFailed = true
 			status.degraded = true
 			if status.reason == "" {
 				status.reason = "native-registration-error"
@@ -125,7 +179,11 @@ func (w *linuxNativeWatcher) SetRoots(ctx context.Context, roots []string) nativ
 		walkRoot := descriptorPath(pinnedRoot) + string(os.PathSeparator) + "."
 		walkErr := filepath.WalkDir(walkRoot, func(path string, entry fs.DirEntry, err error) error {
 			visitedEntries++
+			if entry != nil && entry.IsDir() {
+				w.visited++
+			}
 			if visitedEntries > maxNativeWatchEntries {
+				rootFailed = true
 				status.degraded = true
 				status.reason = "native-entry-capacity-exceeded"
 				return errStopNativeWalk
@@ -133,6 +191,7 @@ func (w *linuxNativeWatcher) SetRoots(ctx context.Context, roots []string) nativ
 			if ctx != nil {
 				select {
 				case <-ctx.Done():
+					rootFailed = true
 					status.degraded = true
 					status.reason = "registration-cancelled"
 					return context.Canceled
@@ -140,6 +199,7 @@ func (w *linuxNativeWatcher) SetRoots(ctx context.Context, roots []string) nativ
 				}
 			}
 			if err != nil {
+				rootFailed = true
 				status.degraded = true
 				if status.reason == "" {
 					status.reason = "native-registration-error"
@@ -159,29 +219,66 @@ func (w *linuxNativeWatcher) SetRoots(ctx context.Context, roots []string) nativ
 				}
 				return nil
 			}
-			if status.registrations >= maxNativeWatchRegistrations {
+			_, existingPath := w.paths[logicalPath]
+			if status.registrations >= maxNativeWatchRegistrations && !existingPath {
+				rootFailed = true
 				status.degraded = true
 				status.reason = "native-capacity-exceeded"
 				return errStopNativeWalk
 			}
 			watchDescriptor, addErr := syscall.InotifyAddWatch(w.fd, path, inotifyMask)
 			if addErr != nil {
+				rootFailed = true
 				status.degraded = true
 				if status.reason == "" {
 					status.reason = "native-registration-error"
 				}
 				return nil
 			}
-			w.watches[watchDescriptor] = logicalPath
+			_, existed := w.watches[watchDescriptor]
+			w.rememberRegistration(watchDescriptor, logicalPath)
 			w.roots[watchDescriptor] = root
-			status.registrations++
+			if !existed {
+				status.registrations++
+			}
+			if logicalPath == root && !scopes[root] {
+				return fs.SkipDir
+			}
 			return nil
 		})
 		_ = pinnedRoot.Close()
+		w.coverage[root] = !rootFailed
+		if rootFailed {
+			status.uncovered = append(status.uncovered, root)
+		}
 		if errors.Is(walkErr, errStopNativeWalk) {
 			break
 		}
 	}
+	status.uncovered = nil
+	for root := range scopes {
+		if !w.coverage[root] {
+			status.uncovered = append(status.uncovered, root)
+			status.degraded = true
+		}
+	}
+	sort.Strings(status.uncovered)
+
+	for root := range w.coverage {
+		if _, ok := scopes[root]; !ok {
+			delete(w.coverage, root)
+		}
+	}
+	w.scopes = make(map[string]bool, len(scopes))
+	for root, recursive := range scopes {
+		w.scopes[root] = recursive
+	}
+	for descriptor, path := range w.watches {
+		if owner := nativeWatchOwner(scopes, path); owner != "" {
+			w.roots[descriptor] = owner
+		}
+	}
+	status.directoriesVisited = w.visited
 	if status.degraded && status.reason == "" {
 		status.reason = "native-degraded"
 	}
@@ -237,12 +334,18 @@ func (w *linuxNativeWatcher) readLoop() {
 			w.mu.Lock()
 			parent, known := w.watches[int(watchDescriptor)]
 			root := w.roots[int(watchDescriptor)]
+			if known && mask&(inIgnored|inDeleteSelf|inMoveSelf) != 0 {
+				w.coverage[root] = false
+			}
 			if mask&inIgnored != 0 {
-				delete(w.watches, int(watchDescriptor))
+				w.forgetRegistration(int(watchDescriptor))
 				delete(w.roots, int(watchDescriptor))
 			}
 			w.mu.Unlock()
 			if mask&inIgnored != 0 {
+				if known {
+					w.emit(nativeWatchEvent{root: root, overflow: true})
+				}
 				offset += recordLength
 				continue
 			}
@@ -252,14 +355,25 @@ func (w *linuxNativeWatcher) readLoop() {
 				if name != "" {
 					path = filepath.Join(parent, name)
 				}
-				if mask&inIsDir != 0 && mask&(inCreate|inMovedTo) != 0 {
+				if mask&inIsDir != 0 && mask&(inCreate|inMovedTo) != 0 && w.recursiveRoot(root) {
 					w.addDirectoryTree(context.Background(), path, root)
 				}
-				w.emit(nativeWatchEvent{path: path, root: root})
+				w.emit(nativeWatchEvent{path: path, root: root, overflow: mask&(inDeleteSelf|inMoveSelf) != 0})
 			}
 			offset += recordLength
 		}
 	}
+}
+
+func (w *linuxNativeWatcher) recursiveRoot(root string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for scope, recursive := range w.scopes {
+		if recursive && indexRootWithin(scope, root) {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *linuxNativeWatcher) addDirectoryTree(ctx context.Context, root, watchRoot string) {
@@ -270,18 +384,25 @@ func (w *linuxNativeWatcher) addDirectoryTree(ctx context.Context, root, watchRo
 	}
 	remaining := maxNativeWatchRegistrations - len(w.watches)
 	if remaining <= 0 {
+		w.coverage[watchRoot] = false
+		w.emit(nativeWatchEvent{root: watchRoot, overflow: true})
 		return
 	}
 	pinnedRoot, pinErr := openPinnedWatchDirectory(root)
 	if pinErr != nil {
+		w.coverage[watchRoot] = false
+		w.emit(nativeWatchEvent{root: watchRoot, overflow: true})
 		return
 	}
 	defer pinnedRoot.Close()
 	// See SetRoots: the trailing "/." makes WalkDir traverse the pinned descriptor root.
 	walkRoot := descriptorPath(pinnedRoot) + string(os.PathSeparator) + "."
 	visitedEntries := 0
-	_ = filepath.WalkDir(walkRoot, func(path string, entry fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(walkRoot, func(path string, entry fs.DirEntry, err error) error {
 		visitedEntries++
+		if entry != nil && entry.IsDir() {
+			w.visited++
+		}
 		if visitedEntries > maxNativeWatchEntries {
 			return errStopNativeWalk
 		}
@@ -308,20 +429,54 @@ func (w *linuxNativeWatcher) addDirectoryTree(ctx context.Context, root, watchRo
 			}
 			return nil
 		}
-		for _, existing := range w.watches {
-			if existing == logicalPath {
-				return nil
-			}
+		if _, exists := w.paths[logicalPath]; exists {
+			return nil
 		}
 		watchDescriptor, addErr := syscall.InotifyAddWatch(w.fd, path, inotifyMask)
 		if addErr != nil {
-			return nil
+			return addErr
 		}
-		w.watches[watchDescriptor] = logicalPath
+		w.rememberRegistration(watchDescriptor, logicalPath)
 		w.roots[watchDescriptor] = watchRoot
 		remaining--
 		return nil
 	})
+	if walkErr != nil {
+		w.coverage[watchRoot] = false
+		w.emit(nativeWatchEvent{root: watchRoot, overflow: true})
+	}
+}
+
+func (w *linuxNativeWatcher) InvalidateRoot(root string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for scope, recursive := range w.scopes {
+		if scope == root || indexRootWithin(root, scope) || recursive && indexRootWithin(scope, root) {
+			w.coverage[scope] = false
+		}
+	}
+	for wd, path := range w.watches {
+		if indexRootWithin(root, path) {
+			_, _ = syscall.InotifyRmWatch(w.fd, uint32(wd))
+			w.forgetRegistration(wd)
+			delete(w.roots, wd)
+		}
+	}
+}
+
+func nativeWatchOwner(scopes map[string]bool, path string) string {
+	owner := ""
+	ownerRecursive := false
+	for root, recursive := range scopes {
+		if path != root && (!recursive || !indexRootWithin(root, path)) {
+			continue
+		}
+		if owner == "" || recursive && !ownerRecursive || recursive == ownerRecursive && len(root) < len(owner) {
+			owner = root
+			ownerRecursive = recursive
+		}
+	}
+	return owner
 }
 
 func openPinnedWatchDirectory(path string) (*os.File, error) {
@@ -347,7 +502,7 @@ func (w *linuxNativeWatcher) emit(event nativeWatchEvent) {
 	if !event.overflow && len(w.events) >= cap(w.events)-1 {
 		if event.root != "" {
 			select {
-			case w.events <- nativeWatchEvent{root: event.root, overflow: true}:
+			case w.events <- nativeWatchEvent{overflow: true}:
 			case <-w.closed:
 			default:
 			}
@@ -361,9 +516,24 @@ func (w *linuxNativeWatcher) emit(event nativeWatchEvent) {
 		// A full event queue is equivalent to native queue overflow: reconcile the affected root.
 		if event.root != "" {
 			select {
-			case w.events <- nativeWatchEvent{root: event.root, overflow: true}:
+			case w.events <- nativeWatchEvent{overflow: true}:
 			default:
 			}
 		}
 	}
+}
+
+func (w *linuxNativeWatcher) Status() nativeWatchStatus {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	status := nativeWatchStatus{available: true, registrations: len(w.watches), directoriesVisited: w.visited}
+	for root := range w.scopes {
+		if !w.coverage[root] {
+			status.uncovered = append(status.uncovered, root)
+			status.degraded = true
+			status.reason = "native-uncovered"
+		}
+	}
+	sort.Strings(status.uncovered)
+	return status
 }

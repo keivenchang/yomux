@@ -10,6 +10,8 @@ The Git tags are the source for exact release contents and historical gate resul
 
 `GO_MIGRATION.md` also defines the Python-removal gate: supported Python-only behavior and Python runtime/tooling dependencies must be ported or replaced before removal.
 
+Current [navigation behavior](specs/GUI.md) includes Normal/Advanced Tabber, stable row order during hover, live activity updates, reorder on pointer exit, and relative Ago defaults with persistent date controls. These describe current behavior; tagged releases remain the authority for shipped history.
+
 ## Release families
 
 - **0.7.x:** added filesystem/Git views, indexing, YO!stats, OpenCode support, and later Markdown editing; see tags `v0.7.0`–`v0.7.35` (there is no `v0.7.27`).

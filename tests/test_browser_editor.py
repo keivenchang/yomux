@@ -8043,11 +8043,12 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
         window.__longScrollReady.then(done, error => done({error: String(error)}));
         """
     )
-    assert "error" not in metrics, metrics
-    assert metrics["savedSnapshot"] is True, metrics
-    assert metrics["savedTop"] > metrics["clientHeight"], metrics
-    assert metrics["restored"] is True, metrics
-    assert abs(metrics["restoredTop"] - metrics["savedTop"]) < 32, metrics
+    diagnostic = json.dumps(metrics, sort_keys=True)
+    assert "error" not in metrics, diagnostic
+    assert metrics["savedSnapshot"] is True, diagnostic
+    assert metrics["savedTop"] > metrics["clientHeight"], diagnostic
+    assert metrics["restored"] is True, diagnostic
+    assert abs(metrics["restoredTop"] - metrics["savedTop"]) < 32, diagnostic
 
 
 def test_focused_editor_background_rerender_keeps_live_selection_and_scroll(browser, tmp_path):

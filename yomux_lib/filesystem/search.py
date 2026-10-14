@@ -89,7 +89,6 @@ def _search_index_policy(root: Path) -> dict[str, Any]:
         return compiled.matches_configured_rule(path)
 
     max_files = int(settings.get("index_max_files", file_index.MAX_INDEX_FILES))
-    persist_max_files = int(settings.get("index_persist_max_files", file_index.MAX_PERSISTED_INDEX_FILES))
     persist_max_bytes = int(settings.get("index_persist_max_mb", file_index.MAX_PERSISTED_INDEX_BYTES // (1024 * 1024))) * 1024 * 1024
     refresh_seconds = float(settings.get("index_refresh_seconds", file_index.INDEX_TTL_SECONDS))
     rule_values = compiled.rule_values
@@ -109,7 +108,6 @@ def _search_index_policy(root: Path) -> dict[str, Any]:
         "max_files": max_files,
         "refresh_seconds": refresh_seconds,
         "persist_enabled": bool(settings.get("index_persist", True)),
-        "persist_max_files": persist_max_files,
         "persist_max_bytes": persist_max_bytes,
         "excluded_paths": rule_values,
     }
@@ -133,7 +131,6 @@ def _ensure_search_index(
             max_files=policy["max_files"],
             refresh_seconds=policy["refresh_seconds"],
             persist_enabled=policy["persist_enabled"],
-            persist_max_files=policy["persist_max_files"],
             persist_max_bytes=policy["persist_max_bytes"],
             root_fd=root_fd,
             operation=operation,
@@ -149,7 +146,6 @@ def _ensure_search_index(
             max_files=policy["max_files"],
             refresh_seconds=policy["refresh_seconds"],
             persist_enabled=policy["persist_enabled"],
-            persist_max_files=policy["persist_max_files"],
             persist_max_bytes=policy["persist_max_bytes"],
             root_fd=handle.descriptor,
             operation=operation,
@@ -1345,7 +1341,6 @@ def _index_status_from_safe_root(raw_root: str, *, root_fd: int | None = None) -
         "error": last_error,
         "refresh_seconds": policy["refresh_seconds"],
         "max_files": policy["max_files"],
-        "persist_max_files": policy["persist_max_files"],
         "persist_max_bytes": policy["persist_max_bytes"],
         "excluded_paths": policy["excluded_paths"],
         "state": state,

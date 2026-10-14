@@ -64,6 +64,50 @@ func TestParseTmuxSessionsKeepsTheMachineRosterExact(t *testing.T) {
 	}
 }
 
+func TestAgentInventoryAttributesRunningPaneToSourceNotOwnedViewAlias(t *testing.T) {
+	panes := []AgentTmuxPane{
+		{Session: "__yomux_view_7110_abc", SessionID: "$216", ViewSourceID: "$46", PaneID: "%55", PID: 900, Window: "0"},
+		{Session: "__yomux_view_7110_def", SessionID: "$220", ViewSourceID: "$46", PaneID: "%92", PID: 903, Window: "1"},
+		{Session: "yo7110", SessionID: "$46", PaneID: "%55", PID: 900, Window: "0"},
+		{Session: "yo7110", SessionID: "$46", PaneID: "%92", PID: 903, Window: "1"},
+		{Session: "__yomux_view_notes", SessionID: "$217", PaneID: "%90", PID: 901, Window: "0"},
+		{Session: "__yomux_view_notes_child", SessionID: "$218", ViewSourceID: "$217", PaneID: "%90", PID: 901, Window: "0"},
+		{Session: "__yomux_view_unverified", SessionID: "$219", ViewSourceID: "$99", PaneID: "%91", PID: 902, Window: "0"},
+	}
+	filtered := filterOwnedTabberViewAliases(panes)
+	if len(filtered) != 4 || filtered[0].Session != "yo7110" || filtered[1].Session != "yo7110" || filtered[2].Session != "__yomux_view_notes" || filtered[3].Session != "__yomux_view_unverified" {
+		t.Fatalf("filtered panes = %#v, want source-session panes and unverified alias-like sessions", filtered)
+	}
+
+	processes := []AgentProcess{
+		{PID: 900, PPID: 1, Command: "codex --full-auto", Executable: "/usr/bin/codex"},
+		{PID: 901, PPID: 1, Command: "codex --full-auto", Executable: "/usr/bin/codex"},
+		{PID: 903, PPID: 1, Command: "codex --full-auto", Executable: "/usr/bin/codex"},
+	}
+	records, errs := BuildAgentInventory(context.Background(), AgentInventorySources{
+		Processes: func(context.Context) ([]AgentProcess, error) { return processes, nil },
+		Panes:     func(context.Context) ([]AgentTmuxPane, error) { return filtered, nil },
+	})
+	if len(errs) != 0 || len(records) != 3 || records[0].TmuxSession != "yo7110" || records[0].TmuxPaneID != "%55" || records[1].TmuxSession != "__yomux_view_notes" || records[1].TmuxPaneID != "%90" || records[2].TmuxSession != "yo7110" || records[2].TmuxWindow != "1" || records[2].TmuxPaneID != "%92" {
+		t.Fatalf("running pane inventory = %#v, errors=%v; want canonical source names across windows and preserved pane IDs", records, errs)
+	}
+}
+
+func TestTabberViewSessionAliasesUseVerifiedSourceSessionNames(t *testing.T) {
+	panes := []AgentTmuxPane{
+		{Session: "__yomux_view_7110_first", SessionID: "$220", ViewSourceID: "$46"},
+		{Session: "__yomux_view_7110_second", SessionID: "$221", ViewSourceID: "$46"},
+		{Session: "yo7110", SessionID: "$46"},
+		{Session: "yo7111", SessionID: "$48"},
+		{Session: "__yomux_view_unverified", SessionID: "$222", ViewSourceID: "$99"},
+	}
+	got := tabberViewSessionAliases(panes)
+	want := map[string]string{"__yomux_view_7110_first": "yo7110", "__yomux_view_7110_second": "yo7110"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("verified view aliases = %#v, want %#v", got, want)
+	}
+}
+
 func TestTmuxScopedAgentRecordsDropsPaneLessProcesses(t *testing.T) {
 	records := tmuxScopedAgentRecords([]AgentRecord{
 		{Kind: "codex", PID: 1, TmuxSession: "yo7222", TmuxPaneID: "%7"},
@@ -417,8 +461,8 @@ func TestParseAgentCommandAndTmuxShapes(t *testing.T) {
 	if err != nil || len(processes) != 1 || processes[0].PID != 10 || processes[0].PPID != 1 {
 		t.Fatalf("processes = %#v, err=%v", processes, err)
 	}
-	panes := parseAgentTmuxPanes("work\t2\tagent\t1\t%9\t/repo\topencode\tOpenCode\t10\nshort")
-	if len(panes) != 1 || panes[0].PaneID != "%9" || panes[0].Title != "OpenCode" {
+	panes := parseAgentTmuxPanes("work\t$1\t\t2\tagent\t1\t%9\t/repo\topencode\tOpenCode\t10\nshort")
+	if len(panes) != 1 || panes[0].PaneID != "%9" || panes[0].Title != "OpenCode" || panes[0].SessionID != "$1" {
 		t.Fatalf("panes = %#v", panes)
 	}
 }

@@ -3,6 +3,8 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//:tools/bazel_rules.bzl", "frontend_assets", "runtime_tree")
 
 exports_files([
+    "static_src/js/yomux/10_core_utils.js",
+    "static_src/js/yomux/20_layout_state.js",
     "tools/generate_go_version.py",
     "yomux_lib/version.py",
 ])
@@ -53,6 +55,7 @@ filegroup(
         "tools/product_environment.py",
         "tools/product_namespace.json",
         "tools/static_build.py",
+        "tools/tabber_browser_journey.py",
         "tools/tls_san.py",
         "tools/tmux_paths.py",
         "tools/tool_guard.py",
@@ -145,6 +148,11 @@ runtime_tree(
     visibility = ["//internal/testsupport:__pkg__"],
 )
 
+filegroup(
+    name = "frontend_source_inputs",
+    srcs = ["//internal/finder:search_rank_weights.json"] + glob(["static_src/**"]),
+)
+
 frontend_assets(
     name = "frontend_assets",
     srcs = [
@@ -152,8 +160,10 @@ frontend_assets(
         "tools/product_environment.py",
         "tools/product_namespace.json",
         "tools/static_build.py",
+        "tools/tabber_browser_journey.py",
+        ":frontend_source_inputs",
         ":python_runtime",
-    ] + glob(["static_src/**"]),
+    ],
 )
 
 filegroup(
@@ -185,13 +195,13 @@ filegroup(
         "tests/tmux_runtime.py",
         ":browser_scenario_fixture_inputs",
         ":frontend_runtime",
+        ":frontend_source_inputs",
         ":integration_python_tools",
         ":python_runtime",
     ] + glob(
         [
             "tests/browser_helpers/**",
             "tests/gate_helpers/**/*.py",
-            "static_src/**",
         ],
         exclude = ["**/__pycache__/**"],
     ),
@@ -207,11 +217,13 @@ filegroup(
     name = "go_browser_runtime_inputs",
     srcs = [
         "tests/browser_helpers/__init__.py",
+        "tests/browser_helpers/native_pointer.py",
         "tests/browser_helpers/webdriver_lease.py",
         ":frontend_runtime",
+        ":frontend_source_inputs",
         ":integration_python_tools",
         ":python_runtime",
-    ] + glob(["static_src/**"]),
+    ],
 )
 
 runtime_tree(
@@ -399,6 +411,7 @@ sh_test(
         "tools/bazel_go_browser_e2e.py",
         "tools/bazel_test_common.sh",
         "tools/product_environment.sh",
+        "tools/tabber_browser_journey.py",
         ":go_browser_runtime",
         ":yomux-go",
     ],

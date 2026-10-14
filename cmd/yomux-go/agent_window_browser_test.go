@@ -92,7 +92,7 @@ func TestAgentWindowMetadataRefreshBrowser(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer renderer.close()
-	html, err := renderer.render(map[string]any{"sessions": []string{"working"}, "role": "admin", "username": "fixture", "language": "en", "capabilities": s.capabilities.Snapshot(), "stats_only": false, "backend": "Go fixture", "dangerously_yolo": false})
+	html, err := renderer.render(map[string]any{"sessions": []string{"working"}, "role": "admin", "username": "fixture", "language": "en", "capabilities": s.capabilities.Snapshot(), "stats_only": false, "backend": "Go fixture", "dangerously_yolo": false, "tmux_topology": map[string]any{"generation": topology.generation, "epoch": s.metadataEpoch()}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,8 +179,8 @@ try:
     renderSessionButtons({force:true});
     renderAutoApproveStatusSurfaces({changedSessions:['working']});
     const model=sessionAgentWindowStatusModel('working');
-    const tab=[...document.querySelectorAll('.pane-tab')].find(tab=>tab.dataset.session==='working'||tab.textContent.includes('working'));
-    const dot=tab?.querySelector('.agent-window-activity-icon--working');
+    const tab=document.querySelector('.file-tree-row[data-tabber-type="normal"][data-tabber-session="working"]');
+    const dot=tab?.querySelector('.agent-window-status-dot.status-indicator--working');
     const animation=dot?.getAnimations().find(a=>a.animationName==='agent-status-opacity-pulse');
     let paint=[];
     if(animation){animation.pause();const duration=animation.effect.getTiming().duration;for(const fraction of [0,0.25,0.5,0.75]){animation.currentTime=duration*fraction;paint.push(getComputedStyle(dot).opacity);}}
@@ -195,7 +195,7 @@ try:
   if not rows or rows[0].get('state')!='working': failures.append((phase,'canonical',rows))
   if not model or model[0].get('state')!='working': failures.append((phase,'model',model))
   if result.get('animation')!='agent-status-opacity-pulse' or len(set(result['paint']))<2: failures.append((phase,'pulse',result.get('animation'),result['paint']))
-  if result['auto']['sessions']['working']['enabled'] or result['tabberOpen']: failures.append((phase,'layout'))
+  if result['auto']['sessions']['working']['enabled'] or not result['tabberOpen']: failures.append((phase,'layout'))
   if phase=='refresh-pending' and not (result['activity']['cache']['stale'] and result['activity']['cache']['refreshing']): failures.append((phase,'barrier'))
   if phase=='complete' and (result['activity']['cache']['stale'] or result['activity']['cache']['generation']<=1): failures.append((phase,'publication'))
  print(json.dumps(trace,sort_keys=True))

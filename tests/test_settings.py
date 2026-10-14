@@ -173,6 +173,17 @@ def test_settings_payload_reuses_cached_yaml_until_file_changes(monkeypatch, tmp
     assert third["settings"]["appearance"]["theme"] == "dark"
 
 
+def test_legacy_settings_use_normal_tabber_default_without_rewrite(tmp_path):
+    path = tmp_path / "settings.yaml"
+    path.write_text("general:\n  default_layout: split\n", encoding="utf-8")
+
+    payload = settings_payload(path)
+
+    assert payload["settings"]["general"]["default_tabber_mode"] == "normal"
+    assert payload["tabber_mode_explicit"] is False
+    assert path.read_text(encoding="utf-8") == "general:\n  default_layout: split\n"
+
+
 def test_legacy_yoagent_default_prompts_migrate_without_overwriting_custom_text():
     settings = sanitize_settings({"yoagent": LEGACY_YOAGENT_DEFAULTS.copy()})
     defaults = default_settings()["yoagent"]
@@ -325,6 +336,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
 
     assert payload["settings"] == default_settings()
     assert payload["settings"]["general"]["auto_focus"] is False
+    assert payload["settings"]["general"]["default_tabber_mode"] == "normal"
     assert payload["settings"]["appearance"]["terminal_theme"] == "follow-app"
     assert payload["settings"]["appearance"]["date_time_hour_cycle"] == "24"
     assert payload["settings"]["appearance"]["tab_width"] == 172
@@ -824,6 +836,12 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
     assert rounded_directory_legacy["performance"]["server_directory_event_poll_ms"] == defaults["performance"]["server_directory_event_poll_ms"]
     stale_index_refresh = sanitize_settings({"file_explorer": {"index_refresh_seconds": 120}})
     assert stale_index_refresh["file_explorer"]["index_refresh_seconds"] == 60
+    unified_index_limit = sanitize_settings({"file_explorer": {
+        "index_max_files": 1000000,
+        "index_persist_max_files": 100000,
+    }})["file_explorer"]
+    assert unified_index_limit["index_max_files"] == 1000000
+    assert "index_persist_max_files" not in unified_index_limit
 
     custom = sanitize_settings({
         "performance": {
@@ -932,3 +950,12 @@ def test_updates_check_defaults_to_patch_threshold():
     assert general["reload_on_update_auto"] is False
     assert updates["check_interval_minutes"] == 60
     assert updates["notify_level"] == "patch"
+
+
+@pytest.mark.parametrize("mode", ["normal", "advanced"])
+def test_settings_payload_preserves_explicit_tabber_mode_provenance(tmp_path, mode):
+    path = tmp_path / "settings.yaml"
+    path.write_text(f"general:\n  default_tabber_mode: {mode}\n", encoding="utf-8")
+    payload = settings_payload(path)
+    assert payload["tabber_mode_explicit"] is True
+    assert payload["settings"]["general"]["default_tabber_mode"] == mode

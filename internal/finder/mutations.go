@@ -51,12 +51,14 @@ func isSearchExcludedDirectory(name string) bool {
 const defaultUploadFilenameTemplate = "{date:%Y%m%d}-{seq:03d}-{name}{ext}"
 
 type searchSortKey struct {
+	score     float64
 	minimum   int
 	total     int
 	negative  int
 	depth     int
 	length    int
 	lowerName string
+	lowerBase string
 }
 
 func compactSearchText(value string) string {
@@ -123,16 +125,16 @@ func searchTokenNameRank(token, name string) (int, bool) {
 }
 
 func searchTokenNameRankPrepared(token preparedSearchToken, name string) (int, bool) {
+	stemName := strings.TrimSuffix(name, filepath.Ext(name))
+	return searchTokenTextsRankPrepared(token, name, stemName)
+}
+
+func searchTokenTextsRankPrepared(token preparedSearchToken, name, stemName string) (int, bool) {
 	needle := token.needle
 	if needle == "" {
 		return 0, true
 	}
-	basename := compactSearchText(name)
-	stemName := name
-	if extension := filepath.Ext(name); extension != "" {
-		stemName = strings.TrimSuffix(name, extension)
-	}
-	stem := compactSearchText(stemName)
+	basename, stem := compactSearchText(name), compactSearchText(stemName)
 	doitNeedle := token.doitNeedle
 	if doitNeedle != "" {
 		basenameAlnum, stemAlnum := alnumSearchText(name), alnumSearchText(stemName)
@@ -177,34 +179,93 @@ func searchTokenRank(token, name, relative string) (int, bool) {
 }
 
 func searchTokenRankPrepared(token preparedSearchToken, name, relative string) (int, bool) {
+	prefix, base := splitSearchPath(relative)
+	return searchTokenRankSegmentsPrepared(token, name, prefix, base, strings.Count(relative, "/"))
+}
+
+func splitSearchPath(relative string) (string, string) {
+	if index := strings.LastIndexByte(relative, '/'); index >= 0 {
+		return relative[:index+1], relative[index+1:]
+	}
+	return "", relative
+}
+
+func searchTokenRankSegmentsPrepared(token preparedSearchToken, name, directory, base string, depth int) (int, bool) {
 	if rank, ok := searchTokenNameRankPrepared(token, name); ok {
 		return rank, true
 	}
-	for start := 0; start <= len(relative); {
-		end := strings.IndexByte(relative[start:], '/')
-		if end < 0 {
-			end = len(relative)
-		} else {
-			end += start
-		}
-		segment := relative[start:end]
-		if token.doitMode {
-			if index := strings.Index(alnumSearchText(segment), token.doitNeedle); index >= 0 {
-				return 90 + index, true
+	if strings.Contains(token.needle, "/") {
+		path := strings.ToLower(directory + base)
+		segmentMatches := func(needle, segment string) bool {
+			if strings.Contains(segment, needle) {
+				return true
 			}
-		} else {
-			segmentText := compactSearchText(segment)
-			if index := strings.Index(segmentText, token.needle); index >= 0 {
-				return 90 + index, true
+			_, matched := fuzzySubsequenceSpanPrepared(needle, segment)
+			return matched
+		}
+		pathNeedle := strings.TrimLeft(token.needle, "/")
+		if pathNeedle == "" {
+			if strings.Contains(path, "/") {
+				return 90, true
 			}
-			if span, ok := fuzzySubsequenceSpanPrepared(token.needle, segmentText); ok {
-				return 130 + strings.Count(relative, "/")*4 + span, true
+			return 0, false
+		}
+		if index := strings.Index(path, pathNeedle); index >= 0 {
+			return 80 + index, true
+		}
+		if left, right, hasSeparator := strings.Cut(pathNeedle, "/"); hasSeparator && left != "" && right == "" {
+			for index, segment := range strings.Split(strings.Trim(strings.ToLower(directory), "/"), "/") {
+				if segmentMatches(left, segment) {
+					return 80 + index, true
+				}
 			}
 		}
-		if end == len(relative) {
-			break
+		if left, right, hasSeparator := strings.Cut(pathNeedle, "/"); hasSeparator && left != "" && right != "" && !strings.Contains(right, "/") {
+			segments := strings.Split(path, "/")
+			for leftIndex, segment := range segments {
+				if !segmentMatches(left, segment) && !segmentMatches(right, segment) {
+					continue
+				}
+				for rightIndex, other := range segments {
+					if leftIndex == rightIndex {
+						continue
+					}
+					if (segmentMatches(left, segment) && segmentMatches(right, other)) ||
+						(segmentMatches(right, segment) && segmentMatches(left, other)) {
+						return 80 + leftIndex + rightIndex, true
+					}
+				}
+			}
 		}
-		start = end + 1
+		return 0, false
+	}
+	for _, part := range []string{directory, base} {
+		for start := 0; start <= len(part); {
+			end := strings.IndexByte(part[start:], '/')
+			if end < 0 {
+				end = len(part)
+			} else {
+				end += start
+			}
+			segment := part[start:end]
+			if token.doitMode {
+				if index := strings.Index(alnumSearchText(segment), token.doitNeedle); index >= 0 {
+					return 90 + index, true
+				}
+			} else {
+				text := compactSearchText(segment)
+				if index := strings.Index(text, token.needle); index >= 0 {
+					return 90 + index, true
+				}
+				if span, ok := fuzzySubsequenceSpanPrepared(token.needle, text); ok {
+					return 130 + depth*4 + span, true
+				}
+			}
+			if end == len(part) {
+				break
+			}
+			start = end + 1
+		}
 	}
 	return 0, false
 }
@@ -214,13 +275,18 @@ func searchEntrySortKey(name, relative string, tokens []string) (searchSortKey, 
 }
 
 func searchEntrySortKeyPrepared(name, relative string, tokens []preparedSearchToken) (searchSortKey, bool) {
-	key := searchSortKey{minimum: 0, total: 0, negative: 0, depth: strings.Count(relative, "/"), length: len(relative), lowerName: strings.ToLower(relative)}
+	directory, base := splitSearchPath(relative)
+	return searchEntrySortKeySegmentsPrepared(name, directory, base, tokens)
+}
+
+func searchEntrySortKeySegmentsPrepared(name, directory, base string, tokens []preparedSearchToken) (searchSortKey, bool) {
+	key := searchSortKey{depth: strings.Count(directory, "/"), length: len(directory) + len(base), lowerName: strings.ToLower(directory), lowerBase: strings.ToLower(base)}
 	if len(tokens) == 0 {
 		return key, true
 	}
 	key.minimum = 1 << 30
 	for _, token := range tokens {
-		rank, ok := searchTokenRankPrepared(token, name, relative)
+		rank, ok := searchTokenRankSegmentsPrepared(token, name, directory, base, key.depth)
 		if !ok {
 			return searchSortKey{}, false
 		}
@@ -241,6 +307,9 @@ func compareSearchSortKey(left, right any) bool {
 	if !leftOK || !rightOK {
 		return fmt.Sprint(left) < fmt.Sprint(right)
 	}
+	if leftKey.score != rightKey.score {
+		return leftKey.score > rightKey.score
+	}
 	if leftKey.minimum != rightKey.minimum {
 		return leftKey.minimum < rightKey.minimum
 	}
@@ -256,7 +325,21 @@ func compareSearchSortKey(left, right any) bool {
 	if leftKey.length != rightKey.length {
 		return leftKey.length < rightKey.length
 	}
-	return leftKey.lowerName < rightKey.lowerName
+	for index := 0; index < min(len(leftKey.lowerName)+len(leftKey.lowerBase), len(rightKey.lowerName)+len(rightKey.lowerBase)); index++ {
+		left := searchLexicalByte(leftKey, index)
+		right := searchLexicalByte(rightKey, index)
+		if left != right {
+			return left < right
+		}
+	}
+	return len(leftKey.lowerName)+len(leftKey.lowerBase) < len(rightKey.lowerName)+len(rightKey.lowerBase)
+}
+
+func searchLexicalByte(key searchSortKey, index int) byte {
+	if index < len(key.lowerName) {
+		return key.lowerName[index]
+	}
+	return key.lowerBase[index-len(key.lowerName)]
 }
 
 func generatedUploadName(name string) bool {
@@ -751,15 +834,20 @@ func (s *Service) ResolveCandidates(ctx context.Context, values []string) (map[s
 type SearchChunkPublisher func(files []map[string]any, coverage map[string]any) error
 
 type SearchOptions struct {
-	Cursor           string
-	IndexedOnly      bool
-	Indexed          bool
-	MaxFiles         int
-	MaxBytes         int64
-	RefreshSec       int
-	ExcludeDirs      []string
-	ExcludePaths     []string
-	SettingsRevision uint64
+	Cursor                 string
+	IndexedOnly            bool
+	Indexed                bool
+	MaxFiles               int
+	MaxBytes               int64
+	RefreshSec             int
+	Background             bool
+	ChangedPaths           []string
+	ForceRefresh           bool
+	DemandScoped           bool
+	ExcludeDirs            []string
+	ExcludePaths           []string
+	SettingsRevision       uint64
+	LegacySettingsRevision uint64
 }
 
 func (s *Service) Search(ctx context.Context, root, query string, limit int, recursive, directOnly, minimal bool) (map[string]any, *Error) {
@@ -797,7 +885,7 @@ func (s *Service) QueueIndexRepair(root string, options SearchOptions, onSchedul
 	}
 	s.searchIndex.QueueRepair(indexRequest{
 		Action: "repair", Root: requested, Identity: fileID(info), MaxFiles: options.MaxFiles, MaxBytes: options.MaxBytes,
-		RefreshSec: options.RefreshSec, ExcludeDirs: options.ExcludeDirs, ExcludePaths: options.ExcludePaths, SettingsRevision: options.SettingsRevision,
+		RefreshSec: options.RefreshSec, Background: options.Background, ChangedPaths: options.ChangedPaths, ForceRefresh: options.ForceRefresh, DemandScoped: options.DemandScoped, ExcludeDirs: options.ExcludeDirs, ExcludePaths: options.ExcludePaths, SettingsRevision: options.SettingsRevision,
 	}, onScheduled)
 }
 
@@ -813,6 +901,14 @@ func (s *Service) search(ctx context.Context, root, query string, limit int, rec
 	}
 	defer directory.Close()
 	query = strings.TrimSpace(strings.ToLower(query))
+	names := make(map[string]struct{}, len(options.ExcludeDirs))
+	for _, name := range options.ExcludeDirs {
+		names[name] = struct{}{}
+	}
+	policy, policyErr := compileSearchPolicy(requested, names, options.ExcludePaths)
+	if policyErr != nil {
+		return nil, filesystemError(requested, policyErr)
+	}
 	if recursive && !directOnly && s.searchIndex != nil && options.Indexed {
 		rootInfo, statErr := directory.Stat()
 		if statErr != nil {
@@ -820,18 +916,23 @@ func (s *Service) search(ctx context.Context, root, query string, limit int, rec
 		}
 		indexed, indexErr := s.searchIndex.Request(ctx, indexRequest{
 			Action: "search", Root: requested, Identity: fileID(rootInfo), Query: query, Limit: limit, Cursor: options.Cursor,
-			MaxFiles: options.MaxFiles, MaxBytes: options.MaxBytes, RefreshSec: options.RefreshSec, ExcludeDirs: options.ExcludeDirs, ExcludePaths: options.ExcludePaths, SettingsRevision: options.SettingsRevision,
+			MaxFiles: options.MaxFiles, MaxBytes: options.MaxBytes, RefreshSec: options.RefreshSec, Background: options.Background, ChangedPaths: options.ChangedPaths, ForceRefresh: options.ForceRefresh, DemandScoped: options.DemandScoped, ExcludeDirs: options.ExcludeDirs, ExcludePaths: options.ExcludePaths, SettingsRevision: options.SettingsRevision,
 		})
 		if indexErr == nil && indexed["indexed"] == true {
 			files, _ := indexed["files"].([]any)
 			verified := make([]map[string]any, 0, len(files))
+			bareCache := make(map[string]bool)
 			for _, value := range files {
 				row, ok := value.(map[string]any)
 				if !ok {
 					continue
 				}
 				path, _ := row["path"].(string)
-				file, _, _, openErr := s.open(path, false)
+				relative, relErr := filepath.Rel(requested, path)
+				if relErr != nil || !indexRootWithin(requested, path) {
+					continue
+				}
+				file, openErr := openIndexedSearchFile(directory, relative, policy, bareCache)
 				if openErr != nil {
 					continue
 				}
@@ -850,6 +951,10 @@ func (s *Service) search(ctx context.Context, root, query string, limit int, rec
 				verified = append(verified, row)
 			}
 			indexed["files"], indexed["count"] = verified, len(verified)
+			if len(verified) < len(files) {
+				indexed["complete"] = false
+				indexed["coverage_reason"] = "retained snapshot filtered under current filesystem and exclusion policy"
+			}
 			if publish != nil {
 				for start := 0; start < len(verified); start += 64 {
 					end := start + 64
@@ -873,7 +978,11 @@ func (s *Service) search(ctx context.Context, root, query string, limit int, rec
 			}
 			indexed["root"], indexed["query"], indexed["files"], indexed["count"] = requested, query, []map[string]any{}, 0
 			indexed["limit"], indexed["complete"], indexed["truncated"], indexed["recursive"] = limit, false, false, true
-			indexed["indexed"], indexed["index_state"], indexed["index_coverage"] = false, "warming", "pending"
+			indexed["indexed"] = false
+			if indexed["index_state"] != "error" {
+				indexed["index_state"] = "warming"
+			}
+			indexed["index_coverage"] = "pending"
 			indexed["cursor"], indexed["generation"] = "0", 0
 			indexed["progressive_coverage"] = map[string]any{"full_coverage": false}
 			return indexed, nil
@@ -949,6 +1058,9 @@ func (s *Service) search(ctx context.Context, root, query string, limit int, rec
 	var walkErr error
 	truncated := false
 	if directOnly || !recursive {
+		if policy.excludedSearchRoot() || bareSearchRepository(directory) {
+			return map[string]any{"root": requested, "query": query, "files": []map[string]any{}, "count": 0, "complete": true, "truncated": false}, nil
+		}
 		entries, err := directory.ReadDir(MaxDirectoryEntries + 1)
 		if err != nil && !errors.Is(err, io.EOF) {
 			return nil, filesystemError(requested, err)
@@ -962,7 +1074,7 @@ func (s *Service) search(ctx context.Context, root, query string, limit int, rec
 			if infoErr != nil || entry.Type()&os.ModeSymlink != 0 || (!entryInfo.Mode().IsRegular() && !entryInfo.IsDir()) {
 				continue
 			}
-			if entryInfo.IsDir() && isSearchExcludedDirectory(entry.Name()) {
+			if policy.excludedPath(filepath.Join(requested, entry.Name())) || (entryInfo.IsDir() && hasName(policy.names, entry.Name())) {
 				continue
 			}
 			if entryInfo.IsDir() {
@@ -988,6 +1100,18 @@ func (s *Service) search(ctx context.Context, root, query string, limit int, rec
 				continue
 			}
 			info, infoErr := child.Stat()
+			if infoErr == nil {
+				excluded := false
+				if info.IsDir() {
+					excluded = bareSearchRepository(child)
+				} else {
+					excluded, infoErr = excludedSearchFile(entry.Name(), child)
+				}
+				if excluded || infoErr != nil {
+					child.Close()
+					continue
+				}
+			}
 			if infoErr == nil && (info.Mode().IsRegular() || info.IsDir()) && sameDescriptorIdentity(identityFor(entryInfo), identityFor(info)) {
 				if info.IsDir() {
 					if !directOnly {
@@ -1027,7 +1151,7 @@ func (s *Service) search(ctx context.Context, root, query string, limit int, rec
 			}
 		}
 	} else {
-		walkErr = s.walkDescriptors(ctx, directory, requested, resolved, func(walked walkedEntry) error {
+		walkErr = walkSearchDescriptors(ctx, directory, requested, resolved, policy, func(walked walkedEntry) error {
 			if walked.IsDir && isSearchExcludedDirectory(walked.Name) {
 				return errWalkSkipDirectory
 			}
@@ -1090,7 +1214,7 @@ func (s *Service) EnsureIndex(ctx context.Context, root string, options SearchOp
 	}
 	payload, err := s.searchIndex.Request(ctx, indexRequest{
 		Action: "ensure", Root: requested, Identity: fileID(info), MaxFiles: options.MaxFiles, MaxBytes: options.MaxBytes,
-		RefreshSec: options.RefreshSec, ExcludeDirs: options.ExcludeDirs, ExcludePaths: options.ExcludePaths, SettingsRevision: options.SettingsRevision,
+		RefreshSec: options.RefreshSec, Background: options.Background, ChangedPaths: options.ChangedPaths, ForceRefresh: options.ForceRefresh, DemandScoped: options.DemandScoped, ExcludeDirs: options.ExcludeDirs, ExcludePaths: options.ExcludePaths, SettingsRevision: options.SettingsRevision,
 	})
 	if err != nil {
 		return nil, filesystemError(requested, err)

@@ -90,7 +90,7 @@ test('Dockview center-drops an allowed Differ into the triplet home through the 
 });
 
 test('Vertical Side Pane tab menus omit More desc and reuse the shared directional Move row', () => {
-  assert.match(coreUtils, /if \(!slotIsSidePane\(sourceSlot\)\) appendDescription\(\)/);
+  assert.match(coreUtils, /if \(!slotIsSidePane\(sourceSlot\) && options.descriptionWindow == null\) appendDescription\(\)/);
   assert.match(coreUtils, /showTabContextMenu\(item, x, y, options = \{\}\)[\s\S]*appendTabSplitCommands\(menu, item, options\)/);
   assert.doesNotMatch(coreUtils, /vertical-side-pane-edge-move|appendVerticalSidePaneEdgeMoveCommand/);
 });

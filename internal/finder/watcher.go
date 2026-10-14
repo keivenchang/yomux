@@ -18,14 +18,21 @@ type nativeWatchEvent struct {
 }
 
 type nativeWatchStatus struct {
-	available     bool
-	degraded      bool
-	reason        string
-	registrations int
+	available          bool
+	degraded           bool
+	reason             string
+	registrations      int
+	uncovered          []string
+	directoriesVisited uint64
 }
 
 type nativeWatchController interface {
 	SetRoots(ctx context.Context, roots []string) nativeWatchStatus
 	Events() <-chan nativeWatchEvent
 	Close()
+}
+
+// Scoped controllers distinguish displayed listings from recursive repositories.
+type scopedNativeWatchController interface {
+	SetScopes(context.Context, map[string]bool, bool) nativeWatchStatus
 }

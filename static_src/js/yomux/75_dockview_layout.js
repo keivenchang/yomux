@@ -28,6 +28,9 @@ const dockviewLayoutState = {
   tabRenderPending: false,
   deferredTabRefreshFrame: 0,
   deferredTabRefreshItems: new Set(),
+  deferredMetadataTabStripRefresh: false,
+  deferredMetadataTabberTreeRefresh: false,
+  deferredMetadataTabStripTimer: 0,
   lastAppliedActiveOnlySignature: '',
   groupSlots: new Map(),
   pendingRootBoundaryDrop: null,
@@ -82,6 +85,42 @@ function dockviewClearTabActivationPerf() {
   Array.from(document.getElementsByClassName('pane-tab tab-activation-pending'))
     .forEach(tab => tab.classList.remove('tab-activation-pending'));
   dockviewLayoutState.tabActivationPerf = null;
+  flushDeferredMetadataTabStripRefresh();
+}
+
+function dockviewTabActivationIsCurrent(state, terminal = state?.terminal) {
+  if (!state || dockviewLayoutState.tabActivationPerf !== state || state.terminal !== terminal) return false;
+  if (!itemIsActivePaneTab(state.item)
+      || (state.terminal && terminals.get(state.item) !== state.terminal)) {
+    // A removed/hidden viewport cannot finish painting. Retire only its captured
+    // owner so stale callbacks cannot clear a replacement activation.
+    dockviewClearTabActivationPerf();
+    return false;
+  }
+  return true;
+}
+
+function flushDeferredMetadataTabStripRefresh() {
+  if (!(dockviewLayoutState.deferredMetadataTabStripRefresh || dockviewLayoutState.deferredMetadataTabberTreeRefresh
+      || dockviewLayoutState.deferredTabRefreshItems?.size)
+      || dockviewLayoutState.tabActivationPerf
+      || dockviewLayoutState.deferredMetadataTabStripTimer) return false;
+  dockviewLayoutState.deferredMetadataTabStripTimer = window.setTimeout(() => {
+    dockviewLayoutState.deferredMetadataTabStripTimer = 0;
+    if (dockviewLayoutState.tabActivationPerf) return;
+    const refreshTabStrips = dockviewLayoutState.deferredMetadataTabStripRefresh;
+    const refreshTabberTree = dockviewLayoutState.deferredMetadataTabberTreeRefresh;
+    dockviewLayoutState.deferredMetadataTabStripRefresh = false;
+    dockviewLayoutState.deferredMetadataTabberTreeRefresh = false;
+    if (dockviewLayoutState.deferredTabRefreshItems?.size) dockviewScheduleDeferredTabRefresh([]);
+    if (refreshTabberTree && typeof scheduleTabberTreeLayoutStateSync === 'function') {
+      scheduleTabberTreeLayoutStateSync({refreshTree: true});
+    }
+    if (refreshTabStrips && typeof renderPaneTabStrips === 'function') {
+      renderPaneTabStrips({deferDuringTerminalActivation: true, renderAttached: false});
+    }
+  }, 0);
+  return true;
 }
 
 function dockviewFinishTabActivationPerf(item) {
@@ -97,8 +136,7 @@ function dockviewFinishTabActivationPerf(item) {
   }
   state.terminal = terminal;
   if (state.frame || state.waitingForParse) return;
-  const current = () => dockviewLayoutState.tabActivationPerf === state && itemIsActivePaneTab(state.item)
-    && (!isTmuxSession(state.item) || terminals.get(state.item) === terminal);
+  const current = () => dockviewTabActivationIsCurrent(state, terminal);
   const painted = () => {
     const complete = () => {
       if (!current()) return;
@@ -202,7 +240,7 @@ function dockviewActivateUserTerminalTab(item, options = {}) {
   const applyingFromLayout = dockviewLayoutState.applyingFromLayout;
   dockviewLayoutState.applyingFromLayout = true;
   try {
-    panel.api.setActive();
+    if (dockviewLayoutState.api.activePanel?.id !== item) panel.api.setActive();
   } finally {
     dockviewLayoutState.applyingFromLayout = applyingFromLayout;
   }
@@ -1046,7 +1084,7 @@ function dockviewTabDropTargetActive(event) {
 }
 
 function dockviewBeginTabPointerDrag(event, item) {
-  if (event.button !== undefined && event.button !== 0) return;
+  if (!tabDragAllowed() || (event.button !== undefined && event.button !== 0)) return;
   const current = dockviewLayoutState.tabPointerDrag;
   // Compatibility mouse events belong to the pointer gesture, including its pre-activation geometry.
   if (event.type === 'mousedown' && current?.item === item && current.pointerDown) return;
@@ -1171,7 +1209,7 @@ function dockviewTabPointerEvent(event, state = dockviewLayoutState.tabPointerDr
 
 function dockviewTrackTabPointerDrag(event) {
   const state = dockviewLayoutState.tabPointerDrag;
-  if (!state?.item) return;
+  if (!state?.item || !tabDragAllowed()) return;
   if (state.pointerCancelTimer) {
     clearTimeout(state.pointerCancelTimer);
     state.pointerCancelTimer = 0;
@@ -1237,7 +1275,7 @@ function dockviewFinishTabPointerDrag(event) {
   dockviewClearTabInsertionPreview();
   dockviewSetInvalidTabDropPreview(false);
   clearDropPreview();
-  if (!state?.item || !state.slot) return;
+  if (!state?.item || !state.slot || !tabDragAllowed()) return;
   const dx = Math.abs((Number(releaseEvent.clientX) || 0) - state.x);
   const dy = Math.abs((Number(releaseEvent.clientY) || 0) - state.y);
   if (Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
@@ -1705,12 +1743,15 @@ function dockviewSyncHeaderBackgroundDragSources() {
 
 function dockviewSyncHeaderActionReservations() {
   if (!dockviewLayoutActive()) return;
+  const rootStyle = getComputedStyle(document.documentElement);
+  const preferredTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--pane-tab-width')) || 180;
+  const minTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--dockview-tab-min-inline-size')) || 64;
+  const plans = [];
   document.querySelectorAll('.dv-groupview').forEach(group => {
     const header = group.querySelector('.dv-tabs-and-actions-container');
     if (!header) return;
     const tabsContainer = header.querySelector('.dv-tabs-container');
     if (!tabsContainer) return;
-    tabsContainer.querySelectorAll(':scope > .dockview-tab-first-row-reservation').forEach(node => node.remove());
     const actions = group.querySelector('.dockview-pane-header-actions:not([hidden])');
     const width = actions ? Math.ceil(appSpaceRect(actions).width || actions.offsetWidth || 0) : 0;
     const reservedWidth = width > 0 ? width + 8 : 0;
@@ -1719,9 +1760,6 @@ function dockviewSyncHeaderActionReservations() {
     const headerWidth = Math.floor(appSpaceRect(tabsContainer).width || tabsContainer.clientWidth || 0);
     const slot = dockviewSlotForGroupElement(group);
     const intrinsicSidePaneTabs = Boolean(slot && slotIsSidePane(slot));
-    const rootStyle = getComputedStyle(document.documentElement);
-    const preferredTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--pane-tab-width')) || 180;
-    const minTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--dockview-tab-min-inline-size')) || 64;
     const availableWidth = headerWidth > reservedWidth ? headerWidth - reservedWidth : headerWidth;
     // Keep the first row clear of its absolutely positioned actions, while allowing later rows to
     // use the whole header. The normal tab width is retained without actions. With actions, fit
@@ -1740,16 +1778,21 @@ function dockviewSyncHeaderActionReservations() {
     const tabWidth = reservedWidth > 0 && tabsNeedWrap
       ? Math.max(minTabWidth, Math.min(preferredTabWidth, laterRowTabWidth))
       : (availableWidth > 0 ? Math.min(Math.max(minTabWidth, preferredTabWidth), Math.max(minTabWidth, availableWidth)) : Math.max(minTabWidth, preferredTabWidth));
-    header.style.setProperty('--dockview-header-actions-reserved-inline-size', reservedWidth > 0 ? `${reservedWidth}px` : '0px');
-    // The narrow triplet home uses content-width tabs. Its shared action gutter is ordinary end
-    // padding, so all three tabs stay on one row and shrink together instead of inheriting the
-    // preferred-width reservation algorithm used by normal multi-row pane tabs.
-    if (intrinsicSidePaneTabs) {
-      header.style.removeProperty('--dockview-tab-inline-size');
-      return;
-    }
-    header.style.setProperty('--dockview-tab-inline-size', `${tabWidth}px`);
-    if (!reservedWidth || !headerWidth) return;
+    plans.push({header, tabsContainer, tabs, intrinsicSidePaneTabs, reservedWidth, headerWidth, tabWidth});
+  });
+  // Read all group geometry before changing any header. Native activation must not
+  // repeatedly lay out the entire workspace as each group's reservation is rebuilt.
+  for (const plan of plans) {
+    const {header, tabsContainer, intrinsicSidePaneTabs, reservedWidth, tabWidth} = plan;
+    tabsContainer.querySelectorAll(':scope > .dockview-tab-first-row-reservation').forEach(node => node.remove());
+    setStylePropertyIfChanged(header.style, '--dockview-header-actions-reserved-inline-size', reservedWidth > 0 ? `${reservedWidth}px` : '0px');
+    if (intrinsicSidePaneTabs) removeStylePropertyIfPresent(header.style, '--dockview-tab-inline-size');
+    else setStylePropertyIfChanged(header.style, '--dockview-tab-inline-size', `${tabWidth}px`);
+  }
+  const reservations = [];
+  for (const {tabsContainer, tabs, intrinsicSidePaneTabs, reservedWidth, headerWidth} of plans) {
+    // A lone tab cannot wrap around its actions; its width already excludes them.
+    if (intrinsicSidePaneTabs || !reservedWidth || !headerWidth || tabs.length < 2) continue;
     const firstRowWidth = Math.max(0, headerWidth - reservedWidth);
     let usedWidth = 0;
     let usedActualWidth = 0;
@@ -1771,13 +1814,16 @@ function dockviewSyncHeaderActionReservations() {
       usedWidth += firstRowTabWidth;
       usedActualWidth += measuredTabWidth;
     }
-    if (!tabs.length || !usedActualWidth) return;
+    if (!usedActualWidth) continue;
+    reservations.push({tabsContainer, firstExcludedTab, width: Math.max(0, Math.floor(headerWidth - usedActualWidth))});
+  }
+  for (const {tabsContainer, firstExcludedTab, width} of reservations) {
     const reservation = document.createElement('span');
     reservation.className = 'dockview-tab-first-row-reservation';
     reservation.setAttribute('aria-hidden', 'true');
-    reservation.style.setProperty('--dockview-first-row-reservation-inline-size', `${Math.max(0, Math.floor(headerWidth - usedActualWidth))}px`);
+    reservation.style.setProperty('--dockview-first-row-reservation-inline-size', `${width}px`);
     tabsContainer.insertBefore(reservation, firstExcludedTab);
-  });
+  }
 }
 
 function dockviewEnsureHost() {
@@ -1804,6 +1850,7 @@ function dockviewInit() {
     createTabComponent: () => createDockviewTabRenderer(),
     defaultRenderer: dockviewPanelRenderer,
     disableFloatingGroups: true,
+    disableDnd: !tabDragAllowed(),
     dndStrategy: 'pointer',
     noPanelsOverlay: 'emptyGroup',
     scrollbars: 'native',
@@ -1831,13 +1878,17 @@ function dockviewInit() {
       if (!pendingUserGesture && focusedPanelItem && itemIsActivePaneTab(focusedPanelItem)) return;
       dockviewCommitPanelActivation(item);
     }),
+    api.onWillDragPanel(event => { if (!tabDragAllowed()) event.nativeEvent.preventDefault(); }),
+    api.onWillDragGroup(event => { if (!tabDragAllowed()) event.nativeEvent.preventDefault(); }),
     api.onWillShowOverlay(event => {
+      if (!tabDragAllowed()) { event.preventDefault(); return; }
       if (event?.nativeEvent && dockviewLayoutState.tabPointerDrag) {
         dockviewTrackTabPointerDrag(event.nativeEvent);
       }
       dockviewTrackRootBoundaryOverlay(event);
     }),
     api.onWillDrop(event => {
+      if (!tabDragAllowed()) { event.preventDefault(); return; }
       // Tab drops are handled here (or committed by dockview itself); stamp the gesture so the pinned
       // pointer-reorder FALLBACK stands down instead of double-applying (see dockviewFinishTabPointerDrag).
       dockviewSetInvalidTabDropPreview(false);
@@ -2043,6 +2094,7 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   const activePaneCount = layoutSlotKeys().filter(side => activeItemForSide(side) || paneIsPlaceholder(side)).length;
   grid.className = `grid dockview-grid ${activePaneCount === 1 ? 'full' : ''} ${activePaneCount === 0 ? 'empty' : ''}`.trim();
   dockviewEnsureHost();
+  dockviewSyncGroupHeaders();
   const activeOnlySignature = dockviewLayoutActiveOnlySignature(layoutSlots);
   let activeOnlyChange = (
     dockviewLayoutState.adoptingFromDockview
@@ -2056,6 +2108,10 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   if (!dockviewLayoutState.adoptingFromDockview && dockviewLayoutState.lastAppliedLayoutSignature !== signature) {
     activeOnlyTransitionItems = dockviewActiveTabTransitionItems(layoutSlots);
     if (dockviewLayoutState.lastAppliedActiveOnlySignature !== activeOnlySignature || !dockviewActivateLayoutTabs(layoutSlots)) {
+      const replacement = options.tabberNormalSelection === true
+        ? dockviewNormalTabberPaneReplacement(options.previousSlots, layoutSlots)
+        : null;
+      if (replacement && dockviewReplaceNormalTabberPaneItem(replacement, {...options, previousActive})) return true;
       if (options.deferDockviewLoad === true) {
         dockviewScheduleDeferredLoad(previousActive, options);
         layoutLoadDeferred = true;
@@ -2122,6 +2178,81 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   return true;
 }
 
+function dockviewNormalTabberPaneReplacement(previousSlots, nextSlots) {
+  if (tabberIsAdvanced() || !itemInLayout(tabberItemId) || !previousSlots || !nextSlots) return null;
+  const previousKeys = layoutSlotKeys(previousSlots);
+  const nextKeys = layoutSlotKeys(nextSlots);
+  if (layoutShapeSignature(previousSlots) !== layoutShapeSignature(nextSlots)) return null;
+  if (previousKeys.length !== nextKeys.length || previousKeys.some((slot, index) => slot !== nextKeys[index])) return null;
+  let replacement = null;
+  for (const slot of nextKeys) {
+    const previousTabs = paneTabs(slot, previousSlots);
+    const nextTabs = paneTabs(slot, nextSlots);
+    if (previousTabs.length === nextTabs.length && previousTabs.every((item, index) => item === nextTabs[index])) continue;
+    if (replacement || slotIsSidePane(slot, nextSlots) || previousTabs.length !== 1 || nextTabs.length !== 1) return null;
+    const [previousItem] = previousTabs;
+    const [nextItem] = nextTabs;
+    if (!isTmuxSession(previousItem) || !isTmuxSession(nextItem) || previousItem === nextItem
+        || activeItemForSide(slot, nextSlots) !== nextItem) return null;
+    replacement = {slot, previousItem, nextItem};
+  }
+  return replacement;
+}
+
+function dockviewReplaceNormalTabberPaneItem(replacement, options = {}) {
+  const api = dockviewLayoutState.api;
+  const previousPanel = replacement.previousItem ? api?.getPanel?.(replacement.previousItem) : null;
+  const referencePanel = api?.getPanel?.(replacement.referenceItem || replacement.previousItem);
+  if (!api || !referencePanel || (replacement.previousItem && !previousPanel)
+      || typeof api.addPanel !== 'function' || typeof api.removePanel !== 'function') return false;
+  const panelOptions = replacement.nextItem ? dockviewPanelOptionsForItem(replacement.nextItem, layoutSlots) : null;
+  const previousGroup = previousPanel?.api?.group;
+  if (replacement.nextItem && !panelOptions) return false;
+  let nextPanel;
+  const applyingFromLayout = dockviewLayoutState.applyingFromLayout;
+  dockviewLayoutState.applyingFromLayout = true;
+  try {
+    if (panelOptions) nextPanel = api.addPanel({...panelOptions, inactive: true, position: {
+      referencePanel: replacement.referenceItem || replacement.previousItem, direction: replacement.direction || 'within',
+    }});
+    if (previousPanel) {
+      captureDockviewPaneBeforeDetach(replacement.previousItem);
+      api.removePanel(previousPanel);
+    }
+    nextPanel?.api?.setActive?.();
+  } catch (error) {
+    if (nextPanel && api.getPanel?.(replacement.nextItem) === nextPanel) api.removePanel(nextPanel);
+    return false;
+  } finally {
+    dockviewLayoutState.applyingFromLayout = applyingFromLayout;
+  }
+  if ((replacement.nextItem && (!nextPanel || api.getPanel?.(replacement.nextItem) !== nextPanel))
+      || (replacement.previousItem && api.getPanel?.(replacement.previousItem))
+      || (!replacement.referenceItem && nextPanel.api?.group !== previousGroup)) return false;
+  const mountedItems = activePaneItems().filter(isTmuxSession);
+  for (const item of mountedItems) {
+    const group = api.getPanel?.(item)?.api?.group;
+    if (!group) return false;
+    dockviewLayoutState.groupSlots.set(dockviewGroupId(group), slotForItem(item));
+  }
+  if (previousGroup && !api.groups?.includes(previousGroup)) dockviewLayoutState.groupSlots.delete(dockviewGroupId(previousGroup));
+  dockviewSyncGroupHeaders();
+  const signature = layoutSlotsSignature(layoutSlots);
+  dockviewLayoutState.lastAppliedLayoutSignature = signature;
+  dockviewLayoutState.lastAppliedActiveOnlySignature = dockviewLayoutActiveOnlySignature(layoutSlots);
+  // A within-group replacement does not change the retained pane's shell or geometry.
+  // Its renderer already owns the new tab; defer enrichment through the activation owner.
+  const changedItems = new Set(replacement.referenceItem ? mountedItems : [replacement.nextItem].filter(Boolean));
+  dockviewSyncTabShells({items: changedItems});
+  dockviewRefreshHeaderActions({items: changedItems});
+  if (replacement.nextItem) dockviewScheduleDeferredTabRefresh([replacement.nextItem]);
+  if (replacement.referenceItem) dockviewSyncMountedPanels({items: new Set(mountedItems.filter(item => item !== replacement.nextItem)), renderAttached: false});
+  if (replacement.nextItem) dockviewSyncMountedPanels({items: new Set([replacement.nextItem]), renderAttached: false, ensureMounted: true, restoreViewState: true});
+  syncPanelVisibility(options.previousActive || []);
+  completeLayoutMutationGeneration(options.completionGeneration);
+  return true;
+}
+
 function syncActivePanelsDockview(previousActive = []) {
   renderPanelsDockview(previousActive, {prune: false});
 }
@@ -2185,25 +2316,11 @@ function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
   const panelItems = paneItems(slots);
   const size = dockviewHostLayoutSize(dockviewLayoutState.host || grid);
   const viewport = appViewport();
-  const sidePaneMaximumWidth = Math.max(
-    minSplitPaneWidthPx(),
-    Math.floor((size.width || viewport.width || 0) * sidePaneRoleDefinition.maxViewportFraction),
-  );
   const panels = {};
   for (const item of panelItems) {
-    const slot = slotForItem(item, slots);
-    const sidePane = slotIsSidePane(slot, slots);
-    panels[item] = {
-      id: item,
-      contentComponent: dockviewContentComponentName,
-      tabComponent: dockviewTabComponentName,
-      title: itemLabel(item),
-      renderer: dockviewPanelRenderer,
-      params: {item},
-      minimumWidth: sidePane ? minWidthForSidePaneItem(item) : minWidthForLayoutItem(item),
-      ...(sidePane ? {maximumWidth: sidePaneMaximumWidth} : {}),
-      minimumHeight: minSplitPaneHeightPx(),
-    };
+    const options = dockviewPanelOptionsForItem(item, slots, size.width || viewport.width || 0);
+    const {component, ...panelOptions} = options;
+    panels[item] = {...panelOptions, contentComponent: component};
   }
   for (const slot of layoutSlotKeys(slots)) {
     if (!paneIsPlaceholder(slot, slots)) continue;
@@ -2228,6 +2345,28 @@ function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
     },
     panels,
     activeGroup: slotForItem(focusedPanelItem, slots) || layoutSlotKeys(slots)[0],
+  };
+}
+
+function dockviewPanelOptionsForItem(item, slots = layoutSlots, hostWidth = 0) {
+  const slot = slotForItem(item, slots);
+  const sidePane = slotIsSidePane(slot, slots);
+  const sidePaneMaximumWidth = sidePane
+    ? Math.max(
+      minSplitPaneWidthPx(),
+      Math.floor((Number(hostWidth) || appViewport().width || 0) * sidePaneRoleDefinition.maxViewportFraction),
+    )
+    : 0;
+  return {
+    id: item,
+    component: dockviewContentComponentName,
+    tabComponent: dockviewTabComponentName,
+    title: itemLabel(item),
+    renderer: dockviewPanelRenderer,
+    params: {item},
+    minimumWidth: sidePane ? minWidthForSidePaneItem(item) : minWidthForLayoutItem(item),
+    ...(sidePane ? {maximumWidth: sidePaneMaximumWidth} : {}),
+    minimumHeight: minSplitPaneHeightPx(),
   };
 }
 
@@ -2290,7 +2429,7 @@ function dockviewSerializedLeaf(slot, slots, weight = SERIALIZED_WEIGHT_BASE) {
       // The Dockview group header is the only tab strip when an inner panel head is hidden.
       // A singleton Finder used to suppress it as a legacy reserved-pane optimization, leaving
       // no visible route to the other independent triplet tabs after they are added.
-      hideHeader: placeholder,
+      hideHeader: placeholder || normalTabberPaneHeaderHidden(slot, slots),
     },
     size: Math.max(1, Math.round(weight)),
     visible: true,
@@ -2322,6 +2461,9 @@ function adoptDockviewLayout(options = {}) {
     return;
   }
   let next = layoutSlotsFromDockviewJson(api.toJSON(), layoutSlots, {activationItem: options.activationItem});
+  const policyLayout = normalTabberPaneLayout(next);
+  if (policyLayout !== next) dockviewLayoutState.reloadAfterAdoption = true;
+  next = policyLayout;
   if (!dockviewLayoutState.tabRenderPending
       && layoutSlotsExactSignature(next) === layoutSlotsExactSignature(layoutSlots)) return;
   // A vendor-confirmed active-tab change preserves topology even if layout is
@@ -2331,6 +2473,18 @@ function adoptDockviewLayout(options = {}) {
     && api.activePanel?.id === options.activationItem
     && dockviewLayoutActiveOnlySignature(next) === dockviewLayoutActiveOnlySignature(layoutSlots);
   if (!activeOnlyActivation && !dockviewHostCanAdoptLayout()) return;
+  const nextWithPreviousGeometry = cloneLayoutSlots(next);
+  copyLayoutSplitPercentagesByShape(nextWithPreviousGeometry[layoutTreeKey], layoutSlots[layoutTreeKey]);
+  if (!dockviewLayoutState.reloadAfterAdoption && !dockviewLayoutState.tabRenderPending
+      && layoutSlotsExactSignature(nextWithPreviousGeometry) === layoutSlotsExactSignature(layoutSlots)) {
+    // Native split sizing is already painted. Only persist its measured ratios; pane,
+    // focus, tab-order and role changes still go through the full adoption owner below.
+    layoutSlots = next;
+    dockviewLayoutState.lastAppliedLayoutSignature = layoutSlotsSignature(next);
+    dockviewLayoutState.lastAppliedActiveOnlySignature = dockviewLayoutActiveOnlySignature(next);
+    updateActiveSessionParam();
+    return;
+  }
   const missingPendingSessions = pendingTmuxSessionNames()
     .filter(item => itemInLayout(item, layoutSlots) && !itemInLayout(item, next));
   if (missingPendingSessions.length) {
@@ -2358,7 +2512,7 @@ function adoptDockviewLayout(options = {}) {
   dockviewLayoutState.lastAppliedLayoutSignature = nextSignature;
   dockviewLayoutState.adoptingFromDockview = true;
   try {
-    applyLayoutSlots(next, {prune: false, preservePlaceholderSlots: true, activeOnlyActivation});
+    applyLayoutSlots(next, {prune: false, preservePlaceholderSlots: true, activeOnlyActivation, sessionButtons: tabberIsAdvanced()});
     if (dockviewLayoutState.reloadAfterAdoption) {
       dockviewLayoutState.reloadAfterAdoption = false;
       dockviewLoadLayout(layoutSlots);
@@ -2616,6 +2770,8 @@ function createDockviewPanelRenderer() {
     if (capture) {
       capture.consumed = true;
     } else capturePaneViewState(item, panel);
+    stopTranscriptStream(item);
+    stopSummaryStream(item);
     panel.classList.remove('active-pane');
     panel.dataset.slot = '';
     panelPool.appendChild(panel);
@@ -2636,6 +2792,21 @@ function createDockviewPanelRenderer() {
 
 function dockviewHeaderActionsHtml(item, slot = slotForItem(item)) {
   if (!isLayoutItem(item)) return '';
+  const tabberHomeNavigation = slotIsSidePane(slot)
+    ? paneTabs(slot).includes(tabberItemId)
+    : item === tabberItemId && tabberSidebarSinglePane;
+  if (tabberHomeNavigation) {
+    const modeControl = `<label class="tabber-advanced-control"><input type="checkbox" data-tabber-advanced aria-label="Advanced"${tabberIsAdvanced() ? ' checked' : ''}> Advanced</label>`;
+    return modeControl + paneFrameControlsGroupHtml(item, {
+      slot,
+      actions: false,
+      details: false,
+      popout: false,
+      expand: false,
+      close: false,
+      minimize: true,
+    });
+  }
   if (slotIsSidePane(slot)) {
     return paneFrameControlsGroupHtml(item, {
       slot,
@@ -2736,8 +2907,8 @@ function createDockviewHeaderActionsRenderer() {
     activeItem = resolveLayoutItem(group?.activePanel?.id || '');
     const slot = dockviewSlotForGroupId(group?.id || '') || slotForItem(activeItem);
     const html = dockviewHeaderActionsHtml(activeItem, slot);
-    element.hidden = !html;
-    element.innerHTML = html;
+    if (element.hidden !== !html) element.hidden = !html;
+    setInnerHtmlIfChanged(element, html);
     const panel = document.getElementById(panelDomId(activeItem));
     // Header activation updates its own controls without walking mounted file trees.
     if (isTmuxSession(activeItem)) {
@@ -2753,7 +2924,22 @@ function createDockviewHeaderActionsRenderer() {
     for (const disposable of disposables) disposable?.dispose?.();
     disposables = [];
   };
-  element.addEventListener('click', event => handleDockviewHeaderActionClick(event, activeItem));
+  element.addEventListener('click', event => {
+    if (event.target.closest?.('.tabber-advanced-control')) { event.stopPropagation(); return; }
+    handleDockviewHeaderActionClick(event, activeItem);
+  });
+  element.addEventListener('change', event => {
+    const control = event.target.closest?.('[data-tabber-advanced]');
+    if (control) {
+      const mode = control.checked ? 'advanced' : 'normal';
+      setTabberMode(mode);
+      void saveTabberModePreference(mode).catch(error => {
+        statusErr(localizedHtml('status.settingsSaveFailed', {
+          error: userMessageText(error, t('common.requestFailed')),
+        }));
+      });
+    }
+  });
   element.__yomuxDockviewRefresh = render;
   return {
     element,
@@ -2780,6 +2966,14 @@ function createDockviewTabRenderer() {
   let api = null;
   let disposables = [];
   const render = () => {
+    if (!tabberIsAdvanced() && !paneTabs(slotForItem(item)).includes(tabberItemId)) {
+      cleanupDetachedPaneTabPopover(element);
+      element.hidden = true;
+      element.replaceChildren();
+      return;
+    }
+    element.hidden = false;
+    if (item && !dockviewEmptyPaneSlot(item)) syncDockviewTabShell(element, item, api);
     if (dockviewLayoutState.applyingFromLayout) {dockviewLayoutState.tabRenderPending = true; return;}
     if (!item) return;
     if (dockviewEmptyPaneSlot(item)) {
@@ -2787,7 +2981,6 @@ function createDockviewTabRenderer() {
       element.replaceChildren();
       return;
     }
-    syncDockviewTabShell(element, item, api);
     if (paneTabShouldPreserve(element)) {
       syncPaneTabPinnedChrome(element, item);
       const popover = paneTabPopoverForAnchor(element);
@@ -2837,8 +3030,7 @@ function createDockviewTabRenderer() {
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation?.();
-      if (isFileEditorItem(item)) closeFileTab(fileItemPath(item), {item});
-      else removeSessionFromLayout(item);
+      closeLayoutTabItem(item);
       return;
     }
     const autoTarget = event.target.closest('[data-auto-session]');
@@ -2973,6 +3165,10 @@ function dockviewScheduleDeferredTabRefresh(items) {
   dockviewLayoutState.deferredTabRefreshFrame = requestAnimationFrame(() => {
     dockviewLayoutState.deferredTabRefreshFrame = requestAnimationFrame(() => {
       dockviewLayoutState.deferredTabRefreshFrame = 0;
+      // Two frames alone do not establish terminal paint: its parse/output fence
+      // can still be pending. The paint completion owner drains this shared set.
+      const activation = dockviewLayoutState.tabActivationPerf;
+      if (activation && dockviewTabActivationIsCurrent(activation)) return;
       const nextItems = new Set(pendingItems);
       pendingItems.clear();
       if (nextItems.size) dockviewRefreshTabs({items: nextItems, refreshHeaderActions: false});
@@ -2982,6 +3178,7 @@ function dockviewScheduleDeferredTabRefresh(items) {
 
 function dockviewRefreshTabs(options = {}) {
   if (!dockviewLayoutActive()) return;
+  dockviewSyncGroupHeaders();
   if (!dockviewLayoutState.applyingFromLayout) dockviewLayoutState.tabRenderPending = false;
   let itemSet = options.items instanceof Set ? new Set(options.items) : null;
   const pendingItems = dockviewLayoutState.deferredTabRefreshItems;
@@ -3002,6 +3199,21 @@ function dockviewRefreshTabs(options = {}) {
   dockviewSyncHeaderBackgroundDragSources();
   dockviewSyncHeaderActionReservations();
   scheduleAgentWindowActivityAnimationSync();
+}
+
+function dockviewSyncGroupHeaders() {
+  const api = dockviewLayoutState.api;
+  let changed = false;
+  for (const group of api?.groups || []) {
+    const slot = dockviewLayoutState.groupSlots.get(dockviewGroupId(group));
+    if (!slot || !group.header) continue;
+    const hidden = paneIsPlaceholder(slot) || normalTabberPaneHeaderHidden(slot);
+    if (group.header.hidden === hidden) continue;
+    group.header.hidden = hidden;
+    changed = true;
+  }
+  // The vendor setter only changes display; refresh geometry once on a mode transition.
+  if (changed) dockviewLayoutToHost(api, dockviewLayoutState.host, {force: true});
 }
 
 function dockviewRefreshHeaderActions(options = {}) {

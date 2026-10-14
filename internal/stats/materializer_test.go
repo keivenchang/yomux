@@ -55,6 +55,32 @@ func TestMaterializerDeclaredFamiliesAndPricing(t *testing.T) {
 	}
 }
 
+func TestMaterializerPreservesPartialProcessMeasurementsAndMarksUnknowns(t *testing.T) {
+	layer, err := (Materializer{}).Build(MaterializeRequest{Start: 0, End: 10, Resolution: 10}, []Observation{
+		{EventID: "partial-cpu", Family: "cpu", SourceID: "host", ObservedAt: 1, EpochID: "cpu", Payload: map[string]any{
+			"process_percent": 20.0, "system_percent": 40.0,
+			"process_cpu_percent": map[string]any{"python": 12.0}, "process_census_incomplete": true,
+		}},
+		{EventID: "partial-memory", Family: "system_memory", SourceID: "host", ObservedAt: 2, EpochID: "memory", Payload: map[string]any{
+			"used_bytes": uint64(900), "capacity_bytes": uint64(1000),
+			"process_memory_bytes": map[string]any{"python": uint64(300)}, "process_census_incomplete": true,
+		}},
+	}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]float64{
+		"process_cpu_percent:python":              12,
+		"process_memory_bytes:python":             300,
+		"process_census_incomplete:cpu":           1,
+		"process_census_incomplete:system_memory": 1,
+	} {
+		if got := seriesValue(layer.Buckets[0], name); got != want {
+			t.Errorf("partial process series %s = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestMaterializerUnpricedAttributionDimensionsMatchTotals(t *testing.T) {
 	layer, err := (Materializer{Price: func(UsageAtom) (int64, int64, *PriceEvidence, bool, error) {
 		return 0, 0, nil, false, nil

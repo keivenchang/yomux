@@ -59,8 +59,7 @@ def _bounded_env_int(name: str, default: int, lower: int, upper: int) -> int:
 
 # Settings normally supply these values per root; environment defaults remain
 # useful for standalone module callers and recovery before settings are loaded.
-MAX_INDEX_FILES = _bounded_env_int('SEARCH_INDEX_MAX_FILES', 100_000, 1_000, 1_000_000)
-MAX_PERSISTED_INDEX_FILES = _bounded_env_int('SEARCH_INDEX_PERSIST_MAX_FILES', 100_000, 1_000, 1_000_000)
+MAX_INDEX_FILES = _bounded_env_int('SEARCH_INDEX_MAX_FILES', 1_000_000, 1_000, 1_000_000)
 MAX_PERSISTED_INDEX_BYTES = _bounded_env_int('SEARCH_INDEX_PERSIST_MAX_MB', 64, 1, 1_024) * 1024 * 1024
 # The persistent indexer batches dirty paths for two seconds. Its writes are
 # row deltas, so this can stay responsive without rewriting an entire index.
@@ -268,7 +267,6 @@ class RootIndex:
         self.cache_bytes = 0
         self.persisted = False
         self.persist_enabled = True
-        self.persist_max_files = MAX_PERSISTED_INDEX_FILES
         self.persist_max_bytes = MAX_PERSISTED_INDEX_BYTES
         self.persist_pending = False
         self.last_persisted_at = 0.0
@@ -2576,7 +2574,7 @@ def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "", *,
         ri.persist_enabled
         and published_root_identity is not None
         and not ri.too_large
-        and len(entries) <= ri.persist_max_files
+        and len(entries) <= ri.max_files
         and estimated_bytes <= ri.persist_max_bytes
     )
     if not persistence_allowed:
@@ -3788,7 +3786,6 @@ def runtime_diagnostics() -> dict[str, Any]:
                 "persist_pending": ri.persist_pending,
                 "max_files": ri.max_files,
                 "refresh_seconds": ri.refresh_seconds,
-                "persist_max_files": ri.persist_max_files,
                 "persist_max_bytes": ri.persist_max_bytes,
             })
     roots.sort(key=lambda row: row["root"])
@@ -4093,13 +4090,12 @@ def _run_bfs_full_build(
         # published row still searchable by both the owner and a reader, and the durable frontier
         # recording exactly which directories remain. That is durable, valid coverage -- deleting it at
         # the cap (the old `not truncated` clause) blanked a large root's index on every build and left
-        # it permanently "Indexing...". So truncation NO LONGER forces a drop. The INDEPENDENT budget
-        # rejections remain: persistence disabled, more rows than `persist_max_files`, or more bytes
-        # than `persist_max_bytes` still keep NO disk snapshot (proven in separate over-file/over-byte/
-        # disabled tests). A partial that fits the budget stays on disk and reloads after a restart.
+        # it permanently "Indexing...". So truncation NO LONGER forces a drop. Persistence is rejected
+        # only when disabled or over the configured byte budget. A partial that fits the budget stays
+        # on disk and reloads after a restart.
         persist_ok = (
             ri.persist_enabled
-            and len(entries) <= ri.persist_max_files
+            and len(entries) <= ri.max_files
             and cache_bytes <= ri.persist_max_bytes
         )
         if not persist_ok:
@@ -4607,7 +4603,6 @@ def ensure_index(
     max_files: int | None = None,
     refresh_seconds: float = INDEX_TTL_SECONDS,
     persist_enabled: bool = True,
-    persist_max_files: int = MAX_PERSISTED_INDEX_FILES,
     persist_max_bytes: int = MAX_PERSISTED_INDEX_BYTES,
     root_fd: int | None = None,
     operation: str = "",
@@ -4629,7 +4624,6 @@ def ensure_index(
             ri.max_files = max(1, int(MAX_INDEX_FILES if max_files is None else max_files))
             ri.refresh_seconds = max(0.0, float(refresh_seconds))
             ri.persist_enabled = bool(persist_enabled)
-            ri.persist_max_files = max(1, int(persist_max_files))
             ri.persist_max_bytes = max(1, int(persist_max_bytes))
             ri.skip_dirs = set(skip_dirs)
             ri.exclude_path = exclude_path
@@ -4704,7 +4698,6 @@ def ensure_index(
                 ri.max_files = max(1, int(MAX_INDEX_FILES if max_files is None else max_files))
                 ri.refresh_seconds = max(0.0, float(refresh_seconds))
                 ri.persist_enabled = bool(persist_enabled)
-                ri.persist_max_files = max(1, int(persist_max_files))
                 ri.persist_max_bytes = max(1, int(persist_max_bytes))
                 ri.skip_dirs = set(skip_dirs)
                 ri.exclude_path = exclude_path
@@ -4726,7 +4719,6 @@ def ensure_index(
         ri.max_files = max(1, int(MAX_INDEX_FILES if max_files is None else max_files))
         ri.refresh_seconds = max(0.0, float(refresh_seconds))
         ri.persist_enabled = bool(persist_enabled)
-        ri.persist_max_files = max(1, int(persist_max_files))
         ri.persist_max_bytes = max(1, int(persist_max_bytes))
         ri.skip_dirs = set(skip_dirs)
         ri.exclude_path = exclude_path
@@ -4784,7 +4776,6 @@ def build_now(
     max_files: int | None = None,
     refresh_seconds: float = INDEX_TTL_SECONDS,
     persist_enabled: bool = True,
-    persist_max_files: int = MAX_PERSISTED_INDEX_FILES,
     persist_max_bytes: int = MAX_PERSISTED_INDEX_BYTES,
     root_fd: int | None = None,
     operation: str = "",
@@ -4805,7 +4796,6 @@ def build_now(
         ri.max_files = max(1, int(MAX_INDEX_FILES if max_files is None else max_files))
         ri.refresh_seconds = max(0.0, float(refresh_seconds))
         ri.persist_enabled = bool(persist_enabled)
-        ri.persist_max_files = max(1, int(persist_max_files))
         ri.persist_max_bytes = max(1, int(persist_max_bytes))
         ri.skip_dirs = set(skip_dirs)
         ri.exclude_path = exclude_path

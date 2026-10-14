@@ -18,6 +18,35 @@ from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F
 _BOOTSTRAP_SCRIPT_RE = re.compile(r'<script id="yomux-bootstrap"[^>]*>(.*?)</script>', re.DOTALL)
 
 
+
+def hold_finder_startup_root_open(browser, entries):
+    browser.execute_script(
+        """
+        const original = fetchDirectory;
+        const state = {original, release: null};
+        fetchDirectory = (path, options) => {
+          if (path !== '/home/test' || state.release) return original(path, options);
+          return new Promise(resolve => {state.release = () => resolve(arguments[0]);});
+        };
+        state.promise = openFileExplorerAt('/home/test');
+        window.__heldFinderStartupOpen = state;
+        """,
+        entries,
+    )
+
+
+def settle_finder_startup_root_open(browser):
+    accepted = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1], state = window.__heldFinderStartupOpen;
+        fetchDirectory = state.original;
+        state.release();
+        state.promise.then(result => {delete window.__heldFinderStartupOpen; done(result);});
+        """
+    )
+    assert accepted is False, 'the explicit editor click must retire the earlier root-open transaction'
+
+
 def test_finder_restore_advances_ready_branches_while_another_listing_is_held(browser, tmp_path):
     load_live_runtime_boot_fixture(
         browser,
@@ -333,6 +362,29 @@ def test_finder_reload_preserves_nested_expansion_under_collapsed_parent(browser
     finally:
         print('latent expansion settlement', browser.execute_script("return {rows:liveDirectoryRows('/home/test/a/b',null).map(row=>({expanded:row.getAttribute('aria-expanded'),children:childContainerForRow(row,'/home/test/a/b')?.innerText,tree:row.closest('.file-explorer-tree-panel')?.id})),parents:liveDirectoryRows('/home/test/a',null).length,pending:[...fileExplorerPendingExpansions],loading:[...document.querySelectorAll('.loading-children')].map(row=>row.dataset.path)};"))
         browser.execute_script('fetchDirectory=window.__latentExpansionTest.originalFetch;window.__latentExpansionTest.secondary?.remove();delete window.__latentExpansionTest;')
+
+
+def test_finder_restore_expanded_paths_bypasses_idle_push_suppression(browser, tmp_path):
+    root, branch = '/home/test', '/home/test/dev'
+    load_live_runtime_boot_fixture(
+        browser, tmp_path, '?sessions=files,1&layout=left&tabs=left:files',
+        settings={'file_explorer': {'root_mode': 'fixed'}},
+        fs_entries={root: [{'name': 'dev', 'kind': 'dir'}], branch: [{'name': 'README.md', 'kind': 'file'}]},
+    )
+    result = browser.execute_async_script(
+        """
+        const done=arguments[arguments.length-1], root='/home/test', branch=`${root}/dev`;
+        clientPushConnectedForData=()=>true;
+        fileExplorerUserIsActive=()=>false;
+        restoreFileExplorerExpandedPaths([branch],root).then(restored=>{
+          const row=document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${branch}"]`);
+          const children=childContainerForRow(row,branch);
+          done({restored,expanded:row?.getAttribute('aria-expanded'),childRows:children?.querySelectorAll('.file-tree-row[data-path]').length||0,
+            pending:fileExplorerPendingExpansions.size,errors:jsDebugFailureEvents('error'),rejections:jsDebugFailureEvents('rejection')});
+        }).catch(error=>done({error:String(error)}));
+        """
+    )
+    assert result == {'restored': True, 'expanded': 'true', 'childRows': 1, 'pending': 0, 'errors': [], 'rejections': []}, result
 
 
 def test_finder_restore_reconciles_both_tree_surfaces_after_cache_eviction(browser, tmp_path):
@@ -4300,8 +4352,8 @@ def test_differ_ref_change_preserves_finder_worktree_counts(browser, tmp_path):
         window.__fixtureSessionFilesPayload = {
           session: '1', loaded: true, from_ref: 'HEAD', to_ref: 'current', errors: [],
           refs_by_repo: initialDifferPayload.refs_by_repo,
-          repos: [{repo, from_ref: 'abc123def456', to_ref: 'current', count: 1, added: 200, removed: 100}],
-          files: [{session: '1', repo, path: 'a.py', abs_path: `${repo}/a.py`, status: 'A', added: 200, removed: 100}],
+          repos: [{repo, from_ref: 'abc123def456', to_ref: 'current', count: 1, added: 12_345, removed: 555_000}],
+          files: [{session: '1', repo, path: 'a.py', abs_path: `${repo}/a.py`, status: 'A', added: 12_345, removed: 555_000}],
         };
         const input = differPanel.querySelector('[data-diff-ref-controls][data-diff-ref-repo="/repo/app"] [data-diff-ref-from]');
         input.value = 'abc123def456';
@@ -4311,7 +4363,7 @@ def test_differ_ref_change_preserves_finder_worktree_counts(browser, tmp_path):
         const inspect = () => {
           const selected = diffRefsByRepo[repo]?.from || '';
           const differ = differTotals();
-          if (!finishing && selected === 'abc123def456' && differ.includes('+200') && differ.includes('-100')) {
+          if (!finishing && selected === 'abc123def456' && differ.includes('+12K') && differ.includes('-555K')) {
             finishing = true;
             activatePaneTab(slotForItem(finderItemId), finderItemId, {userInitiated: true});
             requestAnimationFrame(() => {
@@ -4350,7 +4402,7 @@ def test_differ_ref_change_preserves_finder_worktree_counts(browser, tmp_path):
     assert not metrics.get("error"), json.dumps(metrics, sort_keys=True)
     assert metrics["beforeFinder"] == "+2 -1", metrics
     assert metrics["afterFinder"] == "+2 -1", metrics
-    assert "+200" in metrics["differ"] and "-100" in metrics["differ"], metrics
+    assert "+12K" in metrics["differ"] and "-555K" in metrics["differ"], metrics
     assert metrics["finderFrom"] == "HEAD" and metrics["finderTo"] == "current", metrics
     assert metrics["differFrom"] == "abc123def456", metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
@@ -4984,6 +5036,7 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
             """
         )
     )
+    hold_finder_startup_root_open(browser, fs_entries['/home/test'])
     click_visible_selector(browser, f'.file-editor-panel[data-file-path="{path}"]')
     try:
         WebDriverWait(browser, 5).until(
@@ -5018,6 +5071,7 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
             """
         )
         raise AssertionError(f"Finder did not converge to the clicked editor file: {diagnostic}") from error
+    settle_finder_startup_root_open(browser)
     metrics = browser.execute_script(
         """
         const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
@@ -6544,6 +6598,7 @@ def test_fixed_finder_reveals_clicked_editor_file_without_changing_root(browser,
             """
         )
     )
+    hold_finder_startup_root_open(browser, fs_entries['/home/test'])
     click_visible_selector(browser, '.file-editor-panel[data-file-path="/home/test/repo-a/src/a.md"]')
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -6552,6 +6607,7 @@ def test_fixed_finder_reveals_clicked_editor_file_without_changing_root(browser,
             """
         )
     )
+    settle_finder_startup_root_open(browser)
     click_a_metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];

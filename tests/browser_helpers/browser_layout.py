@@ -52,6 +52,12 @@ from tests.browser_helpers.browser_console import assert_browser_journey_error_f
 from tests.browser_helpers.browser_console import read_browser_console_log
 from tests.browser_helpers.browser_console import retire_browser_after_strict_diagnostic_gate
 from tests.browser_helpers.browser_console import stats_only_expected_boot_404
+from tests.browser_helpers.native_pointer import cdp_drag_hold as native_drag_hold
+from tests.browser_helpers.native_pointer import cdp_release
+from tests.browser_helpers.native_pointer import wait_for_visible_selector
+from tests.browser_helpers.native_pointer import _assert_browser_point_hits_target
+from tests.browser_helpers.native_pointer import _cdp_click_point
+from tests.browser_helpers.native_pointer import click_visible_selector
 from tests.browser_helpers.webdriver_lease import WebDriverLease
 from tests.browser_helpers.webdriver_lease import retire_all
 from tests.helpers.fixture_content_root import FixtureContentRoot
@@ -2409,8 +2415,11 @@ def split_seam_fixture_html():
 def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
     sessions = list(scenario.sessions)
     settings = dict(scenario.settings)
+    # Existing pane/drag scenarios exercise Advanced; fresh Normal is explicit in its journeys.
+    settings["general"] = {"default_tabber_mode": "advanced", **settings.get("general", {})}
     bootstrap: dict[str, object] = {
         "sessions": sessions,
+        "tmuxTopology": {"epoch": "browser-fixture", "generation": 0},
         "availableAgents": list(scenario.available_agents) if scenario.available_agents is not None else ["term"],
         "accessRole": scenario.access_role,
         "authUsername": scenario.auth_username,
@@ -2774,10 +2783,11 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           cost_report: fixtureStatsCostReport(),
         };
       }
-      function applyFixtureSettingsPatch(patch) {
+      function applyFixtureSettingsPatch(patch, options = {}) {
         window.__settingsPayload.settings = mergeSettings(window.__settingsPayload.settings || {}, patch || {});
         window.__settingsPayload.mtime_ns = ++window.__settingsMtime;
-        emitFixtureClientEvent('settings_changed', {data: window.__settingsPayload});
+        if (options.immediate === true) applySettingsPayload(window.__settingsPayload, {force: true});
+        else emitFixtureClientEvent('settings_changed', {data: window.__settingsPayload});
       }
       function fixtureSettingAnswer(path, before, after, where = 'Preferences -> Colors') {
         return [
@@ -3234,6 +3244,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           return jsonResponse((window.__fixtureSessionFilesPayloads || {})[session] || window.__fixtureSessionFilesPayload || {session, files: [], repos: [], errors: [], loaded: true});
         }
         if (url.pathname === '/api/stats-capabilities') return jsonResponse(window.__fixtureStatsCapabilities);
+        if (url.pathname === '/api/stats-session-aliases') return jsonResponse({aliases: {}});
         if (url.pathname === '/api/stats-observations') {
           return jsonResponse({
             ok: true,
@@ -3798,104 +3809,9 @@ def wait_for_visible_panel(browser, panel_id):
     )
 
 
-def wait_for_visible_selector(browser, selector):
-    return WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            const node = [...document.querySelectorAll(arguments[0])].find(candidate => {
-              const rect = candidate.getBoundingClientRect();
-              const style = getComputedStyle(candidate);
-              return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
-            });
-            if (!node) return false;
-            node.scrollIntoView?.({block: 'center', inline: 'center'});
-            const rect = node.getBoundingClientRect();
-            return {
-              x: Math.round(rect.left + rect.width / 2),
-              y: Math.round(rect.top + rect.height / 2),
-              width: Math.round(rect.width),
-              height: Math.round(rect.height),
-            };
-            """,
-            selector,
-        )
-    )
-
-
-def _assert_browser_point_hits_target(browser, point, *, panel_id=None, selector=None):
-    result = browser.execute_script(
-        """
-        const panelId = arguments[0];
-        const selector = arguments[1];
-        const x = arguments[2];
-        const y = arguments[3];
-        const candidates = panelId
-          ? [document.getElementById(panelId)].filter(Boolean)
-          : [...document.querySelectorAll(selector || '')];
-        const target = candidates.find(candidate => {
-          const rect = candidate.getBoundingClientRect();
-          const style = getComputedStyle(candidate);
-          return rect.width > 0 && rect.height > 0
-            && style.display !== 'none' && style.visibility !== 'hidden';
-        });
-        const hit = document.elementFromPoint(x, y);
-        const describe = node => node
-          ? `${node.tagName.toLowerCase()}${node.id ? `#${node.id}` : ''}${node.classList?.length ? `.${[...node.classList].join('.')}` : ''}`
-          : '<none>';
-        return {
-          ownsHit: Boolean(target && hit && (target === hit || target.contains(hit))),
-          target: describe(target),
-          hit: describe(hit),
-          x,
-          y,
-        };
-        """,
-        panel_id,
-        selector,
-        point["x"],
-        point["y"],
-    )
-    assert result and result["ownsHit"], f"browser click point is occluded or off-screen: {result}"
-
-
-def _cdp_click_point(browser, point):
-    browser.execute_cdp_cmd(
-        "Input.dispatchMouseEvent",
-        {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"},
-    )
-    browser.execute_cdp_cmd(
-        "Input.dispatchMouseEvent",
-        {
-            "type": "mousePressed",
-            "x": point["x"],
-            "y": point["y"],
-            "button": "left",
-            "buttons": 1,
-            "clickCount": 1,
-        },
-    )
-    browser.execute_cdp_cmd(
-        "Input.dispatchMouseEvent",
-        {
-            "type": "mouseReleased",
-            "x": point["x"],
-            "y": point["y"],
-            "button": "left",
-            "buttons": 0,
-            "clickCount": 1,
-        },
-    )
-
-
 def click_visible_panel(browser, panel_id):
     point = wait_for_visible_panel(browser, panel_id)
     _assert_browser_point_hits_target(browser, point, panel_id=panel_id)
-    _cdp_click_point(browser, point)
-
-
-def click_visible_selector(browser, selector):
-    point = wait_for_visible_selector(browser, selector)
-    _assert_browser_point_hits_target(browser, point, selector=selector)
     _cdp_click_point(browser, point)
 
 
@@ -4102,22 +4018,8 @@ def cdp_drag(browser, start, end, steps=24):
 
 
 def cdp_drag_hold(browser, start, end, steps=24):
-    assert start and end
-    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": start["x"], "y": start["y"], "button": "left", "buttons": 0, "clickCount": 1})
-    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": start["x"], "y": start["y"], "button": "none"})
-    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": start["x"], "y": start["y"], "button": "left", "buttons": 1, "clickCount": 1})
-    settle_browser_frames(browser)
-    for index in range(1, steps + 1):
-        x = round(start["x"] + (end["x"] - start["x"]) * index / steps)
-        y = round(start["y"] + (end["y"] - start["y"]) * index / steps)
-        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1})
-        if index % 4 == 0:
-            settle_browser_frames(browser, 1)
-    settle_browser_frames(browser, 3)
+    return native_drag_hold(browser, start, end, steps, settle=settle_browser_frames)
 
-
-def cdp_release(browser, point):
-    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": point["x"], "y": point["y"], "button": "left", "buttons": 0, "clickCount": 1})
 
 
 def dockview_invalid_drop_preview(browser):

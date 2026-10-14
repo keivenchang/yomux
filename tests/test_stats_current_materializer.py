@@ -94,6 +94,25 @@ def test_system_memory_projection_emits_one_dynamic_series_per_binary():
     assert samples["process_memory_bytes:node"] == 200
 
 
+def test_partial_process_census_keeps_known_cpu_and_memory_with_unknown_marker():
+    cpu = Observation("partial-cpu", "cpu", "host", 10, "epoch", 1, {
+        "process_percent": 20, "system_percent": 40,
+        "process_cpu_percent": {"python": 12}, "process_census_incomplete": True,
+    })
+    memory = Observation("partial-memory", "system_memory", "host", 10, "epoch", 60, {
+        "used_bytes": 900, "capacity_bytes": 1000,
+        "process_memory_bytes": {"python": 300}, "process_census_incomplete": True,
+    })
+
+    cpu_samples = {sample.series: sample.value for sample in materializer._observation_samples(cpu)}
+    memory_samples = {sample.series: sample.value for sample in materializer._observation_samples(memory)}
+
+    assert cpu_samples["process_cpu_percent:python"] == 12
+    assert cpu_samples["process_census_incomplete:cpu"] == 1
+    assert memory_samples["process_memory_bytes:python"] == 300
+    assert memory_samples["process_census_incomplete:system_memory"] == 1
+
+
 def test_system_disk_projection_keeps_each_mount_as_a_percent_series():
     observations = [
         Observation("disk-root", "system_disk", "mount:/", 10, "epoch", 60, {

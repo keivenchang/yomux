@@ -341,7 +341,7 @@ func TestTmuxCommandContextClearsInheritedNestedClientForGlobalRoster(t *testing
 	t.Setenv("LC_ALL", "")
 	t.Setenv("LC_CTYPE", "")
 
-	command := (&server{}).tmuxCommand("list-sessions", "-F", "#{session_name}\t#{session_id}\t#{session_created}\t#{pid}")
+	command := (&server{}).tmuxCommand("list-sessions", "-F", "#{session_name}\t#{session_id}\t#{session_created}\t#{pid}\t#{@yomux_view_source_id}\t#{@yomux_view_source}")
 	for _, value := range command.Env {
 		if strings.HasPrefix(value, "TMUX=") || strings.HasPrefix(value, "TMUX_PANE=") {
 			t.Fatalf("global tmux command inherited nested client variable %q", value)
@@ -2104,6 +2104,9 @@ func TestPhase45FinderHTTPRoutesUseReadAndMutationContracts(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "note.md"), []byte("hello\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "yo7110.md"), []byte("path completion\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	service, err := finder.New(root, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -2122,6 +2125,13 @@ func TestPhase45FinderHTTPRoutesUseReadAndMutationContracts(t *testing.T) {
 	s.fsFastList(fast, httptest.NewRequest(http.MethodGet, "/api/fs/fast/list?path="+url.QueryEscape(root), nil))
 	if fast.Code != http.StatusOK || !bytes.Contains(fast.Body.Bytes(), []byte(`"entries"`)) {
 		t.Fatalf("fast list route = %d %s", fast.Code, fast.Body.String())
+	}
+
+	fastNameQuery := httptest.NewRecorder()
+	fastNameQueryRequest := httptest.NewRequest(http.MethodGet, "/api/fs/fast/list?path="+url.QueryEscape(root)+"&name_query=yo711", nil)
+	s.fsFastList(fastNameQuery, fastNameQueryRequest)
+	if fastNameQuery.Code != http.StatusOK || !bytes.Contains(fastNameQuery.Body.Bytes(), []byte(`"name":"yo7110.md"`)) {
+		t.Fatalf("fast list name query route = %d %s", fastNameQuery.Code, fastNameQuery.Body.String())
 	}
 
 	read := httptest.NewRecorder()
@@ -5101,6 +5111,7 @@ func TestActivityUsesFreshPublishedAgentStatusInsteadOfMetadataCache(t *testing.
 		t.Fatal(err)
 	}
 	s := &server{
+		state:        t.TempDir(),
 		statsService: service,
 
 		tmuxWindowActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil }, tmuxMetadataState: tmuxMetadataState{metadataGeneration: 7, metadataTopologyGeneration: 7,
@@ -6363,12 +6374,12 @@ func TestPhase45FinderUnindexAndHTMLPreviewRoutes(t *testing.T) {
 	defer service.Close()
 	s := &server{root: root, finder: service, indexSettings: finderIndexSettings{
 		roots: []string{root}, maxFiles: finder.DefaultIndexedFiles,
-		persistFiles: finder.DefaultIndexedFiles, maxBytes: finder.DefaultIndexBytes,
+		maxBytes: finder.DefaultIndexBytes,
 	}}
 
 	indexStatus := httptest.NewRecorder()
 	s.fsIndexStatus(indexStatus, httptest.NewRequest(http.MethodGet, "/api/fs/index-status?root="+url.QueryEscape(root), nil))
-	if indexStatus.Code != http.StatusOK || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"index_state":"not_indexed"`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"indexed":false`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"ready":false`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"max_files":1000000`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"max_bytes":536870912`)) {
+	if indexStatus.Code != http.StatusOK || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"index_state":"not_indexed"`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"indexed":false`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"ready":false`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"max_files":1000000`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"max_bytes":1073741824`)) {
 		t.Fatalf("index status = %d %s", indexStatus.Code, indexStatus.Body.String())
 	}
 
@@ -8460,4 +8471,85 @@ func TestFreshMetadataAttentionWaitsForCanonicalEventIdentity(t *testing.T) {
 		t.Fatalf("replacement inherited old completion: %#v", agent)
 	}
 
+}
+
+func TestTabberReadyLastSurvivesConcurrentObserver(t *testing.T) {
+	runtime, err := os.MkdirTemp("/tmp", "avc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(runtime)
+	socket := filepath.Join(runtime, "tmux.sock")
+	t.Setenv("YOMUX_TMUX_SOCKET", socket)
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	creator, observer := &server{}, &server{}
+	defer creator.tmuxCommand("kill-server").Run()
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := creator.tmuxCommand(args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("new-session", "-d", "-s", "1")
+	sourceID := run("display-message", "-p", "-t", "=1:", "#{session_id}")
+	windowID := run("display-message", "-p", "-t", "=1:", "#{window_id}")
+	view := "__yomux_view_fixture"
+	run("new-session", "-d", "-s", view, "-t", "=1:")
+	run("set-option", "-t", "="+view+":", "@yomux_view_source", "1")
+	run("set-option", "-t", "="+view+":", "@yomux_view_window_id", windowID)
+	if _, err := observer.tmuxSessionRosterSnapshotLocked(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := creator.tmuxCommand("set-option", "-t", "="+view+":", "@yomux_view_source_id", sourceID).Run(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := observer.tmuxSessionRosterSnapshotLocked(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := creator.tmuxCommand("has-session", "-t", "="+view+":").Run(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTabberFinalLegacyViewMissingID(t *testing.T) {
+	killed := false
+	s := &server{}
+	s.tmuxCommandContextFn = func(ctx context.Context, args ...string) *exec.Cmd {
+		output := ""
+		switch args[0] {
+		case "list-sessions":
+			output = "1\t$1\t10\t123\t\t\t\t\n__yomux_view_fixture\t$2\t11\t123\t$1\t1\tgroup\t\n"
+		case "list-windows":
+			output = "$1\t@1\n$2\t@1\n"
+		case "kill-session":
+			killed = true
+		}
+		return exec.CommandContext(ctx, "python3", "-c", "import sys;sys.stdout.write(sys.argv[1])", output)
+	}
+	roster, err := s.tmuxSessionRosterSnapshotLocked(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(roster.sessions, ",") != "1" {
+		t.Fatalf("retired view remained in roster: %v", roster.sessions)
+	}
+	if !killed {
+		t.Fatal("missing-ID orphan was not retired")
+	}
+}
+
+func TestTabberNewRosterSurvivesMaintenanceFailure(t *testing.T) {
+	s := &server{tmuxMetadataState: tmuxMetadataState{tmuxRosterKnown: true, tmuxRoster: []string{"old"}, tmuxRosterIdentities: map[string]string{"old": "old-id"}}}
+	s.tmuxCommandContextFn = func(ctx context.Context, args ...string) *exec.Cmd {
+		if args[0] == "list-windows" {
+			return exec.CommandContext(ctx, "sh", "-c", "exit 19")
+		}
+		return exec.CommandContext(ctx, "python3", "-c", "import sys;sys.stdout.write(sys.argv[1])", "source\t$1\t10\t123\t\t\t\t\nnew\t$3\t12\t123\t\t\t\t\n__yomux_view_fixture\t$2\t11\t123\t$1\tsource\tgroup\t@1\n")
+	}
+	roster, err := s.tmuxSessionRosterSnapshotLocked(true)
+	if err != nil || !strings.Contains(strings.Join(roster.sessions, ","), "new") {
+		t.Fatalf("lost fresh roster: %v %v", roster.sessions, err)
+	}
 }

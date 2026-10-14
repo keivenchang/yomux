@@ -30,6 +30,7 @@ from yomux_lib import browser_diagnostic_receipts
 from tests.browser_helpers import browser_layout
 from tests.browser_helpers.browser_layout import _live_runtime_boot_fixture_html
 from yomux_lib.local_services import registry as local_service_registry
+from yomux_lib.workspace import workdir as workdir_module
 from tools.instance_isolation import GENERATED_PYTHON_CACHE_PREFIX_ENV
 from tests.gate_harness import assert_no_surviving_local_service_daemons
 from tests.gate_harness import assert_writable_paths_beneath
@@ -4130,6 +4131,95 @@ def test_runtime_root_removal_begins_only_after_registry_reaper_settlement(tmp_p
     calls.append("remove-root")
 
     assert calls == ["seal", "capture", "stop", "retire-unowned", "prove-zero", "settle", "remove-root"]
+
+
+def test_fixture_retirement_fences_admission_and_joins_admitted_auth_refresh(tmp_path, monkeypatch):
+    start_entered = threading.Event()
+    allow_start = threading.Event()
+    refresh_started = threading.Event()
+    release_refresh = threading.Event()
+    join_started = threading.Event()
+    refresh_finished = threading.Event()
+    starter_results = []
+    cleanup_results = []
+    worker_errors = []
+
+    class ControlledThread(threading.Thread):
+        def start(self):
+            start_entered.set()
+            assert allow_start.wait(2.0)
+            super().start()
+
+        def join(self, timeout=None):
+            join_started.set()
+            super().join(timeout)
+
+    def blocked_refresh(*, preserve_previous_known):
+        assert preserve_previous_known
+        refresh_started.set()
+        release_refresh.wait()
+        refresh_finished.set()
+        return {}
+
+    def start_refresh():
+        try:
+            starter_results.append(workdir_module.start_agent_auth_status_refresh(force=True))
+        except BaseException as exc:
+            worker_errors.append(exc)
+
+    def cleanup_refresh():
+        try:
+            gate_harness_module.settle_fixture_agent_auth_refresh(tmp_path, label="fixture root")
+            cleanup_results.append(True)
+        except BaseException as exc:
+            worker_errors.append(exc)
+
+    monkeypatch.setattr(workdir_module, "_agent_auth_refresh_admission_closed", False)
+    monkeypatch.setattr(workdir_module, "_agent_auth_refreshing", False)
+    monkeypatch.setattr(workdir_module, "_agent_auth_refresh_thread", None)
+    monkeypatch.setattr(workdir_module, "_agent_auth_status", None)
+    monkeypatch.setattr(workdir_module, "_refresh_agent_auth_status", blocked_refresh)
+    monkeypatch.setattr(workdir_module, "threading", SimpleNamespace(
+        Thread=ControlledThread,
+        current_thread=threading.current_thread,
+    ))
+    starter = threading.Thread(target=start_refresh, name="auth-refresh-starter-test")
+    starter.start()
+    assert start_entered.wait(1.0)
+    waiter = threading.Thread(target=cleanup_refresh, name="fixture-cleanup-test")
+    waiter.start()
+    try:
+        assert not join_started.wait(0.05)
+        allow_start.set()
+        assert join_started.wait(1.0)
+        assert waiter.is_alive()
+        assert refresh_started.wait(1.0)
+        admitted_worker = workdir_module._agent_auth_refresh_thread
+        assert admitted_worker is not None and admitted_worker.is_alive()
+        workdir_module._clear_agent_auth_status_cache_for_tests()
+        assert workdir_module._agent_auth_refresh_thread is admitted_worker
+        assert workdir_module._agent_auth_refreshing
+        release_refresh.set()
+        starter.join(2.0)
+        waiter.join(2.0)
+        assert not starter.is_alive()
+        assert not waiter.is_alive()
+        assert not workdir_module._agent_auth_refreshing
+        assert workdir_module._agent_auth_refresh_thread is None
+        # With the worker finished, only the teardown admission fence can reject this.
+        assert not workdir_module.start_agent_auth_status_refresh(force=True)
+    finally:
+        release_refresh.set()
+        allow_start.set()
+        starter.join(2.0)
+        waiter.join(2.0)
+
+    assert not waiter.is_alive()
+    assert not starter.is_alive()
+    assert refresh_finished.is_set()
+    assert starter_results == [True]
+    assert cleanup_results == [True]
+    assert worker_errors == []
 
 
 def test_registry_reaper_settlement_failure_precedes_runtime_root_removal(tmp_path, monkeypatch):

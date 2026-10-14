@@ -559,6 +559,19 @@ test('session token chart consolidates OpenCode panes by the canonical tmux sess
   assert.equal(api.canonicalAgentLabel('workspace|0|%17|opencode'), 'workspace');
 });
 
+test('historical Tabber view token keys resolve to and merge under the source tmux session', () => {
+  const api = loadNamespace();
+  assert.equal(api.setSessionAliases({
+    '__yomux_view_7110_3a5ed04792596e3a0e3f43d1': 'yo7111',
+    '__yomux_view_7110_6617c41d89676ea351c22c43': 'yo7110',
+  }), 2);
+  assert.equal(api.canonicalSessionKey('__yomux_view_7110_3a5ed04792596e3a0e3f43d1|1|%65|codex'), 'yo7111');
+  assert.equal(api.canonicalSessionKey('__yomux_view_7110_6617c41d89676ea351c22c43|0|%55|codex'), 'yo7110');
+  assert.equal(api.canonicalAgentLabel('__yomux_view_7110_3a5ed04792596e3a0e3f43d1'), 'yo7111');
+  assert.equal(api.setSessionAliases({}), 0);
+  assert.equal(api.canonicalSessionKey('__yomux_view_unverified|0|codex'), '__yomux_view_unverified');
+});
+
 test('session token chart preserves process fallback identity', () => {
   const api = loadNamespace();
   assert.equal(api.canonicalSessionKey('opencode-process:12345'), 'opencode-process:12345');
@@ -3487,7 +3500,7 @@ test('mount owns exact capability controls and renders sparse current series wit
   const modelOutput = chartMarkup(html, 'model-output-tokens');
   const modelUsage = chartMarkup(html, 'model-usage');
   assert.ok(cpu && agent && modelOutput && modelUsage);
-  assert.ok(agent.includes('<h3>Session tokens/min</h3>'));
+  assert.match(agent, /<h3(?:\s[^>]*)?>Session tokens\/min<\/h3>/);
   assert.ok(cpu.includes('data-point-count="2"'));
   assert.match(cpu, /<path d="M[^"]+ L[^"]+"/);
   assert.ok(agent.includes('data-point-count="2"'));

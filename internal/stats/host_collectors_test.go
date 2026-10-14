@@ -573,8 +573,9 @@ func TestLinuxHostSourcesKeepsOwnedProcessWhenCensusIsTooLarge(t *testing.T) {
 	sampler.Sample(snapshot, time.Second)
 	sample := sampler.Sample(next, time.Second)
 	facts := BuildCPUFacts(sample, sample.ProcessCPUPercent, hostFactContext())
-	if got := facts.Observations[0].Payload["process_cpu_percent"]; got != nil {
-		t.Fatalf("owner-only fallback was published as the complete host process CPU breakdown: %#v", got)
+	processCPU, ok := facts.Observations[0].Payload["process_cpu_percent"].(map[string]any)
+	if !ok || processCPU[hostProcessInstanceSeriesKey("yolomux-go", "4242:19")] != 10.0 || facts.Observations[0].Payload["process_census_incomplete"] != true {
+		t.Fatalf("owner-only fallback lost its measured partial CPU breakdown: %#v", facts.Observations[0].Payload)
 	}
 	owned, ok := facts.Observations[0].Payload["owned_process_cpu_percent"].(map[string]any)
 	ownedCPU, valueOK := owned["yolomux-go"].(float64)
@@ -620,8 +621,11 @@ func TestLinuxHostSourcesMemoryKeepsOwnedProcessWhenCensusIsTooLarge(t *testing.
 		t.Fatalf("oversized memory census rows = %#v, want the owned Go process", rows)
 	}
 	facts := BuildSystemMemoryFacts(memory, rows, nil, hostFactContext())
-	if got := facts.Observations[0].Payload["process_memory_bytes"]; got != nil {
-		t.Fatalf("owner-only fallback was published as the complete host process memory breakdown: %#v", got)
+	if got := facts.Observations[0].Payload["process_memory_bytes"].(map[string]any)[hostProcessInstanceSeriesKey("yolomux-go", "4242:19")]; got != rows[0].RSSBytes {
+		t.Fatalf("readable owner memory was omitted from the partial process breakdown: %#v", facts.Observations[0].Payload)
+	}
+	if facts.Observations[0].Payload["process_census_incomplete"] != true {
+		t.Fatalf("partial process memory omitted its census marker: %#v", facts.Observations[0].Payload)
 	}
 }
 

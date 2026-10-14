@@ -4,6 +4,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from tests.helpers.browser_scenarios import assert_terminal_wheel_observation, terminal_wheel_observation
 from tests.helpers.journey_phases import JourneySentinel, STATS_LOGS_PHASES, YOCHAT_PHASES
 from tests.helpers.terminal_navigation import assert_terminal_navigation_ack_semantics
@@ -17,6 +19,7 @@ from tests.browser_helpers import browser_layout as browser_layout_module
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 from tests.browser_helpers.browser_console import assert_only_expected_browser_network_error
+from tests.browser_helpers.browser_console import acknowledge_and_consume_only_expected_js_debug_failures
 from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_errors
 from tests.browser_helpers.browser_console import read_browser_console_log
 from tests.gate_harness import assert_fixture_client_event_demand_claimed
@@ -1138,6 +1141,122 @@ def test_repo_chip_menu_uses_shared_left_aligned_branch_and_status_columns(brows
     assert abs(metrics["branches"][0]["left"] - metrics["branches"][1]["left"]) <= 0.5, metrics
     assert abs(metrics["statuses"][0]["left"] - metrics["statuses"][1]["left"]) <= 0.5, metrics
     assert all(column["left"] >= row["left"] and column["right"] <= row["right"] for column, row in zip(metrics["branches"], metrics["rows"])), metrics
+
+
+def test_yostats_popout_is_live_minimized_and_restored(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug", wrap_app_root=True)
+    opener_handle = browser.current_window_handle
+    initial = WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.querySelector('.js-debug-panel');
+            const slot = slotForItem(debugPaneItemId);
+            if (!panel || !slot || !itemIsActivePaneTab(debugPaneItemId)) return false;
+            return {slot, active: activeItemForSide(slot) === debugPaneItemId};
+            """
+        )
+    )
+
+    assert browser.execute_script("return openPanePopout(debugPaneItemId);") is True
+    popup_handle = WebDriverWait(browser, 8).until(
+        lambda driver: next((handle for handle in driver.window_handles if handle != opener_handle), None)
+    )
+    browser.switch_to.window(opener_handle)
+    minimized = browser.execute_script(
+        """
+        return {
+          inLayout: itemInLayout(debugPaneItemId),
+          tabPresent: Boolean(document.querySelector(`.dockview-pane-tab[data-pane-tab="${debugPaneItemId}"]`)),
+        };
+        """
+    )
+    assert minimized == {"inLayout": False, "tabPresent": False}, minimized
+
+    browser.switch_to.window(popup_handle)
+    popup_controls = WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.querySelector('.js-debug-panel');
+            const button = panel?.querySelector('[data-js-debug-subtab="system"]');
+            const slider = panel?.querySelector('[data-js-debug-graph] [data-js-debug-range-slider]');
+            if (!panel || !button || !slider) return false;
+            const appRoot = document.getElementById('appRoot');
+            const gridRect = document.getElementById('grid')?.getBoundingClientRect();
+            const visibleAppRootChildren = [...(appRoot?.children || [])]
+              .filter(element => element.getClientRects().length > 0)
+              .map(element => element.id || element.className);
+            return {
+              path: location.pathname,
+              singleStatsLayout: document.body.classList.contains('pane-popout-live')
+                && new URLSearchParams(location.search).get('stats_only') === '1'
+                && document.querySelectorAll('.yomux-dockview .dv-groupview').length === 1
+                && [...document.querySelectorAll('.dockview-pane-tab')].every(tab => tab.dataset.paneTab === debugPaneItemId),
+              visibleAppRootChildren,
+              gridCoversWindow: Boolean(gridRect
+                && Math.abs(gridRect.width - window.innerWidth) < 1
+                && Math.abs(gridRect.height - window.innerHeight) < 1),
+              hasMinimizeControl: Boolean(document.querySelector('[data-pane-minimize]')),
+              buttonDisabled: button.disabled,
+              sliderDisabled: slider.disabled,
+              sliderValue: slider.value,
+              sliderMax: slider.max,
+            };
+            """
+        )
+    )
+    assert popup_controls["singleStatsLayout"] is True, popup_controls
+    assert popup_controls["visibleAppRootChildren"] == ["grid"], popup_controls
+    assert popup_controls["gridCoversWindow"] is True, popup_controls
+    assert popup_controls["hasMinimizeControl"] is False, popup_controls
+    assert popup_controls["buttonDisabled"] is False, popup_controls
+    assert popup_controls["sliderDisabled"] is False, popup_controls
+    assert int(popup_controls["sliderMax"]) > 0, popup_controls
+
+    browser.find_element(By.CSS_SELECTOR, '.js-debug-panel [data-js-debug-subtab="system"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.js-debug-panel [data-js-debug-subtab=system]')?.getAttribute('aria-selected') === 'true';"
+        )
+    )
+    browser.find_element(By.CSS_SELECTOR, '.js-debug-panel [data-js-debug-subtab="graph"]').click()
+    slider = browser.find_element(By.CSS_SELECTOR, '.js-debug-panel [data-js-debug-graph] [data-js-debug-range-slider]')
+    slider_value_before_input = slider.get_attribute("value")
+    slider_key = Keys.ARROW_LEFT if float(slider_value_before_input) >= float(slider.get_attribute("max")) else Keys.ARROW_RIGHT
+    slider.send_keys(slider_key)
+    slider_value_after_input = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.js-debug-panel [data-js-debug-graph] [data-js-debug-range-slider]')?.value || '';"
+        )
+    )
+    assert slider_value_after_input != slider_value_before_input, popup_controls
+
+    browser.close()
+    browser.switch_to.window(opener_handle)
+    restored = WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            """
+            const slot = slotForItem(debugPaneItemId);
+            const panel = document.querySelector('.js-debug-panel');
+            if (!itemInLayout(debugPaneItemId) || !panel || !slot) return false;
+            return {slot, active: activeItemForSide(slot) === debugPaneItemId};
+            """
+        )
+    )
+    assert restored == initial
+
+    assert browser.execute_script("return openPanePopout(debugPaneItemId);") is True
+    unload_popup_handle = WebDriverWait(browser, 8).until(
+        lambda driver: next((handle for handle in driver.window_handles if handle != opener_handle), None)
+    )
+    browser.switch_to.window(opener_handle)
+    browser.execute_script("closeAllPanePopouts();")
+    unloaded_restore = WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            "return itemInLayout(debugPaneItemId) && activeItemForSide(slotForItem(debugPaneItemId)) === debugPaneItemId;"
+        )
+    )
+    assert unloaded_restore is True
+    WebDriverWait(browser, 5).until(lambda driver: unload_popup_handle not in driver.window_handles)
 
 
 def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narrow_layout(browser, tmp_path):
@@ -9680,6 +9799,7 @@ def test_in_page_notification_titles_omit_external_yolomux_context(browser, tmp_
         const state = {label: 'Needs input', reason: 'Please answer the question'};
         const externalTitle = sessionNotificationTitle('1', state);
         const internalTitle = sessionNotificationTitle('1', state, {inApp: true});
+        activatePaneTab(slotForItem(tabberItemId), tabberItemId, {userInitiated: true});
         showAttentionAlert('1', state);
         const genericAttentionTitle = document.querySelector('.toast[data-toast-kind="attention"] .toast-title')?.textContent?.trim() || '';
         document.querySelectorAll('.toast[data-toast-kind="attention"]').forEach(node => node.remove());
@@ -9730,7 +9850,7 @@ def test_in_page_notification_titles_omit_external_yolomux_context(browser, tmp_
         "attentionReasonWrapsAroundControls": True,
         "terminalTitle": "Term",
         "testTitle": "notifications enabled",
-    }, metrics
+    }, {"metrics": metrics, "focus": browser.execute_script("return {focusedPanelItem, focusedTerminal, activePaneItems: activePaneItems(), tabberMode, tabberNormalSelections: [...(tabberNormalSelections || [])]};")}
     navigation = browser.execute_async_script(
         """
         const done = arguments[0];
@@ -9776,6 +9896,50 @@ def test_hovered_toast_pauses_countdown(browser, tmp_path):
         """
     )
     assert result == {"held": True, "paused": True, "heldAfterPointerLeave": True, "removed": True}, result
+
+
+def test_agent_attention_toast_renders_its_four_hour_countdown_bar(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    result = browser.execute_script(
+        """
+        const toast = emitNotification('agentAttention', {
+          session: 'timer-bar-fixture',
+          title: 'Working AI needs your attention',
+          body: 'Codex in tmux session timer-bar-fixture stopped and needs your attention.',
+          lines: [agentToastTargetLine('timer-bar-fixture', {
+            kind: 'codex', state: STATE_KEY.needsInput, window_index: 0, window_label: '0:code',
+          }, {reason: 'Codex in tmux session timer-bar-fixture stopped and needs your attention.'})],
+          system: false,
+        }).inApp;
+        const line = toast?.querySelector('.toast-line');
+        const bar = line ? getComputedStyle(line, '::after') : null;
+        return {
+          toast: Boolean(toast),
+          countdown: line?.style.getPropertyValue('--toast-countdown-duration') || '',
+          animationName: bar?.animationName || '',
+          animationDuration: bar?.animationDuration || '',
+          display: bar?.display || '',
+          height: bar?.height || '',
+          width: bar?.width || '',
+          attentionLine: line?.classList.contains('toast-line--attention') || false,
+          keepVisible: toast?.querySelector('[data-toast-keep]')?.hidden === false,
+          persistent: toast?.dataset.toastPersistent === 'true',
+        };
+        """
+    )
+    assert result == {
+        "toast": True,
+        "countdown": "14400000ms",
+        "animationName": "toast-countdown",
+        "animationDuration": "14400s",
+        "display": "block",
+        "height": "3px",
+        "width": result["width"],
+        "attentionLine": True,
+        "keepVisible": True,
+        "persistent": False,
+    }, result
+    assert result["width"] not in ("", "0px"), result
 
 
 def test_browser_notifications_use_shared_badge_free_yolomux_icon(browser, tmp_path):
@@ -9866,6 +10030,103 @@ def test_rename_marks_index_building_and_refresh_done_requeries_open_search(brow
         "indexStatusRequested": True,
         "retries": ["home-manifest"],
     }, metrics
+
+
+def test_terminal_upload_choices_open_at_pane_top_left_without_success_toast(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof bindClipboardPaste === 'function' && typeof uploadFiles === 'function';")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalFetch = window.fetch.bind(window);
+          const uploadCalls = [];
+          let failNextUpload = false;
+          window.fetch = async (input, options) => {
+            const requestUrl = typeof input === 'string' ? input : input.url;
+            const path = new URL(requestUrl, location.href).pathname;
+            if (path === '/api/upload') {
+              uploadCalls.push({url: requestUrl, method: options?.method || input.method || 'GET'});
+              if (failNextUpload) {
+                failNextUpload = false;
+                return new Response(JSON.stringify({error: 'Upload failed'}), {
+                  status: 500,
+                  headers: {'Content-Type': 'application/json'},
+                });
+              }
+              return new Response(JSON.stringify({files: [{path: '/home/test/20261012-001.png'}]}), {
+                status: 200,
+                headers: {'Content-Type': 'application/json'},
+              });
+            }
+            if (path === '/api/drop-action/run') {
+              return new Response(JSON.stringify({ok: true, action: 'selected'}), {
+                status: 200,
+                headers: {'Content-Type': 'application/json'},
+              });
+            }
+            return originalFetch(input, options);
+          };
+          try {
+            const host = document.getElementById('term-1') || document.getElementById('panel-1');
+            const hostRect = host.getBoundingClientRect();
+            const file = new File(['image'], 'image.png', {type: 'image/png'});
+            const pasteEvent = new Event('paste', {bubbles: true, cancelable: true});
+            Object.defineProperty(pasteEvent, 'clipboardData', {value: {
+              items: [{kind: 'file', type: 'image/png', getAsFile: () => file}],
+            }});
+            document.dispatchEvent(pasteEvent);
+            let menu = null;
+            for (let attempt = 0; attempt < 300 && (!menu || uploadCalls.length === 0); attempt += 1) {
+              await new Promise(requestAnimationFrame);
+              menu = document.querySelector('.terminal-drop-suggestions');
+            }
+            if (!menu) throw new Error('successful image paste did not open numbered choices');
+            const menuRect = menu.getBoundingClientRect();
+            const row = menu.querySelector('.terminal-drop-suggestion');
+            const rowRect = row.getBoundingClientRect();
+            const hit = document.elementFromPoint(menuRect.left + 12, rowRect.top + 8);
+            const visibleToasts = () => Array.from(document.querySelectorAll('.attention-alerts .toast, .panel-toast-stack .toast:not([hidden])'))
+              .filter(node => node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden');
+            const selectedNumber = row.querySelector('.terminal-drop-suggestion-combo')?.textContent || '';
+            const metrics = {
+              uploadCallCount: uploadCalls.length,
+              uploadMethod: uploadCalls[0]?.method || '',
+              pasteClaimed: pasteEvent.defaultPrevented,
+              rows: menu.querySelectorAll('.terminal-drop-suggestion').length,
+              leftOffset: menuRect.left - hostRect.left,
+              topOffset: menuRect.top - hostRect.top,
+              choicesOwnHit: hit?.closest('.terminal-drop-suggestions') === menu,
+              uploadToastCount: visibleToasts().length,
+              selectedNumber,
+            };
+            row.click();
+            metrics.choiceDismissed = !document.querySelector('.terminal-drop-suggestions');
+            failNextUpload = true;
+            await uploadFiles('1', [file], {source: 'paste'});
+            metrics.uploadErrorVisible = Array.from(document.querySelectorAll('.attention-alert.toast'))
+              .some(node => node.textContent.includes('Upload failed') && node.getBoundingClientRect().width > 0);
+            done(metrics);
+          } finally {
+            window.fetch = originalFetch;
+          }
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["uploadCallCount"] == 1 and metrics["uploadMethod"] == "POST" and metrics["pasteClaimed"], metrics
+    assert metrics["rows"] > 0 and metrics["selectedNumber"] == "1" and metrics["choiceDismissed"], metrics
+    assert 0 <= metrics["leftOffset"] <= 20 and 0 <= metrics["topOffset"] <= 20, metrics
+    assert metrics["choicesOwnHit"] and metrics["uploadToastCount"] == 0, metrics
+    assert metrics["uploadErrorVisible"], metrics
+    upload_failures = browser.execute_script(
+        "return jsDebugFailureEvents('api').filter(event => event.endpoint === '/api/upload');"
+    )
+    assert len(upload_failures) == 1 and upload_failures[0]["status"] == 500, upload_failures
+    retired_upload_failures = acknowledge_and_consume_only_expected_js_debug_failures(browser, upload_failures)
+    assert len(retired_upload_failures) == 1 and retired_upload_failures[0]["id"] == upload_failures[0]["id"]
 
 
 def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tmp_path):
@@ -10516,6 +10777,86 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         assert screenshot.getbbox() is not None, label
 
 
+def test_normal_tabber_activity_date_shares_name_row_and_description_sits_below(browser, tmp_path):
+    page = tmp_path / "tabber-normal-date-row.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            """
+            <section class="file-explorer-changes-panel" data-file-explorer-view="tabber" style="width: 480px">
+              <div class="changes-groups" data-tabber-mode="normal">
+                <div class="file-tree-row tabber-row tabber-normal-row" data-tabber-type="normal">
+                  <span class="file-tree-icon">●</span>
+                  <span class="file-tree-name">
+                    <span class="tabber-normal-primary" id="tabber-name">yo7110 0:codex</span>
+                    <span class="tabber-normal-description" id="tabber-description">Waiting for background terminal</span>
+                  </span>
+                  <span class="file-tree-date" id="tabber-date">Oct 11, 11:18 AM</span>
+                </div>
+              </div>
+            </section>
+            """
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const rect = selector => document.querySelector(selector).getBoundingClientRect();
+        const row = rect('.tabber-normal-row');
+        const name = rect('#tabber-name');
+        const date = rect('#tabber-date');
+        const description = rect('#tabber-description');
+        return {nameTop: name.top, dateTop: date.top, descriptionTop: description.top,
+          nameBottom: name.bottom, dateBottom: date.bottom, rowRight: row.right,
+          dateRight: date.right, descriptionRight: description.right};
+        """
+    )
+    assert abs(metrics["nameTop"] - metrics["dateTop"]) <= 3, metrics
+    assert metrics["descriptionTop"] > max(metrics["nameBottom"], metrics["dateBottom"]), metrics
+    assert metrics["descriptionRight"] >= metrics["dateRight"] - 1, metrics
+
+
+def test_tabber_advanced_toggle_saves_the_preference(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["1"],
+        settings={"general": {"default_tabber_mode": "normal"}},
+    )
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof tabberIsAdvanced === 'function'"))
+    assert browser.execute_script("return tabberIsAdvanced()") is False
+
+    browser.find_element("css selector", "[data-tabber-advanced]").click()
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return tabberIsAdvanced()"))
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+        "return window.__settingsPayload.settings.general.default_tabber_mode === 'advanced'"
+    ))
+    assert browser.execute_script("return tabberIsAdvanced()") is True
+
+
+def test_tabber_activity_counts_are_hidden_only_in_normal_mode(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["1"],
+        settings={"general": {"default_tabber_mode": "advanced"}},
+    )
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof setTabberMode === 'function'"))
+    browser.execute_script("""
+      const activity = document.querySelector('#topbarActivity');
+      activity.hidden = false;
+      activity.innerHTML = '<span class="topbar-activity-count topbar-activity-working active">1</span><span class="topbar-activity-idle">4 idle</span>';
+      setTabberMode('normal', {refresh: false});
+    """)
+    assert browser.execute_script("return getComputedStyle(document.querySelector('#topbarActivity')).display") == "none"
+    assert browser.execute_script("return document.querySelector('#topbarActivity').textContent.includes('4 idle')") is True
+
+    browser.execute_script("setTabberMode('advanced', {refresh: false})")
+    assert browser.execute_script("return getComputedStyle(document.querySelector('#topbarActivity')).display") != "none"
+    assert browser.execute_script("return document.querySelector('#topbarActivity').textContent.includes('4 idle')") is True
+
+
 def test_tabber_session_tab_popover_uses_normal_tab_surface(browser, tmp_path):
     page = tmp_path / "tabber-session-popover-surface.html"
     load_static_html_fixture(
@@ -10623,6 +10964,7 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
             },
         },
     )
+    browser.execute_async_script("const done = arguments[0]; setTabberMode('advanced'); requestAnimationFrame(() => requestAnimationFrame(() => done(true))); ")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -10771,6 +11113,7 @@ def test_tabber_native_drag_image_snapshots_offscreen_cloned_rows(browser, tmp_p
             },
         },
     )
+    browser.execute_async_script("const done = arguments[0]; setTabberMode('advanced'); requestAnimationFrame(() => requestAnimationFrame(() => done(true))); ")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             "return typeof tabberNativeDragImageForRow === 'function' && document.querySelector('.file-tree-row[data-tabber-type=\"session\"] .tabber-session-tab') !== null"
@@ -13123,19 +13466,32 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
         "return document.querySelector('.app-menu-command-row--shells .app-menu-command')"
     )
     touch_tap(shell_button)
-    launch_state = WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
+    try:
+        launch_state = WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
             """
                 const request = Array.from(window.__bootFetches || []).find(call => call.path === '/api/create-session');
-                if (!request || layoutSlots.left?.active !== '3') return null;
+                const slot = slotForItem('3');
+                if (!request || !slot || layoutSlots[slot]?.active !== '3') return null;
                 const panel = document.getElementById('panel-3');
                 const panelRect = panel?.getBoundingClientRect?.();
                 if (!panel || !panel.querySelector('.xterm') || !panelRect?.width || !panelRect?.height) return null;
                 const root = document.querySelector('.app-menu--nested-root');
-                return {request, active: activeSessions.slice(), selected: layoutSlots.left?.active || '', tabs: layoutSlots.left?.tabs || [], panel: {width: panelRect.width, height: panelRect.height}, rootOpen: root?.classList.contains('open') || false};
+                return {request, active: activeSessions.slice(), slot, selected: layoutSlots[slot]?.active || '', tabs: layoutSlots[slot]?.tabs || [], panel: {width: panelRect.width, height: panelRect.height}, rootOpen: root?.classList.contains('open') || false};
+            """
+            )
+        )
+    except TimeoutException as error:
+        state = browser.execute_script(
+            """
+            return {requests: (window.__bootFetches || []).filter(call => call.path.includes('create-session')),
+              layoutSlots: JSON.parse(JSON.stringify(layoutSlots)), focusedPanelItem, focusedTerminal,
+              activePaneItems: activePaneItems(), sessions: [...sessions], visibleSessions: [...visibleSessions],
+              layoutItems: [...layoutItems], tabberMode, tabberNormalSelections: [...(tabberNormalSelections || [])],
+              terminals: [...terminals.keys()], errors: [...jsDebugFailureEvents('error'), ...jsDebugFailureEvents('rejection')]};
             """
         )
-    )
+        raise AssertionError(f"compact-menu shell launch did not converge: {state}") from error
     assert launch_state["request"]["method"] == "POST", launch_state
     assert "agent=term" in launch_state["request"]["search"] and "terminal=bash" in launch_state["request"]["search"], launch_state
     assert launch_state["selected"] == "3" and "3" in launch_state["tabs"] and launch_state["panel"]["height"] > 20 and launch_state["rootOpen"] is False, launch_state
@@ -13491,6 +13847,46 @@ def test_auto_approve_refresh_rebuilds_pane_tab_to_show_restored_yolo(browser, t
     assert result["statusDotKeyframeOpacities"] == ["0.16", "1", "0.16"], result
     assert result["errors"] == [], result
     assert result["rejections"] == [], result
+
+
+def test_finder_index_limit_preference_fits_default_value_and_spinner(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    browser.set_window_size(1200, 800)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof selectSession === 'function' && window.__terminalOpened >= 1")
+    )
+    browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          await selectSession('__prefs__');
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const input = document.querySelector('[data-setting-path="file_explorer.index_max_files"]');
+          const section = input?.closest('[data-preference-section]');
+          if (section?.querySelector('[data-preference-section-toggle]')?.getAttribute('aria-expanded') === 'false') {
+            section.querySelector('[data-preference-section-toggle]').click();
+            await new Promise(resolve => requestAnimationFrame(resolve));
+          }
+          done();
+        })().catch(error => done(String(error?.stack || error)));
+        """
+    )
+    result = browser.execute_script(
+        """
+        const input = document.querySelector('[data-setting-path="file_explorer.index_max_files"]');
+        const section = input?.closest('[data-preference-section]');
+        return {
+          value: input?.value || '',
+          width: input?.getBoundingClientRect().width || 0,
+          section: Boolean(section),
+          widthToken: input ? getComputedStyle(input.closest('.preferences-setting-control')).getPropertyValue('--preferences-number-control-width').trim() : '',
+        };
+        """
+    )
+    assert result['section'], result
+    assert result['value'] == '1000000', result
+    assert result['widthToken'] == '20ch', result
+    assert result['width'] >= 150, result
 
 
 def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_prices(browser, tmp_path):
@@ -13981,7 +14377,7 @@ def test_active_pane_ring_opacity_follows_preference(browser, tmp_path):
     metrics = browser.execute_script(
         """
         const applyOpacity = value => {
-          applySettingsPayload({settings: {appearance: {pane_ring_opacity: value}}, defaults: {}, mtime_ns: value}, {force: true});
+          applyFixtureSettingsPatch({appearance: {pane_ring_opacity: value}}, {immediate: true});
           const panel = document.querySelector('#panel-1');
           panel.classList.add('active-pane');
           const rootStyle = getComputedStyle(document.documentElement);
@@ -18394,3 +18790,179 @@ def test_agent_status_card_joins_current_sessions_and_names_stale_live_state(bro
     assert "Live breakdown" in recovery["activity"], recovery
     assert "stale status is stale" not in recovery["activity"], recovery
     assert "waiting for the chart snapshot" in recovery["awaiting"], recovery
+
+
+@pytest.mark.parametrize("mode", ["normal", "advanced"])
+def test_tabber_activity_hover_retains_native_row_target(browser, tmp_path, mode):
+    load_live_runtime_boot_fixture(browser, tmp_path,
+        "?sessions=__tabber__,1&layout=row@34(left,right)&tabs=left:__tabber__;right:1",
+        sessions=["1", "2"],
+        transcript_sessions={name: {"panes": [{"window": "0", "window_name": "bash",
+            "command": "bash", "window_active": True}]} for name in ["1", "2"]})
+    browser.execute_script("""
+      setTabberMode(arguments[0]);
+      fileExplorerTabberCollapsed.clear();
+      tabberActivityPayload = {...tabberActivityPayload, activity: {
+        '1:0': {active_recency_ts: Date.now()/1000 - 120},
+        '2:0': {active_recency_ts: Date.now()/1000 - 3600}}};
+      refreshTabberPanels();
+      window.__hoverRows = () => [...document.querySelectorAll('#panel-__tabber__ .file-tree > .file-tree-row')];
+    """, mode)
+    rows = browser.execute_script("return window.__hoverRows().map(row => row.dataset.tabberSession)")
+    assert rows[:2] == ["1", "2"], rows
+    first = browser.find_element("css selector", "#panel-__tabber__ .file-tree > .file-tree-row")
+    fast_pointer_actions(browser).move_to_element_with_offset(first, 2, 0).perform()
+    before = browser.execute_script("""
+      window.__hoverOriginalRows = window.__hoverRows();
+      return window.__hoverRows().map(row => ({session:row.dataset.tabberSession,y:row.getBoundingClientRect().y}));
+    """)
+    browser.execute_script("""
+      tabberActivityPayload.activity['2:0'].active_recency_ts = Date.now()/1000 - 60;
+      refreshTabberPanels();
+    """)
+    after = browser.execute_script("return window.__hoverRows().map(row => ({session:row.dataset.tabberSession,y:row.getBoundingClientRect().y}))")
+    assert after == before, {"before": before, "after": after}
+    assert browser.execute_script("return window.__hoverRows().every((row,index) => row === window.__hoverOriginalRows[index])")
+    assert browser.execute_script("return document.querySelector('#panel-__tabber__ .file-tree-row[data-tabber-session=\"2\"][data-tabber-window=\"0\"] .file-tree-date').textContent.trim()") == "1 min ago"
+    browser.execute_script("""
+      window.__nativeRowClick = null;
+      const recordClick = event => {
+        const row = event.target.closest('.file-tree-row[data-tabber-type]');
+        if (event.isTrusted && row) window.__nativeRowClick = row.dataset.tabberSession;
+      };
+      document.getElementById('panel-__tabber__').addEventListener('pointerdown', recordClick, {once:true,capture:true});
+    """)
+    fast_pointer_actions(browser).click().perform()
+    assert browser.execute_script("return window.__nativeRowClick") == "1"
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".topbar")).perform()
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return window.__hoverRows()[0]?.dataset.tabberSession === '2'"))
+
+    # Whitespace belongs to the pane, and reentry cancels an exit before its deferred reorder.
+    panel = browser.find_element("id", "panel-__tabber__")
+    fast_pointer_actions(browser).move_to_element_with_offset(panel, 0, 180).perform()
+    browser.execute_script("""
+      tabberActivityPayload.activity['1:0'].active_recency_ts = Date.now()/1000 - 30;
+      refreshTabberPanels();
+    """)
+    assert browser.execute_script("return window.__hoverRows()[0]?.dataset.tabberSession") == "2"
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".topbar")).move_to_element_with_offset(panel, 0, 180).perform()
+    browser.execute_async_script("const done=arguments[0]; setTimeout(done, 220)")
+    assert browser.execute_script("return window.__hoverRows()[0]?.dataset.tabberSession") == "2"
+    # Explicit sorting applies without leaving the pane, even with unchanged metadata.
+    browser.execute_script("setFileExplorerViewSetting('tabber', 'treeSortMode', 'az')")
+    assert browser.execute_script("return window.__hoverRows()[0]?.dataset.tabberSession") == "1"
+    browser.execute_script("setFileExplorerViewSetting('tabber', 'treeSortMode', 'newest')")
+    browser.execute_script("""
+      window.__survivingRows = window.__hoverRows();
+      sessions.push('3');
+      transcriptMetadataState.payload.sessions['3'] = {panes:[{window:'0',window_name:'bash',command:'bash',window_active:true}]};
+      tabberActivityPayload.activity['3:0'] = {active_recency_ts:Date.now()/1000};
+      refreshTabberPanels();
+    """)
+    assert browser.execute_script("return window.__survivingRows.every((row,i) => window.__hoverRows()[i] === row)")
+    assert browser.execute_script("return window.__hoverRows().at(-1).dataset.tabberSession") == "3"
+    browser.execute_script("""
+      sessions.splice(sessions.indexOf('2'),1);
+      delete transcriptMetadataState.payload.sessions['2'];
+      transcriptMetadataState.payload.session_order = transcriptMetadataState.payload.session_order.filter(name => name !== '2');
+      refreshTabberPanels();
+    """)
+    assert not browser.find_elements("css selector", "#panel-__tabber__ [data-tabber-session='2']")
+    # Disposal releases both pane hover state and its pending exit refresh.
+    browser.execute_script("""
+      const panel = document.getElementById('panel-__tabber__');
+      panel.dispatchEvent(new PointerEvent('pointerleave',{pointerType:'mouse'}));
+      bindTabberPanel(panel)();
+      window.__disposedHover = {inside:panel.__tabberPointerInside,timer:tabberRefreshDeferredTimer};
+    """)
+    assert browser.execute_script("return window.__disposedHover.timer") is None
+    assert browser.execute_script("return window.__disposedHover.inside === undefined")
+
+
+
+@pytest.mark.parametrize("mode", ["normal", "advanced"])
+def test_tabber_hover_updates_agent_status_and_description(browser, tmp_path, mode):
+    load_live_runtime_boot_fixture(browser, tmp_path,
+        "?sessions=__tabber__,1&layout=row@34(left,right)&tabs=left:__tabber__;right:1",
+        sessions=["1", "2"], transcript_sessions={"1": {"panes": [{"window":"0", "pane":"%1",
+            "window_name":"codex", "command":"codex", "window_active":True, "pid":123}]},
+            "2":{"panes":[{"window":"0", "window_name":"bash", "command":"bash", "window_active":True}]}})
+    browser.execute_script("""
+      setTabberMode(arguments[0]); fileExplorerTabberCollapsed.clear(); refreshTabberPanels();
+      window.__statusRow = document.querySelector('#panel-__tabber__ .file-tree-row[data-tabber-window="0"]');
+      window.__statusRowTop = window.__statusRow.getBoundingClientRect().top;
+      window.__statusFixture = state => {
+        const revision = Math.max(agentWindowSnapshotRevision(tabberActivityPayload), ...Array.from(autoApproveStates.values(),agentWindowSnapshotRevision)) + 1;
+        const agent = {session:'1', window:0, window_index:0, pane:'%1', pane_target:'%1', kind:'codex', state,
+          pid:123, current:true, window_active:true, attention_signature:'hover-status', attention_key:'hover-status'};
+        autoApproveStates.set('1', {agent_windows:[agent], agent_window_status_fresh:true, agent_window_snapshot_revision:revision});
+        tabberActivityPayload = {...tabberActivityPayload, agent_windows:{'1':[agent]}, agent_window_status_fresh:true, agent_window_snapshot_revision:revision};
+        refreshAgentWindowActivityDisplays(['1']);
+      };
+    """, mode)
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", "#panel-__tabber__ .file-tree-row[data-tabber-window='0']")).perform()
+    if mode == "advanced":
+        fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", "#panel-__tabber__ .tabber-session-tab")).perform()
+        browser.execute_script("""
+          window.__retainedSessionAnchor = document.querySelector('#panel-__tabber__ .tabber-session-tab');
+          window.__retainedSessionPopover = paneTabPopoverForAnchor(window.__retainedSessionAnchor);
+          positionPaneTabPopover(window.__retainedSessionAnchor, window.__retainedSessionPopover);
+          window.__retainedSessionAnchor.classList.add('popover-open');
+          window.__retainedSessionAnchor.dataset.popoverHoverState = 'open';
+          window.__retainedSessionPopover.classList.add('popover-open');
+          const info = transcriptMetadataState.payload.sessions['1'];
+          delete info.work_graph;
+          info.current_path = '/fixture/updated-project';
+          info.selected_pane = {...info.selected_pane,current_path:'/fixture/updated-project'};
+          for (const pane of info.panes) pane.current_path = '/fixture/updated-project';
+        """)
+    browser.execute_script("window.__statusFixture(STATE_KEY.working)")
+    assert browser.execute_script("return !!window.__statusRow.querySelector('.status-indicator--working')")
+    browser.execute_script("window.__statusFixture(STATE_KEY.needsInput)")
+    assert browser.execute_script("return !!window.__statusRow.querySelector('.status-indicator--attention')")
+    if mode == "advanced":
+        metrics = browser.execute_script("""
+          const tab = document.querySelector('#panel-__tabber__ .tabber-session-tab');
+          const description = buildTabberTree().entries.find(entry=>entry.tabber?.session==='1').tabber.description;
+          return {sameAnchor:tab === window.__retainedSessionAnchor, samePopover:paneTabPopoverForAnchor(tab) === window.__retainedSessionPopover,
+            classes:tab.className, attention:!!tab.querySelector('.status-indicator--attention'),
+            detail:tab.querySelector('.tab-inline-detail')?.textContent, description,
+            popoverText:window.__retainedSessionPopover.textContent};
+        """)
+        assert metrics['sameAnchor'] and metrics['samePopover'] and metrics['attention'], metrics
+        assert 'needs-attention' in metrics['classes'], metrics
+        assert metrics['detail'] == metrics['description'], metrics
+        assert 'updated-project' in metrics['description'] and 'updated-project' in metrics['popoverText'], metrics
+
+    assert browser.execute_script("return window.__statusRow === document.querySelector('#panel-__tabber__ .file-tree-row[data-tabber-window=\"0\"]') && window.__statusRow.getBoundingClientRect().top === window.__statusRowTop")
+    if mode == "advanced":
+        browser.execute_script("setFileExplorerViewSetting('tabber','treeSortMode','za')")
+        assert browser.execute_script("return [...document.querySelectorAll('#panel-__tabber__ .file-tree > .file-tree-row[data-tabber-type=session]')].map(row=>row.dataset.tabberSession)") == ["2", "1"]
+        assert browser.execute_script("return document.querySelector('#panel-__tabber__ .tabber-session-tab[data-pane-tab=\"1\"]') === window.__retainedSessionAnchor && paneTabPopoverForAnchor(window.__retainedSessionAnchor) === window.__retainedSessionPopover")
+        assert browser.execute_script("""
+          const popover = window.__retainedSessionPopover, anchor = window.__retainedSessionAnchor;
+          const before = popover.getBoundingClientRect().top;
+          positionPaneTabPopover(anchor, popover);
+          return Math.abs(popover.getBoundingClientRect().top - before) <= 1;
+        """)
+
+    if mode == "normal":
+        browser.execute_script("""
+          transcriptMetadataState.payload.sessions['1'].window_metadata = [{window_index:0,description:'Updated during hover'}];
+          refreshTabberPanels();
+        """)
+        assert browser.execute_script("return window.__statusRow.querySelector('.tabber-normal-description').textContent") == "Updated during hover"
+
+
+def test_tabber_native_date_choices_survive_url_reload_after_migration(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path,
+        "?sessions=__tabber__,1&layout=row@34(left,right)&tabs=left:__tabber__;right:1",
+        sessions=["1"], settings={"general":{"default_tabber_mode":"advanced"}})
+    wait = WebDriverWait(browser, 5)
+    for choice in ["none", "date", "relative"]:
+        click_visible_selector(browser, "#panel-__tabber__ [data-file-explorer-tree-dates]")
+        assert browser.execute_script("return fileExplorerTreeDateModeForView('tabber')") == choice
+        assert browser.execute_script("return JSON.parse(new URLSearchParams(location.search).get('state')).finder.viewSettings.tabber.treeDateMode") == choice
+        browser.refresh()
+        wait.until(lambda driver: driver.execute_script("return typeof fileExplorerTreeDateModeForView === 'function' && document.querySelector('#panel-__tabber__ [data-file-explorer-tree-dates]')"))
+        assert browser.execute_script("return fileExplorerTreeDateModeForView('tabber')") == choice

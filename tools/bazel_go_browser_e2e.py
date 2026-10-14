@@ -43,6 +43,7 @@ from tools.product_environment import product_env, product_env_name, require_pro
 from tools.instance_isolation import synthetic_test_environment as isolated_test_environment
 from tools.instance_isolation import normalize_yomux_environment
 from tools.tmux_paths import short_tmux_socket_path
+from tools.tabber_browser_journey import isolated_attention_journey, normal_multiwindow_journey, normal_tabber_journey
 
 
 def sha256_bytes(payload: bytes) -> str:
@@ -104,7 +105,7 @@ def tabber_reload_trace_source(session: str) -> str:
           };
           const markRow = () => {
             if (trace.firstRowAt === null) {
-              const row = Array.from(document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="session"]'))
+              const row = Array.from(document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="normal"]'))
                 .find(candidate => candidate.textContent.includes(targetSession));
               if (row) {
                 trace.firstRowAt = performance.now();
@@ -125,14 +126,15 @@ def tabber_reload_trace_source(session: str) -> str:
             const isTracked = requestUrl.pathname === '/api/activity' || requestUrl.pathname === '/api/session-metadata';
             if (!isTracked) return originalFetch(...args);
             const startedAt = performance.now();
-            const request = {path: requestUrl.pathname, startedAt, responseAt: null, status: null, body: null};
+            const request = {ordinal: trace.requests.length, path: requestUrl.pathname, startedAt, responseAt: null, status: null, body: null};
             trace.requests.push(request);
             const response = await originalFetch(...args);
             request.responseAt = performance.now();
             request.status = response.status;
-            if (request.path === '/api/activity') trace.activity = request;
             response.clone().json().then(body => {
               request.body = body;
+              if (request.path === '/api/activity'
+                && (!trace.activity || request.ordinal > trace.activity.ordinal)) trace.activity = request;
               observeConvergence();
             });
             return response;
@@ -466,7 +468,15 @@ exec /bin/sleep 300
                 time.sleep(0.5)
                 driver.execute_script("localStorage.clear(); sessionStorage.clear();")
                 driver.get(f"https://127.0.0.1:{port}/?sessions={session}&layout=left&tabs=left:{session}")
-                time.sleep(1)
+                WebDriverWait(driver, 15).until(lambda browser: browser.execute_script("""
+                    try {
+                      return typeof saveSettingsPatch === 'function' && typeof layoutSlots === 'object'
+                        && typeof initialSetting === 'function' && document.querySelector('#grid .xterm') !== null;
+                    } catch (error) {
+                      if (error instanceof ReferenceError) return false;
+                      throw error;
+                    }
+                """))
                 settings_result = driver.execute_async_script("""
                     const done = arguments[arguments.length - 1];
                     const waitFor = predicate => new Promise((resolve, reject) => {
@@ -580,6 +590,21 @@ exec /bin/sleep 300
                 # tmux window. The focused browser client must take authority, otherwise
                 # `window-size largest` leaves tmux at the larger sibling dimensions even though
                 # xterm itself resized locally.
+                resize_fence = driver.execute_async_script("""
+                  const done = arguments[arguments.length - 1];
+                  const item = terminals.get(arguments[0]);
+                  const txn = 7110001;
+                  const listener = event => {
+                    if (typeof event.data !== 'string') return;
+                    let payload; try {payload = JSON.parse(event.data);} catch (_) {return;}
+                    if (payload.type !== 'refresh-ack' || payload.txn !== txn) return;
+                    item.socket.removeEventListener('message', listener);
+                    done({ok: true});
+                  };
+                  item.socket.addEventListener('message', listener);
+                  item.socket.send(JSON.stringify({type: 'refresh', txn}));
+                """, session)
+                assert resize_fence.get('ok'), resize_fence
                 secondary_master, secondary_slave = pty.openpty()
                 set_pty_dimensions(secondary_slave, 70, 220)
                 secondary_client = subprocess.Popen(
@@ -765,7 +790,7 @@ exec /bin/sleep 300
                         const session = new URLSearchParams(location.search).get('sessions')?.split(',')[1];
                         const expectedSessions = arguments[0];
                         const state = typeof transcriptMetadataState === 'object' ? transcriptMetadataState : null;
-                        const rendered = new Set(Array.from(document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="session"]'))
+                        const rendered = new Set(Array.from(document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="normal"]'))
                           .map(row => row.dataset.tabberSession));
                         const freshRequest = trace?.requests?.some(request =>
                           request.body?.cache?.stale === false
@@ -846,7 +871,8 @@ exec /bin/sleep 300
                 tabber_reload_duration_ms = tabber_reload_activity["responseAt"] - tabber_reload_activity["startedAt"]
                 tabber_reload_sources = [
                     request for request in tabber_reload_trace["requests"]
-                    if request["responseAt"] <= tabber_reload_trace["firstRowAt"]
+                    if request["responseAt"] is not None
+                    and request["responseAt"] <= tabber_reload_trace["firstRowAt"]
                     and request.get("body", {}).get("sessions", {}).get(session)
                 ]
                 tabber_reload_source = min(tabber_reload_sources, key=lambda request: request["responseAt"], default=None)
@@ -1013,6 +1039,26 @@ exec /bin/sleep 300
                     surfaces["browser_log"] = driver.get_log("browser")
                     raise SystemExit(f"Go Chromium session surface E2E failed: {surfaces}")
                 print(f"Go browser warm Tabber activity: {json.dumps({key: surfaces[key] for key in ('tabberActivityMs', 'tabberFirstPaintMs', 'tabberCacheHit', 'tabberSessionRow')}, sort_keys=True)}")
+                normal_sessions = []
+                for index in range(3):
+                    name = f"normal-native-{os.getpid()}-{index}"
+                    subprocess.run((*tmux, "new-session", "-d", "-s", name, "/bin/bash"), check=True)
+                    created_sessions.append(name)
+                    normal_sessions.append(name)
+                existing_normal_sessions = set(subprocess.check_output((*tmux, "list-sessions", "-F", "#{session_name}"), text=True).splitlines())
+                normal_multi_session = next(str(candidate) for candidate in range(1, 10) if str(candidate) not in existing_normal_sessions)
+                subprocess.run((*tmux, "new-session", "-d", "-s", normal_multi_session, "-n", "codex", "/bin/bash"), check=True)
+                created_sessions.append(normal_multi_session)
+                subprocess.run((*tmux, "new-window", "-d", "-t", f"={normal_multi_session}:", "-n", "bash", "/bin/bash"), check=True)
+                driver.get(f"https://127.0.0.1:{port}/")
+                WebDriverWait(driver, 15).until(lambda browser: browser.execute_script("return typeof sessions !== 'undefined' && arguments[0].every(name => sessions.includes(name))", [*normal_sessions, normal_multi_session]))
+                isolated_attention_journey(driver, tmux, normal_sessions)
+                normal_file = finder_root / 'normal-editor.js'
+                normal_file.write_text('const normal = true;\n', encoding='utf-8')
+                normal_tabber_journey(driver, tmux, normal_sessions, normal_file)
+                normal_multiwindow_journey(driver, tmux, normal_multi_session)
+                driver.get(tabber_reload_url)
+                WebDriverWait(driver, 15).until(lambda browser: browser.execute_script("return typeof apiFetchJson === 'function' && typeof terminals !== 'undefined'"))
                 phase3 = driver.execute_async_script("""
                     const done = arguments[arguments.length - 1];
                     const session = arguments[0];
@@ -1645,6 +1691,13 @@ exec /bin/sleep 300
                     const row = path => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${CSS.escape(path)}"]`);
                     (async () => {
                       if (typeof openFileExplorerAt !== 'function') throw new Error('Finder UI opener is unavailable');
+                      await waitFor(() => typeof tabberIsAdvanced === 'function' && document.querySelector('[data-tabber-advanced]'), 'Tabber toolbar');
+                      if (!tabberIsAdvanced()) {
+                        document.querySelector('[data-tabber-advanced]').click();
+                        await waitFor(() => tabberIsAdvanced(), 'Advanced mode');
+                      }
+                      await selectSession('__finder__', {userInitiated: true});
+                      await waitFor(() => document.querySelector('#panel-__finder__ .file-explorer-tree-panel'), 'Finder panel');
                       const opened = await openFileExplorerAt(root, {user: true, manualSelection: true});
                       if (opened !== true) throw new Error(`Finder UI did not open: ${opened}`);
                       await waitFor(() => row(root + '/nested') && row(root + '/note.md'));
@@ -2219,7 +2272,12 @@ exec /bin/sleep 300
                             " && getComputedStyle(node).display !== 'none'"
                             " && getComputedStyle(node).visibility !== 'hidden');"
                             "return visible(document.getElementById(`panel-${arguments[0]}`))"
-                            "&& visible(document.querySelector(`.dockview-pane-tab[data-pane-tab=\"${CSS.escape(arguments[0])}\"]`))"
+                            "&& (tabberIsAdvanced()"
+                            " ? visible(document.querySelector(`.dockview-pane-tab[data-pane-tab=\"${CSS.escape(arguments[0])}\"]`))"
+                            " : dockviewLayoutState.api.groups.every(group => group.panels.length === 1)"
+                            " && dockviewLayoutState.api.groups.some(group => group.panels.some(panel => panel.id !== '__tabber__'))"
+                            " && dockviewLayoutState.api.groups.filter(group => group.panels.some(panel => panel.id !== '__tabber__'))"
+                            " .every(group => group.header.hidden))"
                             "&& clientEventTransportState.connected === true;",
                             exited_session,
                         ))
@@ -2244,7 +2302,9 @@ exec /bin/sleep 300
                         if (!source?.url) return [];
                         return new URL(source.url, location.href).searchParams.get('channels')?.split(',') || [];
                     """)
-                    if "core" not in roster_channels or "transcripts" in roster_channels:
+                    # Fresh Normal installs display Tabber, which owns transcript demand.
+                    roster_tabber_visible = roster_driver.execute_script("return activePaneItems().includes(tabberItemId);")
+                    if "core" not in roster_channels or ("transcripts" in roster_channels) != roster_tabber_visible:
                         raise SystemExit(
                             f"Go roster-exit E2E has the wrong client-event demand: {roster_channels}"
                         )
@@ -2274,11 +2334,17 @@ exec /bin/sleep 300
                     const pane = () => document.getElementById(`panel-${session}`);
                     const tab = () => document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(session)}"]`);
                     const poll = () => {
+                      const advanced = tabberIsAdvanced();
+                      const dropPromptVisible = Array.from(document.querySelectorAll('.empty-pane-panel strong'))
+                        .some(node => visible(node) && node.textContent.trim() === 'Drop a tab here');
+                      const normalConversationItems = activePaneItems().filter(item => item !== tabberItemId);
+                      const normalPaneContract = normalConversationItems.length <= 1
+                        && !normalConversationItems.includes(session) && !dropPromptVisible;
                       if (!sessions.includes(session) && !activeSessions.includes(session)
                           && !visible(tab())
                           && !visible(pane())
-                          && paneIsPlaceholder(exitedSlot, layoutSlots)) {
-                        done({ok: true, elapsedMs: performance.now() - startedAt, placeholderSlot: exitedSlot});
+                          && (advanced ? paneIsPlaceholder(exitedSlot, layoutSlots) : normalPaneContract)) {
+                        done({ok: true, elapsedMs: performance.now() - startedAt, advanced, placeholderSlot: exitedSlot});
                         return;
                       }
                       if (performance.now() >= deadline) {
@@ -2288,6 +2354,7 @@ exec /bin/sleep 300
                           panelRect: pane()?.getBoundingClientRect().toJSON() || null,
                           tabRect: tab()?.getBoundingClientRect().toJSON() || null,
                           placeholder: paneIsPlaceholder(exitedSlot, layoutSlots),
+                          advanced, normalPaneContract, normalConversationItems,
                           transport: clientEventTransportState?.connected});
                         return;
                       }

@@ -299,6 +299,42 @@ func TestFastListDefersRepositoryMetadata(t *testing.T) {
 	t.Fatal("List() did not return repo entry")
 }
 
+func TestFastListNameQueryFindsMatchesPastDirectoryLimit(t *testing.T) {
+	service, root := newTestService(t, nil)
+	for index := 0; index < MaxDirectoryEntries+5; index++ {
+		name := fmt.Sprintf("unrelated-%04d.txt", index)
+		if err := os.WriteFile(filepath.Join(root, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := "yo7110.md"
+	if err := os.WriteFile(filepath.Join(root, target), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	listing, finderErr := service.FastListNameQuery(context.Background(), root, "yo711")
+	if finderErr != nil {
+		t.Fatalf("FastListNameQuery() error = %v", finderErr)
+	}
+	entries := listing["entries"].([]map[string]any)
+	if len(entries) != 1 || entries[0]["name"] != target || listing["truncated"] != false {
+		t.Fatalf("prefix listing = %#v", listing)
+	}
+
+	fuzzyMatch := "hello-world.txt"
+	if err := os.WriteFile(filepath.Join(root, fuzzyMatch), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listing, finderErr = service.FastListNameQuery(context.Background(), root, "hw")
+	if finderErr != nil {
+		t.Fatalf("fuzzy name listing = %v", finderErr)
+	}
+	entries = listing["entries"].([]map[string]any)
+	if len(entries) != 1 || entries[0]["name"] != fuzzyMatch {
+		t.Fatalf("fuzzy name listing = %#v", listing)
+	}
+}
+
 func TestSearchMatchesPythonDirectRowsAndRanking(t *testing.T) {
 	service, root := newTestService(t, nil)
 	for _, name := range []string{"needle.txt", "needle-long.txt", "xneedle.txt"} {
@@ -931,6 +967,75 @@ func TestWatchRootsSkipsUnchangedNativeConfigurationAndRetriesUnhealthyWatcher(t
 		}
 		if watcher.calls != 2 {
 			t.Fatalf("unhealthy native watcher SetRoots calls = %d, want retry on identical roots", watcher.calls)
+		}
+	})
+}
+
+func TestWatchPollingFallbackRunsOnlyWhenNativeWatchingIsUnavailableOrDegraded(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		mode watchFallbackMode
+	}{
+		{name: "healthy native watcher", mode: watchFallbackMode{}},
+		{name: "degraded native watcher", mode: watchFallbackMode{interval: watchDegradedPollInterval}},
+		{name: "unavailable native watcher", mode: watchFallbackMode{interval: watchPollInterval}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			watcher := &countingNativeWatcher{events: make(chan nativeWatchEvent)}
+			service, _ := newTestServiceWithNative(t, nil, watcher, nativeWatchStatus{available: true})
+			if test.name == "degraded native watcher" {
+				service.mu.Lock()
+				service.nativeStatus.degraded = true
+				service.mu.Unlock()
+			}
+			if test.name == "unavailable native watcher" {
+				service.mu.Lock()
+				service.nativeStatus.available = false
+				service.mu.Unlock()
+			}
+			if got := service.pollingFallbackMode(); got != test.mode {
+				t.Fatalf("pollingFallbackMode() = %#v, want %#v", got, test.mode)
+			}
+		})
+	}
+	t.Run("healthy watcher still polls uncovered signatures", func(t *testing.T) {
+		watcher := &countingNativeWatcher{events: make(chan nativeWatchEvent)}
+		service, serviceRoot := newTestServiceWithNative(t, nil, watcher, nativeWatchStatus{available: true})
+		watchedRoot := filepath.Join(serviceRoot, "src")
+		outside := filepath.Join(serviceRoot, "note.md")
+		if err := os.WriteFile(outside, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		signatures := map[string]string{watchedRoot: service.signature(context.Background(), watchedRoot), outside: service.signature(context.Background(), outside)}
+		service.mu.Lock()
+		service.watches["covered"] = watchRecord{Roots: []string{watchedRoot}, SignaturePaths: []string{watchedRoot, outside}, Signatures: signatures, UpdatedAt: time.Now()}
+		service.mu.Unlock()
+		if mode := service.pollingFallbackMode(); mode != (watchFallbackMode{interval: watchPollInterval, uncoveredOnly: true}) {
+			t.Fatalf("uncovered signature fallback mode = %#v", mode)
+		}
+		if err := os.WriteFile(filepath.Join(watchedRoot, "nested.md"), []byte("changed inside root"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(outside, []byte("changed outside root"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		service.pollUncoveredWatches()
+		service.mu.Lock()
+		defer service.mu.Unlock()
+		if len(service.changes) != 1 || len(service.changes[0].paths) != 1 || service.changes[0].paths[0] != outside {
+			t.Fatalf("uncovered fallback changes = %#v, want only %q", service.changes, outside)
+		}
+	})
+	t.Run("closed native stream enables fallback", func(t *testing.T) {
+		watcher := &countingNativeWatcher{events: make(chan nativeWatchEvent)}
+		service, root := newTestServiceWithNative(t, nil, watcher, nativeWatchStatus{available: true})
+		service.markNativeEventStreamClosed()
+		if _, finderErr := service.WatchRoots(context.Background(), map[string]any{"client_id": "closed-stream", "roots": []any{root}}); finderErr != nil {
+			t.Fatal(finderErr)
+		}
+		mode := service.pollingFallbackMode()
+		if mode.interval != watchDegradedPollInterval || service.nativeStatus.reason != "native-event-stream-closed" || watcher.calls != 0 {
+			t.Fatalf("closed event stream fallback = %#v, status = %#v", mode, service.nativeStatus)
 		}
 	})
 }
@@ -4321,5 +4426,277 @@ func TestInfoReturnsDirectoryCapability(t *testing.T) {
 	}
 	if info["kind"] != "dir" || info["size"] != nil || info["mtime"] != nil {
 		t.Fatalf("directory info = %#v", info)
+	}
+}
+
+func TestDemandPreservesExplicitQueuedBuild(t *testing.T) {
+	store, err := createSearchIndexStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.db.Close()
+	engine := newSearchIndexEngine(store)
+	root := t.TempDir()
+	engine.pendingBuild[root] = indexBuildJob{root: root, visible: true, demandScoped: false}
+	engine.builds[root] = true
+	engine.buildDone[root] = make(chan struct{})
+	if _, err := engine.handle(indexRequest{Action: "demand", FenceRoots: []string{root}}); err != nil {
+		t.Fatal(err)
+	}
+	if engine.pendingBuild[root].demandScoped {
+		t.Fatal("visibility demand replaced explicit ownership")
+	}
+	if _, err := engine.handle(indexRequest{Action: "demand"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := engine.pendingBuild[root]; !exists {
+		t.Fatal("hiding cancelled an explicit queued search")
+	}
+}
+func TestFailedSnapshotCleansOwnedStaging(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 12000; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("%04d-%s.go", i, strings.Repeat("x", 160))), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := openSearchIndexStore(filepath.Join(t.TempDir(), "index.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.db.Close()
+	engine := newSearchIndexEngine(store)
+	job := indexBuildJob{root: root, identity: fileID(info), maxFiles: 20000, maxBytes: DefaultIndexBytes}
+	if err := engine.build(job); err != nil {
+		t.Fatal(err)
+	}
+	job.maxBytes = 1024 * 1024
+	failure := engine.build(job)
+	if failure == nil {
+		t.Fatal("fixture did not reject undersized replacement")
+	}
+	usage, err := store.diskUsage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage["staging_bytes"] != 0 {
+		t.Fatalf("owned staging leaked: %d bytes", usage["staging_bytes"])
+	}
+}
+func TestMultiwordFilenameQueryMatchesIndependentTokens(t *testing.T) {
+	service, root := newTestService(t, nil)
+	name := "hello-world.txt"
+	if err := os.WriteFile(filepath.Join(root, name), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range strings.Fields("world hello") {
+		if _, ok := searchTokenNameRank(token, name); !ok {
+			t.Fatalf("token %s did not match fixture", token)
+		}
+	}
+	listing, err := service.FastListNameQuery(context.Background(), root, "world hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listing["entries"].([]map[string]any)) != 1 {
+		t.Fatal("independent filename tokens were rejected")
+	}
+}
+func TestFilenameSelectionRanksBeforeCap(t *testing.T) {
+	service, root := newTestService(t, nil)
+	for i := 0; i < MaxDirectoryEntries*10; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("a-distractor-%04d.txt", i)), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := "a"
+	if err := os.WriteFile(filepath.Join(root, target), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	exactRank, exactMatches := searchTokenNameRank("a", target)
+	weakerRank, weakerMatches := searchTokenNameRank("a", "a-distractor-0000.txt")
+	if !exactMatches || !weakerMatches || exactRank >= weakerRank {
+		t.Fatalf("rank fixture %d %d", exactRank, weakerRank)
+	}
+	listing, finderErr := service.FastListNameQuery(context.Background(), root, "a")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	found := false
+	for _, entry := range listing["entries"].([]map[string]any) {
+		found = found || entry["name"] == target
+	}
+	if !found {
+		t.Fatal("exact match omitted behind weaker names")
+	}
+}
+
+func TestFilenameSelectionValidatesRowsBeforeProvingTruncation(t *testing.T) {
+	service, root := newTestService(t, nil)
+	for index := 0; index < MaxDirectoryEntries; index++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("a-valid-%04d", index)), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "a"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	validated := 0
+	listing, finderErr := service.listWithEntryInfo(context.Background(), root, func(_ *os.File, _, _ string, entry os.DirEntry) (map[string]any, bool) {
+		validated++
+		return map[string]any{"name": entry.Name(), "kind": "file"}, entry.Name() != "a"
+	}, "a")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if validated != MaxDirectoryEntries+1 || listing["truncated"] != false || len(listing["entries"].([]map[string]any)) != MaxDirectoryEntries {
+		t.Fatalf("invalid high-ranked row displaced valid coverage: validated=%d truncated=%v count=%d", validated, listing["truncated"], len(listing["entries"].([]map[string]any)))
+	}
+}
+
+func TestIndexBuildQueueOwnershipAndFairness(t *testing.T) {
+	merged := mergeIndexBuildJobs(indexBuildJob{root: "a", explicit: true, sequence: 1}, indexBuildJob{root: "a", visible: true, demandScoped: true})
+	if merged.demandScoped || !merged.explicit || merged.sequence != 1 {
+		t.Fatalf("explicit request lost ownership: %+v", merged)
+	}
+	engine := &searchIndexEngine{pendingBuild: map[string]indexBuildJob{
+		"rerun":        {root: "rerun", visible: true, sequence: 1},
+		"explicit-new": {root: "explicit-new", explicit: true, sequence: 3},
+		"explicit-old": {root: "explicit-old", explicit: true, sequence: 2},
+		"background":   {root: "background", background: true},
+	}}
+	for _, expected := range []string{"explicit-old", "explicit-new", "rerun", "background"} {
+		job, ok := engine.nextBuildLocked()
+		if !ok || job.root != expected {
+			t.Fatalf("next build = %+v, want %s", job, expected)
+		}
+	}
+}
+
+func TestFilenameShortlistDoesNotPreferExtensionFreeStemOverShortPrefix(t *testing.T) {
+	service, root := newTestService(t, nil)
+	for i := 0; i < MaxDirectoryEntries; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("a.extension-%04d-long", i)), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "ab"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	listing, err := service.FastListNameQuery(context.Background(), root, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range listing["entries"].([]map[string]any) {
+		if entry["name"] == "ab" {
+			return
+		}
+	}
+	t.Fatal("short basename prefix omitted behind extension-free stem matches")
+}
+
+func TestRepairFenceHonorsDeadlineAcrossAllFlights(t *testing.T) {
+	client := NewSearchIndexWorkerClient(t.TempDir())
+	one, two := make(chan struct{}), make(chan struct{})
+	client.repairFlights["root"] = map[chan struct{}]struct{}{one: {}, two: {}}
+	close(one)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	defer close(two)
+	result := make(chan error, 1)
+	go func() { result <- client.Fence(ctx, "root", 1) }()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expired fence = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("admitted repair wait ignored caller deadline")
+	}
+}
+
+func TestIndexBuildsPublishBeforeRerunAndServeExplicitRootFirst(t *testing.T) {
+	store, err := createSearchIndexStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.db.Close()
+	engine := newSearchIndexEngine(store)
+	makeJob := func(root string, explicit bool, sequence uint64) indexBuildJob {
+		if err := os.WriteFile(filepath.Join(root, "file.go"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return indexBuildJob{root: root, identity: fileID(info), maxFiles: DefaultIndexedFiles, maxBytes: DefaultIndexBytes, explicit: explicit, visible: true, sequence: sequence}
+	}
+	a, b := makeJob(t.TempDir(), false, 1), makeJob(t.TempDir(), true, 2)
+	engine.builds[a.root], engine.builds[b.root] = true, true
+	engine.buildDone[a.root], engine.buildDone[b.root] = make(chan struct{}), make(chan struct{})
+	engine.rerun[a.root], engine.pendingBuild[b.root] = a, b
+	var observed []string
+	var building []bool
+	firstPublishedDuringRerun := false
+	engine.onComplete = func(status map[string]any) {
+		if len(observed) == 0 {
+			_, firstPublishedDuringRerun = engine.pendingBuild[a.root]
+		}
+		observed = append(observed, fmt.Sprint(status["root"]))
+		building = append(building, status["building"] == true)
+	}
+	engine.runBuilds(a)
+	if !firstPublishedDuringRerun || !reflect.DeepEqual(observed, []string{a.root, b.root, a.root}) || !reflect.DeepEqual(building, []bool{true, false, false}) {
+		t.Fatalf("publication/queue order = %v, early=%t", observed, firstPublishedDuringRerun)
+	}
+}
+
+func TestFilenameShortlistPreservesWordStartScore(t *testing.T) {
+	service, root := newTestService(t, nil)
+	for i := 0; i < MaxDirectoryEntries; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("xa-%04d.txt", i)), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "zzzzz-a"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	listing, err := service.FastListNameQuery(context.Background(), root, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range listing["entries"].([]map[string]any) {
+		if entry["name"] == "zzzzz-a" {
+			return
+		}
+	}
+	t.Fatal("client-preferred word-start match omitted behind weaker substring matches")
+}
+
+func TestWriteDiscoveredPathsCommitsAndReleasesConnection(t *testing.T) {
+	store, err := createSearchIndexStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.db.Close()
+	engine := newSearchIndexEngine(store)
+	root := t.TempDir()
+	if err := engine.writeDiscoveredPaths(root, 1, []discoveredIndexPath{{relative: "blog.md", name: "blog.md", identity: "file", size: 1, mtimeNS: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if store.db.Stats().InUse != 0 {
+		t.Fatal("successful writer retained an uncommitted transaction")
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM entries JOIN root_keys ON entries.root=root_keys.id WHERE root_keys.path=?`, root).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("committed entries = %d, want 1", count)
 	}
 }

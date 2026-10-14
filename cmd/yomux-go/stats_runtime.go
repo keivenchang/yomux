@@ -890,6 +890,19 @@ func (s *server) statsCapabilities(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, statsReadyEnvelope(statsRequestID(r), payload))
 }
 
+func (s *server) statsSessionAliases(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	aliases, err := stats.TabberViewSessionAliases(r.Context())
+	if err != nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "tmux session aliases unavailable"})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"aliases": aliases})
+}
+
 func statsRequestID(r *http.Request) string {
 	if r != nil {
 		candidate := strings.TrimSpace(r.Header.Get("X-YOmux-Request-ID"))

@@ -1,0 +1,44 @@
+{
+  "perChar": 8,
+  "contiguous": 10,
+  "contiguousSubstring": 30000,
+  "wordStart": 6,
+  "gapPenalty": 0.2,
+  "haystackLengthPenalty": 0.01,
+  "anchorPrimary": 20000,
+  "anchorSecondary": 12000,
+  "fieldIndexPenalty": 20,
+  "domainPrior": {
+    "files": {
+      "file": 6000,
+      "pane": 3000,
+      "command": 0,
+      "setting": 0
+    },
+    "command": {
+      "pane": 6000,
+      "command": 3000,
+      "setting": 3000,
+      "file": 0
+    }
+  },
+  "fileNamePrefix": 3500,
+  "fileNameExact": 2000000,
+  "fileNameContains": 1800,
+  "fileNameSubsequence": 600,
+  "paneNameContiguous": {
+    "files": 50000,
+    "command": 100000
+  },
+  "finderAlias": 25000,
+  "finderAliasFilesMode": 2500,
+  "paneExactIdentifier": 30000,
+  "recentSelectionBase": 1000,
+  "recencyCap": 900,
+  "recencyHalfLifeSeconds": 604800,
+  "repoAffinity": 400,
+  "mixWindow": 8,
+  "mixSecondarySlots": 4,
+  "mixFirstSecondaryIndex": 2,
+  "mixSecondaryStep": 2
+}

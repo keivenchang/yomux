@@ -8,25 +8,31 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
-	"log/slog"
+	"errors"
+	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/keivenchang/yomux/internal/finder"
 )
 
 type finderIndexSettings struct {
-	roots        []string
-	excludeDirs  []string
-	excludePaths []string
-	maxFiles     int
-	persistFiles int
-	maxBytes     int64
-	refreshSecs  int
-	persist      bool
-	revision     uint64
+	roots                 []string
+	excludeDirs           []string
+	excludePaths          []string
+	maxFiles              int
+	maxBytes              int64
+	refreshSecs           int
+	backgroundRefreshSecs int
+	persist               bool
+	revision              uint64
+	legacyRevision        uint64
 }
 
 const maxSQLiteSettingsRevision = uint64(1<<63 - 1)
@@ -41,7 +47,7 @@ func (s *server) updateFinderIndexSettings(payload map[string]any) ([]string, bo
 	if fileExplorer == nil {
 		return nil, false, nil
 	}
-	current := finderIndexSettings{maxFiles: finder.DefaultIndexedFiles, persistFiles: finder.DefaultIndexedFiles, maxBytes: finder.DefaultIndexBytes, refreshSecs: 60, persist: true}
+	current := finderIndexSettings{maxFiles: finder.DefaultIndexedFiles, maxBytes: finder.DefaultIndexBytes, refreshSecs: 60, backgroundRefreshSecs: 900, persist: true}
 	current.excludeDirs = stringSettings(fileExplorer["index_exclude_dir_names"])
 	current.excludePaths = stringSettings(fileExplorer["index_exclude_paths"])
 	if roots, ok := fileExplorer["indexed_dirs"].([]any); ok {
@@ -59,9 +65,6 @@ func (s *server) updateFinderIndexSettings(payload map[string]any) ([]string, bo
 	if value, ok := fileExplorer["index_max_files"].(float64); ok && value >= 1000 && value <= finder.DefaultIndexedFiles {
 		current.maxFiles = int(value)
 	}
-	if value, ok := fileExplorer["index_persist_max_files"].(float64); ok && value >= 1000 && value <= finder.DefaultIndexedFiles {
-		current.persistFiles = int(value)
-	}
 	if value, ok := fileExplorer["index_persist"].(bool); ok {
 		current.persist = value
 	}
@@ -71,26 +74,46 @@ func (s *server) updateFinderIndexSettings(payload map[string]any) ([]string, bo
 	if value, ok := fileExplorer["index_refresh_seconds"].(float64); ok && value >= 0 && value <= 3600 {
 		current.refreshSecs = int(value)
 	}
+	if value, ok := fileExplorer["index_background_refresh_seconds"].(float64); ok && value >= 0 && value <= 86400 {
+		current.backgroundRefreshSecs = int(value)
+	}
+	current.roots = uniqueFinderIndexRoots(current.roots)
+	sort.Strings(current.roots)
 	revisionPayload, err := json.Marshal(struct {
 		Roots        []string `json:"roots"`
 		ExcludeDirs  []string `json:"exclude_dirs"`
 		ExcludePaths []string `json:"exclude_paths"`
 		MaxFiles     int      `json:"max_files"`
-		PersistFiles int      `json:"persist_files"`
 		MaxBytes     int64    `json:"max_bytes"`
 		RefreshSecs  int      `json:"refresh_secs"`
 		Persist      bool     `json:"persist"`
-	}{current.roots, current.excludeDirs, current.excludePaths, current.maxFiles, current.persistFiles, current.maxBytes, current.refreshSecs, current.persist})
+	}{current.roots, current.excludeDirs, current.excludePaths, current.maxFiles, current.maxBytes, 60, current.persist})
 	if err != nil {
 		return nil, false, err
 	}
 	revisionDigest := sha256.Sum256(revisionPayload)
 	current.revision = finderIndexSettingsRevision(revisionDigest)
+	revisionPayload, err = json.Marshal(struct {
+		Roots        []string `json:"roots"`
+		ExcludeDirs  []string `json:"exclude_dirs"`
+		ExcludePaths []string `json:"exclude_paths"`
+		MaxFiles     int      `json:"max_files"`
+		MaxBytes     int64    `json:"max_bytes"`
+		RefreshSecs  int      `json:"refresh_secs"`
+		Persist      bool     `json:"persist"`
+	}{current.roots, current.excludeDirs, current.excludePaths, current.maxFiles, current.maxBytes, current.refreshSecs, current.persist})
+	if err != nil {
+		return nil, false, err
+	}
+	current.legacyRevision = finderIndexSettingsRevision(sha256.Sum256(revisionPayload))
 	s.indexSettingsMu.Lock()
 	previous := s.indexSettings
 	previousRoots := append([]string(nil), previous.roots...)
-	changed := !(reflect.DeepEqual(current.roots, s.indexSettings.roots) && reflect.DeepEqual(current.excludeDirs, s.indexSettings.excludeDirs) && reflect.DeepEqual(current.excludePaths, s.indexSettings.excludePaths) && current.maxFiles == s.indexSettings.maxFiles && current.persistFiles == s.indexSettings.persistFiles && current.maxBytes == s.indexSettings.maxBytes && current.refreshSecs == s.indexSettings.refreshSecs && current.persist == s.indexSettings.persist)
+	changed := !(reflect.DeepEqual(current.roots, s.indexSettings.roots) && reflect.DeepEqual(current.excludeDirs, s.indexSettings.excludeDirs) && reflect.DeepEqual(current.excludePaths, s.indexSettings.excludePaths) && current.maxFiles == s.indexSettings.maxFiles && current.maxBytes == s.indexSettings.maxBytes && current.refreshSecs == s.indexSettings.refreshSecs && current.backgroundRefreshSecs == s.indexSettings.backgroundRefreshSecs && current.persist == s.indexSettings.persist)
 	preserveSnapshots := previous.revision != 0 && reflect.DeepEqual(current.roots, previous.roots) && reflect.DeepEqual(current.excludeDirs, previous.excludeDirs) && reflect.DeepEqual(current.excludePaths, previous.excludePaths) && current.persist == previous.persist
+	if changed {
+		s.indexApplicationEpoch++
+	}
 	s.indexSettings = current
 	if changed && s.searchIndex != nil {
 		if s.indexSettingsFencePending {
@@ -102,10 +125,9 @@ func (s *server) updateFinderIndexSettings(payload map[string]any) ([]string, bo
 		s.indexSettingsFenceRoots = uniqueFinderIndexRoots(append(append(s.indexSettingsFenceRoots, previousRoots...), current.roots...))
 	}
 	s.indexSettingsMu.Unlock()
-	if s.searchIndex != nil {
-		if err := s.searchIndex.SetPersistent(current.persist); err != nil {
-			return previousRoots, changed, err
-		}
+	select {
+	case s.indexRefreshWake <- struct{}{}:
+	default:
 	}
 	return previousRoots, changed, nil
 }
@@ -134,45 +156,145 @@ func stringSettings(raw any) []string {
 	return result
 }
 
+// All settings entry points hold indexSettingsUpdateMu from YAML access through worker acknowledgment.
 func (s *server) loadFinderIndexSettings() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.reloadFinderIndexSettings(ctx, false)
+}
+
+func (s *server) finderIndexFileDigest() ([32]byte, error) {
+	digest, _, err := s.finderIndexFileSnapshot()
+	return digest, err
+}
+
+func (s *server) finderIndexFileSnapshot() ([32]byte, float64, error) {
+	file, err := os.Open(filepath.Join(s.config, "settings.yaml"))
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	defer file.Close()
+	before, err := file.Stat()
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, 1<<20+1))
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	if len(data) > 1<<20 {
+		return [32]byte{}, 0, errors.New("settings YAML exceeds 1 MiB")
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		return [32]byte{}, 0, errors.New("settings changed during content check")
+	}
+	return sha256.Sum256(data), float64(after.ModTime().UnixNano()), nil
+}
+
+func (s *server) reloadFinderIndexSettings(ctx context.Context, onlyChanged bool) error {
+	s.indexSettingsUpdateMu.Lock()
+	defer s.indexSettingsUpdateMu.Unlock()
+	digest, digestErr := s.finderIndexFileDigest()
+	if onlyChanged && digestErr == nil && digest == s.indexSettingsFileDigest {
+		return s.synchronizeFinderIndexSettings(ctx)
+	}
 	script := `import json
 from yomux_lib.workspace.settings import settings_payload
 print(json.dumps(settings_payload(), separators=(",", ":"), ensure_ascii=False), end="")`
-	command := exec.CommandContext(context.Background(), "python3", "-c", script)
+	command := exec.CommandContext(ctx, "python3", "-c", script)
 	command.Dir = s.root
 	command.Env = pythonBridgeEnvironment(s.root, s.config)
 	output, err := command.Output()
-	if err != nil {
-		return err
-	}
 	var payload map[string]any
-	if err := json.Unmarshal(output, &payload); err != nil {
+	if err == nil {
+		err = json.Unmarshal(output, &payload)
+	}
+	if err == nil {
+		if message, _ := payload["error"].(string); message != "" {
+			err = errors.New(message)
+		}
+	}
+	if err != nil {
+		s.indexSettingsMu.Lock()
+		s.indexSettingsError = err.Error()
+		s.indexSettingsMu.Unlock()
 		return err
 	}
-	_, _, err = s.updateFinderIndexSettings(payload)
+	after, afterErr := s.finderIndexFileDigest()
+	if digestErr == nil && (afterErr != nil || after != digest) {
+		return errors.New("settings changed while being read; reconciliation will retry")
+	}
+	return s.applyFinderIndexSettings(ctx, payload)
+}
+
+func (s *server) applyFinderIndexSettings(ctx context.Context, payload map[string]any) error {
+	digest, mtime, err := s.finderIndexFileSnapshot()
 	if err != nil {
 		return err
+	}
+	if payloadMtime, ok := payload["mtime_ns"].(float64); ok && payloadMtime != mtime {
+		return errors.New("settings changed before policy application")
+	}
+	if _, _, err := s.updateFinderIndexSettings(payload); err != nil {
+		return err
+	}
+	// The digest belongs to the same opened inode and timestamp as the parsed
+	// payload. A later external replacement remains visible to the next loop.
+	s.indexSettingsFileDigest = digest
+	return s.synchronizeFinderIndexSettings(ctx)
+}
+
+func (s *server) synchronizeFinderIndexSettings(ctx context.Context) error {
+	if s.searchIndex == nil {
+		return nil
 	}
 	s.indexSettingsMu.RLock()
-	roots := append([]string(nil), s.indexSettings.roots...)
-	revision := s.indexSettings.revision
+	configured, epoch, pending, preserve := s.indexSettings, s.indexApplicationEpoch, s.indexSettingsFencePending, s.indexSettingsFencePreserveSnapshots
 	s.indexSettingsMu.RUnlock()
-	if s.searchIndex != nil {
-		if err := s.searchIndex.SyncSettings(context.Background(), roots, revision); err != nil {
-			return err
-		}
-		s.indexSettingsMu.Lock()
-		s.indexSettingsFencePending = false
-		s.indexSettingsFenceRoots = nil
+	// Re-acknowledge even unchanged settings: the worker may have restarted since the last request.
+	ack, err := s.searchIndex.ApplySettings(ctx, configured.roots, configured.revision, epoch, configured.persist, configured.maxBytes, preserve || !pending, finder.SearchOptions{MaxFiles: configured.maxFiles, RefreshSec: configured.refreshSecs, ExcludeDirs: configured.excludeDirs, ExcludePaths: configured.excludePaths, LegacySettingsRevision: configured.legacyRevision})
+	s.indexSettingsMu.Lock()
+	if err != nil {
+		s.indexSettingsError = err.Error()
+		s.indexSettingsFencePending = true
 		s.indexSettingsMu.Unlock()
+		return err
 	}
-	for _, root := range roots {
-		options := s.finderSearchOptions(root, "", false)
-		if _, finderErr := s.ensureFinderIndex(context.Background(), root, options); finderErr != nil {
-			slog.Warn("Finder index startup refresh could not be scheduled", "root", root, "error", finderErr.Message)
+	if epoch != s.indexApplicationEpoch || ack["application_epoch"] != strconv.FormatUint(epoch, 10) || ack["revision"] != strconv.FormatUint(configured.revision, 10) {
+		s.indexSettingsError = "stale Finder settings acknowledgment"
+		s.indexSettingsMu.Unlock()
+		return errors.New("stale Finder settings acknowledgment")
+	}
+	incarnation, _ := ack["worker_incarnation"].(string)
+	workerChanged := incarnation != s.indexWorkerIncarnation
+	s.indexActiveSettings, s.indexWorkerIncarnation = configured, incarnation
+	s.indexSettingsFencePending, s.indexSettingsFencePreserveSnapshots = false, false
+	s.indexSettingsFenceRoots, s.indexSettingsError = nil, ""
+	s.indexSettingsMu.Unlock()
+	if pending || workerChanged {
+		select {
+		case s.indexRefreshWake <- struct{}{}:
+		default:
 		}
 	}
 	return nil
+}
+
+func (s *server) finderIndexSettingsStatus() map[string]any {
+	s.indexSettingsMu.RLock()
+	defer s.indexSettingsMu.RUnlock()
+	state := "active"
+	if s.indexSettingsFencePending {
+		state = "pending"
+	}
+	if s.indexSettingsError != "" {
+		state = "error"
+	}
+	return map[string]any{"configured_revision": strconv.FormatUint(s.indexSettings.revision, 10), "active_revision": strconv.FormatUint(s.indexActiveSettings.revision, 10), "application_epoch": strconv.FormatUint(s.indexApplicationEpoch, 10), "worker_incarnation": s.indexWorkerIncarnation, "synchronization_state": state, "synchronization_error": s.indexSettingsError, "configured_budget_bytes": s.indexSettings.maxBytes}
 }
 
 func (s *server) finderSearchOptions(root, cursor string, indexedOnly bool) finder.SearchOptions {
@@ -184,19 +306,22 @@ func (s *server) finderSearchOptions(root, cursor string, indexedOnly bool) find
 	absolute = filepath.Clean(absolute)
 	s.indexSettingsMu.RLock()
 	settings := s.indexSettings
+	active := s.indexActiveSettings
+	pendingUnsafe := s.indexSettingsFencePending && !s.indexSettingsFencePreserveSnapshots
 	s.indexSettingsMu.RUnlock()
-	for _, configured := range settings.roots {
-		relative, relErr := filepath.Rel(configured, absolute)
-		if relErr == nil && (relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))) {
-			options.Indexed = true
-			options.MaxFiles = min(settings.maxFiles, settings.persistFiles)
-			options.MaxBytes = settings.maxBytes
-			options.RefreshSec = settings.refreshSecs
-			options.ExcludeDirs = append([]string(nil), settings.excludeDirs...)
-			options.ExcludePaths = append([]string(nil), settings.excludePaths...)
-			options.SettingsRevision = settings.revision
-			break
-		}
+	if pendingUnsafe && active.revision != 0 && reflect.DeepEqual(active.excludeDirs, settings.excludeDirs) && reflect.DeepEqual(active.excludePaths, settings.excludePaths) && finder.SearchRootConfigured(active.roots, absolute) && finder.SearchRootConfigured(settings.roots, absolute) {
+		settings = active
+		pendingUnsafe = false
+	}
+	options.ExcludeDirs = append([]string(nil), settings.excludeDirs...)
+	options.ExcludePaths = append([]string(nil), settings.excludePaths...)
+	if pendingUnsafe {
+		options.IndexedOnly = true
+	}
+	if finder.SearchRootConfigured(settings.roots, absolute) {
+		options.Indexed = true
+		options.MaxFiles, options.MaxBytes, options.RefreshSec = settings.maxFiles, settings.maxBytes, settings.refreshSecs
+		options.SettingsRevision = settings.revision
 	}
 	return options
 }

@@ -995,7 +995,7 @@ function compactElapsedDurationText(seconds) {
 }
 
 function compactRelativeFileTimeText(unit, countText) {
-  return tPlural(`relative.compact.${unit}`, Number(countText));
+  return tPlural(unit === 'hour' ? 'relative.hour' : `relative.compact.${unit}`, Number(countText));
 }
 
 function sessionFileRelativeTimeText(mtime, nowSeconds = fileTreeRecencyNowMs() / 1000) {
@@ -1053,13 +1053,36 @@ function sessionFileDisplayTimeTextForEntry(entry, options = {}) {
   return sessionFileDisplayTimeText(entry?.mtime, {...options, placeholderForMissingTime: entry?.changedFileMissingTime === true});
 }
 
+function sessionFileLineCountUnit(added, removed) {
+  const largest = Math.max(Number.isFinite(added) ? added : 0, Number.isFinite(removed) ? removed : 0);
+  if (largest >= 999_500) return 'M';
+  if (largest >= 200_000) return 'K';
+  return '';
+}
+
+function sessionFileLineCountText(count, unit) {
+  if (unit === 'K') return count < 1_000 ? '<1K' : `${Math.round(count / 1_000)}K`;
+  if (unit === 'M') {
+    const millions = Math.round(count / 100_000) / 10;
+    return millions === 0 ? '<0.1M' : `${Number(millions.toFixed(1))}M`;
+  }
+  return String(count);
+}
+
+function sessionFileCountsAreTracked(item) {
+  return item?.diff_tracked === true;
+}
+
 function sessionFileDiffText(item) {
   if (item?.binary === true) return [{kind: 'file-label', text: t('gitDiff.binary')}];
   if (item?.counts_available === false) return [{kind: 'file-label', text: t('common.notAvailable')}];
+  const added = Number(item?.added);
+  const removed = Number(item?.removed);
+  const unit = sessionFileLineCountUnit(added, removed);
   const addKind = item?.diff_tracked === false ? 'add-neutral' : 'add';
   return [
-    Number.isFinite(Number(item?.added)) && Number(item.added) !== 0 ? {kind: addKind, text: `+${Number(item.added)}`} : null,
-    Number.isFinite(Number(item?.removed)) && Number(item.removed) !== 0 ? {kind: 'remove', text: `-${Number(item.removed)}`} : null,
+    Number.isFinite(added) && added !== 0 ? {kind: addKind, text: `+${sessionFileLineCountText(added, unit)}`} : null,
+    Number.isFinite(removed) && removed !== 0 ? {kind: 'remove', text: `-${sessionFileLineCountText(removed, unit)}`} : null,
   ].filter(Boolean);
 }
 
@@ -1219,7 +1242,7 @@ function* changeFileTotalsSteps(files) {
   let removed = 0;
   for (const item of Array.isArray(files) ? files : []) {
     yield;
-    if (item?.diff_tracked !== true) continue;
+    if (!sessionFileCountsAreTracked(item)) continue;
     const add = Number(item?.added);
     const remove = Number(item?.removed);
     if (Number.isFinite(add)) added += add;
@@ -1252,8 +1275,11 @@ function changesRepoTotalsHtml(repoInfo, entries) {
     return `<span class="changes-repo-totals" title="${esc(t('filetab.missingTitle'))}"><span class="changes-repo-count">${esc(tPlural('changes.fileCount', remembered))}</span></span>`;
   }
   const totals = changesRepoTotals(repoInfo, entries);
-  const title = `+${totals.added} -${totals.removed} ${tPlural('changes.fileCount', totals.count)}`;
-  return `<span class="changes-repo-totals" title="${esc(title)}"><span class="changes-diff-add">+${totals.added}</span><span class="changes-diff-remove">-${totals.removed}</span><span class="changes-repo-count">${totals.count}</span></span>`;
+  const diffParts = sessionFileDiffText(totals);
+  const diffText = diffParts.length ? diffParts.map(part => part.text).join(' ') : '+0 -0';
+  const diffHtml = diffParts.map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join('');
+  const title = `${diffText} ${tPlural('changes.fileCount', totals.count)}`;
+  return `<span class="changes-repo-totals" title="${esc(title)}">${diffHtml}<span class="changes-repo-count">${totals.count}</span></span>`;
 }
 
 function diffRefDisplayText(ref) {

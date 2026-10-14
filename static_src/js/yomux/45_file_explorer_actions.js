@@ -889,6 +889,9 @@ function finderTreeRowEntry(row, path) {
 // .file-tree-row). Dispatches the PURE fileExplorerKeyIntent map onto the live tree. Same surface gating
 // as the delete shortcut. Returns true if it handled the key.
 function handleFileExplorerArrowNav(event) {
+  // Tabber owns numeric session selection on its own panel. Let its bubbling handler
+  // resolve the window row and toggle that exact view instead of consuming the digit as Finder typeahead.
+  if (typeof tabberNumericSessionKeyEventIsOwned === 'function' && tabberNumericSessionKeyEventIsOwned(event)) return false;
   const intent = fileExplorerKeyIntent(event.key, {shift: event.shiftKey, mod: event.metaKey || event.ctrlKey, alt: event.altKey});
   if (!intent) return false;
   if (!fileExplorerKeyboardEventAllowsAction(event)) return false;
@@ -1572,7 +1575,12 @@ function replaceSharedImageViewerPath(path) {
 }
 
 function syncFileLayoutItems() {
+  const previousItems = new Set(layoutItems.filter(item => !isTmuxSession(item)));
   layoutItems = computeLayoutItems();
+  const registeredItems = layoutItems.filter(item => !isTmuxSession(item));
+  if (panelNodes.has(tabberItemId) && (previousItems.size !== registeredItems.length || registeredItems.some(item => !previousItems.has(item)))) {
+    scheduleTabberTreeLayoutStateSync({refreshTree: true});
+  }
 }
 
 function showFileOpenError(path, message) {
@@ -3083,7 +3091,9 @@ function transcriptContextWatchRequests() {
 function clientServerWatchState() {
   if (document.visibilityState === 'hidden') {
     return {
+      client_id: String(browserClientId || ''),
       roots: [],
+      search_roots: [],
       root_surfaces_version: clientServerWatchRootSurfacesVersion,
       root_surfaces: [],
       files: [],
@@ -3099,6 +3109,7 @@ function clientServerWatchState() {
     // server unions simultaneous tabs and releases this descriptor on SSE close.
     client_id: String(browserClientId || ''),
     roots: rootDescriptor.roots,
+    search_roots: commandPaletteState.node && commandPaletteState.node.hidden === false ? Array.from(fileQuickOpenState.deltaRoots.keys()) : [],
     root_surfaces_version: clientServerWatchRootSurfacesVersion,
     root_surfaces: rootDescriptor.rootSurfaces,
     files: visibleFileEditorWatchFiles(),
@@ -3154,6 +3165,7 @@ function serverWatchRootsForceRequestCompleted(signature, options = {}) {
 }
 
 function syncServerWatchRootsNow(options = {}) {
+  syncFileIndexStatusPollInterval();
   if (serverWatchRootsState.retired) return null;
   if (readOnlyMode || (!clientPushCanSupplyData() && options.deactivate !== true)) return;
   const state = clientServerWatchState();
@@ -3378,6 +3390,10 @@ function largestPaneSlotForFileEditor(exclude = new Set()) {
 async function openFileEditorPane(path, options = {}) {
   const item = options.item || fileEditorItemFor(path);
   syncFileLayoutItems();
+  if (!tabberIsAdvanced()) {
+    if (itemInLayout(item)) return activatePaneTab(slotForItem(item), item, {userInitiated: true});
+    return toggleTabberNormalPane(item);
+  }
   compactCurrentLayoutSlots({focusSession: item});
   renderSessionButtons();
   const existingSlot = slotForSession(item);
@@ -4464,6 +4480,11 @@ function historicalFileReturnItem(item, slots = layoutSlots) {
 
 function closeFileTab(path, options = {}) {
   return removeOpenFile(path, options);
+}
+
+function closeLayoutTabItem(item, options = {}) {
+  if (isFileEditorItem(item)) return closeFileTab(fileItemPath(item), {...options, item});
+  return removeSessionFromLayout(item);
 }
 
 function layoutWithReplacedItem(oldItem, newItem) {

@@ -415,6 +415,39 @@ function dropSuggestionIndexFromKeyEvent(event) {
   return -1;
 }
 
+function positionTerminalDropSuggestions(node, anchorX, anchorY) {
+  const viewport = appViewport();
+  const rect = node.getBoundingClientRect();
+  const maxLeft = Math.max(8, viewport.width - rect.width - 8);
+  const maxTop = Math.max(8, viewport.height - rect.height - 8);
+  const clamp = (value, max) => Math.max(8, Math.min(Number(value) || 8, max));
+  const targetLeft = clamp(anchorX, maxLeft);
+  const targetTop = clamp(anchorY, maxTop);
+  const candidates = [
+    [targetLeft, targetTop],
+    [targetLeft - rect.width - 12, targetTop],
+    [targetLeft, targetTop - rect.height - 12],
+    [targetLeft - rect.width - 12, targetTop - rect.height - 12],
+    [targetLeft + 12, targetTop],
+    [targetLeft, targetTop + 12],
+    [8, 8],
+    [maxLeft, 8],
+    [8, maxTop],
+    [maxLeft, maxTop],
+  ].map(([left, top]) => ({left: clamp(left, maxLeft), top: clamp(top, maxTop)}));
+  const uniqueCandidates = candidates.filter((candidate, index) => candidates.findIndex(other => other.left === candidate.left && other.top === candidate.top) === index);
+  const obstacles = Array.from(document.querySelectorAll('.attention-alerts .toast, .panel-toast-stack .toast:not([hidden])'))
+    .filter(toast => toast !== node && toast.getClientRects().length && getComputedStyle(toast).visibility !== 'hidden')
+    .map(toast => toast.getBoundingClientRect());
+  const fits = candidate => !obstacles.some(obstacle =>
+    candidate.left < obstacle.right && candidate.left + rect.width > obstacle.left
+      && candidate.top < obstacle.bottom && candidate.top + rect.height > obstacle.top
+  );
+  const position = uniqueCandidates.find(fits) || uniqueCandidates[0];
+  node.style.left = `${Math.round(position.left)}px`;
+  node.style.top = `${Math.round(position.top)}px`;
+}
+
 function showTerminalDropSuggestions(session, payload, x, y, options = {}) {
   dismissTerminalDropSuggestions();
   const paths = Array.isArray(payload?.paths) ? payload.paths.filter(Boolean) : [payload?.path].filter(Boolean);
@@ -453,21 +486,18 @@ function showTerminalDropSuggestions(session, payload, x, y, options = {}) {
     node.appendChild(item);
   });
   document.body.appendChild(node);
-  // Anchor at the drop point when there is one; for paste (no drop point) anchor near the session's
-  // terminal, falling back to the viewport so the overlay is always on-screen.
+  // Uploaded files open their action chooser at the pane's top-left, while ordinary drops stay
+  // beside the pointer. Paste has no pointer location, so it uses the same pane anchor.
   let anchorX = x;
   let anchorY = y;
-  if (!Number.isFinite(anchorX) || !Number.isFinite(anchorY)) {
+  if (options.anchorToPane === true || !Number.isFinite(anchorX) || !Number.isFinite(anchorY)) {
     const host = document.getElementById(terminalDomId(session)) || document.getElementById(panelDomId(session));
     const hostRect = host?.getBoundingClientRect?.();
     const fallbackViewport = appViewport();
-    anchorX = hostRect ? hostRect.left + 16 : fallbackViewport.width / 2;
-    anchorY = hostRect ? hostRect.top + 16 : fallbackViewport.height / 3;
+    anchorX = hostRect ? hostRect.left + 8 : fallbackViewport.width / 2;
+    anchorY = hostRect ? hostRect.top + 8 : fallbackViewport.height / 3;
   }
-  const rect = node.getBoundingClientRect();
-  const viewport = appViewport();
-  node.style.left = `${Math.round(Math.max(8, Math.min(anchorX, viewport.width - rect.width - 8)))}px`;
-  node.style.top = `${Math.round(Math.max(8, Math.min(anchorY, viewport.height - rect.height - 8)))}px`;
+  positionTerminalDropSuggestions(node, anchorX, anchorY);
 
   const onKeyDown = event => {
     if (event.key === 'Escape') {

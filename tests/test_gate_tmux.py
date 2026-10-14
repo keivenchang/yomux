@@ -1723,25 +1723,48 @@ def test_s1_certification_qualification_selects_the_statistic_and_never_widens_t
 
 def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="plain", profile=False):
     """Trusted Chromium gestures measure the real Go/PTY/xterm path, with no operator state."""
-    runtime = isolated_dev_server_factory("activation", session_count=3 if mode == "split" else 2)
+    runtime = isolated_dev_server_factory("activation", session_count=3 if mode in ("split", "tabber") else 2)
     first, second = runtime.tmux.sessions[:2]
-    for session in (first, second):
+    third = runtime.tmux.sessions[2] if mode == "tabber" else ""
+    for session in runtime.tmux.sessions[:3] if mode == "tabber" else (first, second):
         _start_marker_echo_process(runtime, session, pressure=mode == "busy")
-    query = urlencode({"sessions": f"{first},{second}", "layout": "left", "tabs": f"left:{first},{second}"})
+    sessions = (first, second, third) if third else (first, second)
+    initial_tabs = sessions if mode == "tabber" else (first, second)
+    query = urlencode({"sessions": ",".join(sessions), "layout": "left", "tabs": f"left:{','.join(initial_tabs)}"})
     try:
         navigation_started = time.monotonic()
         browser.get(f"{runtime.base_url}/?{query}")
         assert_live_runtime_boot_healthy(browser, "go-activation", timeout=20)
+        # These native-tab fixtures start in Advanced; the Tabber case switches through its UI below.
+        browser.execute_script("setTabberMode('advanced'); history.replaceState(null, '', arguments[0]); applyLayoutSlots(initialLayoutSlots(), {prune:false});", f"/?{query}")
+        for close in browser.find_elements("css selector", "[data-toast-close]"):
+            if close.is_displayed():
+                close.click()
         cold_started = time.monotonic()
-        for session in (second, first):
-            click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{session}"]')
+        for session in sessions:
+            selector = f'.dockview-pane-tab[data-pane-tab="{session}"]'
+            try:
+                click_visible_selector(browser, selector)
+            except AssertionError as error:
+                toast = browser.execute_script("return Array.from(document.querySelectorAll('.toast-title')).map(node => node.closest('.toast')?.innerText || node.textContent);")
+                raise AssertionError(f"activation setup tab {session} was obstructed by toast: {toast}") from error
             WebDriverWait(browser, 20).until(lambda driver: driver.execute_script(
                 "const item=terminals.get(arguments[0]); return item?.terminalOutputSeen && item.term?.onRender && item.container.querySelector('.xterm-screen');", session))
         cold_connection_seconds = time.monotonic() - navigation_started
         if mode == "split":
             browser.execute_script("const slots=emptyLayoutSlots(); slots[layoutTreeKey]=splitNode('row',leafNode('left'),leafNode('right'),0.5); slots.left=paneStateWithTabs(arguments[0],arguments[0][0]); slots.right=paneStateWithTabs([arguments[1]],arguments[1]); applyLayoutSlots(slots,{prune:false});", [first, second], runtime.tmux.sessions[2])
         elif mode == "tabber":
-            browser.execute_async_script("const done=arguments[arguments.length-1]; openTabberActivityOverview().then(() => done(true), error => done({error:String(error)}));")
+            browser.execute_async_script("""
+              const done = arguments[arguments.length - 1], initial = arguments[0];
+              (async () => {
+                await openTabberActivityOverview();
+                const advanced = document.querySelector('[data-tabber-advanced]');
+                if (advanced.checked) advanced.click();
+                storeTabberNormalSelections([initial]);
+                await applyTabberNormalSelections(initial);
+                done(true);
+              })().catch(error => done({error:String(error)}));
+            """, first)
         elif mode == "busy":
             browser.execute_script("""
               const fetch = window.fetch.bind(window);
@@ -1756,22 +1779,52 @@ def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="
             """)
             WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("return window.__activationHeldMetadata.length > 0;"))
         # Layout changes are cold work; a warm gesture starts only after the real fit/paint owners settle.
-        for session in (second, first):
-            click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{session}"]')
-            WebDriverWait(browser, 10, poll_frequency=0.01).until(lambda driver: driver.execute_script(
-                "const item=terminals.get(arguments[0]); return item && !item.fitFrame && !item.refreshPending && !dockviewLayoutState.tabActivationPerf && terminalFitIsUnchanged(item,estimateTerminalSize(item.container,item.term));", session))
+        warm_sessions = (second, third, first) if mode == "tabber" else (second, first)
+        for session in warm_sessions:
+            selector = (f'#panel-__tabber__ .file-tree-row[data-tabber-type="normal"][data-tabber-session="{session}"]'
+                        if mode == "tabber" else f'.dockview-pane-tab[data-pane-tab="{session}"]')
+            click_visible_selector(browser, selector)
+            try:
+                WebDriverWait(browser, 10, poll_frequency=0.01).until(lambda driver: driver.execute_script(
+                    "const item=terminals.get(arguments[0]); return item && !item.fitFrame && !item.refreshPending && !dockviewLayoutState.tabActivationPerf && terminalFitIsUnchanged(item,estimateTerminalSize(item.container,item.term));", session))
+            except TimeoutException as error:
+                state = browser.execute_script("""
+                  const item = terminals.get(arguments[0]);
+                      return {exists: Boolean(item), focusedTerminal, focusedPanelItem, activeItems: activePaneItems(),
+                        sessions: [...sessions], visibleSessions: [...visibleSessions], maxSessionTabs, layoutItems: [...layoutItems],
+                        tabberNormalSelections: [...(tabberNormalSelections || [])],
+                    fitFrame: Boolean(item?.fitFrame), refreshPending: Boolean(item?.refreshPending),
+                    tabberRows: Array.from(document.querySelectorAll('#panel-__tabber__ [data-tabber-type="normal"]')).map(row => ({session: row.dataset.tabberSession, active: row.className})),
+                    size: item && estimateTerminalSize(item.container, item.term),
+                    fitUnchanged: item && terminalFitIsUnchanged(item, estimateTerminalSize(item.container, item.term))};
+                """, session)
+                raise AssertionError(f"Tabber activation warmup did not settle for {session}: {state}") from error
+            if mode == "tabber":
+                click_visible_selector(browser, f'#term-{session} .xterm-screen')
         cold_seconds = time.monotonic() - cold_started
         browser.execute_async_script("const done=arguments[arguments.length-1]; requestAnimationFrame(() => requestAnimationFrame(() => done(true)));")
         browser.execute_script(
             r"""
-            const probe = window.__activationProbe = {samples: [], disposables: [], originals: [], echoes: new Map()};
+            const probe = window.__activationProbe = {samples: [], disposables: [], originals: [], echoes: new Map(), metadataTabStripRefreshes: [], metadataTabberTreeRefreshes: []};
             const now = () => performance.now();
-            for (const name of ['applyLayoutSlots', 'refreshTabberPanels', 'syncTabberTreeActiveSelection', 'syncTabberTreeLayoutState', 'refreshTerminal', 'dockviewRefreshTabs', 'dockviewBeginTabPointerDrag', 'captureDockviewPaneBeforeDetach', 'capturePaneViewState', 'dockviewCommitPanelActivation', 'activateTab', 'setFocusedTerminal', 'focusTerminalDom', 'closeOtherSessionPopovers', 'dockviewRootBoundaryEdgesAtPoint']) {
+            for (const name of ['applyLayoutSlots', 'refreshTabberPanels', 'syncTabberTreeActiveSelection', 'syncTabberTreeLayoutState', 'scheduleTabberTreeLayoutStateSync', 'renderPaneTabStrips', 'refreshTerminal', 'dockviewRefreshTabs', 'dockviewBeginTabPointerDrag', 'captureDockviewPaneBeforeDetach', 'capturePaneViewState', 'dockviewCommitPanelActivation', 'activateTab', 'setFocusedTerminal', 'focusTerminalDom', 'closeOtherSessionPopovers', 'dockviewRootBoundaryEdgesAtPoint']) {
               const original = eval(name);
               const wrapper = (...args) => {
                 const started = now();
+                const metadataTabStripRefresh = name === 'renderPaneTabStrips' && args[0]?.deferDuringTerminalActivation === true;
+                const metadataTabberTreeRefresh = name === 'scheduleTabberTreeLayoutStateSync' && args[0]?.refreshTree === true;
+                const activationPending = Boolean(dockviewLayoutState.tabActivationPerf);
                 try { return original(...args); }
-                finally { const sample=probe.samples.at(-1); if (sample) (sample.work ||= []).push({name, at:started, ms:now()-started}); }
+                finally {
+                  const elapsed = now()-started;
+                  if (metadataTabStripRefresh) probe.metadataTabStripRefreshes.push({at: started, elapsedMs: elapsed, activationPending});
+                  if (metadataTabberTreeRefresh) probe.metadataTabberTreeRefreshes.push({at: started, elapsedMs: elapsed, activationPending});
+                  const sample=probe.samples.at(-1);
+                  if (sample) {
+                    (sample.work ||= []).push({name, at:started, ms:elapsed});
+                    if (name === 'dockviewRefreshTabs') (sample.refreshStacks ||= []).push(new Error().stack);
+                  }
+                }
               };
               eval(`${name} = wrapper`);
               probe.originals.push(() => { eval(`${name} = original`); });
@@ -1816,13 +1869,13 @@ def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="
               const dockTab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(session)}"]`);
               if (dockTab) return dockTab.classList.contains('active') && dockTab.closest('.dv-tab')?.classList.contains('dv-active-tab') === true;
               const row = document.querySelector(`.file-tree-row[data-tabber-session="${CSS.escape(session)}"]`);
-              return row?.classList.contains('tabber-active-session') === true && row.querySelector('.tabber-session-tab')?.classList.contains('active') === true;
+              return row?.classList.contains('tabber-active-normal') === true || (row?.classList.contains('tabber-active-session') === true && row.querySelector('.tabber-session-tab')?.classList.contains('active') === true);
             };
             const renderedPreviousHighlights = session => {
               const dockTab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(session)}"]`);
               if (dockTab) return [...(dockTab.closest('.dv-groupview')?.querySelectorAll('.dockview-pane-tab.active') || [])]
                 .map(tab => tab.dataset.paneTab).filter(item => item && item !== session);
-              return [...document.querySelectorAll('.file-tree-row.tabber-active-session')]
+              return [...document.querySelectorAll('.file-tree-row.tabber-active-session, .file-tree-row.tabber-active-normal')]
                 .map(row => row.dataset.tabberSession).filter(item => item && item !== session);
             };
             const observeHighlight = sample => requestAnimationFrame(() => {
@@ -1839,14 +1892,19 @@ def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="
               const entry = [...terminals].find(([, item]) => item.container.contains(event.target));
               const session = tab?.dataset.paneTab || tab?.dataset.tabberSession || entry?.[0];
               if (!session || !arguments[0].includes(session)) return;
+              const previousHighlights = renderedPreviousHighlights(session);
+              const expectedInactive = arguments[1] === 'tabber'
+                ? (tabberNormalSelections?.includes(session) ? [] : [...(tabberNormalSelections || [])])
+                : previousHighlights;
               const sample = {session, body: !tab, trusted: event.isTrusted, eventAt: event.timeStamp,
                 activationAt: event.timeStamp, releaseActivation: Boolean(event.target.closest('.file-tree-row[data-tabber-type="session"]')),
-                handlerAt: now(), previousHighlights: renderedPreviousHighlights(session), resizes: 0, refreshes: 0};
+                handlerAt: now(), previousHighlights: expectedInactive.filter(item => previousHighlights.includes(item)), resizes: 0, refreshes: 0};
               probe.samples.push(sample);
+              // Normal rows consume propagation; observe completion after the synchronous event dispatch.
+              queueMicrotask(() => { sample.handlerEndAt = now(); });
               if (sample.body && document.activeElement === terminals.get(session)?.term.textarea) sample.focusAt = now();
               if (!sample.releaseActivation) observeHighlight(sample);
             };
-            const handled = () => { const sample = probe.samples.at(-1); if (sample) sample.handlerEndAt = now(); };
             const focused = event => {
               const sample = probe.samples.at(-1);
               if (sample && event.target === terminals.get(sample.session)?.term.textarea) sample.focusAt ??= now();
@@ -1869,30 +1927,49 @@ def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="
             };
             document.addEventListener('pointerdown', pointer, true);
             document.addEventListener('pointerup', released, true);
-            window.addEventListener('pointerdown', handled);
             document.addEventListener('focusin', focused, true);
             document.addEventListener('keydown', key, true);
             probe.dispose = () => {
               document.removeEventListener('pointerdown', pointer, true);
               document.removeEventListener('pointerup', released, true);
-              window.removeEventListener('pointerdown', handled);
               document.removeEventListener('focusin', focused, true);
               document.removeEventListener('keydown', key, true);
               probe.disposables.forEach(d => d.dispose()); probe.originals.forEach(restore => restore());
             };
-            """, [first, second])
+        """, sessions, mode)
         if profile:
             browser.execute_cdp_cmd("Profiler.enable", {})
             browser.execute_cdp_cmd("Profiler.start", {})
+        expected_normal_selections = [first] if mode == "tabber" else []
         for index in range(40):
-            session = second if (index // 2) % 2 == 0 else first
+            session = (second, third, first)[(index // 2) % 3] if mode == "tabber" else (second if (index // 2) % 2 == 0 else first)
             selector = (f'#term-{session} .xterm-screen' if index % 2 else
-                        f'#panel-__tabber__ .file-tree-row[data-tabber-type="session"][data-tabber-session="{session}"] .file-tree-name' if mode == 'tabber' else
+                        f'#panel-__tabber__ .file-tree-row[data-tabber-type="normal"][data-tabber-session="{session}"]' if mode == 'tabber' else
                         f'.dockview-pane-tab[data-pane-tab="{session}"]')
             click_visible_selector(browser, selector)
+            if mode == "tabber" and index % 2 == 0:
+                expected_normal_selections = [] if session in expected_normal_selections else [session]
             _send_native_key(browser, "a")
-            WebDriverWait(browser, 5, poll_frequency=0.01).until(lambda driver: driver.execute_script(
-                "return Boolean(window.__activationProbe.samples.at(-1)?.echoAt);"))
+            try:
+                WebDriverWait(browser, 5, poll_frequency=0.01).until(lambda driver: driver.execute_script(
+                    "return Boolean(window.__activationProbe.samples.at(-1)?.echoAt);"))
+            except TimeoutException as error:
+                state = browser.execute_script("""
+                  const sample = window.__activationProbe.samples.at(-1), item = sample && terminals.get(sample.session);
+                  const buffer = item?.term?.buffer?.active;
+                  return {sample, focusedTerminal, focusedPanelItem, activeItems: activePaneItems(),
+                    activeElement: document.activeElement?.className || document.activeElement?.id || document.activeElement?.tagName,
+                    terminalText: item && Array.from({length:item.term.rows}, (_, index) => buffer.getLine(buffer.viewportY + index)?.translateToString(true) || '').join('\\n')};
+                """)
+                raise AssertionError(f"Tabber activation did not produce the expected terminal echo: {state}") from error
+            if mode == "tabber":
+                layout_state = browser.execute_script("""
+                  return {selected: [...(tabberNormalSelections || [])], paneSessions: [...new Set(paneItems().filter(isTmuxSession))],
+                    activeSessions: activePaneItems().filter(isTmuxSession)};
+                """)
+                assert layout_state["selected"] == expected_normal_selections, layout_state
+                assert len(layout_state["paneSessions"]) <= 1, layout_state
+                assert set(layout_state["activeSessions"]) == set(expected_normal_selections), layout_state
             # Cross the ownership scheduler boundary, rather than a fixed sleep.
             browser.execute_async_script("const done=arguments[arguments.length-1]; requestAnimationFrame(() => requestAnimationFrame(() => done(true)));")
         if profile:
@@ -1906,16 +1983,30 @@ def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="
                 durations[name] = durations.get(name, 0) + duration / 1000
             print({"activation_cpu_ms": sorted(durations.items(), key=lambda entry: entry[1], reverse=True)[:30], "profile": str(profile_path)})
         samples = browser.execute_script("return window.__activationProbe.samples;")
-        print({"activation_samples": samples})
+        highlight_failures = [
+            {key: sample.get(key) for key in ("session", "body", "previousHighlights", "highlightReadyAt", "highlightAt", "focusAt")}
+            for sample in samples if sample.get("highlightAt") is None
+        ]
         assert len(samples) == 40, samples
-        assert all(s["trusted"] and s["keyTrusted"] and s["focusAt"] is not None and s["highlightAt"] is not None for s in samples), samples
+        assert all(s["trusted"] and s["keyTrusted"] and s["focusAt"] is not None for s in samples), samples
+        assert not highlight_failures, highlight_failures
         tab_samples = [s for s in samples if not s["body"]]
         body_samples = [s for s in samples if s["body"]]
         counts = {"tab": len(tab_samples), "body": len(body_samples)}
         assert counts == {"tab": 20, "body": 20}, counts
         assert all(s.get("paintAt") for s in tab_samples), tab_samples
+        metadata_tab_strip_refreshes = browser.execute_script("return window.__activationProbe.metadataTabStripRefreshes;")
+        metadata_tabber_tree_refreshes = browser.execute_script("return window.__activationProbe.metadataTabberTreeRefreshes;")
+        if mode == "tabber":
+            assert all(not refresh["activationPending"] or refresh["elapsedMs"] < 2 for refresh in metadata_tab_strip_refreshes), metadata_tab_strip_refreshes
+            assert all(not refresh["activationPending"] or refresh["elapsedMs"] < 2 for refresh in metadata_tabber_tree_refreshes), metadata_tabber_tree_refreshes
+            for refreshes in (metadata_tab_strip_refreshes, metadata_tabber_tree_refreshes):
+                deferred = [refresh for refresh in refreshes if refresh["activationPending"]]
+                flushed = [refresh for refresh in refreshes if not refresh["activationPending"]]
+                assert not deferred or any(refresh["at"] > deferred[0]["at"] for refresh in flushed), refreshes
         metrics = (("queue", samples, "eventAt", "handlerAt"), ("handler", samples, "handlerAt", "handlerEndAt"),
-                   ("highlight", tab_samples, "activationAt", "highlightAt"), ("focus", tab_samples, "activationAt", "focusAt"),
+                   ("highlight", tab_samples, "activationAt", "highlightAt"),
+                   ("highlightReady", tab_samples, "activationAt", "highlightReadyAt"), ("focus", tab_samples, "activationAt", "focusAt"),
                    ("input", samples, "keyAt", "sentAt"), ("echo", tab_samples, "keyAt", "echoAt"),
                    ("bodyHighlight", body_samples, "activationAt", "highlightAt"), ("bodyFocus", body_samples, "activationAt", "focusAt"),
                    ("bodyEcho", body_samples, "keyAt", "echoAt"), ("paint", tab_samples, "activationAt", "paintAt"))
@@ -1925,8 +2016,8 @@ def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="
         maxima = {name: max(values) for name, values in delays.items()}
         trace_path = latency_calibration.write_latency_evidence(
             nodeid=f"go-activation-{mode}", label=f"activation-{mode}",
-            payload={"samples": samples, "summary": summary, "maxima": maxima, "counts": counts, "cold_navigation_and_terminals_ready_seconds": cold_connection_seconds, "cold_warmup_seconds": cold_seconds})
-        print({"go_activation_p95_ms": summary, "maxima": maxima, "counts": counts, "mode": mode, "cold_navigation_and_terminals_ready_seconds": cold_connection_seconds, "cold_warmup_seconds": cold_seconds, "samples": samples, "trace": str(trace_path)})
+            payload={"samples": samples, "summary": summary, "maxima": maxima, "counts": counts, "cold_navigation_and_terminals_ready_seconds": cold_connection_seconds, "cold_warmup_seconds": cold_seconds, "metadata_tab_strip_refreshes": metadata_tab_strip_refreshes, "metadata_tabber_tree_refreshes": metadata_tabber_tree_refreshes})
+        print({"go_activation_p95_ms": summary, "maxima": maxima, "counts": counts, "mode": mode, "cold_navigation_and_terminals_ready_seconds": cold_connection_seconds, "cold_warmup_seconds": cold_seconds, "metadata_tab_strip_refreshes": metadata_tab_strip_refreshes, "metadata_tabber_tree_refreshes": metadata_tabber_tree_refreshes, "samples": samples, "trace": str(trace_path)})
         assert all(s["resizes"] == 1 for s in samples), samples
         assert all(s["refreshes"] == 0 for s in samples if s["body"]), samples
         assert all(s["refreshes"] <= 1 for s in samples if not s["body"]), samples
@@ -1935,7 +2026,7 @@ def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="
     finally:
         if profile:
             browser.execute_cdp_cmd("Profiler.disable", {})
-        browser.execute_script("window.__activationProbe?.dispose(); window.__activationRestoreFetch?.();")
+        browser.execute_script("if (typeof window.__activationProbe?.dispose === 'function') window.__activationProbe.dispose(); window.__activationRestoreFetch?.();")
         browser.get("about:blank")
 
 
@@ -1967,12 +2058,27 @@ def test_go_competing_clients_and_rapid_switch_preserve_draft_viewport_and_panel
     runtime = isolated_dev_server_factory("competing-activation", session_count=2)
     first, second = runtime.tmux.sessions
     query = urlencode({"sessions": f"{first},{second}", "layout": "left", "tabs": f"left:{first},{second}"})
+    def select_tab(session):
+        # Async shell notifications can cover the header after the initial boot dismissal.
+        for close in browser.find_elements("css selector", "[data-toast-close]"):
+            if close.is_displayed():
+                close.click()
+        click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{session}"]')
+
     primary = browser.current_window_handle
     browser.get(f"{runtime.base_url}/?{query}")
     try:
         assert_live_runtime_boot_healthy(browser, "go-competing", timeout=20)
+        browser.execute_script("""
+          const sessions = Array.from(arguments);
+          setTabberMode('advanced');
+          void applyLayoutSlots(layoutSlotsForItems(sessions, 'split'), {prune:false});
+        """, first, second)
+        WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
+            "return tabberIsAdvanced() && [arguments[0], arguments[1]].every(session => document.querySelector(`.dockview-pane-tab[data-pane-tab=\"${CSS.escape(session)}\"]`));",
+            first, second))
         for session in (second, first):
-            click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{session}"]')
+            select_tab(session)
             WebDriverWait(browser, 20).until(lambda driver: driver.execute_script(
                 "return terminals.get(arguments[0])?.terminalOutputSeen && terminals.get(arguments[0]).socket.readyState === WebSocket.OPEN;", session))
         browser.execute_script("window.__activationOriginalItem=terminals.get(arguments[0]); window.__activationOriginalPanel=panelNodes.get(arguments[0]);", first)
@@ -1980,7 +2086,7 @@ def test_go_competing_clients_and_rapid_switch_preserve_draft_viewport_and_panel
         draft = "printf 'activation-draft-preserved\\n'"
         browser.switch_to.active_element.send_keys(draft)
         for session in (second, first, second, first):
-            click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{session}"]')
+            select_tab(session)
         browser.switch_to.active_element.send_keys("\n")
         WebDriverWait(browser, 10).until(lambda _driver: "activation-draft-preserved" in run_isolated_tmux(
             runtime.tmux, "capture-pane", "-p", "-t", f"{first}:").stdout.splitlines())
@@ -1998,7 +2104,7 @@ def test_go_competing_clients_and_rapid_switch_preserve_draft_viewport_and_panel
             "const term=terminals.get(arguments[0]).term; return Array.from({length:term.rows},(_,i)=>term.buffer.active.getLine(i)?.translateToString()).join('\\n').includes('activation-draft-preserved');", first))
         browser.execute_script("const term=terminals.get(arguments[0]).term; window.__activationScroll=term.buffer.active.viewportY; window.__activationScreen=Array.from({length:term.rows},(_,i)=>term.buffer.active.getLine(term.buffer.active.viewportY+i)?.translateToString()).join('\\n');", first)
         for session in (second, first):
-            click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{session}"]')
+            select_tab(session)
         assert browser.execute_script("return terminals.get(arguments[0]) === window.__activationOriginalItem && panelNodes.get(arguments[0]) === window.__activationOriginalPanel && terminals.get(arguments[0]).term.buffer.active.viewportY === window.__activationScroll;", first)
         WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("const term=terminals.get(arguments[0]).term; return Array.from({length:term.rows-1},(_,i)=>term.buffer.active.getLine(term.buffer.active.viewportY+i)?.translateToString()).join('\\n') === window.__activationScreen.split('\\n').slice(0,-1).join('\\n');", first))
         result = run_isolated_tmux(runtime.tmux, "send-keys", "-t", f"{first}:", "-X", "cancel")
@@ -2030,11 +2136,17 @@ def test_go_competing_clients_and_rapid_switch_preserve_draft_viewport_and_panel
         # Hold a real xterm parse completion across replacement; it must not repaint the retired item.
         browser.execute_script("""
           const session=arguments[0], old=terminals.get(session), write=old.term.write.bind(old.term);
-          window.__retiredActivationCallbacks=[]; window.__retiredActivationCallbackRan=false;
-          old.term.write=(data, callback)=>write(data, () => { if (callback) window.__retiredActivationCallbacks.push(callback); });
+          window.__retiredActivationCallbacks=[]; window.__retiredActivationCallbackRan=false; window.__retiredActivationFenceCaptured=false;
+          old.term.write=(data, callback)=>write(data, () => {
+            if (callback) {
+              window.__retiredActivationCallbacks.push(callback);
+              if (data === '') window.__retiredActivationFenceCaptured=true;
+            }
+          });
+          writeTerminalOutput(session, old, '\u001b[0m');
           refreshTerminal(session, {afterParse:()=>{window.__retiredActivationCallbackRan=true;}});
         """, first)
-        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return window.__retiredActivationCallbacks.length > 0;"))
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return window.__retiredActivationFenceCaptured;"))
         browser.execute_script("closeTerminalItem(arguments[0], terminals.get(arguments[0])); startTerminal(arguments[0]); window.__retiredActivationCallbacks.splice(0).forEach(callback=>callback());", first)
         WebDriverWait(browser, 20).until(lambda driver: driver.execute_script("const item=terminals.get(arguments[0]); return item !== window.__activationOriginalItem && item?.terminalOutputSeen && item.socket.readyState === WebSocket.OPEN;", first))
         click_visible_selector(browser, f'#term-{first} .xterm-screen')

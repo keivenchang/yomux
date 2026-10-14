@@ -1201,7 +1201,7 @@ func readTranscriptTextForAgent(path string, agent map[string]any, lines int) (s
 	return text, nil, err
 }
 
-const liveSessionMetadataTmuxFormat = "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{pane_pid}\t#{pane_active}\t#{window_active}"
+const liveSessionMetadataTmuxFormat = "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{pane_pid}\t#{pane_active}\t#{window_active}\t#{window_id}\t#{@yomux_description}"
 
 const (
 	goTmuxSignalWindowFormat = "#{session_name}\t#{session_id}\t#{session_activity}\t#{session_last_attached}\t#{session_attached}\t#{session_attached_list}\t#{window_index}\t#{window_id}\t#{window_name}\t#{window_active}\t#{window_activity}\t#{window_activity_flag}\t#{window_bell_flag}\t#{window_silence_flag}\t#{window_active_clients}\t#{window_active_clients_list}\t#{window_panes}\t#{window_width}\t#{window_height}\t#{window_zoomed_flag}\t#{window_layout}\t#{window_visible_layout}"
@@ -1278,7 +1278,7 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 	agents := make([]map[string]any, 0)
 	windows := make(map[string]map[string]any)
 	var selected map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+	for _, line := range strings.Split(strings.Trim(string(output), "\r\n"), "\n") {
 		parts := splitTmuxFields(line)
 		if len(parts) < 11 || parts[0] != session {
 			continue
@@ -1294,6 +1294,9 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 			"command": parts[6], "active": active, "window_active": windowActive, "title": parts[7], "pid": pid,
 			"window_name": parts[2],
 		}
+		if len(parts) >= 12 {
+			pane["window_id"] = parts[11]
+		}
 		panes = append(panes, pane)
 		if windowActive && active {
 			selected = pane
@@ -1306,6 +1309,10 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 				"window": parts[1], "window_index": windowIndex, "window_name": parts[2],
 				"path": parts[5], "pane": parts[3], "pane_target": parts[4],
 			}
+			if len(parts) >= 13 {
+				windows[parts[1]]["window_id"] = parts[11]
+				tabberDescriptionFields(windows[parts[1]], parts[12])
+			}
 		}
 		kind, agentPID, agentCommand, agentExecutable := paneAgentProcessFromIndex(pid, parts[6], processIndex)
 		if kind == "" {
@@ -1315,6 +1322,16 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 		sessionID, transcript, resolvedCWD := agentTranscriptWithCommand(kind, agentPID, cwd, parts[7], agentCommand)
 		if resolvedCWD != "" {
 			cwd = resolvedCWD
+		}
+		if len(parts) >= 13 && parts[12] == "" && transcript != "" {
+			if description := tabberConversationDescription(kind, transcript, sessionID); description != "" {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				raw, saveErr := s.saveTabberDescription(ctx, parts[11], description, false)
+				cancel()
+				if saveErr == nil {
+					tabberDescriptionFields(windows[parts[1]], raw)
+				}
+			}
 		}
 		status := "idle"
 		queuedFollowupQuestion := false

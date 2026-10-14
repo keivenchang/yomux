@@ -1,3 +1,5 @@
+const rootCssLengthState = {absolutePixels: new Map()};
+
 const BROWSER_STORAGE_LEGACY_PREFIX = 'yolomux.';
 const BROWSER_STORAGE_PREFIX = 'yomux.';
 function browserStorageLegacyKey(key) {
@@ -88,7 +90,7 @@ function capabilityNameForRequest(url, options = {}) {
   if (pathname === '/api/rename-session') return 'session.rename.v1';
   if (pathname === '/api/session-metadata') return 'core.bootstrap.v1';
   if (pathname === '/api/transcripts') return 'core.bootstrap.v1';
-  if (pathname === '/api/activity' || pathname === '/api/activity-summary') return 'pane.tabber.v1';
+  if (pathname === '/api/activity' || pathname === '/api/activity-summary' || pathname === '/api/tabber-description' || pathname === '/api/tabber-view-session') return 'pane.tabber.v1';
   if (pathname === '/api/auto-approve') return 'yolo.auto-approve.v1';
   if (pathname === '/api/yolo-rules' || pathname.startsWith('/api/yolo-rules/')) return 'yolo.auto-approve.v1';
   if (pathname.startsWith('/api/tmux-') || pathname === '/api/transcript' || pathname === '/api/context' || pathname === '/api/context-items' || pathname === '/api/context-stream' || pathname === '/api/events') return 'terminal.status.v1';
@@ -220,6 +222,19 @@ const fileExplorerOpenIntentStorageKey = 'yomux.fileExplorerOpen.v1';
 const fileExplorerTabberCollapsedStorageKey = 'yomux.fileExplorer.tabberCollapsed.v1';
 const fileExplorerTabberExpandedStorageKey = 'yomux.fileExplorer.tabberExpanded.v1';
 const fileExplorerTabberLookbackHoursStorageKey = 'yomux.fileExplorer.tabberLookbackHours.v1';
+const tabberModeStorageKey = 'yomux.tabber.mode.v1';
+const tabberSidebarPreferenceStorageKey = 'yomux.tabber.sidebarVisible.v1';
+const tabberNormalSelectionsStorageKey = 'yomux.tabber.normalSelections.v1';
+const tabberViewSessionsStorageKey = 'yomux.tabber.viewSessions.v1';
+const tabberViewSessionPrefix = '__yomux_view_';
+const tabberNormalPointerPreviewState = {
+  preview: null,
+  frame: 0,
+  activationRevision: 0,
+  pendingWindowActivation: null,
+  defaultSelectionPending: false,
+  activityReady: false,
+};
 const legacyFileExplorerChangesHiddenStorageKey = 'yomux.fileExplorerChangesHidden';
 const changesFolderCollapsedStorageKey = 'yomux.modifiedFiles.folderCollapsed.v1';
 const changesRepoCollapsedStorageKey = 'yomux.modifiedFiles.repoCollapsed.v1';
@@ -787,6 +802,35 @@ let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
 let clientSettingsMetadataDeferred = clientSettingsPayload.deferred_metadata === true;
 let clientSettingsMetadataRefreshPromise = null;
 let clientSettingsMetadataRefreshTimer = null;
+const legacyTabberMode = storageGet(tabberModeStorageKey);
+const configuredTabberMode = clientSettings?.general?.default_tabber_mode
+  ?? clientSettingsDefaults?.general?.default_tabber_mode
+  ?? 'normal';
+let tabberModePreferenceNeedsMigration = clientSettingsPayload.tabber_mode_explicit === false
+  && configuredTabberMode === 'normal'
+  && legacyTabberMode === 'advanced';
+function consumeTabberModePreferenceMigration() {
+  const needsMigration = tabberModePreferenceNeedsMigration;
+  tabberModePreferenceNeedsMigration = false;
+  return needsMigration;
+}
+let tabberMode = tabberModePreferenceNeedsMigration ? 'advanced'
+  : normalizeTabberMode(configuredTabberMode);
+let tabberSidebarRequestedVisible = storageGet(tabberSidebarPreferenceStorageKey) !== 'false';
+let tabberSidebarVisible = tabberSidebarRequestedVisible;
+let tabberSidebarSinglePane = false;
+let tabberSidebarNarrowOverride = false;
+let tabberSidebarResizeObserver = null;
+let tabberSidebarResizeFrame = 0;
+let tabberNormalSelections = readTabberNormalSelections();
+const tabberViewSessions = new Map(Object.entries(readStoredJson(tabberViewSessionsStorageKey, {}))
+  .filter(([item, descriptor]) => String(item).startsWith(tabberViewSessionPrefix)
+    && descriptor && typeof descriptor === 'object'
+    && String(descriptor.sourceSession || '').trim()
+    && sessions.includes(String(descriptor.sourceSession || '').trim())
+    && Number.isInteger(Number(descriptor.windowIndex)) && Number(descriptor.windowIndex) >= 0));
+const tabberViewSessionReady = new Set();
+const tabberViewSessionPromises = new Map();
 const activitySummaryEnabled = bootstrap.activitySummary?.enabled === true;
 const SETTING_FALLBACKS = Object.freeze({
   'appearance.date_time_hour_cycle': '24',
@@ -816,12 +860,13 @@ const terminalStartupPromises = new Map();
 const tmuxSessionLifecycleRecords = new Map();
 let tmuxSessionLifecycleGeneration = 0;
 let tmuxTopologyEpoch = 0;
-let tmuxTopologyGeneration = 0;
+let tmuxTopologyGeneration = Number(bootstrap.tmuxTopology?.generation || 0);
 const pendingTmuxSessionGraceMs = 30000;
 const tmuxSessionLifecyclePendingPhases = new Set(['creating', 'renaming-in']);
 const tmuxSessionLifecycleBlockedPhases = new Set(['renaming-out', 'killing', 'retired']);
 let tmuxSessionMutationSerial = 0;
 let tmuxSessionMutationCurrent = null;
+let tmuxSessionCreationTail = Promise.resolve();
 const panelNodes = new Map();
 const resizeObservers = new Map();
 const transcriptLifecycleScopes = new Map();
@@ -1074,6 +1119,7 @@ function urlFlagEnabled(name) {
     return false;
   }
 }
+if (urlFlagEnabled('pane_popout')) document.body.classList.add('pane-popout-live');
 
 function browserUsesCoarsePointer() {
   if (urlFlagEnabled('mobile')) return true;
@@ -1510,6 +1556,7 @@ const TAB_TYPES = [
     label: () => fileExplorerItemLabel(tabberItemId),
     sortRank: 0.52,
     detail: () => t('tabber.description'),
+    rowHtml: (item, options) => fileExplorerPaneTabHtml(item, options),
     createPanel: item => createFileExplorerPanel(item),
     relocalize: () => relocalizeFileExplorerPanels(),
     className: () => 'file-explorer file-explorer-tabber',
@@ -1563,6 +1610,7 @@ const TAB_TYPES = [
     createPanel: () => createDebugPanel(),
     canPopout: true,
     popoutRenderer: item => panePopoutPanelSnapshot(item),
+    openPopout: item => openLivePanePopout(item),
     renderAttached: () => {
       enableDebugMode();
       renderDebugPanels();
@@ -1619,6 +1667,7 @@ function paneRoleDefinition(kind = paneRoleGeneric, side = null) {
   return normalizedKind === paneRoleSide ? Object.freeze({...definition, side}) : definition;
 }
 function panePlacementForItem(item) {
+  if (tabberMode === 'normal' && (item === finderItemId || item === differItemId)) return panePlacementGenericOnly;
   return tabTypeForItem(item)?.panePlacement || panePlacementGenericOnly;
 }
 function paneRoleAllowsItem(role, item, options = {}) {
@@ -1756,7 +1805,7 @@ function virtualTabItems() {
   return [infoItemId, yoagentItemId, chatItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId, ...dynamicVirtualLayoutItems];
 }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
-let layoutItems = [...virtualTabItems(), ...visibleSessions];
+let layoutItems = [...virtualTabItems(), ...visibleSessions, ...tabberViewSessions.keys()];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 const transcriptMetadataState = {
@@ -1782,11 +1831,12 @@ const transcriptMetadataState = {
   //
   // The epoch is an opaque equality partition, never an ordering: two generations are comparable
   // only when their epochs are equal, and nothing here may infer that one epoch came after another.
-  epoch: '',
+  epoch: String(bootstrap.tmuxTopology?.epoch || ''),
   previousEpoch: '',
   generation: 0,
-  rosterGeneration: 0,
+  rosterGeneration: tmuxTopologyGeneration,
   pendingGeneration: 0,
+  mutationGeneration: 0,
   // Every non-apply outcome, with a machine-readable reason. A dropped payload used to be a bare
   // `false` that no caller read, so a metadata refresh that silently declined to apply looked
   // exactly like one that had nothing to say.
@@ -1805,9 +1855,21 @@ function sessionMetadataIdentity(value) {
 function sessionMetadataPayloadIdentity(payload) {
   return sessionMetadataIdentity(payload?.metadata_identity);
 }
+// Every versioned roster producer must agree on the order for one topology generation.
+function tmuxTopologyPayloadIsCurrent(payload, nextOrder = payload?.session_order) {
+  if (!Object.prototype.hasOwnProperty.call(payload || {}, 'topology_generation')) return true;
+  const generation = Number(payload.topology_generation);
+  const current = Math.max(tmuxTopologyGeneration, transcriptMetadataState.rosterGeneration);
+  if (!Number.isSafeInteger(generation) || generation < current) return false;
+  if (generation === current && current > 0 && Array.isArray(nextOrder)) {
+    return nextOrder.length === sessions.length && nextOrder.every((session, index) => session === sessions[index]);
+  }
+  return true;
+}
 function adoptTopologyGeneration(payload) {
   const value = Number(payload?.topology_generation || 0);
   if (Number.isSafeInteger(value) && value >= tmuxTopologyGeneration) tmuxTopologyGeneration = value;
+  if (typeof refreshJsDebugSessionAliases === 'function') void refreshJsDebugSessionAliases();
   return tmuxTopologyGeneration;
 }
 // The build a forced read must wait for. Generation zero is not a build identity -- every payload
@@ -1888,7 +1950,7 @@ const clientEventTransportState = {
   // demote the active stream rather than strand demand or let the old stream claim to serve the new one.
   candidateEpisode: null,
   queue: new Map(),
-  resourceEpoch: '',
+  resourceEpoch: String(bootstrap.tmuxTopology?.epoch || ''),
   resourceRevisions: new Map(),
   resourceRepairs: new Map(),
   frame: 0,
@@ -1925,6 +1987,7 @@ function adoptServerEpoch(epoch) {
   transcriptMetadataState.generation = 0;
   transcriptMetadataState.rosterGeneration = 0;
   transcriptMetadataState.pendingGeneration = 0;
+  transcriptMetadataState.mutationGeneration = 0;
   tmuxTopologyGeneration = 0;
   return true;
 }
@@ -2269,6 +2332,7 @@ let devAutoReloadSource = null;
 let openAppMenuId = null;
 let openAppMenuPinned = false;
 let openAppMenuOpenedAt = 0;
+let openAppMenuReturnFocus = null;
 const fileExplorerSyncState = {
   inFlightSignature: '',
   appliedPlanKey: '',

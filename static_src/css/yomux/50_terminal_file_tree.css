@@ -3746,13 +3746,15 @@ body.app-vw-lte-980 .tabs {
   color: var(--muted);
 }
 .file-tree-row.selected,
-.file-tree-row.current-file:not(.selected) {
+.file-tree-row.current-file:not(.selected),
+.file-tree-row.tabber-row.tabber-active-normal:not(.selected) {
   color: var(--file-selection-text);
   background: var(--file-selection-bg);
   box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
 }
 .file-tree-row.selected .file-tree-name,
-.file-tree-row.current-file:not(.selected) .file-tree-name {
+.file-tree-row.current-file:not(.selected) .file-tree-name,
+.file-tree-row.tabber-row.tabber-active-normal:not(.selected) .file-tree-name {
   color: currentColor;
 }
 .file-tree-row.is-repo .file-tree-name {

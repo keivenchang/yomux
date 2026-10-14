@@ -832,7 +832,12 @@ def generated_header(asset: str) -> str:
 
 def build_asset(asset: str) -> str:
     parts = ASSETS[asset]
-    return generated_header(asset) + "".join(read_text(repo_path(part)) for part in parts)
+    text = generated_header(asset) + "".join(read_text(repo_path(part)) for part in parts)
+    marker = "__YOMUX_SEARCH_RANK_WEIGHTS__"
+    if marker in text:
+        weights = json.loads(read_text(repo_path("internal/finder/search_rank_weights.json")))
+        text = text.replace(marker, json.dumps(weights, separators=(",", ":")))
+    return text
 
 
 def write_asset(asset: str) -> bool:
@@ -2730,6 +2735,8 @@ def watched_source_paths(assets: list[str]) -> list[Path]:
     paths: list[Path] = []
     for asset in assets:
         paths.extend(repo_path(part) for part in ASSETS[asset])
+    if "yomux.js" in assets:
+        paths.append(repo_path("internal/finder/search_rank_weights.json"))
     if LOCALES_SRC.is_dir():
         paths.extend(sorted(LOCALES_SRC.glob("*.json")))
     return paths

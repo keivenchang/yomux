@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Shared browser client-event stream, demand, repair, and lifecycle ownership.
 
+function setClientEventTransportConnected(connected) {
+  clientEventTransportState.connected = connected;
+  syncFileIndexStatusPollInterval();
+}
+
 function clientEventEnvelope(event) {
   const parsed = safeJsonParse(event?.data, {});
   return parsed && typeof parsed === 'object' ? parsed : {};
@@ -419,7 +424,10 @@ function recordTmuxSignalRemovedWindowLatencies(data) {
 }
 
 function applyTmuxSignalsPayload(payload = {}) {
-  const rawData = tmuxSignalsPayloadWithPatch(tmuxSignalPayloadData(payload));
+  const snapshot = tmuxSignalPayloadData(payload);
+  // A producer can publish parsed rows alongside an error; those rows are not an inventory.
+  if (!snapshot || typeof snapshot !== 'object' || snapshot.ok === false) return null;
+  const rawData = tmuxSignalsPayloadWithPatch(snapshot);
   const data = tmuxSignalsPayloadWithWindowOverrides(rawData);
   if (!data || typeof data !== 'object') return null;
   recordTmuxSignalRemovedWindowLatencies(data);
@@ -906,7 +914,7 @@ function closeClientEventStream() {
   const replacementSource = clientEventTransportState.replacementSource;
   clientEventTransportState.replacementSource = null;
   clearClientEventCandidateEpisode();
-  clientEventTransportState.connected = false;
+  setClientEventTransportConnected(false);
   if (!currentClientEventTransportLifecycleScope().release('active-stream', source)) source?.close?.();
   if (replacementSource !== source && !currentClientEventTransportLifecycleScope().release('candidate-stream', replacementSource)) replacementSource?.close?.();
 }
@@ -928,7 +936,7 @@ function openClientEventStream(descriptor, options = {}) {
   descriptor = normalizeClientEventDemandDescriptor(descriptor);
   if (!descriptor.channels.length) return null;
   if (typeof EventSource === 'undefined') {
-    clientEventTransportState.connected = false;
+    setClientEventTransportConnected(false);
     clientEventTransportState.reconnectPending = true;
     scheduleClientEventDisconnectEpisode(null);
     return null;
@@ -942,7 +950,7 @@ function openClientEventStream(descriptor, options = {}) {
   try {
     source = new EventSource(`/api/client-events?${params.toString()}`);
   } catch (_error) {
-    clientEventTransportState.connected = false;
+    setClientEventTransportConnected(false);
     clientEventTransportState.reconnectPending = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
     scheduleClientEventDisconnectEpisode(null);
@@ -998,7 +1006,7 @@ function openClientEventStream(descriptor, options = {}) {
       : 0;
     clearClientEventDisconnectEpisode(source, {recovered: true});
     clientEventTransportState.reconnectPending = false;
-    clientEventTransportState.connected = true;
+    setClientEventTransportConnected(true);
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     const envelope = clientEventEnvelope(event);
     const readyEpoch = String(envelope.epoch || '');
@@ -1033,7 +1041,7 @@ function openClientEventStream(descriptor, options = {}) {
   });
   source.addEventListener('ping', event => {
     if (clientEventTransportState.source !== source) return;
-    clientEventTransportState.connected = true;
+    setClientEventTransportConnected(true);
     retryPendingOperationTerminalRepairs();
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
@@ -1052,7 +1060,7 @@ function openClientEventStream(descriptor, options = {}) {
       abandonClientEventCandidate(source);
       // The active stream does not serve the new demand: demote it so consumers fall back to HTTP
       // instead of trusting a stream that covers only the old channel set.
-      clientEventTransportState.connected = false;
+      setClientEventTransportConnected(false);
       clientEventTransportState.reconnectPending = true;
       if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
       recordSseDebugEvent('client_events_candidate_failed', {
@@ -1068,7 +1076,7 @@ function openClientEventStream(descriptor, options = {}) {
       return;
     }
     if (clientEventTransportState.source !== source) return;
-    clientEventTransportState.connected = false;
+    setClientEventTransportConnected(false);
     clientEventTransportState.reconnectPending = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
     scheduleClientEventDisconnectEpisode(source);
@@ -1079,7 +1087,7 @@ function openClientEventStream(descriptor, options = {}) {
   for (const type of Object.keys(clientPushEventHandlers)) {
     source.addEventListener(type, event => {
       if (clientEventTransportState.source !== source) return;
-      clientEventTransportState.connected = true;
+      setClientEventTransportConnected(true);
       if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
       const envelope = clientEventEnvelope(event);
       recordSseDebugEvent(type, envelope, event);
@@ -1138,7 +1146,7 @@ function disposeClientEventTransportLifecycle(reason = 'disposed') {
   clientEventTransportLifecycleScope?.dispose(reason);
   clientEventTransportState.source = null;
   clientEventTransportState.replacementSource = null;
-  clientEventTransportState.connected = false;
+  setClientEventTransportConnected(false);
   clientEventTransportState.disconnectTimer = null;
   clientEventTransportState.disconnectEpisode = null;
   clientEventTransportState.candidateEpisode = null;

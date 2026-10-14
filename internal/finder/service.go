@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,17 +28,18 @@ import (
 )
 
 const (
-	MaxDirectoryEntries      = 1000
-	MaxReadBytes             = 20 * 1024 * 1024
-	MaxRawBytes              = 100 * 1024 * 1024
-	MaxSearchResults         = 2_000
-	MaxWatchRoots            = 128
-	MaxWatchFiles            = 128
-	maxWatchSignatureEntries = 4096
-	watchPollInterval        = 500 * time.Millisecond
-	watchLeaseDuration       = 300 * time.Second
-	watchHistoryLimit        = 128
-	watchEventCoalesceWindow = time.Second
+	MaxDirectoryEntries       = 1000
+	MaxReadBytes              = 20 * 1024 * 1024
+	MaxRawBytes               = 100 * 1024 * 1024
+	MaxSearchResults          = 2_000
+	MaxWatchRoots             = 128
+	MaxWatchFiles             = 128
+	maxWatchSignatureEntries  = 4096
+	watchPollInterval         = 500 * time.Millisecond
+	watchDegradedPollInterval = 5 * time.Second
+	watchLeaseDuration        = 300 * time.Second
+	watchHistoryLimit         = 128
+	watchEventCoalesceWindow  = time.Second
 )
 
 type EventPublisher func(kind string, payload map[string]any) error
@@ -108,21 +110,26 @@ func changed(path string) *Error {
 }
 
 type Service struct {
-	root            string
-	uploadMu        sync.RWMutex
-	uploadLimits    UploadLimits
-	publish         EventPublisher
-	mu              sync.Mutex
-	nativeMu        sync.Mutex
-	watches         map[string]watchRecord
-	watchGeneration uint64
-	epoch           string
-	revision        uint64
-	changes         []watchChange
-	native          nativeWatchController
-	nativeStatus    nativeWatchStatus
+	root               string
+	uploadMu           sync.RWMutex
+	uploadLimits       UploadLimits
+	publish            EventPublisher
+	mu                 sync.Mutex
+	nativeMu           sync.Mutex
+	watches            map[string]watchRecord
+	watchGeneration    uint64
+	epoch              string
+	revision           uint64
+	changes            []watchChange
+	native             nativeWatchController
+	nativeStatus       nativeWatchStatus
+	nativeEventsClosed bool
 	// nativeRoots remembers the last healthy configuration to avoid rebuilding the same watch tree.
 	nativeRoots                []string
+	nativeScopes               map[string]bool
+	demandChanged              chan struct{}
+	signatureScans             uint64
+	registrationRebuilds       uint64
 	publishGitRename           func(context.Context, *gitRenamePlan, string) error
 	beforeWriteConflictRecheck func()
 	stop                       chan struct{}
@@ -142,6 +149,7 @@ type Service struct {
 
 type watchRecord struct {
 	Roots           []string
+	SearchRoots     []string
 	SignaturePaths  []string
 	Files           []string
 	BackgroundFiles []string
@@ -289,7 +297,7 @@ func newService(root string, publish EventPublisher, native nativeWatchControlle
 	s := &Service{
 		root: root, uploadLimits: uploadLimits, publish: publish, watches: make(map[string]watchRecord),
 		native: native, nativeStatus: nativeStatus, epoch: fmt.Sprintf("finder-%d", time.Now().UnixNano()),
-		stop: make(chan struct{}), done: make(chan struct{}),
+		demandChanged: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{}),
 		gitHistoryCache:      cache.NewLRU[string, map[string]any](maxGitProductCacheEntries),
 		gitCommitCache:       cache.NewLRU[string, map[string]any](maxGitProductCacheEntries),
 		gitReachabilityCache: cache.NewLRU[string, struct{}](maxGitHistoryStatsCacheEntries),
@@ -434,7 +442,15 @@ func (s *Service) openAny(raw string) (*os.File, string, string, *Error) {
 func (s *Service) FastList(ctx context.Context, raw string) (map[string]any, *Error) {
 	return s.listWithEntryInfo(ctx, raw, func(directory *os.File, requestedDir, resolvedDir string, entry os.DirEntry) (map[string]any, bool) {
 		return fastEntryInfoAt(directory, resolvedDir, entry)
-	})
+	}, "")
+}
+
+// FastListNameQuery matches a path-mode filename query across the whole directory before applying
+// the ordinary entry cap, so a large temporary directory cannot hide a requested completion.
+func (s *Service) FastListNameQuery(ctx context.Context, raw, query string) (map[string]any, *Error) {
+	return s.listWithEntryInfo(ctx, raw, func(directory *os.File, requestedDir, resolvedDir string, entry os.DirEntry) (map[string]any, bool) {
+		return fastEntryInfoAt(directory, resolvedDir, entry)
+	}, query)
 }
 
 func (s *Service) List(ctx context.Context, raw string) (map[string]any, *Error) {
@@ -448,33 +464,100 @@ func (s *Service) ListWithOptions(ctx context.Context, raw string, includeRepo b
 func (s *Service) list(ctx context.Context, raw string, includeRepo bool) (map[string]any, *Error) {
 	return s.listWithEntryInfo(ctx, raw, func(directory *os.File, requestedDir, resolvedDir string, entry os.DirEntry) (map[string]any, bool) {
 		return s.entryInfoAt(directory, requestedDir, resolvedDir, entry.Name(), includeRepo)
-	})
+	}, "")
 }
 
-func (s *Service) listWithEntryInfo(ctx context.Context, raw string, entryInfo func(*os.File, string, string, os.DirEntry) (map[string]any, bool)) (map[string]any, *Error) {
+func (s *Service) listWithEntryInfo(ctx context.Context, raw string, entryInfo func(*os.File, string, string, os.DirEntry) (map[string]any, bool), nameQuery string) (map[string]any, *Error) {
 	directory, requested, resolved, authErr := s.open(raw, true)
 	if authErr != nil {
 		return nil, authErr
 	}
 	defer directory.Close()
-	entries, err := directory.ReadDir(MaxDirectoryEntries + 1)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, &Error{Status: http.StatusInternalServerError, Code: "filesystem_error", MessageKey: "fs.error.operationFailed", Path: requested, Retryable: true, Message: err.Error()}
+	nameQuery = strings.TrimFunc(nameQuery, searchWhitespace)
+	tokens := prepareFilenameSearchTokens(nameQuery)
+	var best rankedIndexHeap
+	if nameQuery != "" {
+		best = make(rankedIndexHeap, 0, MaxDirectoryEntries)
 	}
-	truncated := len(entries) > MaxDirectoryEntries
-	if truncated {
-		entries = entries[:MaxDirectoryEntries]
-	}
-	result := make([]map[string]any, 0, len(entries))
-	for _, entry := range entries {
+	truncated := false
+	result := make([]map[string]any, 0, MaxDirectoryEntries)
+	processEntry := func(entry os.DirEntry) (bool, *Error) {
 		select {
 		case <-ctx.Done():
-			return nil, &Error{Status: http.StatusRequestTimeout, Code: "cancelled", MessageKey: "request.error.cancelled", Path: requested, Retryable: true, Message: "directory listing cancelled"}
+			return false, &Error{Status: http.StatusRequestTimeout, Code: "cancelled", MessageKey: "request.error.cancelled", Path: requested, Retryable: true, Message: "directory listing cancelled"}
 		default:
 		}
+		var key searchSortKey
+		if nameQuery != "" {
+			var matched bool
+			key, matched = searchFilenameSortKey(entry.Name(), tokens)
+			if !matched {
+				return true, nil
+			}
+			// Once an extra valid row proved truncation, a worse key cannot
+			// affect either coverage or the shortlist. Retained rows still
+			// pass the ordinary metadata and symlink checks below.
+			if truncated && !canRetainRankedIndexEntry(best, key, MaxDirectoryEntries) {
+				return true, nil
+			}
+		}
 		row, include := entryInfo(directory, requested, resolved, entry)
-		if include {
-			result = append(result, row)
+		if !include {
+			return true, nil
+		}
+		if nameQuery != "" {
+			if len(best) == MaxDirectoryEntries {
+				truncated = true
+			}
+			retainRankedIndexEntry(&best, rankedIndexEntry{key: key, row: row}, MaxDirectoryEntries)
+			return true, nil
+		}
+		if len(result) == MaxDirectoryEntries {
+			truncated = true
+			return false, nil
+		}
+		result = append(result, row)
+		return true, nil
+	}
+	if nameQuery == "" {
+		entries, err := directory.ReadDir(MaxDirectoryEntries + 1)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, &Error{Status: http.StatusInternalServerError, Code: "filesystem_error", MessageKey: "fs.error.operationFailed", Path: requested, Retryable: true, Message: err.Error()}
+		}
+		truncated = len(entries) > MaxDirectoryEntries
+		if truncated {
+			entries = entries[:MaxDirectoryEntries]
+		}
+		for _, entry := range entries {
+			keepGoing, finderErr := processEntry(entry)
+			if finderErr != nil {
+				return nil, finderErr
+			}
+			if !keepGoing {
+				break
+			}
+		}
+	} else {
+		for {
+			entries, err := directory.ReadDir(MaxDirectoryEntries)
+			if err != nil && !errors.Is(err, io.EOF) {
+				return nil, &Error{Status: http.StatusInternalServerError, Code: "filesystem_error", MessageKey: "fs.error.operationFailed", Path: requested, Retryable: true, Message: err.Error()}
+			}
+			for _, entry := range entries {
+				keepGoing, finderErr := processEntry(entry)
+				if finderErr != nil {
+					return nil, finderErr
+				}
+				if !keepGoing {
+					break
+				}
+			}
+			if errors.Is(err, io.EOF) {
+				break
+			}
+		}
+		for _, candidate := range best {
+			result = append(result, candidate.row)
 		}
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -959,6 +1042,17 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 	if err != nil {
 		return nil, invalid("", err.Error())
 	}
+	searchRoots, err := stringList(payload["search_roots"], MaxWatchRoots)
+	if err != nil {
+		return nil, invalid("", err.Error())
+	}
+	for index, raw := range searchRoots {
+		requested, _, authErr := s.authorize(raw, false)
+		if authErr != nil {
+			return nil, authErr
+		}
+		searchRoots[index] = requested
+	}
 	files, err := stringList(payload["files"], MaxWatchFiles)
 	if err != nil {
 		return nil, invalid("", err.Error())
@@ -989,12 +1083,15 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 	}
 	signaturePaths := watchSignaturePaths(normalized, files, watchPayload.BackgroundFiles)
 	signatures := make(map[string]string, len(signaturePaths))
+	s.mu.Lock()
+	priorRecord := s.watches[clientID]
 	for _, path := range signaturePaths {
-		if err := ctx.Err(); err != nil {
-			return nil, cancelled(path)
+		if signature, exists := priorRecord.Signatures[path]; exists {
+			signatures[path] = signature
 		}
-		signatures[path] = s.signature(ctx, path)
 	}
+	s.mu.Unlock()
+
 	s.mu.Lock()
 	if _, exists := s.watches[clientID]; !exists && len(s.watches) >= maxActiveWatchClients {
 		s.mu.Unlock()
@@ -1023,7 +1120,7 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 	s.watchGeneration++
 	generation := s.watchGeneration
 	s.watches[clientID] = watchRecord{
-		Roots: normalized, SignaturePaths: signaturePaths, Files: files, BackgroundFiles: watchPayload.BackgroundFiles,
+		Roots: normalized, SearchRoots: searchRoots, SignaturePaths: signaturePaths, Files: files, BackgroundFiles: watchPayload.BackgroundFiles,
 		RootSurfaces: watchPayload.RootSurfaces, ContextItems: watchPayload.ContextItems,
 		SessionFiles: watchPayload.SessionFiles, ActivitySummary: watchPayload.ActivitySummary,
 		Signatures: signatures, UpdatedAt: now, ExpiresAt: now.Add(watchLeaseDuration), Generation: generation,
@@ -1057,6 +1154,8 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 		_ = s.reconfigureNative(context.Background(), true)
 		return nil, cancelled("")
 	}
+	s.establishWatchBaselines(ctx, clientID, generation)
+	s.notifyDemandChanged()
 	s.mu.Lock()
 	var rootChangePayload map[string]any
 	if rootsChanged {
@@ -1325,6 +1424,7 @@ func (s *Service) watchLoop() {
 	ticker := time.NewTicker(watchPollInterval)
 	defer ticker.Stop()
 	var nativeEvents <-chan nativeWatchEvent
+	var lastFallbackPoll time.Time
 	if s.native != nil {
 		nativeEvents = s.native.Events()
 	}
@@ -1333,10 +1433,22 @@ func (s *Service) watchLoop() {
 		case <-s.stop:
 			return
 		case <-ticker.C:
-			s.pruneExpiredWatches(time.Now())
-			s.pollWatches()
+			now := time.Now()
+			s.pruneExpiredWatches(now)
+			mode := s.pollingFallbackMode()
+			if mode.interval > 0 && (lastFallbackPoll.IsZero() || now.Sub(lastFallbackPoll) >= mode.interval) {
+				if mode.uncoveredOnly {
+					s.pollUncoveredWatches()
+				} else {
+					s.pollWatches()
+				}
+				lastFallbackPoll = now
+			} else if mode.interval == 0 {
+				lastFallbackPoll = time.Time{}
+			}
 		case event, ok := <-nativeEvents:
 			if !ok {
+				s.markNativeEventStreamClosed()
 				nativeEvents = nil
 				continue
 			}
@@ -1345,9 +1457,68 @@ func (s *Service) watchLoop() {
 	}
 }
 
+type watchFallbackMode struct {
+	interval      time.Duration
+	uncoveredOnly bool
+}
+
+func (s *Service) pollingFallbackMode() watchFallbackMode {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.nativeStatus.available {
+		return watchFallbackMode{interval: watchPollInterval}
+	}
+	if s.nativeStatus.degraded {
+		_, scoped := s.native.(scopedNativeWatchController)
+		return watchFallbackMode{interval: watchDegradedPollInterval, uncoveredOnly: scoped && !s.nativeEventsClosed}
+	}
+	for _, record := range s.watches {
+		for _, path := range record.SignaturePaths {
+			if !s.pathNativelyCoveredLocked(path) {
+				return watchFallbackMode{interval: watchPollInterval, uncoveredOnly: true}
+			}
+		}
+	}
+	return watchFallbackMode{}
+}
+
+func watchPathCoveredByRoots(path string, roots []string) bool {
+	for _, root := range roots {
+		if path == root || strings.HasPrefix(path, root+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) markNativeEventStreamClosed() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nativeEventsClosed = true
+	if s.nativeStatus.available && !s.nativeStatus.degraded {
+		s.nativeStatus.degraded = true
+		s.nativeStatus.reason = "native-event-stream-closed"
+	}
+}
+
 func (s *Service) handleNativeEvent(event nativeWatchEvent) {
+	if watcher, ok := s.native.(interface{ Status() nativeWatchStatus }); ok {
+		s.nativeMu.Lock()
+		status := watcher.Status()
+		s.mu.Lock()
+		if !s.nativeEventsClosed {
+			s.nativeStatus = status
+		}
+		s.mu.Unlock()
+		s.nativeMu.Unlock()
+	}
 	s.mu.Lock()
 	roots := s.activeWatchRootsLocked()
+	if event.overflow && event.root == "" {
+		for root := range s.activeNativeScopesLocked() {
+			roots = append(roots, root)
+		}
+	}
 	paths := make([]string, 0, 1)
 	if event.overflow {
 		if event.root != "" {
@@ -1356,14 +1527,8 @@ func (s *Service) handleNativeEvent(event nativeWatchEvent) {
 			paths = append(paths, roots...)
 		}
 	} else if event.path != "" {
-		for _, root := range roots {
-			if event.root != "" && root != event.root {
-				continue
-			}
-			if event.path == root || strings.HasPrefix(event.path, root+string(os.PathSeparator)) {
-				paths = append(paths, event.path)
-				break
-			}
+		if s.eventDemandedLocked(event.path) {
+			paths = append(paths, event.path)
 		}
 	}
 	s.mu.Unlock()
@@ -1379,11 +1544,29 @@ func (s *Service) handleNativeEvent(event nativeWatchEvent) {
 	// every registration for ordinary file changes makes a high-churn tree spend its event reader
 	// doing repeated full walks; overflow is the explicit signal that requires reconciliation.
 	if event.overflow {
-		s.reconfigureNative(context.Background(), true)
+		if scoped, ok := s.native.(interface{ InvalidateRoot(string) }); ok && event.root != "" {
+			scoped.InvalidateRoot(event.root)
+			s.mu.Lock()
+			s.nativeRoots = nil
+			s.mu.Unlock()
+			_ = s.reconfigureNative(context.Background(), false)
+		} else {
+			s.reconfigureNative(context.Background(), true)
+		}
 	}
 }
 
 func (s *Service) pollWatches() {
+	s.pollWatchesFiltered(false)
+}
+
+func (s *Service) pollUncoveredWatches() {
+	s.pollWatchesFiltered(true)
+}
+
+func (s *Service) pollWatchesFiltered(uncoveredOnly bool) {
+	pprof.SetGoroutineLabels(pprof.WithLabels(context.Background(), pprof.Labels("phase", "signature-polling")))
+	defer pprof.SetGoroutineLabels(context.Background())
 	s.mu.Lock()
 	snapshots := make(map[string]watchRecord, len(s.watches))
 	for clientID, record := range s.watches {
@@ -1396,10 +1579,25 @@ func (s *Service) pollWatches() {
 	}
 	s.mu.Unlock()
 	events := make([]map[string]any, 0)
+	sharedSignatures := map[string]string{}
 	for clientID, record := range snapshots {
 		changedPaths := []string{}
 		for _, path := range record.SignaturePaths {
-			signature := s.signature(context.Background(), path)
+			if uncoveredOnly && s.pathNativelyCovered(path) {
+				continue
+			}
+			key := path
+			for _, root := range record.Roots {
+				if root == path && !recursiveWatchRoot(record, root) {
+					key += "\x00listing"
+					break
+				}
+			}
+			signature, scanned := sharedSignatures[key]
+			if !scanned {
+				signature = s.watchPathSignature(context.Background(), path, record)
+				sharedSignatures[key] = signature
+			}
 			if previous := record.Signatures[path]; previous != signature {
 				record.Signatures[path] = signature
 				changedPaths = append(changedPaths, path)
@@ -1460,33 +1658,49 @@ func (s *Service) pruneExpiredWatches(now time.Time) {
 	}
 	s.mu.Unlock()
 	if removed {
+		s.notifyDemandChanged()
 		s.reconfigureNative(context.Background(), false)
 	}
 }
 
 func (s *Service) reconfigureNative(ctx context.Context, force bool) error {
+	pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels("phase", "watch-registration")))
+	defer pprof.SetGoroutineLabels(context.Background())
 	if s.native == nil {
 		return nil
 	}
 	s.nativeMu.Lock()
 	defer s.nativeMu.Unlock()
 	s.mu.Lock()
+	if s.nativeEventsClosed {
+		s.mu.Unlock()
+		return nil
+	}
 	roots := s.activeWatchRootsLocked()
+	scopes := s.activeNativeScopesLocked()
 	status := s.nativeStatus
-	changed := !sameWatchRoots(s.nativeRoots, roots)
+	changed := !sameWatchRoots(s.nativeRoots, roots) || !sameNativeScopes(s.nativeScopes, scopes)
 	s.mu.Unlock()
-	if !force && !changed && status.available && !status.degraded {
+	if !force && !changed && status.available {
 		if ctx != nil && ctx.Err() != nil {
 			return ctx.Err()
 		}
 		return nil
 	}
-	status = s.native.SetRoots(ctx, roots)
-	s.mu.Lock()
-	s.nativeStatus = status
-	if status.available && !status.degraded {
-		s.nativeRoots = append([]string(nil), roots...)
+	if scoped, ok := s.native.(scopedNativeWatchController); ok {
+		status = scoped.SetScopes(ctx, scopes, force)
+	} else {
+		status = s.native.SetRoots(ctx, roots)
 	}
+	s.mu.Lock()
+	if s.nativeEventsClosed {
+		status.degraded = true
+		status.reason = "native-event-stream-closed"
+	}
+	s.nativeStatus = status
+	s.registrationRebuilds++
+	s.nativeRoots = append([]string(nil), roots...)
+	s.nativeScopes = scopes
 	s.mu.Unlock()
 	if ctx != nil && ctx.Err() != nil {
 		return ctx.Err()
@@ -1506,13 +1720,17 @@ func (s *Service) watchModeLocked() string {
 
 func (s *Service) watchStatusPayloadLocked() map[string]any {
 	return map[string]any{
-		"available":      s.nativeStatus.available,
-		"degraded":       s.nativeStatus.degraded,
-		"reason":         s.nativeStatus.reason,
-		"registrations":  s.nativeStatus.registrations,
-		"lease_seconds":  int(watchLeaseDuration / time.Second),
-		"active_clients": len(s.watches),
-		"active_roots":   len(s.activeWatchRootsLocked()),
+		"available":             s.nativeStatus.available,
+		"degraded":              s.nativeStatus.degraded,
+		"reason":                s.nativeStatus.reason,
+		"registrations":         s.nativeStatus.registrations,
+		"uncovered_paths":       s.nativeStatus.uncovered,
+		"directories_visited":   s.nativeStatus.directoriesVisited,
+		"signature_scans":       s.signatureScans,
+		"registration_rebuilds": s.registrationRebuilds,
+		"lease_seconds":         int(watchLeaseDuration / time.Second),
+		"active_clients":        len(s.watches),
+		"active_roots":          len(s.activeWatchRootsLocked()),
 	}
 }
 

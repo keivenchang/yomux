@@ -166,6 +166,7 @@ function serverFilesystemBatchLimits() {
 const SERVER_FILESYSTEM_BATCH_LIMITS = Object.freeze(serverFilesystemBatchLimits());
 
 const DEFAULT_TEST_SETTINGS = Object.freeze({
+  general: Object.freeze({default_tabber_mode: 'advanced'}),
   appearance: Object.freeze({}),
   editor: Object.freeze({
     trim_trailing_whitespace_on_save: false,
@@ -1154,6 +1155,7 @@ globalThis.__layoutTestApi = {
       lastApply: transcriptMetadataState.lastApply,
     };
   },
+  renameTabberDescriptionForTest: renameTabberDescription,
   settleForcedSessionMetadataForTest: settleForcedSessionMetadata,
   adoptServerEpochForTest: adoptServerEpoch,
   refreshTmuxSessionMutationStateForTest: refreshTmuxSessionMutationState,
@@ -1508,6 +1510,7 @@ globalThis.__layoutTestApi = {
   },
   setServerWatchRootsSyncedAtForTest(value) { serverWatchRootsState.syncedAt = Number(value) || 0; },
   fileExplorerPaneTabHtml,
+  dockviewPaneTabHtml,
   makeButtonForTest: makeButton,
   bindOnceForTest: bindOnce,
   bindScopedOnceForTest: bindScopedOnce,
@@ -1521,6 +1524,8 @@ globalThis.__layoutTestApi = {
   bindPaneFrameControlsForTest: bindPaneFrameControls,
   bindSearchHistoryPanelForTest: bindSearchHistoryPanel,
   fetchDirectoryForTest: fetchDirectory,
+  fetchQuickOpenPathDirectoryForTest: fetchQuickOpenPathDirectory,
+  syncPanelVisibilityForTest: syncPanelVisibility,
   markFileExplorerDeletedPathsForTest: markFileExplorerDeletedPaths,
   fileExplorerEntriesByWatchedDirectoryForTest: fileExplorerEntriesByWatchedDirectory,
   refreshFileExplorerTreesInPlaceForTest: refreshFileExplorerTreesInPlace,
@@ -2274,6 +2279,8 @@ globalThis.__layoutTestApi = {
   customDropActionFromLine,
   commandPaletteDropActionItems,
   normalizeLayoutSlots,
+  normalizeLayoutSlotsForViewport,
+  allTabItems,
   compactLayoutSlots,
   layoutSlotsSignature,
   dockviewJsonFromLayoutSlots,
@@ -2410,13 +2417,14 @@ globalThis.__layoutTestApi = {
   sessionFileTimeText,
   sessionFileRelativeTimeText,
   sessionFileDisplayTimeText,
+  sessionFileDiffTextForTest: sessionFileDiffText,
 	  fileExplorerTreeDateModeLabel,
 	  fileExplorerTreeDateModeButtonLabel,
 	  fileExplorerTreeDateModeTitle,
 	  fileExplorerViewSettingsForTest() { return JSON.parse(JSON.stringify(fileExplorerViewSettings)); },
 	  fileExplorerTreeDateModeForViewForTest: fileExplorerTreeDateModeForView,
 	  fileExplorerTreeSortModeForViewForTest: fileExplorerTreeSortModeForView,
-	  setFileExplorerViewSettingForTest(view, key, value) { return setFileExplorerViewSetting(view, key, value, {refresh: false, publish: false}); },
+	  setFileExplorerViewSettingForTest(view, key, value, options = {refresh: false, publish: false}) { return setFileExplorerViewSetting(view, key, value, options); },
 	  nextFileExplorerTreeDateMode,
 	  cycleFileExplorerTreeDateModeForTest() {
 	    for (const view of ['finder', 'tabber', 'differ']) cycleFileExplorerTreeDateMode(view);
@@ -2533,6 +2541,7 @@ globalThis.__layoutTestApi = {
   setTabLastActivatedForTest(item, ts) { tabLastActivatedAt.set(item, ts); },
   infoBranchRows,
   applyTmuxWindowActiveIndexToTranscriptInfoForTest: applyTmuxWindowActiveIndexToTranscriptInfo,
+  applyTmuxSignalActiveWindowToTranscriptInfoForTest: applyTmuxSignalActiveWindowToTranscriptInfo,
   fileContextMenuState,
   finderOpenInNewTabActionsForContext,
   fileExplorerIndexContextAction,
@@ -2670,6 +2679,7 @@ globalThis.__layoutTestApi = {
     };
   },
   expandDirectoryRowForTest: expandDirectoryRow,
+  ensureDirectoryRowExpandedForTest: ensureDirectoryRowExpanded,
   collapseDirectoryRowForTest: collapseDirectoryRow,
   restoreFileExplorerExpandedPaths,
   settleDirectoryRowExpansionAcrossSurfacesForTest: settleDirectoryRowExpansionAcrossSurfaces,
@@ -2743,6 +2753,7 @@ globalThis.__layoutTestApi = {
     clientSettingsPayload = {...clientSettingsPayload, ...(patch || {})};
   },
   applySettingsPayloadForTest: applySettingsPayload,
+  clientSettingsMetadataDeferredForTest() { return clientSettingsMetadataDeferred; },
   settingsStateForTest() { return {settings: clientSettings, defaults: clientSettingsDefaults}; },
   settingsApplyDependenciesForTest: SETTINGS_APPLY_DEPENDENCIES,
   settingsDependencyChangedForTest: settingsDependencyChanged,
@@ -3092,6 +3103,8 @@ globalThis.__layoutTestApi = {
   sessionFileAgentKindsForTest: sessionFileAgentKinds,
   tabberWindowIsAgentForTest: tabberWindowIsAgent,
   buildTabberTreeForTest: buildTabberTree,
+  tabberWindowRecencyForTest: tabberWindowRecency,
+  tabberRecencyForTest: tabberRecency,
   tabMenuItems,
   sortTabItemsForMenu,
   tmuxPaneTabHtml,
@@ -3274,10 +3287,37 @@ globalThis.__layoutTestApi = {
     return readStoredFileExplorerMode();
   },
   buildTabberTree,
+  buildTabberNormalRowsForTest: buildTabberNormalRows,
+  defaultNormalTabberLayoutSlotsForTest: defaultNormalTabberLayoutSlots,
+  toggleTabberNormalPaneForTest: toggleTabberNormalPane,
+  activateNormalTabberRowForTest: activateNormalTabberRow,
+  ensureTabberViewSessionForWindowForTest(session, windowIndex, details = {}, options = {}) {
+    return ensureTabberViewSessionForWindow(session, windowIndex, {windowId: '@test-' + windowIndex, ...details}, options);
+  },
+  tabberViewSessionForWindowForTest(session, windowIndex) { return tabberViewSessionForWindow(session, String(windowIndex).startsWith('@') ? windowIndex : '@test-' + windowIndex); },
+  storeTabberViewSessionForTest(item, descriptor) {
+    return storeTabberViewSession(item, {windowId: '@test-' + descriptor.windowIndex, ...descriptor});
+  },
+  tabberNormalSelectionsForTest() { return (tabberNormalSelections || []).slice(); },
+  setTabberNormalSelectionsForTest: storeTabberNormalSelections,
+  tabberModeForTest() { return tabberMode; },
+  advancedTabberLayoutSlots,
+  tabberSidebarHostWidth,
+  tabberSidebarCanFit,
+  toggleTabberSidebarForTest: toggleTabberSidebar,
+  setTabberSidebarSinglePaneForTest(value) { tabberSidebarSinglePane = Boolean(value); },
+  applyTabberNormalSelectionsForTest: applyTabberNormalSelections,
+  tabberSidebarStateForTest() { return {visible: tabberSidebarVisible, singlePane: tabberSidebarSinglePane, requestedVisible: tabberSidebarRequestedVisible}; },
+  layoutNodeMinWidth,
+  bindPanelShellForTest: bindPanelShell,
+  setTabberModeForTest(value, options = {refresh: false}) { return setTabberMode(value, options); },
+  setApiFetchJsonForTest(fetcher) { apiFetchJson = fetcher; },
+  terminalDataShouldAcknowledgeAttentionForTest: terminalDataShouldAcknowledgeAttention,
   renderTabberTree,
   fetchTabberSessionFilesForTest: fetchTabberSessionFiles,
   fetchTabberSessionFilesBatchForTest: fetchTabberSessionFilesBatch,
   tabberSessionForNumericKey,
+  tabberNormalRowForSessionForTest: tabberNormalRowForSession,
   openTabberSessionForTest: openTabberSession,
   bindTabberPanelForTest: bindTabberPanel,
   fileExplorerChangesPanelStaticHtmlForTest: fileExplorerChangesPanelStaticHtml,
@@ -3347,9 +3387,11 @@ globalThis.__layoutTestApi = {
       const dateText = dateHtml ? dateHtml.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() : (dateCell.textContent || '');
       return {
         type: row.dataset.tabberType || '',
+        normalRow: row.classList.contains('tabber-normal-row'),
         name: (row.querySelector('.file-tree-name') || {}).textContent || '',
         icon: (row.querySelector('.file-tree-icon') || {}).textContent || '',
         path: row.dataset.path || '',
+        paneItem: row.dataset.tabberPaneItem || '',
         repoRoot: row.dataset.tabberRepoRoot || '',
         branch: row.dataset.tabberBranch || '',
         nameHtml: (row.querySelector('.file-tree-name') || {}).innerHTML || '',

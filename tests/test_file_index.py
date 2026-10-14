@@ -85,7 +85,6 @@ def test_configured_excluded_subtree_is_absent_from_memory_and_sqlite(tmp_path, 
         exclude_signature=policy["exclude_signature"],
         max_files=policy["max_files"],
         persist_enabled=policy["persist_enabled"],
-        persist_max_files=policy["persist_max_files"],
         persist_max_bytes=policy["persist_max_bytes"],
     )
 
@@ -113,7 +112,6 @@ def test_configured_excluded_directory_names_are_absent_from_memory_and_sqlite(t
         exclude_signature=policy["exclude_signature"],
         max_files=policy["max_files"],
         persist_enabled=policy["persist_enabled"],
-        persist_max_files=policy["persist_max_files"],
         persist_max_bytes=policy["persist_max_bytes"],
     )
 
@@ -121,6 +119,19 @@ def test_configured_excluded_directory_names_are_absent_from_memory_and_sqlite(t
     assert {entry[2] for entry in built.entries} == {"source.py"}
     with sqlite3.connect(file_index._index_disk_path(root)) as conn:
         assert {row[0] for row in conn.execute("SELECT relative_path FROM entries")} == {"source.py"}
+
+
+def test_legacy_persistence_file_cap_does_not_override_index_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(filesystem.search, "settings_payload", lambda: {"settings": {"file_explorer": {
+        "index_max_files": 1_000_000,
+        "index_persist_max_files": 100_000,
+        "index_persist": True,
+    }}})
+
+    policy = fs_search._search_index_policy(tmp_path)
+
+    assert policy["max_files"] == 1_000_000
+    assert "persist_max_files" not in policy
 
 
 def test_bare_path_exclusion_is_a_directory_name_at_any_depth(tmp_path, monkeypatch):
@@ -294,7 +305,7 @@ def test_total_entry_cap_partial_is_durable_and_reloads(tmp_path, monkeypatch):
     assert "one.txt" in names  # the retained shallow target is searchable after reload
 
 
-def test_persistence_can_be_disabled_or_rejected_by_file_budget(tmp_path, monkeypatch):
+def test_persistence_uses_the_index_file_limit_and_byte_budget(tmp_path, monkeypatch):
     _clear_registry()
     root = tmp_path / "root"
     root.mkdir()
@@ -308,16 +319,22 @@ def test_persistence_can_be_disabled_or_rejected_by_file_budget(tmp_path, monkey
     assert not file_index._index_disk_path(root).exists()
 
     _clear_registry()
-    capped = file_index.build_now(root, SEARCH_SKIP_DIRS, persist_max_files=1)
+    capped = file_index.build_now(root, SEARCH_SKIP_DIRS, max_files=1)
     assert capped.ready is True
-    assert capped.persisted is False
-    assert not file_index._index_disk_path(root).exists()
+    assert capped.persisted is True
+    assert capped.truncated is True
+    with sqlite3.connect(file_index._index_disk_path(root)) as conn:
+        assert conn.execute("SELECT count(*) FROM entries").fetchone()[0] == 1
 
     _clear_registry()
-    byte_capped = file_index.build_now(root, SEARCH_SKIP_DIRS, persist_max_bytes=1)
+    byte_root = tmp_path / "byte-root"
+    byte_root.mkdir()
+    (byte_root / "one.txt").write_text("one", encoding="utf-8")
+    (byte_root / "two.txt").write_text("two", encoding="utf-8")
+    byte_capped = file_index.build_now(byte_root, SEARCH_SKIP_DIRS, persist_max_bytes=1)
     assert byte_capped.ready is True
     assert byte_capped.persisted is False
-    assert not file_index._index_disk_path(root).exists()
+    assert not file_index._index_disk_path(byte_root).exists()
 
 
 def test_incremental_refresh_replaces_only_dirty_subtree_and_debounces_persistence(tmp_path, monkeypatch):

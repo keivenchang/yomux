@@ -95,6 +95,7 @@
   const CURRENT_STATS_PLOT_BOTTOM = 28;
   const CURRENT_STATS_ZOOM_THRESHOLD_PX = 8;
   let nextRendererId = 1;
+  let currentStatsSessionAliases = new Map();
 
   // `streamEvidence` is the transport's own first-transition observables. The failure MESSAGE
   // can only say that nothing arrived; it cannot say which side went quiet, so every artifact a
@@ -1707,6 +1708,7 @@
     const title = 'Refill the last 24 hours?';
     const warning = 'Tokens/min will be temporarily unavailable while we reread available agent history. CPU usage may rise, and YOmux may feel slower. Deleted source history cannot be recovered.';
     const busy = () => submitting || ['queued', 'running'].includes(status.state);
+    const nextPollDelayMs = () => busy() ? 1000 : 10000;
     const waitHtml = () => '<div role="status" data-stats-refill-wait>Refilling agent history… Please wait.</div>';
     function html(showButton = true) {
       const message = busy() ? `Refilling agent history… Please wait. ${status.phase || 'Reading history'}` : status.message || '';
@@ -1741,7 +1743,7 @@
           options.onChange?.();
         }
       }
-      if (!destroyed && generation === requestGeneration) timer = globalThis.setTimeout(() => { void poll(); }, 1000);
+      if (!destroyed && generation === requestGeneration) timer = globalThis.setTimeout(() => { void poll(); }, nextPollDelayMs());
     }
     function handleClick(event) {
       const target = event?.target;
@@ -2409,9 +2411,10 @@
     if (name.startsWith('agent_tokens_per_minute:')) return 'agent-tokens';
     if (name.startsWith('model_tokens_per_minute:output:')) return 'model-output-tokens';
     if (name.startsWith('model_tokens_per_minute:')) return 'model-usage';
+    if (name.startsWith('process_census_incomplete:')) return null;
     if (['ask_agents', 'run_agents', 'transition_agents', 'idle_agents', 'ask_sessions', 'run_sessions', 'transition_sessions', 'idle_sessions'].includes(name)) return 'agent-status';
     if (name.startsWith('gpu_')) return 'gpu';
-    if (name.startsWith('service_') || name.startsWith('system_memory_')) return 'system';
+    if (name.startsWith('service_') || name.startsWith('system_memory_') || name.startsWith('process_memory_bytes:')) return 'system';
     if (name.startsWith('browser_')) return 'browser';
     if (name.includes('cpu_percent')) return 'cpu';
     return 'other';
@@ -2471,6 +2474,13 @@
     const plotWidth = width - left - right;
     const plotHeight = height - top - bottom;
     const clipId = `yo-stats-current-clip-${rendererId}-${definition.id}`;
+    const partialProcessCensus = definition.families.some(family => generation.buckets.some(bucket => (
+      Number(bucket.series?.[`process_census_incomplete:${family}`]?.value) > 0
+    )));
+    const title = partialProcessCensus ? `${definition.title} (partial process data)` : definition.title;
+    const censusNote = partialProcessCensus
+      ? 'Some process readings are unknown; readable processes remain shown.'
+      : '';
     const paths = [...series.entries()].map(([name, points]) => {
       const rendered = currentStatsPath(points, frame, maximum, left, top, plotWidth, plotHeight);
       const circles = rendered.points.map((point, index) => (
@@ -2495,8 +2505,8 @@
     const showSeconds = generation.resolution_seconds === 1;
     return [
       `<article class="yo-stats-current-chart${definition.compact ? ' yo-stats-current-chart--compact' : ''}" data-stats-chart="${definition.id}" data-y-min="0" data-y-max="${currentStatsNumber(maximum)}" data-resolution-seconds="${generation.resolution_seconds}">`,
-      `<h3>${currentStatsEscape(definition.title)}</h3>`,
-      `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${currentStatsEscape(definition.title)}" data-stats-current-svg data-axis-seconds="${showSeconds}">`,
+      `<h3 title="${currentStatsEscape(censusNote)}">${currentStatsEscape(title)}</h3>`,
+      `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${currentStatsEscape(title)}" data-stats-current-svg data-axis-seconds="${showSeconds}">`,
       `<defs><clipPath id="${clipId}"><rect x="${left}" y="${top}" width="${plotWidth}" height="${plotHeight}"></rect></clipPath></defs>`,
       `<g clip-path="url(#${clipId})">${gapRects}${paths}<rect data-stats-current-selection hidden x="${left}" y="${top}" width="0" height="${plotHeight}"></rect></g>`,
       `<text x="${left}" y="${height - 6}" text-anchor="start">${currentStatsEscape(currentStatsTime(frame.window_start, showSeconds))}</text>`,
@@ -2570,10 +2580,27 @@
     if (!full) return '';
     if (full.startsWith('opencode-process:')) return full;
     const parts = full.split('|');
+    const mappedSession = currentStatsSessionAliases.get(parts[0]);
+    if (mappedSession) return mappedSession;
     if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'opencode', 'term'].includes(parts.at(-1))) {
       return parts[0] || full;
     }
     return full;
+  }
+
+  function setCurrentStatsSessionAliases(value) {
+    const aliases = new Map();
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const [alias, session] of Object.entries(value)) {
+        const normalizedAlias = alias.trim();
+        const normalizedSession = String(session || '').trim();
+        if (normalizedAlias.startsWith('__yomux_view_') && normalizedSession && !normalizedSession.startsWith('__yomux_view_')) {
+          aliases.set(normalizedAlias, normalizedSession);
+        }
+      }
+    }
+    currentStatsSessionAliases = aliases;
+    return aliases.size;
   }
 
   function currentStatsCanonicalAgentLabel(value) {
@@ -3360,6 +3387,7 @@
   const currentStatsModule = Object.freeze({
     canonicalAgentLabel: currentStatsCanonicalAgentLabel,
     canonicalSessionKey: currentStatsCanonicalSessionKey,
+    setSessionAliases: setCurrentStatsSessionAliases,
     createBrowserClient,
     createController,
     mount,

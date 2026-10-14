@@ -94,7 +94,10 @@ async function runCrossSurfaceStateSuite() {
     vm.createContext(context);
     vm.runInContext(source.slice(source.indexOf('function focusTerminalDom('), source.indexOf('function clearFocusForInactiveLayout(')), context);
     context.focusTerminalDom('1');
-    assert.equal(focusCalls, 1);
+    assert.equal(focusCalls, 0, 'an already focused textarea needs no second native focus');
+    context.document.activeElement = null;
+    context.focusTerminalDom('1');
+    assert.equal(focusCalls, 1, 'a different input owner still transfers native focus');
     context.focusTerminalDom('1', 10);
     assert.equal(focusCalls, 1);
     deferredFocus();
@@ -130,14 +133,13 @@ async function runCrossSurfaceStateSuite() {
     const slots = requestApi.emptyLayoutSlots();
     slots[requestApi.layoutTreeKey] = requestApi.splitNode('row', requestApi.leafNode('left'), requestApi.leafNode('right'));
     slots.left = requestApi.paneStateWithTabs([requestApi.finderItemId], requestApi.finderItemId);
-    slots.right = requestApi.paneStateWithTabs([requestApi.differItemId], requestApi.differItemId);
+    slots.right = {...requestApi.paneStateWithTabs([requestApi.differItemId], requestApi.differItemId), paneRole: 'side', side: 'right'};
     requestApi.setLayoutSlotsForTest(slots);
-    requestApi.activatePaneTab('left', requestApi.differItemId);
     requestApi.setFileExplorerChangesSelectedSessionForTest('1');
     requestApi.setFileExplorerFinderSelectedSessionForTest('1');
     requestApi.setFinderSessionFilesPayloadForTest({
       session: '1', loaded: true, from_ref: 'HEAD', to_ref: 'current', errors: [], repos: [{repo: '/repo/app', added: 2, removed: 1}],
-      files: [{repo: '/repo/app', abs_path: '/repo/app/a.py', status: 'M', added: 2, removed: 1}],
+      files: [{repo: '/repo/app', abs_path: '/repo/app/a.py', status: 'M', added: 2, removed: 1, diff_tracked: true}],
     });
     requestApi.setSessionFilesPayloadForTest({
       session: '1', loaded: true, from_ref: 'v0.7.4', to_ref: 'current', errors: [], repos: [{repo: '/repo/app', added: 200, removed: 100}],
@@ -508,7 +510,7 @@ async function runCrossSurfaceStateSuite() {
       loaded: true,
       errors: [],
       refs_by_repo: {'/repo/app': [{ref: 'abc123def456', short: 'abc123d', subject: 'older base commit'}]},
-      repos: [{repo: '/repo/app', count: 3, touched_count: 4, added: 10, removed: 1, behind: 0, ahead: 2}],
+      repos: [{repo: '/repo/app', count: 3, touched_count: 4, added: 12_345, removed: 555_000, behind: 0, ahead: 2}],
       files: [
         {session: '1', agent: 'codex', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
         {session: '1', agent: 'codex', status: 'A', repo: '/repo/app', path: 'src/new.py', abs_path: '/repo/app/src/new.py', mtime: 200, added: 8, removed: 0, diff_tracked: true},
@@ -521,7 +523,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(changesHtml.includes('/repo/app'));
     const repoHeadStart = changesHtml.indexOf('changes-repo-head');
     const repoHead = changesHtml.slice(repoHeadStart, changesHtml.indexOf('</button>', repoHeadStart));
-    assert.ok(/changes-repo-caret[\s\S]*changes-repo-title[^>]*>\/repo\/app<[\s\S]*changes-repo-totals[\s\S]*changes-diff-add[^>]*>\+10<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-repo-count[^>]*>3<\/span>/.test(repoHead), 'repo disclosure header shows repo name, tracked +added, -removed, and file count');
+    assert.ok(/changes-repo-caret[\s\S]*changes-repo-title[^>]*>\/repo\/app<[\s\S]*changes-repo-totals[\s\S]*changes-diff-add[^>]*>\+12K<\/span>[\s\S]*changes-diff-remove[^>]*>-555K<\/span>[\s\S]*changes-repo-count[^>]*>3<\/span>/.test(repoHead), 'repo disclosure header shows repo name, consistently compacted line totals, and file count');
     assert.equal(/Behind|Ahead/.test(repoHead), false, 'ahead/behind stays out of the repo disclosure header');
     assert.ok(changesHtml.includes('1 repo, 3 files changed in &#39;1&#39;'), 'Finder diff summary names repo count, file count, and session explicitly');
     assert.ok(changesHtml.includes('Compare:'), 'Differ labels the inline ref controls as Compare');
@@ -1574,7 +1576,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/\.file-explorer-refresh-cluster::before\s*\{[\s\S]*content:\s*"↻"/.test(changedFilesCss), 'Finder Reload control paints the same visible refresh icon (scoped to its own class after the header row swap)');
     assert.ok(changedFilesCss.includes('--file-hover-bg: #fff2a8'), 'light-mode Finder/Differ row hover uses a yellow highlighter fill');
     assert.ok(/\.file-tree-row:not\(\.selected\):hover\s*\{[\s\S]*background:\s*var\(--file-hover-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-hover-border\)/.test(changedFilesCss), 'Finder/Differ hover rows use the shared yellow highlighter tokens without overriding selected rows');
-    assert.ok(/\.file-tree-row\.current-file:not\(\.selected\)\s*\{[\s\S]*color:\s*var\(--file-selection-text\)[\s\S]*background:\s*var\(--file-selection-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-selection-border\)/.test(changedFilesCss), 'Finder Sync current file reuses the selected-row color tokens');
+    assert.ok(/\.file-tree-row\.current-file:not\(\.selected\),\s*\.file-tree-row\.tabber-row\.tabber-active-normal:not\(\.selected\)\s*\{[\s\S]*color:\s*var\(--file-selection-text\)[\s\S]*background:\s*var\(--file-selection-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-selection-border\)/.test(changedFilesCss), 'Finder Sync and Normal Tabber current rows share the selected-row color tokens');
     assert.ok(c9Src.includes('function scheduleFileExplorerActiveFileReveal('), 'Finder active-file reveal uses a shared helper');
     assert.ok(/function showFileEditorPaneForPath\([\s\S]*?scheduleFileExplorerActiveFileReveal\(path\)/.test(c9Src), 'opening an editor file reveals it in the current Finder root');
     assert.ok(/const previousActiveFile = activeFile;[\s\S]*?if \(previousActiveFile !== path\) scheduleFileExplorerActiveFileReveal\(path\)/.test(c9Src), 'switching editor tabs reveals the newly active file without re-expanding on every render');
@@ -2138,9 +2140,11 @@ async function runCrossSurfaceStateSuite() {
     const yomuxRepo = '/home/keivenc/yolomux.dev8002';
     rootlessDifferApi.setFileExplorerModeForTest('diff');
     const rootlessSlots = rootlessDifferApi.emptyLayoutSlots();
-    rootlessSlots.left = rootlessDifferApi.paneStateWithTabs([rootlessDifferApi.finderItemId, rootlessDifferApi.differItemId], rootlessDifferApi.differItemId);
+    rootlessSlots[rootlessDifferApi.layoutTreeKey] = rootlessDifferApi.splitNode('row', rootlessDifferApi.leafNode('left'), rootlessDifferApi.leafNode('right'));
+    rootlessSlots.left = rootlessDifferApi.paneStateWithTabs([rootlessDifferApi.finderItemId], rootlessDifferApi.finderItemId);
+    rootlessSlots.right = {...rootlessDifferApi.paneStateWithTabs([rootlessDifferApi.differItemId], rootlessDifferApi.differItemId), paneRole: 'side', side: 'right'};
     rootlessDifferApi.setLayoutSlotsForTest(rootlessSlots);
-    rootlessDifferApi.activatePaneTab('left', rootlessDifferApi.differItemId);
+
     rootlessDifferApi.setFileExplorerChangesSelectedSessionForTest('8002');
     rootlessDifferApi.setFileExplorerSessionFilesPayloadForTest({
       session: '8002',
@@ -2308,7 +2312,7 @@ async function runCrossSurfaceStateSuite() {
   assert.deepStrictEqual([...watchApi.backgroundFileEditorWatchFilesForTest()], [], 'the previously visible clean editor does not move to the slower watch list');
   watchApi.setDocumentVisibilityForTest('hidden');
   assert.deepStrictEqual(canonical(watchApi.clientServerWatchStateForTest()), {
-    roots: [], root_surfaces_version: 1, root_surfaces: [], files: [], background_files: [], context_items: [], activity_summary: {visible: false}, session_files: [],
+    client_id: watchApi.clientServerWatchStateForTest().client_id, roots: [], search_roots: [], root_surfaces_version: 1, root_surfaces: [], files: [], background_files: [], context_items: [], activity_summary: {visible: false}, session_files: [],
   }, 'hidden documents unregister every pane watch and producer request');
 
   const transcriptWatchApi = loadYomux('', ['1', '2']);
@@ -2620,7 +2624,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/\.yoagent-chat\.empty\s*\{[\s\S]*grid-template-rows:\s*auto auto auto/.test(preferencesCss), 'empty YO!agent chat does not stretch an empty history row');
     assert.ok(preferencesCss.includes('body.editor-cursor-block .file-editor-codemirror .cm-cursor'), 'block cursor styling is available for CodeMirror');
     assert.ok(/\.preferences-setting-control\s*\{[^}]*--preferences-control-left-indent:\s*14px/.test(preferencesCss), 'Preferences controls share the 14px left inset');
-    assert.ok(/\.preferences-setting-control\s*\{[^}]*--preferences-number-control-width:\s*11ch/.test(preferencesCss), 'Preferences number controls reserve room for the native spinner');
+    assert.ok(/\.preferences-setting-control\s*\{[^}]*--preferences-number-control-width:\s*20ch/.test(preferencesCss), 'Preferences number controls reserve room for seven-digit values beside the native spinner');
     assert.ok(/\.preferences-radio-group\s*\{[^}]*justify-content:\s*start[^}]*padding-inline-start:\s*var\(--preferences-control-left-indent\)/.test(preferencesCss), 'theme radio choices start from the left inset');
     assert.ok(/\.preferences-setting-control\.setting-type-text input\[type="text"\],\s*\n\.preferences-setting-control\.setting-type-select select\s*\{[^}]*justify-self:\s*start[^}]*margin-inline-start:\s*var\(--preferences-control-left-indent\)/.test(preferencesCss), 'select/text controls use the same left inset');
     assert.ok(/\.preferences-setting-control\.setting-type-number\s*\{[^}]*grid-template-columns:\s*calc\(var\(--preferences-control-left-indent\) \+ var\(--preferences-number-control-width\)\) auto minmax\(0, 1fr\) auto/.test(preferencesCss), 'number rows use the shared left inset with a flexible spacer before Reset');
@@ -2994,7 +2998,7 @@ async function runCrossSurfaceStateSuite() {
       assert.equal(api.sessionFileRelativeTimeText(1000, 1014), '<15 sec ago', 'file-tree relative dates localize the pulse-window case');
       assert.equal(api.sessionFileRelativeTimeText(1000, 1059), '<1 min ago', 'file-tree relative dates localize the sub-minute case after the pulse window');
       assert.equal(api.sessionFileRelativeTimeText(1000, 1060), '1 min ago', 'file-tree relative dates show minute age');
-      assert.equal(api.sessionFileRelativeTimeText(1000, 19720), '5.2 hrs ago', 'file-tree relative dates show decimal hour age');
+      assert.equal(api.sessionFileRelativeTimeText(1000, 19720), '5.2 hours ago', 'file-tree relative dates show decimal hour age');
       assert.equal(api.sessionFileRelativeTimeText(1000, 217000), '2.5 days ago', 'file-tree relative dates show decimal day age');
       assert.equal(api.sessionFileRelativeTimeText(1000, 1000 + (366 * 86400)), '1.0 year(s) ago', 'file-tree relative dates switch to decimal years after one year instead of continuing in days');
     }
@@ -3671,7 +3675,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/function ensureDiffRefPopover\(\)[\s\S]*appOverlayRootElement\(\)\?\.appendChild\(popover\)/.test(renderedSource), 'diff ref popovers mount under the app overlay root');
     assert.ok(/function fileTreeRepoPopoverNode\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(node\)/.test(renderedSource), 'repo hover popovers mount under the app overlay root');
     assert.ok(/function openFileImagePreview\(anchor, path, entry, point = null, options = \{\}\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(popover\)/.test(renderedSource), 'image preview popovers mount under the app overlay root');
-    assert.ok(/function showSessionRenameDialog\(session\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(overlay\)/.test(renderedSource), 'rename dialogs mount under the app overlay root');
+    assert.ok(/function showSessionRenameDialog\(session, descriptionWindow = null, descriptionWindowId = ''\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(overlay\)/.test(renderedSource), 'rename dialogs mount under the app overlay root');
     assert.ok(/function showFileEditorDecisionDialog\(options = \{\}\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(backdrop\)/.test(renderedSource), 'editor decision dialogs mount under the app overlay root');
     assert.ok(/function ensureCommandPalette\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(node\)/.test(renderedSource), 'command palette DOM mounts under the app overlay root');
     const timingSource = fs.readFileSync('static_src/js/yomux/02_timing.js', 'utf8');
@@ -5623,8 +5627,8 @@ async function runCrossSurfaceStateSuite() {
       loaded: true,
       repos: [{repo: '/repo/app', count: 1, touched_count: 1, added: 5, removed: 3}],
       files: [
-        {abs_path: '/repo/README.md', agent: 'codex', status: 'M', added: 5, removed: 3},
-        {abs_path: '/repo/app/a.py', repo: '/repo/app', status: 'M', added: 5, removed: 3},
+        {abs_path: '/repo/README.md', agent: 'codex', status: 'M', added: 5, removed: 3, diff_tracked: true},
+        {abs_path: '/repo/app/a.py', repo: '/repo/app', status: 'M', added: 5, removed: 3, diff_tracked: true},
       ],
     });
     const gitTree = new TestElement('git-tree');
@@ -5696,9 +5700,9 @@ async function runCrossSurfaceStateSuite() {
       loaded: true,
       repos: [],
       files: [
-        {abs_path: '/repo/A/B/C/F', agents: ['codex'], status: 'M', mtime: 1, added: 2, removed: 1},
-        {abs_path: '/repo/A/B/C/G', agent: 'claude', status: 'M', mtime: 2, added: 3, removed: 4},
-        {abs_path: '/repo/A/B/D/H', agents: ['codex'], status: 'A', mtime: 3, added: 8, removed: 0},
+        {abs_path: '/repo/A/B/C/F', agents: ['codex'], status: 'M', mtime: 1, added: 2, removed: 1, diff_tracked: true},
+        {abs_path: '/repo/A/B/C/G', agent: 'claude', status: 'M', mtime: 2, added: 3, removed: 4, diff_tracked: true},
+        {abs_path: '/repo/A/B/D/H', agents: ['codex'], status: 'A', mtime: 3, added: 8, removed: 0, diff_tracked: true},
         {abs_path: '/repo/A/B/D/touched-only.py', agent: 'claude', status: 'T', mtime: 4, source: 'transcript'},
       ],
     });

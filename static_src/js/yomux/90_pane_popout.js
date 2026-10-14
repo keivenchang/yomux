@@ -34,10 +34,21 @@ function panePopoutNamespaceMap(namespace) {
   };
 }
 
-function closePanePopoutRecord(record) {
+function finishPanePopoutRecord(record, options = {}) {
   if (!record) return false;
   panePopouts.delete(record.key);
+  if (record.closePoll) window.clearInterval(record.closePoll);
+  record.closePoll = null;
+  if (record.finished) return false;
+  record.finished = true;
+  if (options.restore !== false) record.onClosed?.();
+  return true;
+}
+
+function closePanePopoutRecord(record, options = {}) {
+  if (!record) return false;
   const popoutWindow = record.window;
+  finishPanePopoutRecord(record, options);
   if (!popoutWindow || popoutWindow.closed) return false;
   try { popoutWindow.close?.(); } catch (_) {}
   return true;
@@ -282,9 +293,10 @@ function writePaneItemPopoutDocument(record, snapshot) {
 function updatePanePopout(item) {
   const record = paneItemPopouts.get(item);
   if (!record) return false;
+  if (record.mode === 'live') return true;
   const popoutWindow = record.window;
   if (!popoutWindow || popoutWindow.closed) {
-    paneItemPopouts.delete(item);
+    finishPanePopoutRecord(record);
     return false;
   }
   const snapshot = panePopoutSnapshotForItem(item);
@@ -302,7 +314,7 @@ function updatePanePopout(item) {
     root.innerHTML = snapshot.html || '';
     return true;
   } catch (_) {
-    paneItemPopouts.delete(item);
+    finishPanePopoutRecord(record);
     return false;
   }
 }
@@ -321,7 +333,7 @@ function closePanePopout(item) {
 }
 
 function closePopoutsForLayoutItem(item) {
-  let closed = closePanePopout(item);
+  let closed = closePanePopoutRecord(paneItemPopouts.get(item), {restore: false});
   if (isFileEditorItem(item) && !isHistoricalFileEditorItem(item) && typeof closeFilePreviewPopout === 'function') {
     closed = closeFilePreviewPopout(fileItemPath(item)) || closed;
   }
@@ -333,6 +345,87 @@ function closeAllPanePopouts() {
 }
 
 window.addEventListener('beforeunload', closeAllPanePopouts);
+
+function livePanePopoutUrl(item) {
+  const url = new URL(window.location.href);
+  for (const parameter of ['layout', 'tabs', 'active', 'sessions']) url.searchParams.delete(parameter);
+  url.searchParams.set('sessions', readableItemParam(item));
+  url.searchParams.set('layout', 'popout');
+  url.searchParams.set('tabs', `popout:${readableItemParam(item)}`);
+  url.searchParams.set('debug', '1');
+  url.searchParams.set('stats_only', '1');
+  url.searchParams.set('pane_popout', '1');
+  url.hash = '';
+  return url.href;
+}
+
+function restoreLivePanePopoutLayout(record) {
+  const item = record?.id;
+  const restore = record?.restoreLayout;
+  if (!item || !restore || itemInLayout(item)) return false;
+  const next = layoutWithItems(cloneLayoutSlots(layoutSlots), [item], restore.slot);
+  const restoredSlot = slotForItem(item, next);
+  if (!restoredSlot) return false;
+  if (restore.wasActive) {
+    next[restoredSlot] = paneStateWithTabsForSlot(
+      restoredSlot,
+      paneTabs(restoredSlot, next),
+      item,
+      next,
+    );
+  }
+  applyLayoutSlots(next, {
+    focusSession: restore.wasActive ? item : undefined,
+    preservePlaceholderSlots: true,
+    prune: false,
+  });
+  return true;
+}
+
+function openLivePanePopout(item) {
+  const existingRecord = paneItemPopouts.get(item);
+  if (existingRecord?.window && !existingRecord.window.closed) {
+    existingRecord.window.focus?.();
+    return true;
+  }
+  if (existingRecord) finishPanePopoutRecord(existingRecord);
+  const originalSlot = slotForItem(item);
+  if (!originalSlot) return false;
+  const popoutWindow = window.open(
+    livePanePopoutUrl(item),
+    `yomux-pane-${encodeURIComponent(item)}`,
+    'popup,width=980,height=900',
+  );
+  if (!popoutWindow) {
+    statusErr(localizedHtml('status.panePopoutBlocked'));
+    return false;
+  }
+  const record = paneItemPopouts.set(item, {
+    window: popoutWindow,
+    mode: 'live',
+    restoreLayout: {
+      slot: originalSlot,
+      wasActive: activeItemForSide(originalSlot) === item,
+    },
+    onClosed: () => restoreLivePanePopoutLayout(record),
+  }).get(item);
+  try {
+    const minimized = layoutWithoutItemFromSlots(item, layoutSlots, {preserveRemovedSlot: true});
+    applyLayoutSlots(minimized, {
+      preservePlaceholderSlots: true,
+      prune: false,
+    });
+    record.closePoll = window.setInterval(() => {
+      if (!record.window || record.window.closed) finishPanePopoutRecord(record);
+    }, 250);
+    return true;
+  } catch (error) {
+    closePanePopoutRecord(record, {restore: false});
+    restoreLivePanePopoutLayout(record);
+    statusErr(localizedHtml('status.panePopoutFailed', {error}));
+    return false;
+  }
+}
 
 function openPanePopout(item) {
   if (isLegacyYoCostItemParam(item)) {

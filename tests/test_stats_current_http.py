@@ -1327,6 +1327,19 @@ def test_capabilities_route_is_authenticated_and_uses_the_same_policy_owner():
     assert route.role == "readonly"
 
 
+def test_session_alias_route_is_authenticated_and_returns_an_empty_python_mapping():
+    writes = []
+    request = SimpleNamespace(write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)))
+
+    http_routes.get_stats_session_aliases(request, None, None)
+
+    assert writes == [(HTTPStatus.OK, {"aliases": {}})]
+    route = http_routes.route_for_request("GET", "/api/stats-session-aliases")
+    assert route is not None
+    assert route.handler is http_routes.get_stats_session_aliases
+    assert route.role == "readonly"
+
+
 def test_retry_route_is_authenticated_and_returns_the_forwarder_result():
     writes = []
     adapter = SimpleNamespace(retry=lambda: {"ok": True, "status": "ready"})

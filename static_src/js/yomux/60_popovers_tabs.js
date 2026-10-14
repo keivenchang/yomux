@@ -272,7 +272,7 @@ async function settleDirectoryRowExpansionRequest(row, fullPath, cachedEntries, 
   }
   let entries;
   try {
-    entries = await fetchDirectory(fullPath, {user: options.user === true});
+    entries = await fetchDirectory(fullPath, {user: options.user === true, force: options.force === true});
   } catch (error) {
     if (!ownsExpansion()) return;
     if (!isCurrent()) { releaseExpansion(); return; }
@@ -344,7 +344,7 @@ function updateSessionButtonStates(sessionNames = sessions) {
 
 function updateSessionStateClasses(sessionNames = sessions) {
   const included = new Set(sessionNames);
-  for (const tab of document.querySelectorAll('.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab]')) {
+  for (const tab of document.querySelectorAll('.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab], .tmux-pane-tab-token[data-pane-tab]')) {
     const session = String(tab.dataset?.paneTab || '').trim();
     if (!session || !included.has(session) || !isTmuxSession(session)) continue;
     const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
@@ -387,7 +387,7 @@ function refreshSessionPopoverContent(popover, html) {
 
 function refreshPaneTabSessionPopovers(sessionNames = sessions) {
   const included = new Set(sessionNames);
-  document.querySelectorAll('.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab]').forEach(tab => {
+  document.querySelectorAll('.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab], .tmux-pane-tab-token[data-pane-tab]').forEach(tab => {
     const session = String(tab?.dataset?.paneTab || '').trim();
     if (!session || !included.has(session) || tabTypeForItem(session)) return;
     const popover = typeof paneTabPopoverForAnchor === 'function'
@@ -695,6 +695,8 @@ function tabInteractionControllerForApp() {
       tab: descriptor.anchor,
       sourceSlot: descriptor.sourceSlot?.() || slotForItem(item),
       presentation: options.presentation || 'context',
+      descriptionWindow: descriptor.descriptionWindow ?? null,
+      descriptionWindowId: descriptor.descriptionWindowId ?? '',
     });
     return true;
   };
@@ -2118,6 +2120,7 @@ function showDragTimingOverlay(rows) {
 }
 
 function startSessionDrag(event, session, sourceSlot = null, options = {}) {
+  if (!tabDragAllowed()) { event.preventDefault?.(); return false; }
   dragTimingMark('startSessionDrag:begin');
   clearNativeDragImagePreview();
   dragState.item = session;

@@ -10,6 +10,51 @@ from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
 pytestmark = [pytest.mark.browser, pytest.mark.socket, pytest.mark.boot]
 
 
+def test_finder_and_differ_render_compact_large_line_counts(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof sessionFileDiffText === 'function' && typeof updateFileTreeRowContents === 'function'"
+    ))
+    rendered = browser.execute_script("""
+      const container = document.createElement('div');
+      document.body.append(container);
+      try {
+        return ['finder', 'differ'].map(view => {
+          const row = document.createElement('div');
+          row.className = 'file-tree-row';
+          container.append(row);
+          updateFileTreeRowContents(row, 'F', 'large.txt', {
+            diffParts: sessionFileDiffText({added: 1200000, removed: 3400000}),
+          });
+          return {view, text: row.querySelector('.file-tree-diff').textContent};
+        });
+      } finally {
+        container.remove();
+      }
+    """)
+    assert rendered == [
+        {"view": "finder", "text": "+1.2M -3.4M"},
+        {"view": "differ", "text": "+1.2M -3.4M"},
+    ]
+
+
+def test_finder_parent_totals_exclude_untracked_lines_but_keep_file_count(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof fileTreeChangedAncestorStats === 'function' && typeof sessionFileCountsAreTracked === 'function'"
+    ))
+    result = browser.execute_script("""
+      const payload = {files: [
+        {abs_path: '/repo/tracked.txt', status: 'M', diff_tracked: true, added: 11, removed: 3, mtime: 10},
+        {abs_path: '/repo/untracked.txt', status: '?', diff_tracked: false, added: 407, removed: 0, mtime: 20},
+        {abs_path: '/repo/transcript.txt', status: 'T', diff_tracked: false, added: 1000, removed: 0, mtime: 30},
+      ]};
+      const stats = fileTreeChangedAncestorStats(payload).get('/repo');
+      return {count: stats.count, added: stats.added, removed: stats.removed, mtime: stats.mtime};
+    """)
+    assert result == {"count": 2, "added": 11, "removed": 3, "mtime": 20}
+
+
 def test_tree_metadata_alignment_follows_live_column_visibility(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path)
     WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(

@@ -102,9 +102,16 @@ function startFinderPanelListing(panel, options = {}) {
       scheduleAfterFileExplorerFirstPaint(() => {
         finishFinderFastPaint();
       });
-      if (options.preserveExpanded !== false && fileExplorerRootMode !== 'sync') {
-        const expandedPaths = fileExplorerExpandedPathsForRoot(currentFileExplorerRoot());
-        if (expandedPaths.length) await restoreFileExplorerExpandedPaths(expandedPaths, currentFileExplorerRoot());
+      if (options.preserveExpanded !== false) {
+        const root = currentFileExplorerRoot();
+        const expandedPaths = fileExplorerExpandedPathsForRoot(root);
+        if (expandedPaths.length) {
+          const syncGeneration = fileExplorerRootMode === 'sync' ? fileExplorerSyncState.generation : undefined;
+          await restoreFileExplorerExpandedPaths(expandedPaths, root, {
+            generation: syncGeneration,
+            isCurrent: () => currentFileExplorerRoot() === root,
+          });
+        }
       }
     }).catch(error => {
       scheduleAfterFileExplorerFirstPaint(() => {

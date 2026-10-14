@@ -553,6 +553,67 @@ def test_current_stats_one_second_motion_and_sse_delta_do_not_refetch_or_fabrica
     assert any(label.count(":") == 2 for label in result["afterDelta"]["labels"]), result
 
 
+def test_current_stats_chromium_merges_historical_view_alias_tokens_under_source_tmux_names(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "current-stats-aliases.html", _current_stats_fixture_html())
+    browser.execute_script(
+        """
+        const fixture = window.__statsFixture;
+        window.YOmuxStatsCurrent.setSessionAliases({
+          '__yomux_view_7110_3a5ed04792596e3a0e3f43d1': 'yo7111',
+          '__yomux_view_7110_6617c41d89676ea351c22c43': 'yo7110',
+        });
+        fixture.snapshotTransform = snapshot => {
+          for (const bucket of snapshot.buckets) {
+            const value = Number(Object.entries(bucket.series).find(([name]) => name.startsWith('agent_tokens_per_minute:'))?.[1].value || 0);
+            const series = Object.fromEntries(Object.entries(bucket.series).filter(([name]) => !name.startsWith('agent_tokens_per_minute:')));
+            Object.assign(series, {
+              'agent_tokens_per_minute:yo7111': {value: 20, source_count: 1, first_timestamp: bucket.start, last_timestamp: bucket.start},
+              'agent_tokens_per_minute:__yomux_view_7110_3a5ed04792596e3a0e3f43d1|1|%65|codex': {value: 30, source_count: 1, first_timestamp: bucket.start, last_timestamp: bucket.start},
+              'agent_tokens_per_minute:__yomux_view_7110_6617c41d89676ea351c22c43|0|%55|codex': {value, source_count: 1, first_timestamp: bucket.start, last_timestamp: bucket.start},
+            });
+            bucket.series = series;
+          }
+          return snapshot;
+        };
+        """
+    )
+    started = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const fixture = window.__statsFixture;
+        const root = document.getElementById('stats-root');
+        fixture.start('stats').then(() => done({ok: true})).catch(error => done({
+          error: String(error?.stack || error),
+          generations: fixture.generationEvents.map(item => JSON.parse(item.dataset).requested_resolution),
+          status: root.querySelector('[data-stats-current-state]')?.textContent || '',
+          charts: [...root.querySelectorAll('[data-stats-chart]')].map(chart => chart.dataset.statsChart),
+          rootHtml: root.innerHTML.slice(0, 1500),
+          aliasSetter: typeof window.YOmuxStatsCurrent.setSessionAliases,
+          failures: typeof jsDebugFailureEvents === 'function' ? jsDebugFailureEvents() : [],
+        }));
+        """
+    )
+    assert started.get("error") is None, started
+    result = browser.execute_script(
+        """
+        const root = document.getElementById('stats-root');
+        return {
+          series: [...root.querySelectorAll('[data-stats-chart="agent-tokens"] [data-series]')].map(item => ({
+            key: item.dataset.series,
+            label: item.querySelector('title')?.textContent || '',
+            values: [...item.querySelectorAll('[data-series-point]')].map(point => Number(point.dataset.pointValue)),
+          })),
+          legend: [...root.querySelectorAll('[data-stats-chart="agent-tokens"] [data-series-legend]')].map(item => item.textContent),
+        };
+        """
+    )
+    keys = {row["key"] for row in result["series"]}
+    assert "agent_tokens_per_minute:yo7111" in keys, result
+    assert "agent_tokens_per_minute:yo7110" in keys, result
+    assert not any("__yomux_view_" in key for key in keys), result
+    assert {"yo7110", "yo7111"}.issubset(set(result["legend"])), result
+
+
 # Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_current_stats_one_second_motion_preserves_sparse_native_cadence_series(browser, tmp_path):

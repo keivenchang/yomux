@@ -79,6 +79,15 @@ func TestRouteCapabilityIsMethodAndOperationAware(t *testing.T) {
 	if got := RouteCapability("GET", "/api/fs/git-history-stats-stream?path=/tmp/repo&count=1&batch_size=1"); got != "finder.git.v1" {
 		t.Fatalf("RouteCapability(git-history-stats-stream) = %q, want finder.git.v1", got)
 	}
+	if got := Policy("POST", "/api/tabber-view-session").Role; got != "readonly" {
+		t.Fatalf("Tabber per-window view role = %q, want readonly", got)
+	}
+	if got := Policy("POST", "/api/tabber-description").Role; got != "admin" {
+		t.Fatalf("Tabber description role = %q, want admin", got)
+	}
+	if got := Policy("POST", "/api/tmux-window").Role; got != "admin" {
+		t.Fatalf("tmux window selection role = %q, want admin", got)
+	}
 	catalog := New("go-test")
 	if !catalog.Available("finder.git.v1") || !catalog.Available("pane.tabber.v1") {
 		t.Fatal("implemented Finder and Tabber capabilities are not enabled")

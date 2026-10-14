@@ -50,6 +50,7 @@ function paneFrameControlsHtml(session, options = {}) {
   const includeActions = controlOptions.actions ?? isTmuxSession(session);
   const includeDetails = controlOptions.details === true;
   const includeMinimize = controlOptions.minimize !== false
+    && !urlFlagEnabled('pane_popout')
     && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
   const includeExpand = controlOptions.expand !== false;
   const includePopout = controlOptions.popout === true;
@@ -67,7 +68,7 @@ function paneFrameControlsHtml(session, options = {}) {
     add({className: 'pane-expand', platformKind: 'zoom', dataset: {paneExpand: session}, title: t('pane.expand'), label: t('pane.expand'), hidden: !canPaneExpand(session)});
   }
   if (includeMinimize) {
-    add({className: 'pane-minimize', platformKind: 'minimize', dataset: {paneMinimize: session}, title: t('pane.minimize'), label: t('pane.minimize')});
+    add({className: 'pane-minimize', platformKind: 'minimize', dataset: {paneMinimize: session}, title: t('pane.minimize'), label: t('pane.minimize'), hidden: !tabLayoutManipulationAllowed()});
   }
   if (controlOptions.close) {
     const closeLabel = controlOptions.closeLabel || t('pane.closeTab');

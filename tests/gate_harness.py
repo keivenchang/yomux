@@ -375,6 +375,9 @@ def gate_runtime_paths(
     # remains bindable under Linux's fixed sockaddr_un path limit.
     root = Path(require_product_env("TEST_ROOT")) / f"g-{uuid.uuid4().hex[:4]}"
     root.mkdir(mode=0o700)
+    # Each fixture owns a fresh admission window. Keep it closed after teardown
+    # until monkeypatch restores the prior module state.
+    monkeypatch.setattr(workdir_module, "_agent_auth_refresh_admission_closed", False)
     ledger = install_fixture_local_service_ledger(monkeypatch)
     self_baseline = capture_fixture_self_baseline()
     home_dir = root / "home"
@@ -2129,6 +2132,26 @@ def retire_fixture_spawned_processes_beneath_tmpdir(root: Path, *, label: str) -
     return processes
 
 
+def settle_fixture_agent_auth_refresh(root: Path, *, label: str) -> None:
+    """Join the process-global auth probe before removing its fixture-owned TMPDIR."""
+
+    worker = workdir_module._close_agent_auth_status_refresh_admission_for_tests()
+    if worker is None or worker is threading.current_thread():
+        return
+
+    timeout = float(workdir_module._AGENT_AUTH_PROBE_TIMEOUT) + 1.0
+    worker.join(timeout)
+
+    if worker.is_alive():
+        # The refresh has a bounded CLI timeout. If it outlives that contract,
+        # terminate only children carrying this fixture's private TMPDIR and
+        # join again before deleting paths they may still use.
+        retire_fixture_spawned_processes_beneath_tmpdir(root, label=label)
+        worker.join(1.0)
+    if worker.is_alive():
+        raise AssertionError(f"{label} agent auth refresh worker did not settle: {worker.name}")
+
+
 def retire_fixture_local_services(
     ledger: FixtureLocalServiceLedger,
     root: Path,
@@ -2150,6 +2173,7 @@ def retire_fixture_local_services(
         # keeps its uid-wide inotify instance for as long as it runs. Reclaim
         # those from the process table, then prove none is left.
         ("unowned daemons", lambda: retire_local_service_daemons_beneath(root, label=label)),
+        ("agent auth refresh", lambda: settle_fixture_agent_auth_refresh(root, label=label)),
         ("inherited workers", lambda: retire_fixture_spawned_processes_beneath_tmpdir(root, label=label)),
         ("surviving daemons", lambda: assert_no_surviving_local_service_daemons(root, label=label)),
         ("reaper settlement", lambda: settle_fixture_local_service_reapers(registries, label=label)),

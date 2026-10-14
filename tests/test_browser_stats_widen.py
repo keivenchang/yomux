@@ -161,6 +161,7 @@ def _seed_go_stats_fixture(database: Path) -> None:
                 ),
             )
         )
+    observations.append(("go-range-history-cpu", "cpu", "host", now - 3500, "go-cpu-epoch", 1, json.dumps({"process_percent": 18, "system_percent": 37})))
     atoms = [
         (
             f"go-input-{index}",
@@ -203,7 +204,7 @@ def _seed_go_stats_fixture(database: Path) -> None:
         for index in range(3)
     ]
     coverage = [
-        ("cpu", "host", "go-cpu-epoch", now - 180, None, 1, 1),
+        ("cpu", "host", "go-cpu-epoch", now - 3600, None, 1, 1),
         ("agent_status", "host", "go-agent-epoch", now - 180, None, 60, 1),
         ("system_memory", "host", "go-memory-epoch", now - 180, None, 60, 1),
         ("system_disk", "mount:/", "go-disk-epoch", now - 180, None, 300, 1),
@@ -368,6 +369,88 @@ def _raise_login_page_diagnostic(driver):
 
 def _register_stats_route_instrumentation(harness: Any) -> None:
     register_browser_new_document_script(harness.driver, _STATS_ROUTE_INSTRUMENTATION)
+
+
+def _assert_native_stats_range_journey(browser, terminal_session):
+    """Exercise Chromium's native range input and restore the fixture page selection."""
+    original = browser.execute_script("return {range: debugRuntimeState.graphRangeSeconds, resolution: debugRuntimeState.graphResolutionOverrideSeconds, zoom: jsDebugGraphZoomDomain}")
+    snapshot_script = """
+      const controller = jsDebugCurrentStatsClientState.client.controller();
+      const generation = controller.generation();
+      const graph = document.querySelector('[data-js-debug-graph]');
+      const grid = graph?.querySelector('[data-js-debug-chart-grid]');
+      const slider = graph?.querySelector('[data-js-debug-range-slider]');
+      return {
+        range: debugRuntimeState.graphRangeSeconds,
+        resolution: debugRuntimeState.graphResolutionOverrideSeconds,
+        zoom: jsDebugGraphZoomDomain,
+        owner: jsDebugGraphRangeSliderInteraction !== null,
+        value: slider?.value,
+        label: graph?.querySelector('[data-js-debug-range-label]')?.textContent,
+        selection: controller.selection(),
+        generationRange: generation?.range_seconds,
+        generationResolution: generation?.resolution_seconds,
+        paintedMatches: graph?.dataset.jsDebugStatsGenerationKey === jsDebugCurrentStatsGenerationKey(generation),
+        axisMs: Number(grid?.dataset.jsDebugDomainEnd) - Number(grid?.dataset.jsDebugDomainStart),
+        resolutionLabel: Number(graph?.querySelector('[data-js-debug-resolution]')?.dataset.jsDebugResolutionSeconds),
+        coverage: generation?.buckets?.length ? Math.max(...generation.buckets.map(bucket => bucket.start + bucket.duration)) - Math.min(...generation.buckets.map(bucket => bucket.start)) : 0,
+        renderedCoverage: (() => { const buckets = debugGraphDisplayBuckets(Date.now()); return buckets.length ? (Math.max(...buckets.map(bucket => bucket.startMs)) - Math.min(...buckets.map(bucket => bucket.startMs))) / 1000 : 0; })(),
+      };
+    """
+    timings = {}
+    touch_active = False
+    try:
+        browser.execute_script("setDebugGraphRange(300)")
+        WebDriverWait(browser, 15, poll_frequency=0.05).until(lambda driver: driver.execute_script(snapshot_script)["generationRange"] == 300)
+        before = browser.execute_script(snapshot_script)
+        for cancel in (True, False):
+            coordinates = browser.execute_script("""
+              const slider = document.querySelector('[data-js-debug-graph] [data-js-debug-range-slider]');
+              slider.scrollIntoView({block: 'center'});
+              const rect = slider.getBoundingClientRect();
+              const index = debugGraphAvailableRangeOptions().findIndex(option => option.seconds === 3600);
+              return {x: rect.left + 8, y: rect.top + rect.height / 2, endX: rect.left + 8 + (rect.width - 16) * index / Number(slider.max)};
+            """)
+            browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": coordinates["x"], "y": coordinates["y"]}]})
+            touch_active = True
+            browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [{"x": coordinates["endX"], "y": coordinates["y"]}]})
+            held = browser.execute_script(snapshot_script)
+            assert held["owner"] and held["label"] == "1h", held
+            assert held["range"] == held["generationRange"] == held["selection"]["range_seconds"] == 300, held
+            started = time.monotonic()
+            browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchCancel" if cancel else "touchEnd", "touchPoints": []})
+            touch_active = False
+            immediate = browser.execute_script(snapshot_script)
+            assert immediate["owner"] is False, immediate
+            if cancel:
+                assert immediate["range"] == immediate["generationRange"] == immediate["selection"]["range_seconds"] == 300, immediate
+                assert immediate["label"] == "5m" and immediate["value"] == "0", immediate
+                assert immediate["resolution"] == before["resolution"] and immediate["zoom"] == before["zoom"], immediate
+                timings["cancel_restore_ms"] = (time.monotonic() - started) * 1000
+            else:
+                assert immediate["range"] == immediate["selection"]["range_seconds"] == 3600, immediate
+                timings["selection_request_ms"] = (time.monotonic() - started) * 1000
+                WebDriverWait(browser, 15, poll_frequency=0.05).until(lambda driver: driver.execute_script(snapshot_script)["generationRange"] == 3600)
+                timings["generation_ms"] = (time.monotonic() - started) * 1000
+                try:
+                    settled = WebDriverWait(browser, 15, poll_frequency=0.05).until(lambda driver: (state if (state := driver.execute_script(snapshot_script))["paintedMatches"] and state["axisMs"] == 3600000 and state["resolutionLabel"] == state["generationResolution"] and state["coverage"] >= 3540 and state["renderedCoverage"] >= 3300 else False))
+                except TimeoutException as error:
+                    raise AssertionError(browser.execute_script(snapshot_script)) from error
+                timings["render_ms"] = (time.monotonic() - started) * 1000
+                assert settled["label"] == "1h", settled
+                browser.execute_script("activatePaneTab(slotForSession(arguments[0]), arguments[0]);", terminal_session)
+                WebDriverWait(browser, 5, poll_frequency=0.05).until(lambda driver: driver.execute_script("return !jsDebugStatsPanelVisible()"))
+                browser.execute_script("activatePaneTab(slotForSession('__debug__'), '__debug__');")
+                WebDriverWait(browser, 5, poll_frequency=0.05).until(lambda driver: driver.execute_script("return jsDebugStatsPanelVisible()"))
+                returned = browser.execute_script(snapshot_script)
+                assert returned["range"] == returned["selection"]["range_seconds"] == returned["generationRange"] == 3600, returned
+                assert returned["resolution"] == settled["resolution"] and returned["zoom"] == settled["zoom"], returned
+        print(f"Native stats range timings: {json.dumps(timings, sort_keys=True)}")
+        return timings
+    finally:
+        if touch_active:
+            browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchCancel", "touchPoints": []})
+        browser.execute_script("setDebugGraphRange(arguments[0].range); setDebugGraphResolutionOverride(arguments[0].resolution); jsDebugGraphZoomDomain = arguments[0].zoom; refreshDebugGraphSurfaces();", original)
 
 
 def test_stats_area_legend_key_is_a_thick_block(browser, tmp_path):
@@ -1002,6 +1085,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
         unexpected_routes = {route: result["unrelatedRouteCounts"].get(route, 0) for route in unrelated_routes if result["unrelatedRouteCounts"].get(route, 0)}
         assert not unexpected_routes, {"unexpected_routes": unexpected_routes, "route_counts": result["unrelatedRouteCounts"]}
         assert result["unrelatedRouteCounts"].get("/api/activity", 0) == 1, result
+        _assert_native_stats_range_journey(browser, tmux_runtime.sessions[0])
     finally:
         active_error = sys.exc_info()[1]
         browser_retirement_error = None
@@ -1436,6 +1520,7 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
     config_dir.mkdir()
     (config_dir / "auth.yaml").write_text("users:\n  - username: lifecycle-admin\n    password: fixture-only-password\n    role: admin\n", encoding="utf-8")
     (config_dir / "auth-cookie-secret").write_text("22" * 32, encoding="ascii")
+    (config_dir / "settings.yaml").write_text("general:\n  default_tabber_mode: advanced\n", encoding="utf-8")
     state_file = tmp_path / "codex-screen-state"
     state_file.write_text("working", encoding="ascii")
     attention_state_file = tmp_path / "codex-attention-screen-state"
@@ -1540,7 +1625,11 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
             return response;
           };
         """})["identifier"]
-        browser.get(f"{base_url}/?sessions={codex_session}&layout=left&tabs=left:{codex_session}")
+        def open_advanced_session_view():
+            browser.get(f"{base_url}/?sessions={codex_session}&layout=left&tabs=left:{codex_session}")
+            WebDriverWait(browser, 20).until(lambda driver: driver.execute_script("return typeof tabberIsAdvanced === 'function' && tabberIsAdvanced()"))
+
+        open_advanced_session_view()
         WebDriverWait(browser, 20, poll_frequency=0.05).until(lambda driver: driver.execute_script("return document.readyState === 'complete' && document.querySelector('#grid') !== null"))
 
         def get_activity():
@@ -1567,7 +1656,7 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
         first_tab = browser.current_window_handle
         browser.switch_to.new_window("tab")
         second_tab = browser.current_window_handle
-        browser.get(f"{base_url}/?sessions={codex_session}&layout=left&tabs=left:{codex_session}")
+        open_advanced_session_view()
         WebDriverWait(browser, 20, poll_frequency=0.1).until(lambda driver: driver.execute_script("""
           const marker = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] [data-action="pane-tab-auto-approve"]`);
           return document.readyState === 'complete' && document.querySelector('#grid')
@@ -1580,11 +1669,17 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
         """)
         yolo_revision_before_enable = browser.execute_script("return Number(clientEventTransportState.resourceRevisions.get('auto_approve_changed') || 0)")
         browser.switch_to.window(first_tab)
-        yolo_marker = WebDriverWait(browser, 15, poll_frequency=0.1).until(lambda driver: driver.execute_script("""
+        WebDriverWait(browser, 15, poll_frequency=0.1).until(lambda driver: driver.execute_script("""
           const marker = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] [data-action="pane-tab-auto-approve"]`);
-          return marker && marker.classList.contains('inactive') ? marker : false;
+          return marker && marker.classList.contains('inactive');
         """, codex_session))
-        yolo_marker.click()
+        # The sibling tab can deliver SSE while WebDriver holds an element handle. Query and click
+        # the current control in one task so a legitimate rerender cannot stale the click target.
+        browser.execute_script("""
+          const marker = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] [data-action="pane-tab-auto-approve"]`);
+          if (!marker || !marker.classList.contains('inactive')) throw new Error('current YO control is not inactive');
+          marker.click();
+        """, codex_session)
         WebDriverWait(browser, 15, poll_frequency=0.1).until(lambda _driver: browser.execute_script("""
           const state = autoApproveStates.get(arguments[0]);
           const marker = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] .session-yolo-marker`);

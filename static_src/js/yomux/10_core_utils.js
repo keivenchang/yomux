@@ -7,6 +7,18 @@ function setAttributeIfChanged(node, name, value) {
   else node.setAttribute(name, next);
 }
 
+function setStylePropertyIfChanged(style, name, value) {
+  if (!style) return;
+  const next = String(value);
+  if (style.getPropertyValue?.(name) === next) return;
+  style.setProperty?.(name, next);
+}
+
+function removeStylePropertyIfPresent(style, name) {
+  if (!style?.getPropertyValue?.(name)) return;
+  style.removeProperty?.(name);
+}
+
 function setInnerHtmlIfChanged(node, source, beforeReplace = null) {
   const current = node.innerHTML;
   const previous = elementHtmlState.get(node);
@@ -3606,7 +3618,8 @@ function readStoredFileExplorerViewSettings() {
     treeSortMode: readStoredFileExplorerTreeSortMode(),
   };
   const stored = readStoredJson(fileExplorerViewSettingsStorageKey, null);
-  const tabberFallback = legacyFinder;
+  // Both Tabber modes share relative activity dates and newest-first ordering.
+  const tabberFallback = {treeDateMode: 'relative', treeSortMode: 'newest'};
   const differFallback = {treeDateMode: legacyFinder.treeDateMode, treeSortMode: 'newest'};
   return {
     finder: normalizeFileExplorerViewSettings(stored?.finder, legacyFinder),
@@ -3617,7 +3630,11 @@ function readStoredFileExplorerViewSettings() {
 
 function fileExplorerViewSettingsFor(view = 'finder') {
   const key = normalizeFileExplorerView(view);
-  const fallback = key === 'differ' ? {treeDateMode: 'none', treeSortMode: 'newest'} : {treeDateMode: 'none', treeSortMode: 'az'};
+  const fallback = key === 'tabber'
+    ? {treeDateMode: 'relative', treeSortMode: 'newest'}
+    : key === 'differ'
+      ? {treeDateMode: 'none', treeSortMode: 'newest'}
+    : {treeDateMode: 'none', treeSortMode: 'az'};
   const settings = normalizeFileExplorerViewSettings(fileExplorerViewSettings?.[key], fallback);
   if (!fileExplorerViewSettings || fileExplorerViewSettings[key] !== settings) {
     fileExplorerViewSettings = {...(fileExplorerViewSettings || {}), [key]: settings};
@@ -3633,6 +3650,16 @@ function fileExplorerTreeSortModeForView(view = 'finder') {
   return fileExplorerViewSettingsFor(view).treeSortMode;
 }
 
+function migrateTabberRelativeDates() {
+  const key = 'yomux.tabber.relativeDates.migrated.v1';
+  if (storageGet(key) === '1') return false;
+  // Run after URL restoration so an old saved Date/None URL cannot undo the migration.
+  setFileExplorerViewSetting('tabber', 'treeDateMode', 'relative', {refresh: false});
+  writeStoredFileExplorerViewSettings();
+  storageSet(key, '1');
+  return true;
+}
+
 function writeStoredFileExplorerViewSettings() {
   storageSet(fileExplorerViewSettingsStorageKey, JSON.stringify(fileExplorerViewSettings));
 }
@@ -3644,7 +3671,11 @@ function setFileExplorerViewSetting(view, key, value, options = {}) {
   if (next.treeDateMode === current.treeDateMode && next.treeSortMode === current.treeSortMode) return false;
   fileExplorerViewSettings = {...fileExplorerViewSettings, [surface]: next};
   writeStoredFileExplorerViewSettings();
-  if (options.refresh !== false) refreshFileExplorerViewSettingsSurface(surface);
+  if (options.refresh !== false) {
+    refreshFileExplorerViewSettingsSurface(surface);
+    // A reload restores URL settings after browser storage; publish the user's choice together.
+    updateActiveSessionParam();
+  }
   return true;
 }
 
@@ -4045,6 +4076,8 @@ function refreshFileExplorerViewSettingsSurface(view) {
   const surface = normalizeFileExplorerView(view);
   if (surface === 'finder') {
     if (typeof refreshFileExplorerTrees === 'function') void refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  } else if (surface === 'tabber') {
+    refreshTabberPanels({reorder: true});
   } else if (typeof renderFileExplorerChangesPanels === 'function') {
     renderFileExplorerChangesPanels({force: true, view: surface});
   }
@@ -4137,15 +4170,19 @@ function attentionAcknowledgeDelayMsFromOptions(options = {}) {
 function acknowledgeTerminalAttentionFromUserAction(session, windowIndex = null, options = {}) {
   const sessionKey = String(session || '').trim();
   if (!sessionKey || !isTmuxSession(sessionKey)) return false;
-  const explicitWindowIndex = windowIndex !== null && windowIndex !== undefined;
+  const view = typeof tabberViewDescriptorForSession === 'function' ? tabberViewDescriptorForSession(sessionKey) : null;
+  if (view && view.windowIndex < 0) return false;
+  const targetSession = view?.sourceSession || sessionKey;
+  const targetWindowIndex = view ? view.windowIndex : windowIndex;
+  const explicitWindowIndex = targetWindowIndex !== null && targetWindowIndex !== undefined;
   const acknowledgeDelayMs = attentionAcknowledgeDelayMsFromOptions(options);
   let acknowledged = false;
   // A parent session tab acknowledges the highest-priority stopped/attention child, not whichever
   // tmux window happens to be active. Direct sub-window actions remain tied to their exact target.
   if (options.acknowledgeAgentWindow !== false && typeof acknowledgeAgentWindowActivity === 'function') {
-    acknowledged = acknowledgeAgentWindowActivity(sessionKey, explicitWindowIndex ? windowIndex : null, {
+    acknowledged = acknowledgeAgentWindowActivity(targetSession, explicitWindowIndex ? targetWindowIndex : null, {
       ...options,
-      preferSummary: options.preferSummary === true || !explicitWindowIndex,
+      preferSummary: !view && (options.preferSummary === true || !explicitWindowIndex),
       delayMs: acknowledgeDelayMs,
     }) || acknowledged;
   }
@@ -4316,7 +4353,7 @@ function focusTerminalDom(session, delay = 0) {
       textareaFocused: document.activeElement === textarea,
     });
     // The pinned xterm focuses with preventScroll; measuring the document here flushes sibling tree layout.
-    item?.term?.focus?.();
+    if (!textarea || document.activeElement !== textarea) item?.term?.focus?.();
     recordTerminalMobileInputTrace(session, 'touch-focus-result', {
       textareaPresent: Boolean(textarea),
       textareaFocused: document.activeElement === textarea,
@@ -4409,37 +4446,7 @@ function textWithMovingEllipsisHtml(value, className = '') {
   return `${esc(stripTrailingEllipsisText(value))}${movingEllipsisHtml(className)}`;
 }
 
-const searchRankWeights = Object.freeze({
-  perChar: 8,
-  contiguous: 10,
-  contiguousSubstring: 30000,
-  wordStart: 6,
-  gapPenalty: 0.2,
-  haystackLengthPenalty: 0.01,
-  anchorPrimary: 20000,
-  anchorSecondary: 12000,
-  fieldIndexPenalty: 20,
-  domainPrior: {
-    files: {file: 6000, pane: 3000, command: 0, setting: 0},
-    command: {pane: 6000, command: 3000, setting: 3000, file: 0},
-  },
-  fileNamePrefix: 3500,
-  fileNameExact: 100000,
-  fileNameContains: 1800,
-  fileNameSubsequence: 600,
-  paneNameContiguous: {files: 50000, command: 100000},
-  finderAlias: 25000,
-  finderAliasFilesMode: 2500,
-  paneExactIdentifier: 30000,
-  recentSelectionBase: 1000,
-  recencyCap: 900,
-  recencyHalfLifeSeconds: 7 * 24 * 60 * 60,
-  repoAffinity: 400,
-  mixWindow: 8,
-  mixSecondarySlots: 4,
-  mixFirstSecondaryIndex: 2,
-  mixSecondaryStep: 2,
-});
+const searchRankWeights = Object.freeze(__YOMUX_SEARCH_RANK_WEIGHTS__);
 
 function fuzzySubsequenceMatch(query, text) {
   const needle = String(query || '').toLowerCase().replace(/\s+/g, '');
@@ -5390,6 +5397,10 @@ function terminalUrlContinuationCharactersAreValid(text) {
     && /^[^<>'"`\s]+$/.test(continuation);
 }
 
+function terminalUrlContinuationToken(text) {
+  return String(text || '').match(/^\S+/)?.[0] || '';
+}
+
 function terminalUrlCanContinueAtBoundary(text) {
   const value = String(text || '');
   return terminalTailIsUnterminatedUrl(value) && /[A-Za-z0-9/_.~%-]$/.test(value);
@@ -5477,8 +5488,10 @@ function terminalRowIsHangingUrlContinuation(buffer, index, cols, depth = 0) {
   // The OpenCode mock uses four-space markdown output indentation and wraps at slash/word boundaries.
   // Its short query-key fragments can end before the terminal edge, e.g. `?au` then `to=format`.
   if (shape.indent === 4 && terminalUrlContinuationTextIsStrong(previousText, shape.text)) return true;
-  if (terminalVisibleRowReachesRightEdge(prev, cols) && terminalTailIsUnterminatedUrl(previousText)) return true;
-  if (terminalTailHasUrlSplitBoundary(previousText) && terminalUrlContinuationCharactersAreValid(shape.text)) return true;
+  const continuationToken = terminalUrlContinuationToken(shape.text);
+  if (terminalVisibleRowReachesRightEdge(prev, cols) && terminalTailIsUnterminatedUrl(previousText)
+    && terminalUrlContinuationCharactersAreValid(continuationToken)) return true;
+  if (terminalTailHasUrlSplitBoundary(previousText) && terminalUrlContinuationCharactersAreValid(continuationToken)) return true;
   return terminalRowIsHangingUrlContinuation(buffer, index - 1, cols, depth + 1);
 }
 
@@ -5601,7 +5614,7 @@ function terminalWrappedLineGroup(term, y, scan = terminalReferenceScanContext(t
         && (!terminalRowIsRepeatedGutterUrlRow(buffer, index, shape) || shape.indent === 4)
         && terminalUrlContinuationTextIsStrong(
           joined,
-          shape?.text,
+          shape.indent === 4 ? shape.text : terminalUrlContinuationToken(shape?.text),
           !(shape.indent === 4)
             && !terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols),
         );
@@ -6135,13 +6148,18 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   };
 
   const renderCached = () => {
-    if (!active()) return clearInactive();
+    let inactive = false;
     const count = renderTerminalFileReferenceUnderlines(term, container, () => {
+      if (!active()) {
+        inactive = true;
+        return [];
+      }
       const refs = currentReferences().filter(ref => ref.type === 'file');
       existingReferenceKeys = new Set(refs.map(terminalFileReferenceKey));
       if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
       return refs;
     }, {hoverKey});
+    if (inactive) return clearInactive();
     lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term, contentRevision);
     return count;
   };
@@ -6929,14 +6947,32 @@ function contextMenuIsOpen() {
     || markdownPreviewContextMenuController.isOpen();
 }
 
-function rootCssLengthPx(name) {
+// Only these stylesheet-owned absolute minima are stable across layout gestures.
+// Inline overrides are checked synchronously; loaded stylesheets retire prior values.
+document.addEventListener('load', event => {
+  if (event.target?.tagName === 'LINK' || event.target?.tagName === 'STYLE') rootCssLengthState.absolutePixels.clear();
+}, true);
+
+function rootCssLengthPx(name, style = null) {
   if (!document.body || typeof window.getComputedStyle !== 'function') return 0;
-  const value = window.getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const cacheable = name === '--min-split-pane-width' || name === '--min-split-pane-height';
+  const inline = cacheable ? document.documentElement.style.getPropertyValue(name).trim() : '';
+  const priority = cacheable ? document.documentElement.style.getPropertyPriority(name) : '';
+  const cached = cacheable ? rootCssLengthState.absolutePixels.get(name) : null;
+  if (cached?.inline === inline && cached.priority === priority) return cached.pixels;
+  if (cacheable) rootCssLengthState.absolutePixels.delete(name);
+  const value = (style || window.getComputedStyle(document.documentElement)).getPropertyValue(name).trim();
   if (!value) return 0;
   // Absolute pixel tokens already have their used length. A probe would force
   // layout of every dirty pane merely to read an unchanged split minimum.
   const pixels = value.match(/^([+-]?(?:\d*\.?\d+)(?:e[+-]?\d+)?)px$/i);
-  if (pixels && Number.isFinite(Number(pixels[1]))) return Math.max(0, Number(pixels[1]));
+  if (pixels && Number.isFinite(Number(pixels[1]))) {
+    const length = Math.max(0, Number(pixels[1]));
+    if (cacheable && length > 0 && (!inline || inline === value)) {
+      rootCssLengthState.absolutePixels.set(name, {inline, priority, pixels: length});
+    }
+    return length;
+  }
   const probe = document.createElement('div');
   probe.style.position = 'fixed';
   probe.style.visibility = 'hidden';
@@ -7880,9 +7916,9 @@ function showTabContextMenu(item, x, y, options = {}) {
   const renderActions = () => {
     menu.replaceChildren();
     const sourceSlot = options.sourceSlot || slotForItem(item);
-    if (options.tab) appendTabSplitCommands(menu, item, options);
-    if (!slotIsSidePane(sourceSlot)) appendDescription();
-    if (tabWorkspaceIsFilled(item) || tabCanFillWorkspace(item)) {
+    if (options.tab && options.descriptionWindow == null) appendTabSplitCommands(menu, item, options);
+    if (!slotIsSidePane(sourceSlot) && options.descriptionWindow == null) appendDescription();
+    if (options.descriptionWindow == null && (tabWorkspaceIsFilled(item) || tabCanFillWorkspace(item))) {
       appendContextMenuButton(
         menu,
         tabWorkspaceIsFilled(item) ? t('layout.status.restored', {item: itemLabel(item)}) : t('pane.expand'),
@@ -7890,7 +7926,7 @@ function showTabContextMenu(item, x, y, options = {}) {
         closeSessionContextMenu,
       );
     }
-    appendContextMenuSeparator(menu);
+    if (options.descriptionWindow == null) appendContextMenuSeparator(menu);
     appendTabActionCommands(menu, item, options);
     refreshPosition();
   };
@@ -7913,6 +7949,7 @@ function tabDirectionalMoveActionLabel(capabilities, sourceSlot, zone) {
 }
 
 function appendTabSplitCommands(menu, item, options = {}) {
+  if (!tabLayoutManipulationAllowed()) return;
   const sourceSlot = options.sourceSlot || slotForItem(item);
   const capabilities = tabDirectionalActionCapabilities(item, sourceSlot);
   const zones = ['left', 'right', 'top', 'bottom'];
@@ -7961,6 +7998,10 @@ function appendTabSplitCommands(menu, item, options = {}) {
 }
 
 function appendTabActionCommands(menu, item, options = {}) {
+  if (options.descriptionWindow != null && isTmuxSession(item)) {
+    appendContextMenuButton(menu, 'Rename Description', () => showSessionRenameDialog(item, options.descriptionWindow, options.descriptionWindowId), closeSessionContextMenu, {disabled: readOnlyMode});
+    appendContextMenuButton(menu, 'Rename tmux', () => renameTmuxSession(item), closeSessionContextMenu, {disabled: readOnlyMode});
+  }
   if (isPinnableTab(item)) {
     const pinned = tabIsPinned(item);
     appendContextMenuButton(
@@ -7978,10 +8019,18 @@ function appendTabActionCommands(menu, item, options = {}) {
       appendContextMenuButton(menu, t('tab.popout'), () => openPanePopout(item), closeSessionContextMenu);
     }
   }
+  if (isFileEditorItem(item) || item === differItemId) {
+    appendContextMenuButton(
+      menu,
+      isFileEditorItem(item) ? t('finder.close', {name: itemLabel(item)}) : t('common.close'),
+      () => closeLayoutTabItem(item),
+      closeSessionContextMenu,
+    );
+  }
   if (isTmuxSession(item)) {
     if (isPinnableTab(item)) appendContextMenuSeparator(menu);
     const renameAction = options.tab ? () => beginPaneTabRename(options.tab, item) : () => renameTmuxSession(item);
-    for (const command of tmuxSessionActionCommands(item, {renameAction, includeKill: false})) {
+    for (const command of tmuxSessionActionCommands(item, {renameAction, includeKill: false, includeRename: options.descriptionWindow == null})) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {disabled: command.disabled, checked: command.checked});
     }
     const paneInfoBarLabel = t('menu.tmux.paneDetails');

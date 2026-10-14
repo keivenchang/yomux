@@ -821,6 +821,9 @@ func addObservation(b *MaterializedBucket, o Observation) bool {
 		n, e := number(v)
 		return n, e == nil
 	}
+	if incomplete, ok := p["process_census_incomplete"].(bool); ok && incomplete {
+		add("process_census_incomplete:"+o.Family, "maximum", 1)
+	}
 	switch o.Family {
 	case "cpu":
 		if v, ok := num("process_percent"); ok {

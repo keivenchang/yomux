@@ -19,7 +19,7 @@ const pythonHomeRendererScript = `import json,sys
 from yomux_lib.web import html_page
 for line in sys.stdin:
  request=json.loads(line)
- html=html_page(request["sessions"], access_role=request["role"], auth_username=request["username"], accept_language=request["language"], terminal_only=False, capability_snapshot=request["capabilities"], stats_only=request["stats_only"], backend_label=request["backend"], dangerously_yolo=request["dangerously_yolo"])
+ html=html_page(request["sessions"], access_role=request["role"], auth_username=request["username"], accept_language=request["language"], terminal_only=False, capability_snapshot=request["capabilities"], stats_only=request["stats_only"], backend_label=request["backend"], dangerously_yolo=request["dangerously_yolo"], tmux_topology=request["tmux_topology"])
  response={"html":html}
  print(json.dumps(response,separators=(",",":")),flush=True)
 `

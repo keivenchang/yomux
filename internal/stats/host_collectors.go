@@ -112,7 +112,10 @@ func BuildCPUFacts(sample CPUSample, processCPUPercent map[string]float64, conte
 		"process_percent": sample.Process.Value,
 		"system_percent":  sample.Host.Value,
 	}
-	if processCPUPercent != nil && !sample.ProcessCensusIncomplete {
+	if sample.ProcessCensusIncomplete {
+		payload["process_census_incomplete"] = true
+	}
+	if processCPUPercent != nil {
 		series := make(map[string]any, len(processCPUPercent))
 		for binary, value := range processCPUPercent {
 			if !finite(value) {
@@ -170,7 +173,10 @@ func BuildSystemMemoryFacts(memory MemoryCounters, rows []ProcessCensusRow, mac 
 		return BuildUnavailableFacts("system_memory", context, "invalid_sample")
 	}
 	payload := map[string]any{"used_bytes": memory.UsedBytes, "capacity_bytes": memory.CapacityBytes}
-	if len(rows) > 0 && !memory.ProcessCensusIncomplete {
+	if memory.ProcessCensusIncomplete {
+		payload["process_census_incomplete"] = true
+	}
+	if len(rows) > 0 {
 		processMemory := map[string]any{}
 		for _, row := range topProcessMemory(rows) {
 			if row.Binary != "" && row.RSSBytes > 0 {

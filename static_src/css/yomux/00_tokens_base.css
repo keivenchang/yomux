@@ -118,6 +118,7 @@
   --active-ring: rgba(255, 255, 255, 0.96);
   --brand-green: #76b900;
   --brand-green-dark: #3f6f00;
+  --brand-chat-blue: #2f5bea;
   --about-brand-red: #ef4444;
   --accent-gold: #f5c542;
   --agent-status-working-rgb: 82 210 115;
@@ -398,12 +399,12 @@
   --z-file-tree-drag: 60;
   --z-terminal-badge: 150;
   --z-terminal-popover: 240;
-  /* Full-screen overlays cover drop suggestions when both are mounted. */
   --z-full-screen-overlay: 210;
   --z-resizer: 20;
   --z-pane-overlay: 12;
   --z-drop-preview: 38;
-  --z-drop-suggestions: 200;
+  /* Choices avoid notification toasts and remain clickable if a compact viewport leaves no free spot. */
+  --z-drop-suggestions: 211;
   --z-drag-ghost: 45;
   --z-pane-modal: 170;
   --z-session-popover: 80;
@@ -1781,6 +1782,7 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .info-tree-group-label,
 .file-editor-title-name,
 .file-tree-row.tabber-row .tabber-window-text,
+.file-tree-row.tabber-row .tabber-normal-description,
 .command-palette-group,
 .repo-chip-menu .repo-chip-branch,
 .repo-chip-menu .repo-chip-status,

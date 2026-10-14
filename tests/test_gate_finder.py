@@ -440,7 +440,7 @@ def test_finder_fast_paint_wins_when_session_files_completes_first(browser, tmp_
           if (!finderSessionFilesDiffIsDeferred()) throw new Error('the production Finder first-paint gate was not active');
           setSessionFilesPayloadForDestination('finder', {
             session: '1',
-            files: [{repo: '/home/test/project', path: 'nested.txt', abs_path: '/home/test/project/nested.txt', status: 'M', added: 5, removed: 2, mtime: 1}],
+            files: [{repo: '/home/test/project', path: 'nested.txt', abs_path: '/home/test/project/nested.txt', status: 'M', added: 5, removed: 2, diff_tracked: true, mtime: 1}],
             repos: [{repo: '/home/test/project', count: 1, added: 5, removed: 2}],
             refs_by_repo: {}, errors: [], warnings: [], from_ref: 'HEAD', to_ref: 'current', loaded: true,
           }, {invalidateRequest: false});
@@ -488,7 +488,7 @@ def test_finder_fast_paint_wins_when_an_existing_session_files_request_completes
         const requestOrder = [];
         const payload = {
           session: '1',
-          files: [{repo: '/home/test/project', path: 'nested.txt', abs_path: '/home/test/project/nested.txt', status: 'M', added: 5, removed: 2, mtime: 1}],
+          files: [{repo: '/home/test/project', path: 'nested.txt', abs_path: '/home/test/project/nested.txt', status: 'M', added: 5, removed: 2, diff_tracked: true, mtime: 1}],
           repos: [{repo: '/home/test/project', count: 1, added: 5, removed: 2}],
           refs_by_repo: {}, errors: [], warnings: [], from_ref: 'HEAD', to_ref: 'current', loaded: true,
         };
