@@ -1313,7 +1313,7 @@ const SETTINGS_APPLY_DEPENDENCIES = Object.freeze({
   explorerRoot: ['file_explorer.root_mode'],
   indexedDirs: ['file_explorer.indexed_dirs'],
   indexExcludes: ['file_explorer.index_exclude_paths'],
-  indexLimits: ['file_explorer.index_max_files', 'file_explorer.index_persist_max_files', 'file_explorer.index_persist_max_mb'],
+  indexLimits: ['file_explorer.index_max_files', 'file_explorer.index_persist_max_mb'],
   metaChrome: ['performance.latency_refresh_ms', 'performance.event_log_refresh_ms', 'performance.tabber_activity_refresh_ms'],
   runtimeIntervals: [
     'performance.latency_refresh_ms', 'performance.event_log_refresh_ms', 'performance.tabber_activity_refresh_ms',
@@ -1326,6 +1326,7 @@ const SETTINGS_APPLY_DEPENDENCIES = Object.freeze({
   ],
   autosave: ['editor.autosave', 'editor.autosave_delay_seconds'],
   locale: ['general.language'],
+  tabberMode: ['general.default_tabber_mode'],
   chrome: [
     'appearance.theme', 'appearance.terminal_theme',
     'appearance.editor_dark_color_scheme', 'appearance.editor_light_color_scheme',
@@ -1352,6 +1353,13 @@ function settingsDependencyChanged(group, previousSettings, previousDefaults, ne
 function applySettingsPayload(payload, options = {}) {
   if (!payload?.settings) return false;
   const nextMtime = Number(payload.mtime_ns || 0);
+  if (payload.deferred_metadata === true || (payload.catalog && typeof payload.catalog === 'object' && payload.choices && typeof payload.choices === 'object')) {
+    // The full settings endpoint can have the same mtime as the lightweight boot
+    // payload. It still satisfies the deferred metadata request even when its
+    // settings revision is already current.
+    const nextDeferred = payload.deferred_metadata === true;
+    if (nextDeferred !== clientSettingsMetadataDeferred) clientSettingsMetadataDeferred = nextDeferred;
+  }
   // A deferred refresh or duplicate push may arrive after a settings write. A revision is a
   // complete snapshot, so an equal revision is already applied; `force` may repaint callers but
   // must never let an older/equal payload roll back the accepted settings values.
@@ -1370,10 +1378,18 @@ function applySettingsPayload(payload, options = {}) {
   const previousDateTimeHourCycle = dateTimeHourCycle;
   const previousAgentStatusPulsePeriodMs = agentStatusPulsePeriodMs;
   clientSettingsPayload = payload;
-  clientSettingsMetadataDeferred = payload.deferred_metadata === true;
   clientSettingsDefaults = nextDefaults;
   clientSettings = nextSettings;
   clientSettingsMtimeNs = nextMtime;
+  if (options.initial && consumeTabberModePreferenceMigration() && payload.tabber_mode_explicit === false) {
+    void saveTabberModePreference(tabberMode).catch(error => {
+      statusErr(localizedHtml('status.settingsSaveFailed', {
+        error: userMessageText(error, t('common.requestFailed')),
+      }));
+    });
+  } else if (options.initial || groupChanged.tabberMode) {
+    setTabberMode(initialSetting('general.default_tabber_mode', 'normal'));
+  }
   remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms');
   latencyRefreshMs = numberSetting('performance.latency_refresh_ms');
   eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms');

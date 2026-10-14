@@ -7,7 +7,10 @@ import (
 	"bufio"
 	"container/heap"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +19,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,34 +32,43 @@ import (
 )
 
 const (
-	DefaultIndexedFiles      = 1_000_000
-	DefaultIndexBytes        = int64(512 * 1024 * 1024)
-	MaxIndexBytes            = int64(1024 * 1024 * 1024)
-	indexBatchSize           = 256
-	indexQueueLimit          = 200_000
-	indexQueueByteLimit      = 32 * 1024 * 1024
-	searchIndexSchemaVersion = 1
+	DefaultIndexedFiles       = 1_000_000
+	DefaultIndexBytes         = int64(1024 * 1024 * 1024)
+	MaxIndexBytes             = int64(1024 * 1024 * 1024)
+	indexBatchSize            = 256
+	indexQueueLimit           = 200_000
+	indexQueueByteLimit       = 32 * 1024 * 1024
+	searchIndexSchemaVersion  = 2
+	indexCoverageFileLimit    = "per-root file limit reached"
+	indexCoverageStorageLimit = "snapshot storage budget reached"
+	indexCoverageSQLiteLimit  = "SQLite storage budget reached"
 )
 
 type indexRequest struct {
-	ID                uint64         `json:"id"`
-	CancelID          uint64         `json:"cancel_id,omitempty"`
-	Action            string         `json:"action"`
-	Root              string         `json:"root"`
-	Identity          string         `json:"identity,omitempty"`
-	Query             string         `json:"query,omitempty"`
-	Limit             int            `json:"limit,omitempty"`
-	Cursor            string         `json:"cursor,omitempty"`
-	MaxFiles          int            `json:"max_files,omitempty"`
-	MaxBytes          int64          `json:"max_bytes,omitempty"`
-	RefreshSec        int            `json:"refresh_seconds,omitempty"`
-	ExcludeDirs       []string       `json:"exclude_dirs,omitempty"`
-	ExcludePaths      []string       `json:"exclude_paths,omitempty"`
-	SettingsRevision  uint64         `json:"settings_revision,omitempty"`
-	FenceRoots        []string       `json:"fence_roots,omitempty"`
-	Invalidate        bool           `json:"invalidate,omitempty"`
-	PreserveSnapshots bool           `json:"preserve_snapshots,omitempty"`
-	Options           map[string]any `json:"options,omitempty"`
+	ID                     uint64         `json:"id"`
+	CancelID               uint64         `json:"cancel_id,omitempty"`
+	Action                 string         `json:"action"`
+	Root                   string         `json:"root"`
+	Identity               string         `json:"identity,omitempty"`
+	Query                  string         `json:"query,omitempty"`
+	Limit                  int            `json:"limit,omitempty"`
+	Cursor                 string         `json:"cursor,omitempty"`
+	MaxFiles               int            `json:"max_files,omitempty"`
+	MaxBytes               int64          `json:"max_bytes,omitempty"`
+	Background             bool           `json:"background,omitempty"`
+	ChangedPaths           []string       `json:"changed_paths,omitempty"`
+	ForceRefresh           bool           `json:"force_refresh,omitempty"`
+	DemandScoped           bool           `json:"demand_scoped,omitempty"`
+	RefreshSec             int            `json:"refresh_seconds,omitempty"`
+	ExcludeDirs            []string       `json:"exclude_dirs,omitempty"`
+	ExcludePaths           []string       `json:"exclude_paths,omitempty"`
+	ApplicationEpoch       uint64         `json:"application_epoch,omitempty"`
+	SettingsRevision       uint64         `json:"settings_revision,omitempty"`
+	LegacySettingsRevision uint64         `json:"legacy_settings_revision,omitempty"`
+	FenceRoots             []string       `json:"fence_roots,omitempty"`
+	Invalidate             bool           `json:"invalidate,omitempty"`
+	PreserveSnapshots      bool           `json:"preserve_snapshots,omitempty"`
+	Options                map[string]any `json:"options,omitempty"`
 }
 
 type indexResponse struct {
@@ -64,15 +78,60 @@ type indexResponse struct {
 	Payload map[string]any `json:"payload,omitempty"`
 }
 
+type workerReply struct {
+	response indexResponse
+	err      error
+}
+
 // RunSearchIndexWorker serves a private newline-delimited protocol over inherited stdin/stdout.
 // It is called only by the supervised server child process; stdout never carries logs.
 func RunSearchIndexWorker(input io.Reader, output io.Writer, databasePath string) error {
-	store, err := openSearchIndexStore(databasePath)
+	var policy *indexRequest
+	if os.Getenv("YOMUX_INDEX_INITIAL_POLICY") == "stdin" {
+		buffered := bufio.NewReader(input)
+		var encoded []byte
+		for {
+			fragment, err := buffered.ReadSlice('\n')
+			encoded = append(encoded, fragment...)
+			if len(encoded) > 2<<20 {
+				return errors.New("initial index policy exceeds 2 MiB")
+			}
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, bufio.ErrBufferFull) {
+				return err
+			}
+		}
+		policy = &indexRequest{}
+		if err := json.Unmarshal(encoded, policy); err != nil {
+			return err
+		}
+		if policy.Action != "settings_fence" {
+			return errors.New("initial index policy is required before storage initialization")
+		}
+		names := make(map[string]struct{}, len(policy.ExcludeDirs))
+		for _, name := range policy.ExcludeDirs {
+			names[name] = struct{}{}
+		}
+		for _, root := range policy.FenceRoots {
+			if _, err := compileSearchPolicy(root, names, policy.ExcludePaths); err != nil {
+				return err
+			}
+		}
+		input = buffered
+	}
+	store, err := openSearchIndexStore(databasePath, policy)
 	if err != nil {
 		return err
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
+	if policy != nil {
+		if _, err := engine.handleContext(context.Background(), *policy); err != nil {
+			return err
+		}
+	}
 	reader := bufio.NewScanner(input)
 	reader.Buffer(make([]byte, 4096), 1<<20)
 	writer := bufio.NewWriter(output)
@@ -80,6 +139,17 @@ func RunSearchIndexWorker(input io.Reader, output io.Writer, databasePath string
 	active := make(map[uint64]context.CancelFunc)
 	var writerMu sync.Mutex
 	var workers sync.WaitGroup
+	engine.onComplete = func(status map[string]any) {
+		data, err := json.Marshal(indexResponse{ID: 0, OK: true, Payload: status})
+		if err != nil {
+			return
+		}
+		writerMu.Lock()
+		defer writerMu.Unlock()
+		if _, err := writer.Write(append(data, '\n')); err == nil {
+			_ = writer.Flush()
+		}
+	}
 	for reader.Scan() {
 		var request indexRequest
 		if err := json.Unmarshal(reader.Bytes(), &request); err != nil {
@@ -141,7 +211,19 @@ type searchIndexStore struct {
 	path string
 }
 
-func openSearchIndexStore(path string) (*searchIndexStore, error) {
+func openSearchIndexStore(path string, initialPolicy ...*indexRequest) (*searchIndexStore, error) {
+	if path != ":memory:" {
+		if err := recoverIndexPublication(path); err != nil {
+			return nil, err
+		}
+		if err := migrateSearchIndex(path, initialPolicy...); err != nil {
+			return nil, err
+		}
+	}
+	return createSearchIndexStore(path)
+}
+
+func createSearchIndexStore(path string) (*searchIndexStore, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -161,12 +243,14 @@ func openSearchIndexStore(path string) (*searchIndexStore, error) {
 	}
 	statements := []string{
 		`PRAGMA auto_vacuum=INCREMENTAL`, `PRAGMA journal_mode=WAL`, `PRAGMA synchronous=NORMAL`, `PRAGMA journal_size_limit=0`, `PRAGMA cache_size=-32768`, `PRAGMA mmap_size=0`,
-		`CREATE TABLE IF NOT EXISTS roots(root TEXT PRIMARY KEY, identity TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, coverage TEXT NOT NULL DEFAULT 'pending', count INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0, updated_ns INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', settings_revision INTEGER NOT NULL DEFAULT 0, scan_duration_ns INTEGER NOT NULL DEFAULT 0, last_success_ns INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS roots(root TEXT PRIMARY KEY, identity TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, coverage TEXT NOT NULL DEFAULT 'pending', count INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0, updated_ns INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', settings_revision INTEGER NOT NULL DEFAULT 0, active_revision INTEGER NOT NULL DEFAULT 0, scan_duration_ns INTEGER NOT NULL DEFAULT 0, last_success_ns INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS root_generations(root TEXT PRIMARY KEY, generation INTEGER NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS settings_fences(root TEXT PRIMARY KEY, revision INTEGER NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS settings_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS entries(root TEXT NOT NULL, generation INTEGER NOT NULL, relative_path TEXT NOT NULL, name TEXT NOT NULL, file_identity TEXT NOT NULL, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, PRIMARY KEY(root,generation,relative_path)) WITHOUT ROWID`,
-		`CREATE INDEX IF NOT EXISTS entries_by_name ON entries(root,generation,name)`,
+		`CREATE TABLE IF NOT EXISTS settings_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL, policy TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE IF NOT EXISTS root_keys(id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE)`,
+		`CREATE TABLE IF NOT EXISTS directories(id INTEGER PRIMARY KEY, parent INTEGER NOT NULL, name TEXT NOT NULL, UNIQUE(parent,name))`,
+		`INSERT OR IGNORE INTO directories(id,parent,name) VALUES(1,0,'')`,
+		`CREATE TABLE IF NOT EXISTS entries(root INTEGER NOT NULL, generation INTEGER NOT NULL, directory INTEGER NOT NULL, name TEXT NOT NULL, file_identity TEXT NOT NULL, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, PRIMARY KEY(root,generation,directory,name)) WITHOUT ROWID`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
@@ -195,7 +279,7 @@ func openSearchIndexStore(path string) (*searchIndexStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	newRootColumns := map[string]string{"scan_duration_ns": `INTEGER NOT NULL DEFAULT 0`, "last_success_ns": `INTEGER NOT NULL DEFAULT 0`}
+	newRootColumns := map[string]string{"active_revision": `INTEGER NOT NULL DEFAULT 0`, "scan_duration_ns": `INTEGER NOT NULL DEFAULT 0`, "last_success_ns": `INTEGER NOT NULL DEFAULT 0`}
 	for name, definition := range newRootColumns {
 		if !rootColumns[name] {
 			if _, err := db.Exec(`ALTER TABLE roots ADD COLUMN ` + name + ` ` + definition); err != nil {
@@ -248,9 +332,10 @@ func (store *searchIndexStore) setStorageBudget(maxBytes int64) error {
 			return err
 		}
 		if used > pageBudget*pageSize {
-			return errors.New("existing index snapshot exceeds the configured storage budget")
-		}
-		if _, err := store.db.Exec(`VACUUM`); err != nil {
+			// Keep the current allocation limit until the refresh can atomically
+			// replace an older, larger snapshot with a budget-compliant generation.
+			pageBudget = pageCount
+		} else if err := store.reclaimFreePages(); err != nil {
 			return err
 		}
 	}
@@ -262,6 +347,11 @@ func (store *searchIndexStore) setStorageBudget(maxBytes int64) error {
 		return errors.New("SQLite could not apply the configured storage budget")
 	}
 	return nil
+}
+
+func (store *searchIndexStore) markRootRefreshing(root, identity string, prior int, updatedNS int64) error {
+	_, err := store.db.Exec(`INSERT INTO roots(root,identity,generation,state,coverage,count,bytes,updated_ns,error,settings_revision) VALUES(?,?,?,'warming','pending',0,0,?,'',0) ON CONFLICT(root) DO UPDATE SET identity=excluded.identity,state=CASE WHEN generation=0 THEN 'warming' ELSE state END,error=CASE WHEN generation=0 THEN '' ELSE error END`, root, identity, prior, updatedNS)
+	return err
 }
 
 func indexStorageLimit(maxBytes int64) int64 {
@@ -316,15 +406,28 @@ type searchIndexEngine struct {
 	settingsRevisions      map[string]uint64
 	settingsFloor          uint64
 	settingsFloorSet       bool
+	settingsPolicy         string
+	settingsApplyMu        sync.Mutex
+	applicationEpoch       uint64
+	budgetBytes            int64
 	fenceLoadErr           error
 	incarnation            string
 	activeBuild            bool
 	activeRoot             string
 	activeSettingsRevision uint64
+	demandRoots            []string
 	buildCancels           map[string]context.CancelFunc
+	mutationGeneration     uint64
 	snapshotMutations      int
 	snapshots              map[string]*searchIndexSnapshot
 	crawlPause             sync.RWMutex
+	onComplete             func(map[string]any)
+	cpuCapture             CPUCapture
+	fullDiscoveries        uint64
+	incrementalDiscoveries uint64
+	directoriesVisited     uint64
+	queuedJobs             uint64
+	coalescedJobs          uint64
 }
 
 type indexBuildJob struct {
@@ -335,14 +438,28 @@ type indexBuildJob struct {
 	settingsRevision uint64
 	excludeDirs      map[string]struct{}
 	excludePaths     []string
+	changedPaths     []string
+	background       bool
+	visible          bool
+	demandScoped     bool
+	explicit         bool
+	sequence         uint64
 }
 
 type discoveredIndexPath struct {
-	relative string
-	name     string
-	identity string
-	size     int64
-	mtimeNS  int64
+	directory string
+	relative  string
+	name      string
+	identity  string
+	size      int64
+	mtimeNS   int64
+}
+
+func (path discoveredIndexPath) relativePath() string {
+	if path.relative != "" {
+		return path.relative
+	}
+	return path.directory + path.name
 }
 
 type searchIndexSnapshot struct {
@@ -356,6 +473,7 @@ func newSearchIndexEngine(store *searchIndexStore) *searchIndexEngine {
 		store: store, builds: make(map[string]bool), pendingBuild: make(map[string]indexBuildJob),
 		buildDone: make(map[string]chan struct{}), rerun: make(map[string]indexBuildJob), fences: make(map[string]uint64), settingsRevisions: make(map[string]uint64), snapshots: make(map[string]*searchIndexSnapshot),
 		buildCancels: make(map[string]context.CancelFunc),
+		budgetBytes:  DefaultIndexBytes,
 		incarnation:  fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
 	}
 	rows, err := store.db.Query(`SELECT root,revision FROM settings_fences`)
@@ -379,7 +497,7 @@ func newSearchIndexEngine(store *searchIndexStore) *searchIndexEngine {
 	if err := rows.Close(); err != nil {
 		engine.fenceLoadErr = err
 	}
-	if err := store.db.QueryRow(`SELECT revision FROM settings_state WHERE singleton=1`).Scan(&engine.settingsFloor); err == nil {
+	if err := store.db.QueryRow(`SELECT revision,policy FROM settings_state WHERE singleton=1`).Scan(&engine.settingsFloor, &engine.settingsPolicy); err == nil {
 		engine.settingsFloorSet = true
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		engine.fenceLoadErr = err
@@ -407,7 +525,135 @@ func (engine *searchIndexEngine) handleContext(ctx context.Context, request inde
 		return map[string]any{"ok": true, "purged": true}, nil
 	}
 	if request.Action == "settings_fence" {
-		return engine.fenceSettings(request.FenceRoots, request.SettingsRevision, request.Invalidate, request.PreserveSnapshots)
+		engine.settingsApplyMu.Lock()
+		defer engine.settingsApplyMu.Unlock()
+		names := make(map[string]struct{}, len(request.ExcludeDirs))
+		for _, name := range request.ExcludeDirs {
+			names[name] = struct{}{}
+		}
+		if _, err := compileSearchPolicy("/", names, request.ExcludePaths); err != nil {
+			return nil, err
+		}
+		engine.mu.Lock()
+		if request.ApplicationEpoch != 0 && request.ApplicationEpoch < engine.applicationEpoch {
+			engine.mu.Unlock()
+			return nil, errors.New("stale settings application epoch")
+		}
+		engine.mu.Unlock()
+		if !request.PreserveSnapshots && engine.compatibleStoredPolicy(request) {
+			request.PreserveSnapshots = true
+		}
+		if !request.PreserveSnapshots && request.LegacySettingsRevision != 0 && engine.legacySnapshotsMatch(request.FenceRoots, request.LegacySettingsRevision) {
+			request.PreserveSnapshots = true
+		}
+		engine.mu.Lock()
+		unchanged := request.PreserveSnapshots && !request.Invalidate && engine.settingsFloorSet && engine.settingsFloor == request.SettingsRevision
+		engine.mu.Unlock()
+		payload := map[string]any{"ok": true, "revision": strconv.FormatUint(request.SettingsRevision, 10)}
+		var err error
+		if !unchanged {
+			payload, err = engine.fenceSettings(request.FenceRoots, request.SettingsRevision, request.Invalidate, request.PreserveSnapshots)
+		}
+		if err != nil {
+			return nil, err
+		}
+		engine.mu.Lock()
+		engine.applicationEpoch = request.ApplicationEpoch
+		if request.MaxBytes > 0 {
+			engine.budgetBytes = request.MaxBytes
+		}
+		engine.mu.Unlock()
+		policy, marshalErr := json.Marshal(request)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		engine.crawlPause.RLock()
+		_, policyErr := engine.store.db.Exec(`UPDATE settings_state SET policy=? WHERE singleton=1 AND policy<>?`, string(policy), string(policy))
+		if policyErr == nil {
+			policyErr = engine.store.reclaimDirectories()
+		}
+		engine.crawlPause.RUnlock()
+		if policyErr != nil {
+			return nil, policyErr
+		}
+		engine.mu.Lock()
+		engine.settingsPolicy = string(policy)
+		engine.mu.Unlock()
+		payload["application_epoch"] = strconv.FormatUint(request.ApplicationEpoch, 10)
+		payload["worker_incarnation"] = engine.incarnation
+		return payload, nil
+	}
+	if request.Action == "demand" {
+		roots := make([]string, 0, len(request.FenceRoots))
+		seen := make(map[string]struct{}, len(request.FenceRoots))
+		for _, candidate := range request.FenceRoots {
+			absolute, err := filepath.Abs(candidate)
+			if err != nil || candidate == "" {
+				continue
+			}
+			absolute = filepath.Clean(absolute)
+			if _, exists := seen[absolute]; exists {
+				continue
+			}
+			seen[absolute] = struct{}{}
+			roots = append(roots, absolute)
+		}
+		sort.Strings(roots)
+		engine.mu.Lock()
+		engine.demandRoots = roots
+		for root, job := range engine.pendingBuild {
+			if IndexRootDemanded(root, roots) {
+				if job.background {
+					job.background = false
+					job.visible = true
+				}
+				engine.pendingBuild[root] = job
+				continue
+			}
+			if !job.demandScoped {
+				continue
+			}
+			delete(engine.pendingBuild, root)
+			delete(engine.builds, root)
+			if done := engine.buildDone[root]; done != nil {
+				close(done)
+				delete(engine.buildDone, root)
+			}
+		}
+		for root, job := range engine.rerun {
+			if IndexRootDemanded(root, roots) {
+				if job.background {
+					job.background = false
+					job.visible = true
+				}
+				engine.rerun[root] = job
+			} else if job.demandScoped {
+				delete(engine.rerun, root)
+			}
+		}
+		engine.mu.Unlock()
+		return map[string]any{"ok": true}, nil
+	}
+	if request.Action == "cpu_profile" {
+		mode, _ := request.Options["mode"].(string)
+		seconds, _ := request.Options["seconds"].(float64)
+		if mode == "start" {
+			if err := engine.cpuCapture.Start(int(seconds)); err != nil {
+				return nil, err
+			}
+			return engine.cpuCapture.Status(), nil
+		}
+		if mode == "status" {
+			return engine.cpuCapture.Status(), nil
+		}
+		if mode == "artifact" {
+			status := engine.cpuCapture.Status()
+			status["artifact"] = base64.StdEncoding.EncodeToString(engine.cpuCapture.Artifact())
+			return status, nil
+		}
+		if mode != "start" || seconds < 1 || seconds > 60 {
+			return nil, errors.New("invalid worker CPU profile request")
+		}
 	}
 	root, err := filepath.Abs(request.Root)
 	if err != nil || request.Root == "" {
@@ -429,7 +675,13 @@ func (engine *searchIndexEngine) handleContext(ctx context.Context, request inde
 			if request.Action == "repair" {
 				refreshSec = 0
 			}
-			engine.schedule(root, identity, request.MaxFiles, request.MaxBytes, refreshSec, request.ExcludeDirs, request.ExcludePaths, request.SettingsRevision)
+			engine.mu.Lock()
+			accepted := engine.settingsRevisionAcceptedLocked(root, request.SettingsRevision)
+			engine.mu.Unlock()
+			if !accepted {
+				return nil, errors.New("stale settings revision: refresh was not scheduled")
+			}
+			engine.schedule(root, identity, request.MaxFiles, request.MaxBytes, refreshSec, request.ExcludeDirs, request.ExcludePaths, request.SettingsRevision, request)
 		}
 		if request.Action == "search" {
 			return engine.searchContext(ctx, root, identity, request.Query, request.Limit, request.Cursor, request.SettingsRevision)
@@ -502,6 +754,72 @@ func (engine *searchIndexEngine) handleContext(ctx context.Context, request inde
 	}
 }
 
+func (engine *searchIndexEngine) compatibleStoredPolicy(request indexRequest) bool {
+	engine.mu.Lock()
+	raw, floor := engine.settingsPolicy, engine.settingsFloor
+	engine.mu.Unlock()
+	if raw != "" {
+		var previous indexRequest
+		if json.Unmarshal([]byte(raw), &previous) != nil {
+			return false
+		}
+		return reflect.DeepEqual(previous.ExcludeDirs, request.ExcludeDirs) && reflect.DeepEqual(previous.ExcludePaths, request.ExcludePaths)
+	}
+	// Legacy v1 persisted only the opaque fingerprint. Qualify a budget-only
+	// mismatch by reproducing that fingerprint with otherwise identical policy.
+	if request.MaxFiles < 1 {
+		return false
+	}
+	for mb := int64(1); mb <= MaxIndexBytes/(1024*1024); mb++ {
+		encoded, err := json.Marshal(struct {
+			Roots        []string `json:"roots"`
+			ExcludeDirs  []string `json:"exclude_dirs"`
+			ExcludePaths []string `json:"exclude_paths"`
+			MaxFiles     int      `json:"max_files"`
+			MaxBytes     int64    `json:"max_bytes"`
+			RefreshSecs  int      `json:"refresh_secs"`
+			Persist      bool     `json:"persist"`
+		}{request.FenceRoots, request.ExcludeDirs, request.ExcludePaths, request.MaxFiles, mb * 1024 * 1024, request.RefreshSec, true})
+		if err != nil {
+			return false
+		}
+		digest := sha256.Sum256(encoded)
+		if binary.BigEndian.Uint64(digest[:8])&uint64(1<<63-1) == floor {
+			return true
+		}
+	}
+	return false
+}
+
+func (engine *searchIndexEngine) legacySnapshotsMatch(roots []string, revision uint64) bool {
+	engine.mu.Lock()
+	floor, floorSet := engine.settingsFloor, engine.settingsFloorSet
+	engine.mu.Unlock()
+	if !floorSet || floor != revision {
+		return false
+	}
+	rows, err := engine.store.db.Query("SELECT root,settings_revision FROM roots")
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	matched := false
+	for rows.Next() {
+		var root string
+		var storedRevision uint64
+		if rows.Scan(&root, &storedRevision) != nil {
+			return false
+		}
+		if SearchRootConfigured(roots, root) {
+			matched = true
+			if storedRevision != revision {
+				return false
+			}
+		}
+	}
+	return matched && rows.Err() == nil
+}
+
 func (engine *searchIndexEngine) fenceSettings(roots []string, revision uint64, invalidate bool, preserveRequested ...bool) (map[string]any, error) {
 	preserveSnapshots := len(preserveRequested) > 0 && preserveRequested[0]
 	resume := engine.pauseBuildAdmission()
@@ -531,13 +849,13 @@ func (engine *searchIndexEngine) fenceSettings(roots []string, revision uint64, 
 		if candidate != engine.activeRoot {
 			jobRevision = engine.pendingBuild[candidate].settingsRevision
 		}
-		if (invalidate && indexRootWithinAny(normalizedRoots, candidate)) || (!invalidate && (jobRevision != revision || !indexRootConfigured(normalizedRoots, candidate))) {
+		if (invalidate && indexRootWithinAny(normalizedRoots, candidate)) || (!invalidate && (jobRevision != revision || !SearchRootConfigured(normalizedRoots, candidate))) {
 			targets[candidate] = struct{}{}
 		}
 	}
 	for candidate := range engine.pendingBuild {
 		job := engine.pendingBuild[candidate]
-		if (invalidate && indexRootWithinAny(normalizedRoots, candidate)) || (!invalidate && (job.settingsRevision != revision || !indexRootConfigured(normalizedRoots, candidate))) {
+		if (invalidate && indexRootWithinAny(normalizedRoots, candidate)) || (!invalidate && (job.settingsRevision != revision || !SearchRootConfigured(normalizedRoots, candidate))) {
 			targets[candidate] = struct{}{}
 		}
 	}
@@ -579,7 +897,7 @@ func (engine *searchIndexEngine) fenceSettings(roots []string, revision uint64, 
 			return nil, err
 		}
 		for target := range stale {
-			if !preserveSnapshots || !indexRootConfigured(normalizedRoots, target) {
+			if !preserveSnapshots || !SearchRootConfigured(normalizedRoots, target) {
 				targets[target] = struct{}{}
 			}
 		}
@@ -588,7 +906,7 @@ func (engine *searchIndexEngine) fenceSettings(roots []string, revision uint64, 
 	if preserveSnapshots && !invalidate {
 		removeTargets = make(map[string]struct{})
 		for target := range targets {
-			if !indexRootConfigured(normalizedRoots, target) {
+			if !SearchRootConfigured(normalizedRoots, target) {
 				removeTargets[target] = struct{}{}
 			}
 		}
@@ -611,7 +929,7 @@ func (engine *searchIndexEngine) fenceSettings(roots []string, revision uint64, 
 				engine.crawlPause.RUnlock()
 				return nil, err
 			}
-			if indexRootConfigured(normalizedRoots, root) {
+			if SearchRootConfigured(normalizedRoots, root) {
 				retainedRoots = append(retainedRoots, root)
 			}
 		}
@@ -625,14 +943,14 @@ func (engine *searchIndexEngine) fenceSettings(roots []string, revision uint64, 
 			return nil, err
 		}
 		for _, root := range retainedRoots {
-			if _, err := engine.store.db.Exec(`UPDATE roots SET settings_revision=?,state=CASE WHEN generation>0 THEN 'warming' ELSE state END WHERE root=?`, revision, root); err != nil {
+			if _, err := engine.store.db.Exec(`UPDATE roots SET active_revision=?,state=CASE WHEN generation>0 THEN 'warming' ELSE state END WHERE root=? AND active_revision<>?`, revision, root, revision); err != nil {
 				engine.crawlPause.RUnlock()
 				return nil, err
 			}
 		}
 		engine.crawlPause.RUnlock()
 	}
-	return map[string]any{"ok": true, "revision": revision, "fenced_roots": len(targets)}, nil
+	return map[string]any{"ok": true, "revision": strconv.FormatUint(revision, 10), "fenced_roots": len(targets)}, nil
 }
 
 func (engine *searchIndexEngine) pauseBuildAdmission() func() {
@@ -640,6 +958,7 @@ func (engine *searchIndexEngine) pauseBuildAdmission() func() {
 	// request must not start a replacement crawl after the affected builds drain.
 	engine.mu.Lock()
 	engine.snapshotMutations++
+	engine.mutationGeneration++
 	engine.mu.Unlock()
 	return func() {
 		engine.mu.Lock()
@@ -665,7 +984,7 @@ func (engine *searchIndexEngine) removeSnapshots(targets map[string]struct{}, pu
 		return nil
 	}
 	for target := range targets {
-		if _, err := engine.store.db.Exec(`DELETE FROM entries WHERE root=?`, target); err != nil {
+		if _, err := engine.store.db.Exec(`DELETE FROM entries WHERE root=(SELECT id FROM root_keys WHERE path=?)`, target); err != nil {
 			return err
 		}
 		if _, err := engine.store.db.Exec(`DELETE FROM roots WHERE root=?`, target); err != nil {
@@ -687,12 +1006,12 @@ func indexRootWithinAny(parents []string, candidate string) bool {
 	return false
 }
 
-func indexRootConfigured(configuredRoots []string, candidate string) bool {
+func SearchRootConfigured(configuredRoots []string, candidate string) bool {
 	return indexRootWithinAny(configuredRoots, candidate)
 }
 
 func (engine *searchIndexEngine) storedSettingsReconcileTargets(configuredRoots []string, revision uint64) (map[string]struct{}, error) {
-	rows, err := engine.store.db.Query(`SELECT root,settings_revision FROM roots`)
+	rows, err := engine.store.db.Query(`SELECT root,active_revision FROM roots`)
 	if err != nil {
 		return nil, err
 	}
@@ -704,7 +1023,7 @@ func (engine *searchIndexEngine) storedSettingsReconcileTargets(configuredRoots 
 			_ = rows.Close()
 			return nil, err
 		}
-		if storedRevision != revision || !indexRootConfigured(configuredRoots, root) {
+		if storedRevision != revision || !SearchRootConfigured(configuredRoots, root) {
 			targets[root] = struct{}{}
 		}
 	}
@@ -832,7 +1151,7 @@ func (store *searchIndexStore) deleteGenerations(root string, keep int) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM entries WHERE root=? AND generation<>?`, root, keep); err != nil {
+	if _, err := tx.Exec(`DELETE FROM entries WHERE root=(SELECT id FROM root_keys WHERE path=?) AND generation<>?`, root, keep); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -844,59 +1163,92 @@ func (store *searchIndexStore) deleteGenerations(root string, keep int) error {
 }
 
 func (store *searchIndexStore) reclaimFreePages() error {
-	var free int
-	if err := store.db.QueryRow(`PRAGMA freelist_count`).Scan(&free); err != nil {
-		return err
+	for {
+		var free int
+		if err := store.db.QueryRow(`PRAGMA freelist_count`).Scan(&free); err != nil {
+			return err
+		}
+		if free == 0 {
+			return checkpointIndex(store.db)
+		}
+		rows, err := store.db.Query(`PRAGMA incremental_vacuum(64)`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		if err := checkpointIndex(store.db); err != nil {
+			return err
+		}
 	}
-	if free == 0 {
-		return nil
-	}
-	rows, err := store.db.Query(`PRAGMA incremental_vacuum`)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	_, err = store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
-	return err
 }
 
-func (engine *searchIndexEngine) schedule(root, identity string, maxFiles int, maxBytes int64, refreshSec int, excludeDirs, excludePaths []string, settingsRevision uint64) {
+func (engine *searchIndexEngine) schedule(root, identity string, maxFiles int, maxBytes int64, refreshSec int, excludeDirs, excludePaths []string, settingsRevision uint64, requests ...indexRequest) {
 	if maxFiles < 1 || maxFiles > DefaultIndexedFiles {
 		maxFiles = DefaultIndexedFiles
 	}
 	if maxBytes < 1 || maxBytes > MaxIndexBytes {
 		maxBytes = DefaultIndexBytes
 	}
-	if !engine.needsRefresh(root, identity, refreshSec, settingsRevision, time.Now()) {
+	forceRefresh := len(requests) > 0 && requests[0].ForceRefresh
+	engine.mu.Lock()
+	blocked := engine.snapshotMutations > 0 || !engine.settingsRevisionAcceptedLocked(root, settingsRevision)
+	engine.mu.Unlock()
+	if blocked {
+		return
+	}
+	if !forceRefresh && !engine.needsRefresh(root, identity, refreshSec, settingsRevision, time.Now()) {
 		return
 	}
 	engine.mu.Lock()
+	if len(requests) > 0 && requests[0].DemandScoped && !IndexRootDemanded(root, engine.demandRoots) {
+		engine.mu.Unlock()
+		return
+	}
 	if engine.snapshotMutations > 0 || !engine.settingsRevisionAcceptedLocked(root, settingsRevision) {
 		engine.mu.Unlock()
 		return
 	}
 	job := indexBuildJob{root: root, identity: identity, maxFiles: maxFiles, maxBytes: maxBytes, fence: engine.fences[root], settingsRevision: settingsRevision, excludeDirs: make(map[string]struct{}, len(excludeDirs)), excludePaths: append([]string(nil), excludePaths...)}
+	if len(requests) > 0 {
+		job.changedPaths = append([]string(nil), requests[0].ChangedPaths...)
+		job.background = requests[0].Background
+		job.demandScoped = requests[0].DemandScoped
+		job.explicit = !job.background && !job.demandScoped && (requests[0].Action == "search" || requests[0].Action == "ensure")
+		job.visible = !job.background && (requests[0].Action == "ensure" || requests[0].Action == "search" || requests[0].Action == "repair")
+	}
+	if job.background && IndexRootDemanded(root, engine.demandRoots) {
+		job.background, job.visible = false, true
+	}
 	for _, name := range excludeDirs {
 		if strings.TrimSpace(name) != "" {
 			job.excludeDirs[name] = struct{}{}
 		}
 	}
 	if engine.builds[root] {
-		if refreshSec <= 0 {
+		engine.coalescedJobs++
+		if pending, exists := engine.pendingBuild[root]; exists {
+			engine.pendingBuild[root] = mergeIndexBuildJobs(pending, job)
+		} else if forceRefresh {
+			if previous, exists := engine.rerun[root]; exists {
+				job = mergeIndexBuildJobs(previous, job)
+			} else {
+				engine.queuedJobs++
+				job.sequence = engine.queuedJobs
+			}
 			engine.rerun[root] = job
 		}
 		engine.mu.Unlock()
 		return
 	}
 	engine.builds[root] = true
+	engine.queuedJobs++
+	job.sequence = engine.queuedJobs
 	engine.buildDone[root] = make(chan struct{})
 	if engine.activeBuild {
 		engine.pendingBuild[root] = job
@@ -923,15 +1275,14 @@ func (engine *searchIndexEngine) settingsRevisionAcceptedLocked(root string, set
 }
 
 func (engine *searchIndexEngine) needsRefresh(root, identity string, refreshSec int, settingsRevision uint64, now time.Time) bool {
-	if refreshSec <= 0 {
-		return true
-	}
+	engine.crawlPause.RLock()
+	defer engine.crawlPause.RUnlock()
 	var storedIdentity, state, lastError string
 	var count int
 	var storedRevision uint64
 	var updatedNS int64
 	statusErr := engine.store.db.QueryRow(`SELECT identity,state,settings_revision,updated_ns,count,error FROM roots WHERE root=?`, root).Scan(&storedIdentity, &state, &storedRevision, &updatedNS, &count, &lastError)
-	return statusErr != nil || state == "warming" || (state == "partial" && count == 0 && lastError == "") || storedIdentity != identity || storedRevision != settingsRevision || now.Sub(time.Unix(0, updatedNS)) >= time.Duration(refreshSec)*time.Second
+	return statusErr != nil || state == "warming" || (state == "partial" && count == 0 && lastError == "") || storedIdentity != identity || storedRevision != settingsRevision || refreshSec > 0 && now.Sub(time.Unix(0, updatedNS)) >= time.Duration(refreshSec)*time.Second
 }
 
 func (engine *searchIndexEngine) runBuilds(job indexBuildJob) {
@@ -944,31 +1295,24 @@ func (engine *searchIndexEngine) runBuilds(job indexBuildJob) {
 			slog.Error("search index build failed", "root", job.root, "settings_revision", job.settingsRevision, "error", err)
 		}
 		cancel()
+		// A committed generation is useful immediately, even if another refresh
+		// is queued. Root completion waiters remain open until its work drains.
 		engine.mu.Lock()
 		delete(engine.buildCancels, job.root)
 		if rerun, exists := engine.rerun[job.root]; exists && rerun.fence == engine.fences[job.root] {
-			delete(engine.rerun, job.root)
-			engine.activeSettingsRevision = rerun.settingsRevision
-			engine.mu.Unlock()
-			job = rerun
-			continue
+			engine.pendingBuild[job.root] = rerun
+		} else {
+			delete(engine.builds, job.root)
+			close(engine.buildDone[job.root])
+			delete(engine.buildDone, job.root)
 		}
 		delete(engine.rerun, job.root)
-		delete(engine.builds, job.root)
-		close(engine.buildDone[job.root])
-		delete(engine.buildDone, job.root)
-		var next indexBuildJob
-		found := false
-		for root, candidate := range engine.pendingBuild {
-			if !found || root < next.root {
-				next, found = candidate, true
-			}
-		}
+		next, found := engine.nextBuildLocked()
 		if found {
-			delete(engine.pendingBuild, next.root)
 			engine.activeRoot = next.root
 			engine.activeSettingsRevision = next.settingsRevision
 			engine.mu.Unlock()
+			engine.notifyCompletion(job.root, job.identity)
 			job = next
 			continue
 		}
@@ -976,7 +1320,69 @@ func (engine *searchIndexEngine) runBuilds(job indexBuildJob) {
 		engine.activeRoot = ""
 		engine.activeSettingsRevision = 0
 		engine.mu.Unlock()
+		engine.notifyCompletion(job.root, job.identity)
 		return
+	}
+}
+
+func mergeIndexBuildJobs(previous, next indexBuildJob) indexBuildJob {
+	next.changedPaths = mergeIndexChanges(next.root, previous.changedPaths, next.changedPaths)
+	next.visible = next.visible || previous.visible
+	next.explicit = next.explicit || previous.explicit
+	next.background = next.background && previous.background
+	// Visibility can promote priority, but it cannot take ownership of an
+	// independently requested search or scheduled background reconciliation.
+	next.demandScoped = next.demandScoped && previous.demandScoped
+	next.sequence = previous.sequence
+	return next
+}
+
+func (engine *searchIndexEngine) nextBuildLocked() (indexBuildJob, bool) {
+	var next indexBuildJob
+	found := false
+	for _, candidate := range engine.pendingBuild {
+		if !found || indexBuildPriority(candidate) > indexBuildPriority(next) ||
+			indexBuildPriority(candidate) == indexBuildPriority(next) &&
+				(candidate.sequence < next.sequence || candidate.sequence == next.sequence && candidate.root < next.root) {
+			next, found = candidate, true
+		}
+	}
+	if found {
+		delete(engine.pendingBuild, next.root)
+	}
+	return next, found
+}
+
+func indexBuildPriority(job indexBuildJob) int {
+	if job.explicit {
+		return 3
+	}
+	if job.visible {
+		return 2
+	}
+	if !job.background {
+		return 1
+	}
+	return 0
+}
+
+// IndexRootDemanded reports overlap between an index root and consumer scopes.
+func IndexRootDemanded(root string, scopes []string) bool {
+	for _, scope := range scopes {
+		if indexRootWithin(root, scope) || indexRootWithin(scope, root) {
+			return true
+		}
+	}
+	return false
+}
+
+func (engine *searchIndexEngine) notifyCompletion(root, identity string) {
+	if engine.onComplete == nil {
+		return
+	}
+	status, err := engine.status(root, identity)
+	if err == nil {
+		engine.onComplete(status)
 	}
 }
 
@@ -1005,66 +1411,8 @@ func indexEntryInfo(entry os.DirEntry, excludedNames map[string]struct{}) (os.Fi
 }
 
 func excludedIndexPath(root, path string, exclusions []string) bool {
-	home, _ := os.UserHomeDir()
-	root, _ = filepath.Abs(root)
-	path, _ = filepath.Abs(path)
-	root, path = filepath.Clean(root), filepath.Clean(path)
-	relatives := []string{}
-	if relative, err := filepath.Rel(root, path); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		relative = filepath.ToSlash(relative)
-		if !containsString(relatives, relative) {
-			relatives = append(relatives, relative)
-		}
-	}
-	for _, raw := range exclusions {
-		rule := strings.TrimSpace(raw)
-		if rule == "" {
-			continue
-		}
-		if rule == "~" {
-			rule = home
-		} else if strings.HasPrefix(rule, "~/") {
-			rule = filepath.Join(home, rule[2:])
-		}
-		if strings.HasPrefix(rule, "glob:") {
-			pattern := strings.TrimLeft(strings.ReplaceAll(strings.TrimSpace(strings.TrimPrefix(rule, "glob:")), "\\", "/"), "/")
-			if pattern == "" {
-				continue
-			}
-			matcher, err := regexp.Compile(globPatternRegex(pattern))
-			if err != nil {
-				continue
-			}
-			for _, relative := range relatives {
-				for _, candidate := range []string{relative, "_/" + relative, relative + "/", "_/" + relative + "/"} {
-					if matcher.MatchString(candidate) {
-						return true
-					}
-				}
-			}
-			continue
-		}
-		if strings.HasPrefix(rule, "regex:") {
-			matcher, err := regexp.Compile(strings.TrimSpace(strings.TrimPrefix(rule, "regex:")))
-			if err != nil {
-				continue
-			}
-			for _, relative := range relatives {
-				if matcher.MatchString(relative) {
-					return true
-				}
-			}
-			continue
-		}
-		if !filepath.IsAbs(rule) {
-			rule = filepath.Join(root, rule)
-		}
-		relative, err := filepath.Rel(filepath.Clean(rule), filepath.Clean(path))
-		if err == nil && (relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))) {
-			return true
-		}
-	}
-	return false
+	policy, err := compileSearchPolicy(root, nil, exclusions)
+	return err != nil || policy.excludedPath(path)
 }
 
 func globPatternRegex(pattern string) string {
@@ -1095,6 +1443,36 @@ func globPatternRegex(pattern string) string {
 }
 
 func (engine *searchIndexEngine) status(root, identity string) (map[string]any, error) {
+	engine.crawlPause.RLock()
+	defer engine.crawlPause.RUnlock()
+	return engine.statusUnlocked(root, identity)
+}
+
+func (engine *searchIndexEngine) statusUnlocked(root, identity string) (payload map[string]any, statusErr error) {
+	defer func() {
+		if statusErr != nil {
+			return
+		}
+		engine.mu.Lock()
+		active, budget := engine.settingsFloor, engine.budgetBytes
+		engine.mu.Unlock()
+		var build, ack uint64
+		_ = engine.store.db.QueryRow(`SELECT settings_revision,active_revision FROM roots WHERE root=?`, root).Scan(&build, &ack)
+		payload["configured_revision"] = strconv.FormatUint(active, 10)
+		payload["active_revision"] = strconv.FormatUint(ack, 10)
+		payload["snapshot_revision"] = strconv.FormatUint(build, 10)
+		payload["snapshot_compatible"] = ack == active || !engine.settingsFloorSet
+		payload["configured_budget_bytes"], payload["max_bytes"] = budget, budget
+		usage, err := engine.store.diskUsage()
+		if err != nil {
+			statusErr = err
+			return
+		}
+		for key, value := range usage {
+			payload[key] = value
+		}
+		payload["over_budget"] = usage["database_bytes"]+usage["wal_bytes"] > budget
+	}()
 	var generation, count int
 	var scanDurationNS, lastSuccessNS int64
 	var state, coverage, storedIdentity, lastError string
@@ -1107,6 +1485,7 @@ func (engine *searchIndexEngine) status(root, identity string) (map[string]any, 
 	}
 	engine.mu.Lock()
 	building := engine.builds[root]
+	diagnostics := map[string]any{"full_discoveries": engine.fullDiscoveries, "incremental_discoveries": engine.incrementalDiscoveries, "directories_visited": engine.directoriesVisited, "queued_jobs": engine.queuedJobs, "coalesced_jobs": engine.coalescedJobs}
 	engine.mu.Unlock()
 	lastSuccessfulScan := ""
 	if lastSuccessNS > 0 {
@@ -1118,7 +1497,22 @@ func (engine *searchIndexEngine) status(root, identity string) (map[string]any, 
 		}
 		lastSuccessfulScan = scanTime.Format(time.RFC3339Nano)
 	}
-	return map[string]any{"root": root, "status": state, "index_state": state, "indexed": generation > 0, "ready": generation > 0, "building": building, "generation": generation, "count": count, "error": lastError, "coverage_reason": lastError, "stale": state == "error", "refreshing": building, "freshness": map[bool]string{true: "stale", false: "fresh"}[state == "error"], "worker_incarnation": engine.incarnation, "index_coverage": coverage, "discovery_coverage": coverage, "enrichment_state": "disabled", "scan_duration_ms": float64(scanDurationNS) / float64(time.Millisecond), "last_successful_scan": lastSuccessfulScan, "progressive_coverage": map[string]any{"full_coverage": coverage == "complete", "visited_files": count}}, nil
+	presentedState := state
+	if state == "error" && coverage == "partial" && indexCoverageLimitReason(lastError) {
+		// Older builds persisted expected coverage limits as errors. Their searchable
+		// generation is valid partial coverage and can be presented directly.
+		presentedState = "partial"
+	}
+	return map[string]any{"root": root, "status": presentedState, "index_state": presentedState, "indexed": generation > 0, "ready": generation > 0, "building": building, "generation": generation, "count": count, "error": lastError, "coverage_reason": lastError, "stale": presentedState == "error", "refreshing": building, "freshness": map[bool]string{true: "stale", false: "fresh"}[presentedState == "error"], "worker_incarnation": engine.incarnation, "index_coverage": coverage, "discovery_coverage": coverage, "enrichment_state": "disabled", "scan_duration_ms": float64(scanDurationNS) / float64(time.Millisecond), "last_successful_scan": lastSuccessfulScan, "index_diagnostics": diagnostics, "progressive_coverage": map[string]any{"full_coverage": coverage == "complete", "visited_files": count}}, nil
+}
+
+func indexCoverageLimitReason(reason string) bool {
+	switch reason {
+	case indexCoverageFileLimit, indexCoverageStorageLimit, indexCoverageSQLiteLimit:
+		return true
+	default:
+		return false
+	}
 }
 
 func (engine *searchIndexEngine) build(job indexBuildJob) error {
@@ -1127,127 +1521,29 @@ func (engine *searchIndexEngine) build(job indexBuildJob) error {
 
 func (engine *searchIndexEngine) buildContext(ctx context.Context, job indexBuildJob) error {
 	started := time.Now()
-	root, identity, maxFiles, maxBytes := job.root, job.identity, job.maxFiles, job.maxBytes
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if engine.fenced(root, job.fence, job.settingsRevision) {
+	if engine.fenced(job.root, job.fence, job.settingsRevision) {
 		return nil
 	}
 	var prior int
-	_ = engine.store.db.QueryRow(`SELECT generation FROM roots WHERE root=? AND identity=?`, root, identity).Scan(&prior)
-	if _, err := engine.store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-		return engine.fail(root, identity, prior, err)
-	}
-	deleteErr := engine.store.deleteGenerations(root, prior)
-	if deleteErr != nil {
-		return engine.fail(root, identity, prior, deleteErr)
-	}
-	if err := engine.store.setStorageBudget(maxBytes * 2); err != nil {
-		return engine.fail(root, identity, prior, err)
-	}
-	rootInfo, err := os.Stat(root)
-	if err != nil || fileID(rootInfo) != identity {
-		return errors.New("root identity changed before crawl")
-	}
-	paths, coverage, coverageReason, err := discoverIndexPaths(ctx, root, job.excludeDirs, job.excludePaths, maxFiles)
+	_ = engine.store.db.QueryRow(`SELECT generation FROM roots WHERE root=? AND identity=?`, job.root, job.identity).Scan(&prior)
+	paths, coverage, reason, err := engine.discoverBuildPaths(ctx, job, prior)
 	if err != nil {
-		return engine.fail(root, identity, prior, err)
+		return engine.fail(job.root, job.identity, prior, err)
 	}
-	if prior > 0 && coverage == "partial" {
-		if coverageReason == "" {
-			coverageReason = "discovery traversal was incomplete"
-		}
-		return engine.fail(root, identity, prior, errors.New(coverageReason))
+	if prior > 0 && coverage == "partial" && reason != indexCoverageFileLimit {
+		return engine.fail(job.root, job.identity, prior, errors.New(reason))
 	}
-	if engine.fenced(root, job.fence, job.settingsRevision) {
+	if engine.fenced(job.root, job.fence, job.settingsRevision) {
 		return nil
 	}
-	currentInfo, statErr := os.Stat(root)
-	if statErr != nil || fileID(currentInfo) != identity {
-		return engine.fail(root, identity, prior, errors.New("root identity changed before publish"))
+	err = engine.replaceMeasuredSnapshot(ctx, job, prior, paths, coverage, reason, started)
+	if err != nil && !errors.Is(err, context.Canceled) && !engine.fenced(job.root, job.fence, job.settingsRevision) {
+		return engine.fail(job.root, job.identity, prior, err)
 	}
-	var otherSnapshotBytes int64
-	if err := engine.store.db.QueryRow(`SELECT COALESCE(SUM(bytes),0) FROM roots WHERE root<>?`, root).Scan(&otherSnapshotBytes); err != nil {
-		return err
-	}
-	estimatedBytes := int64(4096)
-	for _, path := range paths {
-		estimatedBytes += int64(len(path.relative) + len(path.name) + 256)
-	}
-	storageLimit := maxBytes
-	if globalLimit := indexStorageLimit(maxBytes*2) - otherSnapshotBytes; globalLimit < storageLimit {
-		storageLimit = globalLimit
-	}
-	if estimatedBytes > storageLimit {
-		if prior > 0 {
-			return engine.fail(root, identity, prior, errors.New("snapshot storage budget reached"))
-		}
-		trimmed := paths[:0]
-		used := int64(4096)
-		for _, path := range paths {
-			entryBytes := int64(len(path.relative) + len(path.name) + 256)
-			if used+entryBytes > storageLimit {
-				break
-			}
-			trimmed = append(trimmed, path)
-			used += entryBytes
-		}
-		paths = trimmed
-		coverage, coverageReason = "partial", "snapshot storage budget reached"
-	}
-	var generation int
-	if err := engine.store.db.QueryRow(`SELECT generation FROM root_generations WHERE root=?`, root).Scan(&generation); errors.Is(err, sql.ErrNoRows) {
-		generation = prior
-	} else if err != nil {
-		return err
-	}
-	generation++
-	if _, err := engine.store.db.Exec(`INSERT INTO root_generations(root,generation) VALUES(?,?) ON CONFLICT(root) DO UPDATE SET generation=excluded.generation`, root, generation); err != nil {
-		return err
-	}
-	if _, err := engine.store.db.Exec(`INSERT INTO roots(root,identity,generation,state,coverage,count,bytes,updated_ns,error,settings_revision) VALUES(?,?,?,'warming','pending',0,0,?,'',0) ON CONFLICT(root) DO UPDATE SET identity=excluded.identity,state=CASE WHEN generation=0 THEN 'warming' ELSE state END,error=''`, root, identity, prior, time.Now().UnixNano()); err != nil {
-		return err
-	}
-	for {
-		err := engine.writeDiscoveredPaths(root, generation, paths)
-		if err == nil {
-			break
-		}
-		if !isSQLiteStorageFull(err) || prior > 0 || len(paths) == 0 {
-			return engine.fail(root, identity, prior, err)
-		}
-		paths = paths[:len(paths)/2]
-		coverage, coverageReason = "partial", "SQLite storage budget reached"
-	}
-	if engine.fenced(root, job.fence, job.settingsRevision) {
-		_ = engine.store.deleteGenerations(root, prior)
-		return nil
-	}
-	state := "ready"
-	if coverage == "partial" {
-		state = "partial"
-		if coverageReason == "" {
-			coverageReason = "some eligible paths could not be traversed"
-		}
-	}
-	snapshotBytes := int64(4096)
-	for _, path := range paths {
-		snapshotBytes += int64(len(path.relative) + len(path.name) + 256)
-	}
-	snapshot := &searchIndexSnapshot{generation: generation, identity: identity, entries: paths}
-	published, err := engine.publishGeneration(job, generation, state, coverage, len(paths), snapshotBytes, coverageReason, time.Since(started), snapshot)
-	if err != nil {
-		return engine.fail(root, identity, prior, err)
-	}
-	if !published {
-		return nil
-	}
-	deleteErr = engine.store.deleteGenerations(root, generation)
-	if deleteErr != nil {
-		return deleteErr
-	}
-	return engine.store.reclaimFreePages()
+	return err
 }
 
 func (engine *searchIndexEngine) writeDiscoveredPaths(root string, generation int, paths []discoveredIndexPath) error {
@@ -1255,165 +1551,123 @@ func (engine *searchIndexEngine) writeDiscoveredPaths(root string, generation in
 	if err != nil {
 		return err
 	}
-	statement, err := transaction.Prepare(`INSERT INTO entries(root,generation,relative_path,name,file_identity,size,mtime_ns) VALUES(?,?,?,?,'',0,0)`)
-	if err != nil {
-		_ = transaction.Rollback()
-		return err
-	}
-	for _, path := range paths {
-		if _, err := statement.Exec(root, generation, path.relative, path.name); err != nil {
-			_ = statement.Close()
-			_ = transaction.Rollback()
-			return err
-		}
-	}
-	if err := statement.Close(); err != nil {
+	if err := writeDiscoveredPathsTx(transaction, root, generation, paths); err != nil {
 		_ = transaction.Rollback()
 		return err
 	}
 	return transaction.Commit()
 }
 
-func discoverIndexPaths(ctx context.Context, root string, excludedNames map[string]struct{}, excludedPaths []string, maxFiles int) ([]discoveredIndexPath, string, string, error) {
+func (engine *searchIndexEngine) replaceGenerationWithinBudget(job indexBuildJob, generation, count int, bytes int64, reason string, duration time.Duration, snapshot *searchIndexSnapshot, paths []discoveredIndexPath) (bool, error) {
+	engine.crawlPause.Lock()
+	defer engine.crawlPause.Unlock()
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	if engine.fences[job.root] != job.fence || !engine.settingsRevisionAcceptedLocked(job.root, job.settingsRevision) {
+		return false, nil
+	}
+	transaction, err := engine.store.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	if _, err := transaction.Exec(`DELETE FROM entries WHERE root=?`, job.root); err != nil {
+		_ = transaction.Rollback()
+		return false, err
+	}
+	if err := writeDiscoveredPathsTx(transaction, job.root, generation, paths); err != nil {
+		_ = transaction.Rollback()
+		return false, err
+	}
+	now := time.Now().UnixNano()
+	result, err := transaction.Exec(`UPDATE roots SET identity=?,generation=?,state='partial',coverage='partial',count=?,bytes=?,updated_ns=?,error=?,settings_revision=?,scan_duration_ns=?,last_success_ns=? WHERE root=?`, job.identity, generation, count, bytes, now, reason, job.settingsRevision, duration.Nanoseconds(), now, job.root)
+	if err == nil {
+		var affected int64
+		affected, err = result.RowsAffected()
+		if err == nil && affected != 1 {
+			err = errors.New("root snapshot disappeared before publication")
+		}
+	}
+	if err != nil {
+		_ = transaction.Rollback()
+		return false, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return false, err
+	}
+	engine.snapshots[job.root] = snapshot
+	return true, nil
+}
+
+func writeDiscoveredPathsTx(transaction *sql.Tx, root string, generation int, paths []discoveredIndexPath) error {
+	return writeNormalizedPaths(transaction, root, generation, paths)
+}
+
+func discoverIndexPaths(ctx context.Context, root string, excludedNames map[string]struct{}, excludedPaths []string, maxFiles int, visited ...func()) ([]discoveredIndexPath, string, string, error) {
 	if maxFiles < 1 || maxFiles > DefaultIndexedFiles {
 		maxFiles = DefaultIndexedFiles
 	}
-	binary, err := exec.LookPath("find")
+	policy, err := compileSearchPolicy(root, excludedNames, excludedPaths)
+	if err != nil {
+		return nil, "", "", err
+	}
+	indexPolicy := *policy
+	policy = &indexPolicy
+	policy.directoryLimit = indexQueueLimit
+	directory, err := openResolvedDescriptorContext(ctx, root, true, nil)
+	if err != nil {
+		return nil, "", "", err
+	}
+	defer directory.Close()
 	paths := make([]discoveredIndexPath, 0, min(maxFiles, 65536))
-	coverage, reason := "complete", ""
-	appendPath := func(path string) bool {
-		if path == "" || excludedIndexPath(root, path, excludedPaths) {
-			return true
-		}
-		relative, err := filepath.Rel(root, path)
-		if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return true
+	limited := false
+	prefixes := make(map[string]string)
+	walkErr := walkSearchDescriptors(ctx, directory, root, root, policy, func(entry walkedEntry) error {
+		if entry.IsDir {
+			if len(visited) > 0 {
+				visited[0]()
+			}
+			return nil
 		}
 		if len(paths) == maxFiles {
-			coverage, reason = "partial", "per-root file limit reached"
-			return false
+			limited = true
+			return errWalkStop
 		}
-		name := filepath.Base(path)
-		paths = append(paths, discoveredIndexPath{relative: filepath.ToSlash(relative), name: name})
-		return true
-	}
-	if err == nil {
-		args := []string{root, "(", "-type", "d", "(", "-name", ".git"}
-		for name := range searchExcludedDirectoryNames {
-			if name == ".git" {
-				continue
-			}
-			args = append(args, "-o", "-name", name)
+		prefix, _ := splitSearchPath(entry.Relative)
+		shared, exists := prefixes[prefix]
+		if !exists {
+			shared = prefix
+			prefixes[prefix] = shared
 		}
-		for name := range excludedNames {
-			if name == ".git" || hasName(searchExcludedDirectoryNames, name) {
-				continue
-			}
-			if name != "" {
-				args = append(args, "-o", "-name", name)
-			}
-		}
-		for _, raw := range excludedPaths {
-			rule := strings.TrimSpace(raw)
-			if rule == "" || strings.HasPrefix(rule, "regex:") {
-				continue
-			}
-			if strings.HasPrefix(rule, "glob:") {
-				pattern := strings.TrimLeft(strings.ReplaceAll(strings.TrimPrefix(rule, "glob:"), "\\", "/"), "/")
-				if pattern != "" && !strings.Contains(pattern, "?") && !strings.Contains(strings.ReplaceAll(pattern, "**", ""), "*") {
-					args = append(args, "-o", "-path", filepath.Join(root, filepath.FromSlash(pattern)))
-				}
-				continue
-			}
-			if rule == "~" {
-				rule, _ = os.UserHomeDir()
-			} else if strings.HasPrefix(rule, "~/") {
-				home, _ := os.UserHomeDir()
-				rule = filepath.Join(home, rule[2:])
-			} else if !filepath.IsAbs(rule) {
-				rule = filepath.Join(root, rule)
-			}
-			args = append(args, "-o", "-path", filepath.Clean(rule))
-		}
-		args = append(args, ")", "-prune", ")", "-o", "(", "-type", "f", "-print0", ")")
-		command := exec.CommandContext(ctx, binary, args...)
-		stdout, err := command.StdoutPipe()
-		if err != nil {
-			return nil, "", "", err
-		}
-		var stderr strings.Builder
-		command.Stderr = &stderr
-		if err := command.Start(); err != nil {
-			return nil, "", "", err
-		}
-		reader := bufio.NewReaderSize(stdout, 256*1024)
-		for {
-			path, readErr := reader.ReadBytes(0)
-			if len(path) > 0 {
-				path = path[:len(path)-1]
-				if !appendPath(string(path)) {
-					_ = command.Process.Kill()
-					break
-				}
-			}
-			if readErr != nil {
-				if !errors.Is(readErr, io.EOF) {
-					_ = command.Process.Kill()
-					_ = command.Wait()
-					return nil, "", "", readErr
-				}
-				break
-			}
-		}
-		waitErr := command.Wait()
-		if waitErr != nil {
-			if ctx.Err() != nil {
-				return nil, "", "", ctx.Err()
-			}
-			if coverage == "complete" {
-				coverage = "partial"
-				reason = strings.TrimSpace(stderr.String())
-			}
-		}
-		return paths, coverage, reason, nil
-	}
-	walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if walkErr != nil {
-			coverage, reason = "partial", walkErr.Error()
-			return nil
-		}
-		relative, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			coverage, reason = "partial", relErr.Error()
-			return nil
-		}
-		if entry.IsDir() && path != root && (isSearchExcludedDirectory(entry.Name()) || hasName(excludedNames, entry.Name()) || excludedIndexPath(root, path, excludedPaths)) {
-			return filepath.SkipDir
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return nil
-		}
-		if !entry.IsDir() && relative != "." && !excludedIndexPath(root, path, excludedPaths) && !appendPath(path) {
-			return filepath.SkipAll
-		}
+		paths = append(paths, discoveredIndexPath{directory: shared, name: entry.Name, identity: fileID(entry.Info), size: entry.Info.Size(), mtimeNS: entry.Info.ModTime().UnixNano()})
 		return nil
 	})
-	if errors.Is(walkErr, filepath.SkipAll) {
-		return paths, coverage, reason, nil
+	if err := ctx.Err(); err != nil {
+		return nil, "", "", err
 	}
-	if walkErr != nil {
-		if ctx.Err() != nil {
-			return nil, "", "", ctx.Err()
-		}
-		coverage, reason = "partial", walkErr.Error()
+	reason := ""
+	if walkErr != nil && !errors.Is(walkErr, errWalkStop) {
+		reason = walkErr.Error()
 	}
+	coverage, reason := indexDiscoveryCoverage(limited, reason)
 	return paths, coverage, reason, nil
 }
 
+func indexDiscoveryCoverage(fileLimitReached bool, traversalReason string) (string, string) {
+	if fileLimitReached {
+		if traversalReason != "" {
+			return "partial", indexCoverageFileLimit + "; traversal error: " + traversalReason
+		}
+		return "partial", indexCoverageFileLimit
+	}
+	if traversalReason != "" {
+		return "partial", traversalReason
+	}
+	return "complete", ""
+}
+
 func (engine *searchIndexEngine) publishGeneration(job indexBuildJob, generation int, state, coverage string, count int, bytes int64, reason string, duration time.Duration, snapshot *searchIndexSnapshot) (bool, error) {
+	pprof.SetGoroutineLabels(pprof.WithLabels(context.Background(), pprof.Labels("phase", "index-publication")))
+	defer pprof.SetGoroutineLabels(context.Background())
 	// Readers pin metadata and rows with the exclusive lock. Wait for them before
 	// advancing the generation, so subsequent reclamation cannot remove their rows.
 	engine.crawlPause.Lock()
@@ -1428,7 +1682,7 @@ func (engine *searchIndexEngine) publishGeneration(job indexBuildJob, generation
 	if err == nil {
 		var result sql.Result
 		now := time.Now().UnixNano()
-		result, err = publish.Exec(`UPDATE roots SET identity=?,generation=?,state=?,coverage=?,count=?,bytes=?,updated_ns=?,error=?,settings_revision=?,scan_duration_ns=?,last_success_ns=? WHERE root=?`, job.identity, generation, state, coverage, count, bytes, now, reason, job.settingsRevision, duration.Nanoseconds(), now, job.root)
+		result, err = publish.Exec(`UPDATE roots SET identity=?,generation=?,state=?,coverage=?,count=?,bytes=?,updated_ns=?,error=?,settings_revision=?,active_revision=?,scan_duration_ns=?,last_success_ns=? WHERE root=?`, job.identity, generation, state, coverage, count, bytes, now, reason, job.settingsRevision, job.settingsRevision, duration.Nanoseconds(), now, job.root)
 		if err == nil {
 			var affected int64
 			affected, err = result.RowsAffected()
@@ -1448,33 +1702,37 @@ func (engine *searchIndexEngine) publishGeneration(job indexBuildJob, generation
 	return err == nil, err
 }
 
+func indexInteger(value any) int64 {
+	switch value := value.(type) {
+	case int:
+		return int64(value)
+	case int64:
+		return value
+	default:
+		panic("invalid index integer")
+	}
+}
+
 func (engine *searchIndexEngine) writeBatch(batch [][]any) error {
-	tx, err := engine.store.db.Begin()
+	transaction, err := engine.store.db.Begin()
 	if err != nil {
 		return err
 	}
-	statement, err := tx.Prepare(`INSERT OR REPLACE INTO entries(root,generation,relative_path,name,file_identity,size,mtime_ns) VALUES(?,?,?,?,?,?,?)`)
-	if err != nil {
-		_ = tx.Rollback()
-		return err
-	}
+	defer transaction.Rollback()
 	for _, row := range batch {
-		if _, err := statement.Exec(row...); err != nil {
-			_ = statement.Close()
-			_ = tx.Rollback()
+		path := discoveredIndexPath{relative: row[2].(string), name: row[3].(string), identity: row[4].(string), size: indexInteger(row[5]), mtimeNS: indexInteger(row[6])}
+		if err := writeNormalizedPaths(transaction, row[0].(string), row[1].(int), []discoveredIndexPath{path}); err != nil {
 			return err
 		}
 	}
-	if err := statement.Close(); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return transaction.Commit()
 }
 
 func (engine *searchIndexEngine) fail(root, identity string, prior int, cause error) error {
-	_, _ = engine.store.db.Exec(`UPDATE roots SET identity=?,generation=?,state='error',error=?,updated_ns=? WHERE root=?`, identity, prior, cause.Error(), time.Now().UnixNano(), root)
-	return cause
+	engine.crawlPause.RLock()
+	defer engine.crawlPause.RUnlock()
+	_, err := engine.store.db.Exec(`INSERT INTO roots(root,identity,generation,state,coverage,error,updated_ns) VALUES(?,?,?,'error','pending',?,?) ON CONFLICT(root) DO UPDATE SET identity=excluded.identity,generation=CASE WHEN roots.identity=excluded.identity THEN roots.generation ELSE 0 END,count=CASE WHEN roots.identity=excluded.identity THEN roots.count ELSE 0 END,state='error',coverage=CASE WHEN roots.identity=excluded.identity THEN roots.coverage ELSE 'pending' END,error=excluded.error,updated_ns=excluded.updated_ns`, root, identity, prior, cause.Error(), time.Now().UnixNano())
+	return errors.Join(cause, err)
 }
 
 type rankedIndexEntry struct {
@@ -1499,6 +1757,23 @@ func (entries *rankedIndexHeap) Pop() any {
 	last := old[len(old)-1]
 	*entries = old[:len(old)-1]
 	return last
+}
+
+// Keep the strongest bounded shortlist regardless of filesystem enumeration order.
+func canRetainRankedIndexEntry(best rankedIndexHeap, key searchSortKey, limit int) bool {
+	return len(best) < limit || compareSearchSortKey(key, best[0].key)
+}
+
+func retainRankedIndexEntry(best *rankedIndexHeap, candidate rankedIndexEntry, limit int) {
+	if !canRetainRankedIndexEntry(*best, candidate.key, limit) {
+		return
+	}
+	if len(*best) < limit {
+		heap.Push(best, candidate)
+	} else {
+		(*best)[0] = candidate
+		heap.Fix(best, 0)
+	}
 }
 
 func (engine *searchIndexEngine) search(root, identity, query string, limit int, cursor string, settingsRevision uint64) (map[string]any, error) {
@@ -1530,7 +1805,7 @@ func (engine *searchIndexEngine) searchContext(ctx context.Context, root, identi
 	if limit > MaxSearchResults {
 		limit = MaxSearchResults
 	}
-	status, err := engine.status(root, identity)
+	status, err := engine.statusUnlocked(root, identity)
 	if err != nil {
 		return nil, err
 	}
@@ -1546,7 +1821,7 @@ func (engine *searchIndexEngine) searchContext(ctx context.Context, root, identi
 	}
 	var generation int
 	var storedRevision uint64
-	if err := engine.store.db.QueryRow(`SELECT generation,settings_revision FROM roots WHERE root=? AND identity=?`, root, identity).Scan(&generation, &storedRevision); err != nil {
+	if err := engine.store.db.QueryRow(`SELECT generation,active_revision FROM roots WHERE root=? AND identity=?`, root, identity).Scan(&generation, &storedRevision); err != nil {
 		return nil, err
 	}
 	if storedRevision != settingsRevision {
@@ -1560,25 +1835,11 @@ func (engine *searchIndexEngine) searchContext(ctx context.Context, root, identi
 	engine.mu.Unlock()
 	if snapshot == nil || snapshot.generation != generation || snapshot.identity != identity {
 		loaded := &searchIndexSnapshot{generation: generation, identity: identity}
-		rows, err := engine.store.db.QueryContext(ctx, `SELECT relative_path,name,file_identity,size,mtime_ns FROM entries WHERE root=? AND generation=?`, root, generation)
+		paths, err := engine.store.loadNormalizedPaths(ctx, root, generation)
 		if err != nil {
 			return nil, err
 		}
-		for rows.Next() {
-			var entry discoveredIndexPath
-			if err := rows.Scan(&entry.relative, &entry.name, &entry.identity, &entry.size, &entry.mtimeNS); err != nil {
-				_ = rows.Close()
-				return nil, err
-			}
-			loaded.entries = append(loaded.entries, entry)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, err
-		}
-		if err := rows.Close(); err != nil {
-			return nil, err
-		}
+		loaded.entries = paths
 		snapshot = loaded
 		engine.mu.Lock()
 		engine.snapshots[root] = snapshot
@@ -1606,23 +1867,22 @@ func (engine *searchIndexEngine) searchContext(ctx context.Context, root, identi
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		key, matched := searchEntrySortKeyPrepared(path.name, path.relative, preparedTokens)
+		directory, base := path.directory, path.name
+		if path.relative != "" {
+			directory, base = splitSearchPath(path.relative)
+		}
+		key, matched := searchEntrySortKeySegmentsPrepared(path.name, directory, base, preparedTokens)
 		if !matched {
 			continue
 		}
 		matchedCount++
-		if len(best) == limit && !compareSearchSortKey(key, best[0].key) {
+		if !canRetainRankedIndexEntry(best, key, limit) {
 			continue
 		}
-		absolute := filepath.Join(root, filepath.FromSlash(path.relative))
-		row := map[string]any{"path": absolute, "name": path.name, "relative_path": path.relative, "kind": "file", "size": path.size, "mtime": path.mtimeNS / 1e9, "mtime_ns": path.mtimeNS, "realpath": absolute, "file_id": path.identity, "file_identity": "id:" + path.identity, "uploaded": generatedUploadName(path.name)}
-		candidate := rankedIndexEntry{key: key, row: row}
-		if len(best) < limit {
-			heap.Push(&best, candidate)
-		} else {
-			heap.Pop(&best)
-			heap.Push(&best, candidate)
-		}
+		relative := directory + base
+		absolute := filepath.Join(root, filepath.FromSlash(relative))
+		row := map[string]any{"path": absolute, "name": path.name, "relative_path": relative, "kind": "file", "size": path.size, "mtime": path.mtimeNS / 1e9, "mtime_ns": path.mtimeNS, "realpath": absolute, "file_id": path.identity, "file_identity": "id:" + path.identity, "uploaded": generatedUploadName(path.name)}
+		retainRankedIndexEntry(&best, rankedIndexEntry{key: key, row: row}, limit)
 	}
 	files := make([]map[string]any, 0, len(best))
 	sort.Slice(best, func(left, right int) bool { return compareSearchSortKey(best[left].key, best[right].key) })
@@ -1636,26 +1896,69 @@ func (engine *searchIndexEngine) searchContext(ctx context.Context, root, identi
 }
 
 // SearchIndexWorkerClient supervises one worker process and serializes its private RPC stream.
+type contextMutex struct {
+	initOnce sync.Once
+	token    chan struct{}
+}
+
+func (mutex *contextMutex) Lock() {
+	_ = mutex.LockContext(context.Background(), nil)
+}
+
+func (mutex *contextMutex) LockContext(ctx context.Context, abort <-chan struct{}) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	mutex.initOnce.Do(func() { mutex.token = make(chan struct{}, 1) })
+	select {
+	case mutex.token <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			mutex.Unlock()
+			return err
+		}
+		select {
+		case <-abort:
+			mutex.Unlock()
+			return errors.New("search index worker is shutting down")
+		default:
+			return nil
+		}
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-abort:
+		return errors.New("search index worker is shutting down")
+	}
+}
+
+func (mutex *contextMutex) Unlock() {
+	<-mutex.token
+}
+
 type SearchIndexWorkerClient struct {
-	mu           sync.Mutex
-	repairMu     sync.Mutex
-	stateDir     string
-	persistent   bool
-	closed       bool
-	repairs      map[string]*time.Timer
-	repairEpochs map[string]uint64
-	closing      chan struct{}
-	closeOnce    sync.Once
-	cmd          *exec.Cmd
-	input        io.WriteCloser
-	output       *bufio.Reader
-	stdin        io.WriteCloser
-	stdout       io.ReadCloser
-	nextID       uint64
+	replies        chan workerReply
+	OnComplete     func(map[string]any)
+	repairRequests map[string]indexRequest
+	mu             contextMutex
+	repairMu       contextMutex
+	stateDir       string
+	persistent     bool
+	closed         bool
+	repairs        map[string]*time.Timer
+	repairEpochs   map[string]uint64
+	repairFlights  map[string]map[chan struct{}]struct{}
+	closing        chan struct{}
+	closeOnce      sync.Once
+	cmd            *exec.Cmd
+	input          io.WriteCloser
+	output         *bufio.Reader
+	stdin          io.WriteCloser
+	stdout         io.ReadCloser
+	initialPolicy  *indexRequest
+	nextID         uint64
 }
 
 func NewSearchIndexWorkerClient(stateDir string) *SearchIndexWorkerClient {
-	return &SearchIndexWorkerClient{stateDir: stateDir, persistent: true, repairs: make(map[string]*time.Timer), repairEpochs: make(map[string]uint64), closing: make(chan struct{})}
+	return &SearchIndexWorkerClient{stateDir: stateDir, persistent: true, repairs: make(map[string]*time.Timer), repairRequests: make(map[string]indexRequest), repairEpochs: make(map[string]uint64), repairFlights: make(map[string]map[chan struct{}]struct{}), closing: make(chan struct{})}
 }
 
 func (client *SearchIndexWorkerClient) QueueRepair(request indexRequest, onScheduled func()) {
@@ -1665,8 +1968,12 @@ func (client *SearchIndexWorkerClient) QueueRepair(request indexRequest, onSched
 	client.repairMu.Lock()
 	defer client.repairMu.Unlock()
 	if existing := client.repairs[request.Root]; existing != nil {
-		existing.Stop()
+		previous := client.repairRequests[request.Root]
+		request.ChangedPaths = mergeIndexChanges(request.Root, previous.ChangedPaths, request.ChangedPaths)
+		client.repairRequests[request.Root] = request
+		return
 	}
+	client.repairRequests[request.Root] = request
 	client.repairEpochs[request.Root]++
 	epoch := client.repairEpochs[request.Root]
 	var timer *time.Timer
@@ -1677,10 +1984,29 @@ func (client *SearchIndexWorkerClient) QueueRepair(request indexRequest, onSched
 			return
 		}
 		delete(client.repairs, request.Root)
+		request = client.repairRequests[request.Root]
+		delete(client.repairRequests, request.Root)
 		request.Action = "repair"
-		_, err := client.Request(context.Background(), request)
+		// Keep map ownership short; policy fences still wait for admitted repairs
+		// before retiring their root, without blocking unrelated repair queues.
+		done := make(chan struct{})
+		if client.repairFlights[request.Root] == nil {
+			client.repairFlights[request.Root] = make(map[chan struct{}]struct{})
+		}
+		client.repairFlights[request.Root][done] = struct{}{}
 		client.repairMu.Unlock()
-		if err == nil && onScheduled != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_, err := client.Request(ctx, request)
+		cancel()
+		close(done)
+		client.repairMu.Lock()
+		current := client.repairEpochs[request.Root] == epoch
+		delete(client.repairFlights[request.Root], done)
+		if len(client.repairFlights[request.Root]) == 0 {
+			delete(client.repairFlights, request.Root)
+		}
+		client.repairMu.Unlock()
+		if err == nil && current && onScheduled != nil {
 			onScheduled()
 		}
 	})
@@ -1690,35 +2016,34 @@ func (client *SearchIndexWorkerClient) QueueRepair(request indexRequest, onSched
 func (client *SearchIndexWorkerClient) SetPersistent(persistent bool) error {
 	client.repairMu.Lock()
 	defer client.repairMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := client.cancelAllRepairsLocked(ctx); err != nil {
+		return err
+	}
 	client.mu.Lock()
 	defer client.mu.Unlock()
+	return client.setPersistentLocked(persistent)
+}
+
+func (client *SearchIndexWorkerClient) setPersistentLocked(persistent bool) error {
+	if client.closed {
+		return errors.New("search index worker client is closed")
+	}
 	if client.persistent == persistent {
 		return nil
-	}
-	for root, timer := range client.repairs {
-		timer.Stop()
-		client.repairEpochs[root]++
-		delete(client.repairs, root)
-	}
-	if client.persistent && !persistent {
-		if client.closed {
-			return errors.New("search index worker client is closed")
-		}
-		if err := client.startLocked(); err != nil {
-			return err
-		}
-		if _, err := client.requestLocked(context.Background(), indexRequest{Action: "purge"}); err != nil {
-			return err
-		}
 	}
 	client.stopLocked()
 	client.persistent = persistent
 	return nil
 }
 
-func (client *SearchIndexWorkerClient) startLocked() error {
+func (client *SearchIndexWorkerClient) startLocked(ctx context.Context) error {
 	if client.cmd != nil {
 		return nil
+	}
+	if client.initialPolicy == nil {
+		return errors.New("search index settings unavailable: initial policy is required")
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -1730,6 +2055,14 @@ func (client *SearchIndexWorkerClient) startLocked() error {
 	}
 	cmd := execCommand(executable, "--search-index-worker", "--index-db", databasePath)
 	cmd.Env = withSearchIndexWorkerCPUCap(os.Environ())
+	var initial []byte
+	if client.initialPolicy != nil {
+		initial, err = json.Marshal(client.initialPolicy)
+		if err != nil {
+			return err
+		}
+		cmd.Env = append(cmd.Env, "YOMUX_INDEX_INITIAL_POLICY=stdin")
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -1744,25 +2077,81 @@ func (client *SearchIndexWorkerClient) startLocked() error {
 	}
 	client.cmd, client.stdin, client.stdout = cmd, stdin, stdout
 	client.input, client.output = stdin, bufio.NewReader(stdout)
+	replies := make(chan workerReply, 1)
+	client.replies = replies
+	reader := client.output
+	notify := client.OnComplete
+	go func() {
+		for {
+			line, err := reader.ReadBytes('\n')
+			var response indexResponse
+			if err == nil {
+				err = json.Unmarshal(line, &response)
+			}
+			if err != nil {
+				replies <- workerReply{err: err}
+				return
+			}
+			if response.ID == 0 {
+				if notify != nil {
+					notify(response.Payload)
+				}
+				continue
+			}
+			replies <- workerReply{response: response}
+		}
+	}()
+	if initial != nil {
+		if err := client.writeFrameLocked(ctx, initial); err != nil {
+			client.stopLocked()
+			return err
+		}
+	}
 	return nil
 }
 
+// Bootstrap and request frames share cancellation: a worker doing migration
+// may stop consuming stdin before a large policy fits in the pipe.
+func (client *SearchIndexWorkerClient) writeFrameLocked(ctx context.Context, frame []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	input := client.input
+	written := make(chan error, 1)
+	go func() {
+		_, err := input.Write(append(frame, '\n'))
+		written <- err
+	}()
+	select {
+	case err := <-written:
+		return err
+	case <-ctx.Done():
+		client.stopLocked()
+		<-written
+		return ctx.Err()
+	case <-client.closing:
+		client.stopLocked()
+		<-written
+		return errors.New("search index worker is shutting down")
+	}
+}
+
 func withSearchIndexWorkerCPUCap(environment []string) []string {
-	bounded := make([]string, 0, len(environment)+1)
+	allowed := map[string]bool{"PATH": true, "HOME": true, "TMPDIR": true, "TMP": true, "TEMP": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TZ": true, "GODEBUG": true, "GOTRACEBACK": true, "GOMEMLIMIT": true, "LD_LIBRARY_PATH": true, "DYLD_LIBRARY_PATH": true, "SystemRoot": true, "RUNFILES_DIR": true, "RUNFILES_MANIFEST_FILE": true, "YOMUX_TEST_INDEX_WORKER": true}
+	bounded := make([]string, 0, len(allowed)+1)
 	for _, entry := range environment {
-		if strings.HasPrefix(entry, "GOMAXPROCS=") {
-			continue
+		key, _, _ := strings.Cut(entry, "=")
+		if allowed[key] {
+			bounded = append(bounded, entry)
 		}
-		bounded = append(bounded, entry)
 	}
 	return append(bounded, "GOMAXPROCS=1")
 }
 
 func (client *SearchIndexWorkerClient) Request(ctx context.Context, request indexRequest) (map[string]any, error) {
-	if err := ctx.Err(); err != nil {
+	if err := client.mu.LockContext(ctx, client.closing); err != nil {
 		return nil, err
 	}
-	client.mu.Lock()
 	defer client.mu.Unlock()
 	if client.closed {
 		return nil, errors.New("search index worker client is closed")
@@ -1777,7 +2166,7 @@ func (client *SearchIndexWorkerClient) requestLocked(ctx context.Context, reques
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := client.startLocked(); err != nil {
+	if err := client.startLocked(ctx); err != nil {
 		return nil, err
 	}
 	client.nextID++
@@ -1786,7 +2175,7 @@ func (client *SearchIndexWorkerClient) requestLocked(ctx context.Context, reques
 	if err != nil {
 		return nil, err
 	}
-	if _, err := client.input.Write(append(data, '\n')); err != nil {
+	if err := client.writeFrameLocked(ctx, data); err != nil {
 		client.stopLocked()
 		return nil, err
 	}
@@ -1794,16 +2183,13 @@ func (client *SearchIndexWorkerClient) requestLocked(ctx context.Context, reques
 		response indexResponse
 		err      error
 	}, 1)
+	replies := client.replies
 	go func() {
-		line, readErr := client.output.ReadBytes('\n')
-		var response indexResponse
-		if readErr == nil {
-			readErr = json.Unmarshal(line, &response)
-		}
+		reply := <-replies
 		result <- struct {
 			response indexResponse
 			err      error
-		}{response, readErr}
+		}{reply.response, reply.err}
 	}()
 	finishResponse := func(result struct {
 		response indexResponse
@@ -1846,40 +2232,22 @@ func (client *SearchIndexWorkerClient) requestLocked(ctx context.Context, reques
 			client.stopLocked()
 			return nil, marshalErr
 		}
-		if _, writeErr := client.input.Write(append(cancelData, '\n')); writeErr != nil {
+		cancelContext, cancelWrite := context.WithTimeout(context.Background(), 5*time.Second)
+		writeErr := client.writeFrameLocked(cancelContext, cancelData)
+		cancelWrite()
+		if writeErr != nil {
 			client.stopLocked()
-			return nil, writeErr
-		}
-		select {
-		case response := <-result:
-			if response.err != nil || response.response.ID != request.ID {
-				_, err := finishResponse(response)
-				return nil, err
-			}
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			if _, err := finishResponse(response); err != nil {
-				return nil, err
-			}
-			return nil, ctx.Err()
-		case <-client.closing:
-			response, completed := waitForShutdown()
-			if !completed {
-				return nil, ctx.Err()
-			}
-			if response.err != nil || response.response.ID != request.ID {
-				_, err := finishResponse(response)
-				return nil, err
-			}
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			if _, err := finishResponse(response); err != nil {
-				return nil, err
-			}
 			return nil, ctx.Err()
 		}
+		response, completed := waitForShutdown()
+		if !completed {
+			return nil, ctx.Err()
+		}
+		if response.err != nil || response.response.ID != request.ID {
+			_, err := finishResponse(response)
+			return nil, err
+		}
+		return nil, ctx.Err()
 	case <-client.closing:
 		response, completed := waitForShutdown()
 		if !completed {
@@ -1895,43 +2263,126 @@ func (client *SearchIndexWorkerClient) requestLocked(ctx context.Context, reques
 }
 
 func (client *SearchIndexWorkerClient) Fence(ctx context.Context, root string, settingsRevision uint64) error {
-	client.repairMu.Lock()
-	client.cancelRepairLocked(root)
+	if err := client.repairMu.LockContext(ctx, client.closing); err != nil {
+		return err
+	}
+	defer client.repairMu.Unlock()
+	if err := client.cancelRepairLocked(ctx, root); err != nil {
+		return err
+	}
 	_, err := client.Request(ctx, indexRequest{Action: "fence", Root: root, SettingsRevision: settingsRevision})
-	client.repairMu.Unlock()
 	return err
 }
 
 func (client *SearchIndexWorkerClient) FenceSettings(ctx context.Context, roots []string, settingsRevision uint64, preserveSnapshots ...bool) error {
-	client.repairMu.Lock()
+	if err := client.repairMu.LockContext(ctx, client.closing); err != nil {
+		return err
+	}
 	defer client.repairMu.Unlock()
 	for _, root := range roots {
-		client.cancelRepairLocked(root)
+		if err := client.cancelRepairLocked(ctx, root); err != nil {
+			return err
+		}
 	}
 	preserve := len(preserveSnapshots) > 0 && preserveSnapshots[0]
 	_, err := client.Request(ctx, indexRequest{Action: "settings_fence", FenceRoots: append([]string(nil), roots...), SettingsRevision: settingsRevision, Invalidate: !preserve, PreserveSnapshots: preserve})
 	return err
 }
 
-func (client *SearchIndexWorkerClient) SyncSettings(ctx context.Context, roots []string, settingsRevision uint64) error {
-	_, err := client.Request(ctx, indexRequest{Action: "settings_fence", FenceRoots: append([]string(nil), roots...), SettingsRevision: settingsRevision})
+func (client *SearchIndexWorkerClient) ApplySettings(ctx context.Context, roots []string, revision, epoch uint64, persistent bool, maxBytes int64, preserve bool, initialOptions ...SearchOptions) (map[string]any, error) {
+	if err := client.repairMu.LockContext(ctx, client.closing); err != nil {
+		return nil, err
+	}
+	defer client.repairMu.Unlock()
+	if err := client.cancelAllRepairsLocked(ctx); err != nil {
+		return nil, err
+	}
+	if err := client.mu.LockContext(ctx, client.closing); err != nil {
+		return nil, err
+	}
+	defer client.mu.Unlock()
+	if client.closed {
+		return nil, errors.New("search index worker client is closed")
+	}
+	request := indexRequest{Action: "settings_fence", FenceRoots: append([]string(nil), roots...), SettingsRevision: revision, ApplicationEpoch: epoch, MaxBytes: maxBytes, PreserveSnapshots: preserve}
+	if len(initialOptions) > 0 {
+		options := initialOptions[0]
+		request.MaxFiles, request.RefreshSec = options.MaxFiles, options.RefreshSec
+		request.LegacySettingsRevision = options.LegacySettingsRevision
+		request.ExcludeDirs, request.ExcludePaths = append([]string(nil), options.ExcludeDirs...), append([]string(nil), options.ExcludePaths...)
+	}
+	client.initialPolicy = &request
+	if err := client.setPersistentLocked(persistent); err != nil {
+		return nil, err
+	}
+	return client.requestLocked(ctx, request)
+}
+
+func (client *SearchIndexWorkerClient) SyncSettings(ctx context.Context, roots []string, settingsRevision uint64, legacyRevisions ...uint64) error {
+	request := indexRequest{Action: "settings_fence", FenceRoots: append([]string(nil), roots...), SettingsRevision: settingsRevision}
+	if len(legacyRevisions) > 0 {
+		request.LegacySettingsRevision = legacyRevisions[0]
+	}
+	_, err := client.Request(ctx, request)
+	return err
+}
+
+func (client *SearchIndexWorkerClient) Profile(ctx context.Context, mode string, seconds int) (map[string]any, error) {
+	return client.Request(ctx, indexRequest{Action: "cpu_profile", Options: map[string]any{"mode": mode, "seconds": seconds}})
+}
+
+func (client *SearchIndexWorkerClient) UpdateDemand(ctx context.Context, roots []string) error {
+	_, err := client.Request(ctx, indexRequest{Action: "demand", FenceRoots: roots})
 	return err
 }
 
 func (client *SearchIndexWorkerClient) Unindex(ctx context.Context, root string) error {
-	client.repairMu.Lock()
-	client.cancelRepairLocked(root)
+	if err := client.repairMu.LockContext(ctx, client.closing); err != nil {
+		return err
+	}
+	defer client.repairMu.Unlock()
+	if err := client.cancelRepairLocked(ctx, root); err != nil {
+		return err
+	}
 	_, err := client.Request(ctx, indexRequest{Action: "unindex", Root: root})
-	client.repairMu.Unlock()
 	return err
 }
 
-func (client *SearchIndexWorkerClient) cancelRepairLocked(root string) {
+func (client *SearchIndexWorkerClient) cancelAllRepairsLocked(ctx context.Context) error {
+	roots := make(map[string]bool, len(client.repairs)+len(client.repairFlights))
+	for root := range client.repairs {
+		roots[root] = true
+	}
+	for root := range client.repairFlights {
+		roots[root] = true
+	}
+	for root := range roots {
+		if err := client.cancelRepairLocked(ctx, root); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (client *SearchIndexWorkerClient) cancelRepairLocked(ctx context.Context, root string) error {
+	delete(client.repairRequests, root)
 	client.repairEpochs[root]++
 	if timer := client.repairs[root]; timer != nil {
 		timer.Stop()
 		delete(client.repairs, root)
 	}
+	// No IPC mutex is held while waiting. A root can have several admitted
+	// repairs; all must settle before its fence, and the caller retains its deadline.
+	for done := range client.repairFlights[root] {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-client.closing:
+			return errors.New("search index worker client is closing")
+		}
+	}
+	return nil
 }
 
 func (client *SearchIndexWorkerClient) stopLocked() {
@@ -1952,10 +2403,8 @@ func (client *SearchIndexWorkerClient) stopLocked() {
 func (client *SearchIndexWorkerClient) Close() {
 	client.closeOnce.Do(func() { close(client.closing) })
 	client.repairMu.Lock()
-	for root, timer := range client.repairs {
-		timer.Stop()
-		client.repairEpochs[root]++
-		delete(client.repairs, root)
+	for root := range client.repairs {
+		_ = client.cancelRepairLocked(context.Background(), root)
 	}
 	client.repairMu.Unlock()
 	client.mu.Lock()

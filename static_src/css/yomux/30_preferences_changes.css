@@ -3483,7 +3483,7 @@ body.theme-light .js-debug-line--moving-average {
 }
 .preferences-setting-control {
   --preferences-control-left-indent: 14px;
-  --preferences-number-control-width: 11ch;
+  --preferences-number-control-width: 20ch;
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;

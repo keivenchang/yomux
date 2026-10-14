@@ -58,7 +58,7 @@ function layoutMenuCommand(mode, options = {}) {
       : '';
   return menuCommand(t(`menu.view.layout.${normalized}`), () => applyLayoutMode(normalized), {
     detail: options.detail ?? defaultDetail,
-    disabled: options.disabled === true,
+    disabled: options.disabled === true || !tabLayoutManipulationAllowed(),
     keepOpen: true,
   });
 }
@@ -302,7 +302,7 @@ function tmuxSessionActionCommands(session, options = {}) {
       iconHtml: hasSession ? yoloMarkerHtml(session, autoHere, {enabledOnly: false, yoloWorking: sessionYoloIsWorking(session)}) : '',
       ariaLabel: [yoloLabel, hasSession ? focusDetail : t('menu.tmux.focusSessionFirst')].filter(Boolean).join(' - '),
     }));
-  commands.push(
+  if (options.includeRename !== false) commands.push(
     menuCommand(renameLabel, renameAction, {
       disabled: readOnlyMode || !hasSession,
       detail: visibleDetail,
@@ -979,6 +979,7 @@ const topbarPackingVisualItemSelectors = Object.freeze([
   '.brand-cell',
   '.app-menu-bar',
   '.topbar-nav',
+  '.topbar-tabber-toggle',
   '.topbar-search',
   '.topbar-language-menu',
   '#backendHealthIndicator',
@@ -1257,6 +1258,7 @@ function renderSessionButtonsMeasured(options = {}) {
   sessionButtons.classList.remove(CLS.dragOver);
   sessionButtons.appendChild(createAppMenuBar());
   sessionButtons.appendChild(createTopbarCenterTools());
+  syncTabberSidebarToggle();
   updateEditorNavButtons();   // sync ←/→ disabled state to the global editorNav stack after (re)assembly
   // Topbar right group: Language | Activity (activity pinned far-right). #257: the theme switcher was
   // removed as redundant — theme is set via View -> Theme and the Preferences Global color theme.
@@ -1365,8 +1367,22 @@ function createTopbarSearch() {
 function createTopbarCenterTools() {
   const group = document.createElement('div');
   group.className = 'topbar-center-tools';
-  group.append(createTopbarNav(), createTopbarSearch());
+  group.append(createTopbarNav(), createTopbarTabberToggle(), createTopbarSearch());
   return group;
+}
+
+function createTopbarTabberToggle() {
+  const button = makeButton({
+    id: 'topbarTabberToggle',
+    className: 'topbar-tabber-toggle',
+    ariaLabel: t('tabber.title'),
+    title: t('tabber.title'),
+    pressed: false,
+    label: '▤',
+    onClick: event => { event.preventDefault(); toggleTabberSidebar(); },
+  });
+  button.setAttribute('aria-pressed', 'false');
+  return button;
 }
 
 function createTopbarRightTools() {
@@ -1856,6 +1872,20 @@ function focusAdjacentTopMenu(wrapper, direction) {
   next.querySelector('.app-menu-button')?.focus();
 }
 
+function closeAppMenuAndRestoreFocus(fallback) {
+  const target = typeof openAppMenuReturnFocus === 'function'
+    ? openAppMenuReturnFocus()
+    : openAppMenuReturnFocus;
+  closeAppMenus();
+  [target, fallback].find(appMenuFocusTargetIsAvailable)?.focus();
+}
+
+function appMenuFocusTargetIsAvailable(target) {
+  if (!target?.isConnected || target.disabled || !target.getClientRects?.().length) return false;
+  const style = getComputedStyle(target);
+  return style.display !== 'none' && style.visibility !== 'hidden';
+}
+
 function handleAppMenuButtonKeydown(event, wrapper) {
   if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
     event.preventDefault();
@@ -1867,7 +1897,11 @@ function handleAppMenuButtonKeydown(event, wrapper) {
     event.preventDefault();
     focusAdjacentTopMenu(wrapper, -1);
   } else if (event.key === 'Escape') {
-    closeAppMenus();
+    const tabberToggle = document.querySelector('#topbarTabberToggle');
+    const fallbackFocus = tabberToggle && !tabberToggle.hidden
+      ? tabberToggle
+      : wrapper.querySelector('.app-menu-button');
+    closeAppMenuAndRestoreFocus(fallbackFocus);
   }
 }
 
@@ -1880,8 +1914,11 @@ function handleAppMenuCommandKeydown(event, button, item, options = {}) {
     focusAdjacentAppMenuCommand(button, -1);
   } else if (event.key === 'Escape') {
     event.preventDefault();
-    closeAppMenus();
-    button.closest('.app-menu')?.querySelector('.app-menu-button')?.focus();
+    const tabberToggle = document.querySelector('#topbarTabberToggle');
+    const fallbackFocus = tabberToggle && !tabberToggle.hidden
+      ? tabberToggle
+      : button.closest('.app-menu')?.querySelector('.app-menu-button');
+    closeAppMenuAndRestoreFocus(fallbackFocus);
   } else if (event.key === 'ArrowLeft') {
     event.preventDefault();
     const submenu = button.closest('.app-submenu-popover');
@@ -1949,6 +1986,11 @@ function openAppMenu(wrapper, options = {}) {
   openAppMenuId = wrapper.dataset.appMenu || null;
   openAppMenuPinned = options.pinned === true;
   openAppMenuOpenedAt = Date.now();
+  if (Object.prototype.hasOwnProperty.call(options, 'returnFocus')) {
+    openAppMenuReturnFocus = typeof options.returnFocus === 'function'
+      ? options.returnFocus
+      : options.returnFocus?.isConnected ? options.returnFocus : null;
+  }
   wrapper.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'true');
   if (openAppMenuId === 'tabs') refreshTabsMenuMetadataOnOpen();
   if (options.focusFirst) requestAnimationFrame(() => focusFirstAppMenuCommand(wrapper));
@@ -1977,5 +2019,6 @@ function closeAppMenus(keepOpen = null) {
   if (!openAppMenuId) {
     openAppMenuPinned = false;
     openAppMenuOpenedAt = 0;
+    openAppMenuReturnFocus = null;
   }
 }

@@ -502,6 +502,13 @@ def get_stats_capabilities(request: Any, parsed: Any, route: Route) -> None:
     request.write_json(request.server.app.stats_current_http.capabilities())
 
 
+def get_stats_session_aliases(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    # The Python backend does not create Tabber view sessions, so its live alias
+    # mapping is empty. Keep the shared stats client boot probe successful here.
+    request.write_json({"aliases": {}})
+
+
 def post_stats_retry(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
     payload = request.server.app.stats_current_http.retry()
@@ -1604,6 +1611,7 @@ CORE_ROUTES = (
     Route("GET", "/api/stats-capabilities", "readonly", get_stats_capabilities, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
     Route("GET", "/api/stats-delta", "readonly", get_stats_delta, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
     Route("GET", "/api/stats-snapshot", "readonly", get_stats_snapshot, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
+    Route("GET", "/api/stats-session-aliases", "readonly", get_stats_session_aliases, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/api/stats-stream", "readonly", get_stats_stream, protocol=RESPONSE_SSE, group="core"),
     Route("POST", "/api/stats-retry", "readonly", post_stats_retry, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/api/pricing-catalog", "readonly", get_pricing_catalog, protocol=RESPONSE_JSON, group="core"),

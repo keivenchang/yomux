@@ -4502,6 +4502,25 @@ async function scenario(stale, applyAt) {
   return context.__tabberReloadTrace.metadataConvergence;
 }
 (async () => {
+  const pending = [];
+  const context = {URL, location: {href: 'https://fixture.invalid/'}, performance: {now: () => 2},
+    document: {querySelectorAll: () => []}, MutationObserver: class {observe() {}}, requestAnimationFrame: () => {},
+    fetch: async () => ({status: 200, clone: () => ({json: () => new Promise(resolve => pending.push(resolve))})}),
+  };
+  context.window = context;
+  vm.createContext(context);
+  vm.runInContext(process.argv[1], context);
+  await context.fetch('/api/activity');
+  pending[0]({name: 'A'});
+  await Promise.resolve();
+  await context.fetch('/api/activity');
+  assert.equal(context.__tabberReloadTrace.activity.body.name, 'A');
+  await context.fetch('/api/activity');
+  pending[2]({name: 'C'});
+  await Promise.resolve();
+  pending[1]({name: 'B'});
+  await Promise.resolve();
+  assert.equal(context.__tabberReloadTrace.activity.body.name, 'C');
   const current = await scenario(false, null);
   assert.equal(current.at, 30);
   assert.equal(current.skipped, 'cache is current');

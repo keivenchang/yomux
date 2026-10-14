@@ -420,6 +420,7 @@ function renderEmptyPane(slot) {
   fill.dataset.dockviewRegion = 'content';
   const title = document.createElement('strong');
   title.textContent = t('pane.dropTab');
+  title.hidden = !tabberIsAdvanced();
   const hint = document.createElement('span');
   hint.className = 'empty-pane-hint';
   hint.textContent = t('pane.empty');
@@ -435,19 +436,30 @@ function renderEmptyPane(slot) {
   return panel;
 }
 
-function renderPaneTabStrips() {
+function syncEmptyPaneDropPromptVisibility() {
+  const visible = tabberIsAdvanced();
+  for (const title of document.querySelectorAll('.empty-pane-panel .empty-pane-fill > strong')) {
+    title.hidden = !visible;
+  }
+}
+
+function renderPaneTabStrips(options = {}) {
   const perf = clientPerfStart('renderPaneTabStrips');
   try {
-    return renderPaneTabStripsMeasured();
+    return renderPaneTabStripsMeasured(options);
   } finally {
     clientPerfEnd(perf, {nodes: document.querySelectorAll?.('.pane-tab')?.length || 0});
   }
 }
 
-function renderPaneTabStripsMeasured() {
+function renderPaneTabStripsMeasured(options = {}) {
   if (dockviewLayoutActive()) {
+    if (options.deferDuringTerminalActivation === true && dockviewLayoutState.tabActivationPerf) {
+      dockviewLayoutState.deferredMetadataTabStripRefresh = true;
+      return false;
+    }
     dockviewRefreshTabs();
-    dockviewSyncMountedPanels();
+    dockviewSyncMountedPanels({renderAttached: options.renderAttached});
     return;
   }
   // do not rebuild tab DOM while a tab is being dragged — replacing the dragged node
@@ -479,7 +491,11 @@ function updatePaneTabStrip(panel, side) {
   if (!strip) return;
   const stack = paneTabs(side);
   strip.dataset.side = side;
-  strip.hidden = false;
+  strip.hidden = normalTabberPaneHeaderHidden(side);
+  if (strip.hidden) {
+    strip.replaceChildren();
+    return;
+  }
   const restorePopoverItem = paneTabPopoverItemToRestore(strip);
   const activeItem = activeItemForSide(side);
   const items = stack.slice();
@@ -782,8 +798,7 @@ function createPaneTab(side, item, displayContext = {}) {
   });
   bindActionDispatcher(tab, {
     'pane-tab-close': () => {
-      if (isEditor) closeFileTab(fileItemPath(item), {item});
-      else removeSessionFromLayout(item);
+      closeLayoutTabItem(item);
     },
     'pane-tab-auto-approve': async (_event, autoTarget) => {
       const shouldRefocus = item === activeItemForSide(side);
@@ -1035,6 +1050,9 @@ function paneInfoTabHtml(item = infoItemId, options = {}) {
 }
 
 function fileExplorerPaneTabHtml(item = fileExplorerItemId, options = {}) {
+  if (item === tabberItemId && !tabberIsAdvanced()) {
+    return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}</span>`;
+  }
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(itemLabel(item))}</span></span>`;
 }
 
@@ -1082,8 +1100,9 @@ function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
     : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false, state});
   const stateHtml = options.showState === false || !state ? '' : sessionStateHtml(state, {leadingTab: true});
   const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestSummaryBadgesHtml(session, info)}`;
+  const windowIdentityHtml = String(options.windowIdentityHtml || '');
   return `<span class="pane-tab-core"><span class="session-tab-leading-activity">${leadingHtml}</span><span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
-    <span class="session-button-text">${stateHtml}${badgeHtml}${detailHtml}</span></span>`;
+    ${windowIdentityHtml}<span class="session-button-text">${stateHtml}${badgeHtml}${detailHtml}</span></span>`;
 }
 
 function tmuxPaneTabTokenHtml(session, options = {}) {
@@ -1113,7 +1132,17 @@ function tmuxPaneTabTokenHtml(session, options = {}) {
 }
 
 function bindPaneTabStrip(strip, side) {
+  const rejectDisabledTabStripDrag = event => {
+    if (tabDragAllowed()) return false;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'none';
+    clearPaneTabDropPreview(strip);
+    clearDropPreview();
+    return true;
+  };
   strip.ondragover = event => {
+    if (rejectDisabledTabStripDrag(event)) return;
     const filePayload = fileDragPayload(event);
     if (filePayload?.path) {
       event.preventDefault();
@@ -1146,6 +1175,7 @@ function bindPaneTabStrip(strip, side) {
     if (!strip.contains(event.relatedTarget)) clearPaneTabDropPreview(strip);
   };
   strip.ondrop = event => {
+    if (rejectDisabledTabStripDrag(event)) return;
     const filePayload = fileDragPayload(event);
   if (filePayload?.path) {
       clearPaneTabDropPreview(strip);
@@ -1318,6 +1348,9 @@ function bindPanelShell(panel, session) {
   bindPaneFrameControls(panel, session);
   panel.addEventListener('pointerenter', event => selectPanelOnHover(session, event));
   panel.addEventListener('pointerdown', event => {
+    // Normal row selection owns focus; focusing its shell first forces a second
+    // chrome/layout transition before the selected terminal can receive input.
+    if (session === tabberItemId && tabberNormalPaneActivationRow(event)) return;
     // Native range dragging must keep the same input node for the whole gesture;
     // focusing YO!stats here would rerender the panel before the browser moves the thumb.
     if (event.target?.closest?.('[data-js-debug-range-slider], .js-debug-line-chart, [data-js-debug-zoom-reset]')) return;
@@ -1472,10 +1505,14 @@ function schedulePanelDetailsFit(panel) {
 }
 
 function terminalTabDisplayLabel(session, info) {
+  const tabberView = tabberViewSessions.get(String(session || ''));
+  if (tabberView) return sessionLabel(session);
   return t('tab.terminal.short');
 }
 
 function terminalTabDetailLabel(session, info) {
+  const tabberView = tabberViewSessions.get(String(session || ''));
+  if (tabberView) return sessionLabel(session);
   const label = terminalProcessLabel(session, info);
   return label || t('tab.terminal.short');
 }
@@ -1762,6 +1799,20 @@ function refreshTabberPanelsForTmuxWindowChange() {
   if (itemInLayout(tabberItemId) && typeof refreshTabberPanels === 'function') refreshTabberPanels();
 }
 
+function transcriptPaneMetadataEqual(left, right) {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every(key => Object.prototype.hasOwnProperty.call(right, key) && left[key] === right[key]);
+}
+
+function transcriptInfoWithPaneSelection(info, panes, selectedPane) {
+  const selection = transcriptPaneMetadataEqual(info.selected_pane, selectedPane) ? info.selected_pane : selectedPane;
+  // Repeated resize/readback signals must not invalidate every metadata consumer.
+  if (selection === info.selected_pane && panes.length === info.panes.length && panes.every((pane, index) => pane === info.panes[index])) return info;
+  return {...info, selected_pane: selection, panes};
+}
+
 function tmuxWindowInfoWithActiveIndex(info, windowIndex) {
   const activeIndex = tmuxWindowIndexKey(windowIndex);
   const panes = Array.isArray(info?.panes) ? info.panes : [];
@@ -1769,21 +1820,21 @@ function tmuxWindowInfoWithActiveIndex(info, windowIndex) {
   let selectedPane = null;
   let matched = false;
   const nextPanes = panes.map(pane => {
-    const active = tmuxWindowIndexKey(pane.window ?? pane.window_index) === activeIndex;
-    if (active) {
+    const next = mergeTranscriptPaneWithSignalPane(pane, null, activeIndex);
+    if (next.window_active) {
       matched = true;
-      if (!selectedPane || pane.active === true) selectedPane = {...pane, window_active: true};
+      if (!selectedPane || next.active === true) selectedPane = next;
     }
-    return {...pane, window_active: active};
+    return next;
   });
   if (!matched) return null;
-  return {...info, selected_pane: selectedPane || info.selected_pane || nextPanes.find(pane => pane.window_active) || null, panes: nextPanes};
+  return transcriptInfoWithPaneSelection(info, nextPanes, selectedPane || info.selected_pane || nextPanes.find(pane => pane.window_active) || null);
 }
 
 function applyTmuxWindowActiveIndexToTranscriptInfo(session, windowIndex, options = {}) {
   const info = transcriptMetadataState.payload.sessions?.[session];
   const nextInfo = tmuxWindowInfoWithActiveIndex(info, windowIndex);
-  if (!nextInfo) return false;
+  if (!nextInfo || nextInfo === info) return false;
   setTranscriptMetadataPayload({
     ...transcriptMetadataState.payload,
     sessions: {...(transcriptMetadataState.payload.sessions || {}), [session]: nextInfo},
@@ -2016,7 +2067,7 @@ function tmuxWindowRecords(panes) {
     const indexText = String(pane.window);
     const existing = byIndex.get(index);
     const active = pane.window_active === true;
-    const record = existing || {index, indexText, name: tmuxWindowDisplayName(pane), pid: tmuxWindowProcessPid(pane), active: false};
+    const record = existing || {index, indexText, windowId: String(pane.window_id || ''), name: tmuxWindowDisplayName(pane), pid: tmuxWindowProcessPid(pane), active: false};
     if (!existing || active || !record.name) {
       record.name = tmuxWindowDisplayName(pane);
       record.pid = tmuxWindowProcessPid(pane);
@@ -2040,6 +2091,29 @@ function tmuxWindowRecords(panes) {
     indexedButtonLabel: `${record.indexText}:${record.name}`,
     indexedNameLabel: `${record.indexText}:${tmuxWindowDisplayLabel(record.name, record.pid)}`,
   }));
+}
+
+function sessionMetadataForLayoutItem(session, fallback = null) {
+  const direct = transcriptMetadataState.payload.sessions?.[session];
+  const view = tabberViewDescriptorForSession(session);
+  if (!view) return fallback || direct || null;
+  const source = view.sourceSession ? transcriptMetadataState.payload.sessions?.[view.sourceSession] : null;
+  if (!source) return fallback || direct || null;
+  const index = Number(view.windowIndex);
+  const panes = (Array.isArray(source.panes) ? source.panes : [])
+    .filter(pane => tmuxWindowNumber(pane.window) === index)
+    .map(pane => ({...pane, window_active: true}));
+  const agents = (Array.isArray(source.agents) ? source.agents : [])
+    .filter(agent => tmuxWindowNumber(agent.window ?? agent.window_index) === index);
+  return {
+    ...source,
+    ...(direct || {}),
+    session: String(session),
+    label: view.label || direct?.label || source.label,
+    panes,
+    agents,
+    selected_pane: panes.find(pane => pane.active === true) || panes[0] || null,
+  };
 }
 
 function tmuxWindowBarLabelMode(records, options = {}) {
@@ -2280,7 +2354,7 @@ function updatePanelWindowStepButtons(session, info, controlNodes = null) {
   const panel = document.getElementById(panelDomId(session));
   const nodes = controlNodes || collectSessionControlNodes([session]).get(session);
   const bars = nodes.windowBars;
-  const html = tmuxWindowBarHtml(session, info, {infoBar: true});
+  const html = tmuxWindowBarHtml(session, sessionMetadataForLayoutItem(session, info), {infoBar: true});
   let changed = false;
   if (!html) {
     bars.forEach(bar => {

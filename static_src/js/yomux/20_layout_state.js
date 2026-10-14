@@ -1672,11 +1672,11 @@ function normalizeLayoutSlotsForViewport(value, options = {}) {
     }
   }
   sidePaneLayoutWasConstrained = sideConstrained;
-  return normalizeLayoutSlots(source, {
+  return normalTabberPaneLayout(normalizeLayoutSlots(source, {
     ...options,
     allowSidePanes: !sideConstrained,
     preserveMissingSidePane: sideConstrained || options.preserveMissingSidePane === true,
-  });
+  }), options);
 }
 
 function rememberInitialConstrainedLayout(value) {
@@ -1694,7 +1694,7 @@ function initialLayoutSlots() {
   maybeAdoptLayoutStateDeepLink(params);
   maybeAdoptYoagentDeepLink(params);
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '');
-  if (layoutFromUrl) return normalizeLayoutSlotsForViewport(migrateLegacyFileSurfaceLayout(layoutFromUrl, params));
+  if (layoutFromUrl) return normalizeLayoutSlotsForViewport(initialTabberLayoutSlots(migrateLegacyFileSurfaceLayout(layoutFromUrl, params), {preserveSurfaceSelection: paneItems(layoutFromUrl).some(isFileExplorerItem)}));
   if (mobileSinglePaneMode()) return rememberInitialConstrainedLayout(mobileSinglePaneLayoutSlots());
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
@@ -1705,7 +1705,7 @@ function initialLayoutSlots() {
     if (isLayoutItem(item) && !selected.includes(item)) selected.push(item);
   }
   if (selected.length) {
-    const selectedLayout = layoutFromSessionList(selected);
+    const selectedLayout = initialTabberLayoutSlots(layoutFromSessionList(selected), {surfaceSelection: selected.find(isFileExplorerItem)});
     return narrowSingleColumnMode()
       ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(selectedLayout))
       : normalizeLayoutSlotsForViewport(selectedLayout);
@@ -1715,6 +1715,13 @@ function initialLayoutSlots() {
 
 function defaultLayoutSlots() {
   if (mobileSinglePaneMode()) return rememberInitialConstrainedLayout(mobileSinglePaneLayoutSlots());
+  if (!statsOnlyBootEnabled() && typeof tabberIsAdvanced === 'function' && !tabberIsAdvanced()
+      && typeof defaultNormalTabberLayoutSlots === 'function') {
+    const normal = defaultNormalTabberLayoutSlots();
+    return narrowSingleColumnMode()
+      ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(normal))
+      : normalizeLayoutSlotsForViewport(normal);
+  }
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
   const content = layoutSlotsForItems(sorted, configuredDefaultLayoutMode());
   const standard = sidePaneConstrainedMode()
@@ -2104,6 +2111,18 @@ function beginTmuxSessionLifecycleMutation(kind, options = {}) {
   return transaction;
 }
 
+async function withTmuxSessionCreationLease(create) {
+  const previous = tmuxSessionCreationTail;
+  let release;
+  tmuxSessionCreationTail = new Promise(resolve => { release = resolve; });
+  await previous;
+  try {
+    return await create();
+  } finally {
+    release();
+  }
+}
+
 function tmuxSessionLifecycleMutationIsCurrent(transaction) {
   return Boolean(transaction && transaction.state === 'active' && tmuxSessionMutationCurrent === transaction);
 }
@@ -2236,7 +2255,7 @@ function markPendingTmuxSession(session) {
     const created = newTmuxSessionLifecycleRecord(key, 'creating');
     created.committed = true;
   }
-  layoutItems = computeLayoutItems();
+  syncFileLayoutItems();
   return key;
 }
 
@@ -2246,7 +2265,7 @@ function clearPendingTmuxSession(session) {
   if (!key || !record || !tmuxSessionLifecyclePendingPhases.has(record.phase)) return false;
   record.phase = 'stable';
   record.pendingUntil = 0;
-  layoutItems = computeLayoutItems();
+  syncFileLayoutItems();
   return true;
 }
 
@@ -2268,7 +2287,8 @@ function sessionOrderIncludingPending(nextSessions = []) {
 
 function computeLayoutItems() {
   const items = [];
-  for (const item of [...virtualTabItems(), ...openFileEditorItems(), ...visibleSessions, ...pendingTmuxSessionNames()]) {
+  const normalTabberSessions = Array.isArray(tabberNormalSelections) ? tabberNormalSelections : [];
+  for (const item of [...virtualTabItems(), ...openFileEditorItems(), ...sessions, ...pendingTmuxSessionNames(), ...tabberViewSessions.keys(), ...normalTabberSessions]) {
     if (!items.includes(item)) items.push(item);
   }
   return items;
@@ -2276,7 +2296,7 @@ function computeLayoutItems() {
 
 function isTmuxSession(item) {
   const phase = tmuxSessionLifecycleRecords.get(item)?.phase;
-  return sessions.includes(item) || tmuxSessionLifecyclePendingPhases.has(phase);
+  return sessions.includes(item) || tabberViewSessions.has(item) || tmuxSessionLifecyclePendingPhases.has(phase);
 }
 
 function isLayoutItem(item) {
@@ -2474,7 +2494,7 @@ function registerDynamicVirtualLayoutItem(item) {
   const text = String(item || '');
   if (!tabTypeForItem(text)?.prefix) return null;
   dynamicVirtualLayoutItems.add(text);
-  layoutItems = computeLayoutItems();
+  syncFileLayoutItems();
   return text;
 }
 
@@ -2498,6 +2518,7 @@ function resolveLayoutItem(value) {
     return (path && registerFileEditorLayoutItem(path, {item: text})) || text;
   }
   if (type?.id) return type.id;
+  if (tabberViewSessions.has(text)) return text;
   if (sessions.includes(text)) return text;
   const ordinal = Number(text);
   if (Number.isInteger(ordinal) && ordinal > 0) return sessionForLabel(String(ordinal));
@@ -2856,9 +2877,10 @@ function terminalDisconnected(session) {
   return item.socket?.readyState === WebSocket.CLOSED || item.socket?.readyState === WebSocket.CLOSING;
 }
 
-function sessionState(session, info = transcriptMetadataState.payload.sessions?.[session]) {
+function sessionState(session, info = sessionMetadataForLayoutItem(session)) {
   if (!isTmuxSession(session)) return {key: STATE_KEY.idle, ...stateDef(STATE_KEY.idle), reason: t('state.notTmux')};
-  const auto = autoApproveStates.get(session) || {};
+  const view = tabberViewDescriptorForSession(session);
+  const auto = autoApproveStates.get(view?.sourceSession || session) || {};
   const autoEnabled = autoApproveEnabledForSession(auto);
   const approvalPrompt = auto.prompt || {};
   const screen = auto.screen || {};
@@ -4503,7 +4525,9 @@ function fileQuickOpenDoitCandidateAllowed(file, query = commandPaletteSearchQue
   const stem = name.includes('.') ? name.slice(0, name.lastIndexOf('.')) : name;
   const nameText = name.toLowerCase().replace(/[^a-z0-9]+/g, '');
   const stemText = stem.toLowerCase().replace(/[^a-z0-9]+/g, '');
-  if (!(stemText.startsWith(needle) || nameText.startsWith(needle) || stemText.includes(needle) || nameText.includes(needle))) return false;
+  const relativePath = String(file?.relative_path || name);
+  const slashPathMatch = String(query || '').includes('/') && fileQuickOpenPathTokenMatches(relativePath, query);
+  if (!(stemText.startsWith(needle) || nameText.startsWith(needle) || stemText.includes(needle) || nameText.includes(needle) || slashPathMatch)) return false;
   return fileQuickOpenPathInRepoFamily(path);
 }
 
@@ -5045,7 +5069,21 @@ function commandPaletteItemScore(item, query, options = {}) {
     + commandPaletteRepoAffinityBonus(item, options);
   if (!String(query || '').trim()) return bonus;
   const base = fuzzySearchScore(query, item.searchFields || [item.label, item.detail, item.group]);
+  if (!Number.isFinite(base) && commandPaletteFilePathQueryFallback(item, query)) {
+    return searchRankWeights.fileNameSubsequence + bonus;
+  }
   return Number.isFinite(base) ? base + bonus : base;
+}
+
+function commandPaletteFilePathQueryFallback(item, query) {
+  if (item?.category !== 'file') return false;
+  const tokens = String(query || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!tokens.some(token => token.includes('/'))) return false;
+  const relativePath = String(item.relative_path || item.path || '');
+  const fields = item.searchFields || [item.label, item.detail, item.group];
+  return tokens.every(token => token.includes('/')
+    ? fileQuickOpenPathTokenMatches(relativePath, token)
+    : fields.some(value => Number.isFinite(fuzzySubsequenceScore(token, value))));
 }
 
 function commandPalettePaneNameContiguousBonus(item, query, options = {}) {
@@ -5307,6 +5345,7 @@ function openCommandPalette(options = {}) {
   commandPaletteState.query = '';
   commandPaletteState.index = 0;
   node.hidden = false;
+  syncFileIndexStatusPollInterval();
   node.classList.add(CLS.open);
   const input = node.querySelector('.command-palette-input');
   input.value = '';
@@ -5333,6 +5372,8 @@ function closeCommandPalette() {
   if (fileQuickOpenState.debounce) clearTimeout(fileQuickOpenState.debounce);
   fileQuickOpenState.debounce = null;
   abortFileQuickOpenSearch();
+  syncFileIndexStatusPollInterval();
+  syncServerWatchRoots({immediate: true});
 }
 
 function focusCommandPaletteTarget(item) {
@@ -5501,6 +5542,26 @@ function fileQuickOpenSseStreamOptions(fetchOptions) {
   };
 }
 
+function fileQuickOpenPathTokenMatches(relativePath, token) {
+  const path = String(relativePath || '').toLowerCase();
+  const needle = String(token || '').toLowerCase().replace(/^\/+/, '');
+  if (!needle) return path.includes('/');
+  if (path.includes(needle)) return true;
+  const separator = needle.indexOf('/');
+  const doitNeedle = fileQuickOpenDoitNeedle(token);
+  const segments = path.split('/').filter(Boolean);
+  if (doitNeedle && segments.at(-1)?.replace(/[^a-z0-9]+/g, '').includes(doitNeedle)) return true;
+  if (separator < 0 || needle.indexOf('/', separator + 1) >= 0) return false;
+  const left = needle.slice(0, separator);
+  const right = needle.slice(separator + 1);
+  const segmentMatches = (term, segment) => segment.includes(term) || Number.isFinite(fuzzySubsequenceScore(term, segment));
+  if (!left) return segments.some(segment => segmentMatches(right, segment));
+  if (!right) return segments.slice(0, -1).some(segment => segmentMatches(left, segment));
+  return segments.some((segment, index) => segments.some((other, otherIndex) => index !== otherIndex
+    && ((segmentMatches(left, segment) && segmentMatches(right, other))
+      || (segmentMatches(right, segment) && segmentMatches(left, other)))));
+}
+
 function applyFileQuickOpenSearchChunk(requestId, searchRoot, files) {
   if (requestId !== fileQuickOpenState.requestId) return false;
   const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot) || String(searchRoot || '');
@@ -5511,10 +5572,13 @@ function applyFileQuickOpenSearchChunk(requestId, searchRoot, files) {
       const query = commandPaletteSearchQuery();
       const basename = String(file.name || basenameOf(file.path || ''));
       const stem = basename.includes('.') ? basename.slice(0, basename.lastIndexOf('.')) : basename;
-      const segments = String(file.relative_path || '').split('/').filter(Boolean);
+      const relativePath = String(file.relative_path || '');
+      const segments = relativePath.split('/').filter(Boolean);
       const fields = [basename, stem, ...segments];
       const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
-      return tokens.every(token => fields.some(value => Number.isFinite(fuzzySubsequenceScore(token, value))));
+      return tokens.every(token => token.includes('/')
+        ? fileQuickOpenPathTokenMatches(relativePath, token)
+        : fields.some(value => Number.isFinite(fuzzySubsequenceScore(token, value))));
     })
     .map(file => ({...file, operation: 'upsert'}));
   if (!changes.length) return true;
@@ -5618,8 +5682,16 @@ async function fileQuickOpenSearchRootResult(searchRoot, query, requestId, fetch
   return {ok: true, ...fileQuickOpenSearchPayloadResult(payload, searchRoot)};
 }
 
-async function fetchQuickOpenPathDirectory(directory, fetchOptions) {
-  const entries = await fetchDirectory(directory, {user: true, enrich: false});
+async function fetchQuickOpenPathDirectory(directory, prefix, fetchOptions) {
+  let entries;
+  if (prefix) {
+    const params = new URLSearchParams({path: directory, name_query: prefix});
+    const payload = await apiFetchJson(`/api/fs/fast/list?${params.toString()}`, fetchOptions);
+    entries = Array.isArray(payload?.entries) ? payload.entries : [];
+    entries = filterFileExplorerDeletedPathTombstones(directory, entries);
+  } else {
+    entries = await fetchDirectory(directory, {user: true, enrich: false});
+  }
   if (entries !== null) return entries;
   const error = new Error(currentFileExplorerListError(directory) || t('common.searchFailed'));
   error.status = 404;
@@ -5661,11 +5733,10 @@ async function refreshFileQuickOpenCandidates(query = '') {
   renderCommandPaletteResults();
   try {
     if (pathQuery.active) {
-      // Path-mode queries share the existing direct-directory cache. The first query loads the
-      // parent once; subsequent keystrokes filter the same entries locally instead of rescanning a
-      // large directory for every intermediate prefix.
+      // Browse an empty path from the shared directory cache; once a filename prefix exists, ask
+      // the server to match it across the full directory so a large listing cannot hide the target.
       const directory = fileQuickOpenPathDirectory(pathQuery);
-      const entries = await fetchQuickOpenPathDirectory(directory, fetchOptions);
+      const entries = await fetchQuickOpenPathDirectory(directory, pathQuery.filter, fetchOptions);
       if (requestId !== fileQuickOpenState.requestId) return;
       fileQuickOpenState.root = directory;
       fileQuickOpenState.candidates = fileQuickOpenPathEntries(entries, directory);
@@ -5773,6 +5844,7 @@ function seedFileQuickOpenDeltaCursors(results, requestId, progressAtStart = new
     });
   }
   fileQuickOpenState.deltaRoots = deltaRoots;
+  syncServerWatchRoots({immediate: true});
   let workerIncarnationMismatch = false;
   for (const deltaRoot of deltaRoots.values()) {
     const publishedIncarnation = fileQuickOpenState.searchProgressIncarnations.get(deltaRoot.scopeId) || '';
@@ -6299,7 +6371,7 @@ function normalizeToastLine(item, options = {}) {
   const text = objectItem ? item.text : item;
   return {
     text: compactToastText(text),
-    countdownMs: objectItem ? item.countdownMs : options.countdownMs,
+    countdownMs: objectItem ? (item.countdownMs ?? options.countdownMs) : options.countdownMs,
     render: objectItem && typeof item.render === 'function' ? item.render : null,
   };
 }
@@ -7162,7 +7234,7 @@ function setSessionOrder(next) {
   const authoritative = normalizedSessionOrder(next) || [];
   sessions = sessionOrderIncludingPending(authoritative);
   visibleSessions = sessions.slice(0, maxSessionTabs);
-  layoutItems = computeLayoutItems();
+  syncFileLayoutItems();
 }
 
 function updateSessionList(nextSessions, options = {}) {
@@ -7171,9 +7243,10 @@ function updateSessionList(nextSessions, options = {}) {
   pruneExpiredPendingTmuxSessions();
   if (options.clearConfirmedPending === true) clearConfirmedPendingTmuxSessions(next);
   const effectiveNext = sessionOrderIncludingPending(next);
+  if (typeof reconcileTabberViewSessionsForRoster === 'function') reconcileTabberViewSessionsForRoster(effectiveNext);
   const changed = effectiveNext.length !== sessions.length || effectiveNext.some((session, index) => session !== sessions[index]);
   if (!changed) {
-    layoutItems = computeLayoutItems();
+    syncFileLayoutItems();
     return false;
   }
   const removedSessions = visibleSessions.filter(session => !effectiveNext.includes(session));
@@ -7189,6 +7262,8 @@ function updateSessionList(nextSessions, options = {}) {
 }
 
 function applyLayoutSlots(nextSlots, options = {}) {
+  nextSlots = normalTabberPaneLayout(nextSlots, options);
+  const previousSlots = cloneLayoutSlots(layoutSlots);
   const previousActive = activeSessions.slice(), previousItems = new Set(paneItems(layoutSlots));
   const completionGeneration = Number(options.completionGeneration || runtimeState.layoutMutationSnapshot().pending) || 0;
   runtimeState.consumePendingLayoutMutation(completionGeneration);
@@ -7206,6 +7281,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
     preservePlaceholderSlots: options.preservePlaceholderSlots === true,
   });
   cleanupRemovedDynamicLayoutItems(previousItems, new Set(paneItems(layoutSlots)));
+  adoptNormalTabberLayoutSelections();
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
@@ -7225,6 +7301,8 @@ function applyLayoutSlots(nextSlots, options = {}) {
       sessionButtons: options.sessionButtons,
       deferDockviewLoad: options.deferDockviewLoad,
       deferDockviewLoadAfterPaint: options.deferDockviewLoadAfterPaint,
+      previousSlots,
+      tabberNormalSelection: options.tabberNormalSelection === true,
       completionGeneration,
     },
     reason: 'applyLayoutSlots',
@@ -7243,8 +7321,12 @@ function applyLayoutSlots(nextSlots, options = {}) {
     && jsDebugStatsLayoutItemsVisible(activeSessions);
   if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: statsActivated});
   if (options.message) showLayoutStatus(options.message, options.messageKind || '');
-  if (autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
-    setTimeout(() => focusPanel(options.focusSession), 80);
+  if (options.tabberNormalSelection !== true && autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
+    const focusGeneration = tabSwitchHighlightGeneration;
+    setTimeout(() => {
+      if (focusGeneration === tabSwitchHighlightGeneration && autoFocusCanFollowCursor()
+          && activeSessions.includes(options.focusSession)) focusPanel(options.focusSession);
+    }, 80);
   } else if (!options.message) {
     resetLayoutStatusSurface();
     updateStatus();
@@ -7253,6 +7335,10 @@ function applyLayoutSlots(nextSlots, options = {}) {
 }
 
 function cleanupRemovedDynamicLayoutItems(previousItems, nextItems) {
+  if (!tabberIsAdvanced()) {
+    syncFileLayoutItems();
+    return;
+  }
   for (const item of previousItems || []) {
     if (!dynamicVirtualLayoutItems.has(item) || nextItems?.has(item)) continue;
     const panel = panelNodes.get(item);
@@ -7344,6 +7430,7 @@ function beginLayoutMutationCompletion(state = null) {
 function mergePendingLayoutRender(current, next) {
   if (!current) return next;
   const options = {...current.options, ...next.options};
+  if (current.options.previousSlots) options.previousSlots = current.options.previousSlots;
   if (next.options.message) options.message = next.options.message;
   if (next.options.messageKind) options.messageKind = next.options.messageKind;
   const completionGeneration = layoutCompletionGeneration(
@@ -7364,6 +7451,7 @@ function mergePendingLayoutRender(current, next) {
 
 function layoutRenderCanUseCheap(request) {
   return !request.forceFull
+    && request.options.tabberNormalSelection !== true
     && request.prevShape === request.nextShape
     && (grid.querySelector('.drop-slot[data-slot]') || dockviewLayoutActive());
 }
@@ -7390,6 +7478,8 @@ function performLayoutRender(request = {}) {
     prune: renderRequest.options.prune,
     deferDockviewLoad: renderRequest.options.deferDockviewLoad,
     deferDockviewLoadAfterPaint: renderRequest.options.deferDockviewLoadAfterPaint,
+    previousSlots: renderRequest.options.previousSlots,
+    tabberNormalSelection: renderRequest.options.tabberNormalSelection === true,
     completionGeneration: renderRequest.options.completionGeneration,
   });
 }
@@ -7447,6 +7537,7 @@ function updateActiveSessionParam() {
 }
 
 function syncInitialLayoutUrl() {
+  migrateTabberRelativeDates();
   schedulePendingLayoutUrlStateApply();
   updateActiveSessionParam();
 }

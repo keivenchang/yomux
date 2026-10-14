@@ -858,12 +858,7 @@ func releaseInstanceRootLease(lock *os.File) {
 func (s *server) shutdown() {
 	s.shutdownOnce.Do(func() {
 		shutdownClean := true
-		s.indexMonitorMu.Lock()
-		for _, monitor := range s.indexMonitors {
-			monitor.cancel()
-		}
-		s.indexMonitors = nil
-		s.indexMonitorMu.Unlock()
+
 		if s.tmuxRosterWatchCancel != nil {
 			s.tmuxRosterWatchCancel()
 			<-s.tmuxRosterWatchDone

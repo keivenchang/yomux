@@ -24,8 +24,8 @@ func (row DarwinProcess) censusRow() ProcessCensusRow {
 }
 
 // DarwinProcessInventory retains observable processes even when protected PIDs
-// make the host-wide metrics census incomplete. Discovery needs measured rows,
-// while CPU and memory breakdowns additionally require a complete census.
+// make the host-wide process census incomplete. Discovery and partial process
+// breakdowns still use readable rows; callers carry completeness separately.
 func DarwinProcessInventory() ([]DarwinProcess, error) {
 	return darwinProcessInventory(DarwinProcessSnapshot)
 }

@@ -208,10 +208,10 @@ def test_locale_key_parity_requires_exact_locale_plural_categories():
     assert locale_key_errors({"en": source, "fr": unexpected}) == ["fr.json has unknown keys: item.few"]
 
 
-def test_shipped_catalogs_have_all_598_locale_specific_plural_forms():
+def test_shipped_catalogs_have_all_585_locale_specific_plural_forms():
     catalogs = source_catalogs()
     source = catalogs["en"]
-    assert len(plural_family_bases(source)) == 46
+    assert len(plural_family_bases(source)) == 45
     extras = 0
     for locale, catalog in catalogs.items():
         if locale == "en":
@@ -219,7 +219,7 @@ def test_shipped_catalogs_have_all_598_locale_specific_plural_forms():
         expected = locale_expected_keys(source, locale)
         assert set(catalog) == expected
         extras += len(expected) - len(source)
-    assert extras == 598
+    assert extras == 585
 
 
 def test_i18n_literal_key_errors_checks_exact_and_plural_calls_but_skips_dynamic_prefixes(tmp_path):
@@ -1478,7 +1478,11 @@ def test_tree_row_hover_and_selection_paint_have_one_base_owner():
     editor_css = repo_path("static_src/css/yomux/60_editor_file_panels.css").read_text(encoding="utf-8")
     selection_shadow = "box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);"
     hover_shadow = "box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);"
-    assert frozenset({".file-tree-row.selected", ".file-tree-row.current-file:not(.selected)"}) in (
+    assert frozenset({
+        ".file-tree-row.selected",
+        ".file-tree-row.current-file:not(.selected)",
+        ".file-tree-row.tabber-row.tabber-active-normal:not(.selected)",
+    }) in (
         _grouped_css_selectors(tree_css)
     )
     assert tree_css.count(selection_shadow) == 1

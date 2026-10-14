@@ -13,6 +13,19 @@ import (
 	"testing"
 )
 
+func TestDarwinMachTicksConvertThroughThePlatformTimebase(t *testing.T) {
+	got, ok := darwinMachTicksToNanoseconds(24_000_000, 125, 3)
+	if !ok || got != 1_000_000_000 {
+		t.Fatalf("24 million Mach ticks = %d ns, valid=%t; want one second", got, ok)
+	}
+	if _, ok := darwinMachTicksToNanoseconds(^uint64(0), 2, 1); ok {
+		t.Fatal("overflowing Mach time conversion was accepted")
+	}
+	if _, ok := darwinMachTicksToNanoseconds(1, 1, 0); ok {
+		t.Fatal("zero-denominator Mach timebase was accepted")
+	}
+}
+
 func TestDarwinNativeSnapshotIncludesCurrentProcessAndOpenFiles(t *testing.T) {
 	file, err := os.CreateTemp(t.TempDir(), "codex-rollout-*.jsonl")
 	if err != nil {

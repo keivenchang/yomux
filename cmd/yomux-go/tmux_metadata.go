@@ -618,7 +618,7 @@ func (s *server) tmuxSessionRosterSnapshotLocked(forceFresh bool) (tmuxSessionRo
 	s.tmuxRosterMu.RUnlock()
 	commandContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	out, err := s.tmuxCommandContext(commandContext, "list-sessions", "-F", "#{session_name}\t#{session_id}\t#{session_created}\t#{pid}").CombinedOutput()
+	out, err := s.tmuxCommandContext(commandContext, "list-sessions", "-F", "#{session_name}\t#{session_id}\t#{session_created}\t#{pid}\t#{@yomux_view_source_id}\t#{@yomux_view_source}\t#{session_group}\t#{@yomux_view_window_id}").CombinedOutput()
 	if err != nil {
 		if stats.TmuxNoServerError(out) {
 			s.rememberTmuxSessionRoster([]string{}, nil)
@@ -628,17 +628,91 @@ func (s *server) tmuxSessionRosterSnapshotLocked(forceFresh bool) (tmuxSessionRo
 	}
 	var result []string
 	identities := map[string]string{}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		fields := strings.SplitN(line, "\t", 2)
+	sessionIDs := map[string]struct{}{}
+	sessionNamesByID := map[string]string{}
+	tabberViewSources := map[string]string{}
+	tabberViewSourceNames := map[string]string{}
+	tabberViewGrouped := map[string]bool{}
+	tabberViewWindows := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
+		fields := strings.SplitN(line, "\t", 8)
 		if len(fields) == 0 || fields[0] == "" {
 			continue
 		}
 		result = append(result, fields[0])
-		if len(fields) > 1 {
-			identities[fields[0]] = strings.Join(fields[1:], "\x1f")
+		if len(fields) > 1 && fields[1] != "" {
+			sessionIDs[fields[1]] = struct{}{}
+			sessionNamesByID[fields[1]] = fields[0]
+		}
+		if len(fields) > 3 {
+			identities[fields[0]] = strings.Join(fields[1:4], "\x1f")
+		}
+		if len(fields) > 6 && strings.TrimSpace(fields[6]) != "" {
+			tabberViewGrouped[fields[0]] = true
+		}
+		if len(fields) > 7 {
+			tabberViewWindows[fields[0]] = strings.TrimSpace(fields[7])
+		}
+		if len(fields) > 5 && isOwnedTabberViewSession(fields[0], fields[4], fields[5]) {
+			if len(fields) > 4 {
+				tabberViewSources[fields[0]] = fields[4]
+			}
+			if len(fields) > 5 {
+				tabberViewSourceNames[fields[0]] = fields[5]
+			}
 		}
 	}
-	result = normalizeTmuxSessionRoster(result)
+	// Roster discovery is authoritative independently of optional view maintenance.
+	// One complete window inventory serves every view; a failed observation can
+	// never justify killing a view or suppress a newly discovered real session.
+	var sourceWindows map[string]map[string]bool
+	if len(tabberViewSources) > 0 {
+		windows, inventoryErr := s.tmuxCommandContext(commandContext, "list-windows", "-a", "-F", "#{session_id}\t#{window_id}").Output()
+		if inventoryErr == nil {
+			sourceWindows = make(map[string]map[string]bool)
+			for _, line := range strings.Split(strings.TrimSpace(string(windows)), "\n") {
+				fields := strings.Split(line, "\t")
+				if len(fields) != 2 || !strings.HasPrefix(fields[0], "$") || !strings.HasPrefix(fields[1], "@") {
+					sourceWindows = nil
+					break
+				}
+				if sourceWindows[fields[0]] == nil {
+					sourceWindows[fields[0]] = map[string]bool{}
+				}
+				sourceWindows[fields[0]][fields[1]] = true
+			}
+		} else {
+			slog.Warn("Tabber window maintenance observation failed", "error", inventoryErr)
+		}
+	}
+	for viewSession, sourceID := range tabberViewSources {
+		windowID, observed := tabberViewWindows[viewSession]
+		_, sourceLive := sessionIDs[sourceID]
+		orphan := !sourceLive || observed && windowID == "" || observed && sourceWindows != nil && !sourceWindows[sourceID][windowID]
+		if orphan {
+			if killErr := s.tmuxCommandContext(commandContext, "kill-session", "-t", s.exactTarget(viewSession)).Run(); killErr != nil {
+				slog.Warn("Tabber orphan retirement failed", "view", viewSession, "error", killErr)
+			}
+			continue
+		}
+		if sourceName := sessionNamesByID[sourceID]; sourceName != "" && sourceName != tabberViewSourceNames[viewSession] {
+			if setErr := s.tmuxCommandContext(commandContext, "set-option", "-t", s.exactTarget(viewSession), "@yomux_view_source", sourceName).Run(); setErr != nil {
+				slog.Warn("Tabber source name maintenance failed", "view", viewSession, "error", setErr)
+			}
+		}
+	}
+
+	visible := make([]string, 0, len(result))
+	for _, name := range result {
+		// Owned views and partially created grouped views must not leak into
+		// session pickers; standalone user sessions with a similar name remain visible.
+		_, owned := tabberViewSources[name]
+		if owned || isTabberViewSessionName(name) && tabberViewGrouped[name] {
+			continue
+		}
+		visible = append(visible, name)
+	}
+	result = normalizeTmuxSessionRoster(visible)
 	s.rememberTmuxSessionRoster(result, identities)
 	return s.cachedTmuxSessionRosterSnapshot(), nil
 }
@@ -689,6 +763,10 @@ func normalizeTmuxSessionRoster(raw []string) []string {
 		return left.number < right.number
 	})
 	return result
+}
+
+func isTabberViewSessionName(name string) bool {
+	return strings.HasPrefix(strings.TrimSpace(name), stats.TabberViewSessionPrefix)
 }
 
 type tmuxSessionSortValue struct {
@@ -797,6 +875,7 @@ type tmuxMetadataState struct {
 
 	tmuxRosterMu          sync.RWMutex
 	tmuxRosterFetchMu     sync.Mutex
+	tabberDescriptionMu   sync.Mutex
 	tmuxRoster            []string
 	tmuxRosterIdentities  map[string]string
 	tmuxRosterKnown       bool

@@ -3510,6 +3510,135 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   --tabber-detail-color: var(--muted);
   --tabber-agent-icon-size: calc(var(--file-explorer-font-size) + 2px);
 }
+.tabber-toolbar .tabber-new-chat {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-6);
+  margin-inline-end: auto;
+  min-block-size: var(--compact-control-height);
+  padding: 0 var(--space-10);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--brand-chat-blue);
+  color: var(--paint-white);
+  font: inherit;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: filter var(--motion-interaction-fast), box-shadow var(--motion-interaction-fast), transform var(--motion-interaction-fast);
+}
+.tabber-toolbar .tabber-new-chat:hover {
+  filter: brightness(1.08);
+}
+.tabber-toolbar .tabber-new-chat:active {
+  transform: scale(0.98);
+}
+.tabber-toolbar .tabber-new-chat:focus-visible,
+.tabber-toolbar .tabber-search:focus-visible {
+  outline: 0;
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
+.tabber-new-chat-icon,
+.tabber-search-icon {
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.tabber-new-chat-icon {
+  inline-size: 18px;
+  block-size: 18px;
+  stroke-width: 2;
+}
+.tabber-toolbar .tabber-search {
+  display: grid;
+  flex: 0 0 var(--compact-control-height);
+  place-items: center;
+  inline-size: var(--compact-control-height);
+  min-inline-size: var(--compact-control-height);
+  block-size: var(--compact-control-height);
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted) 22%, var(--panel));
+  color: var(--text);
+  cursor: pointer;
+  transition: background-color var(--motion-interaction-fast), box-shadow var(--motion-interaction-fast), transform var(--motion-interaction-fast);
+}
+.tabber-toolbar .tabber-search:hover {
+  background: color-mix(in srgb, var(--muted) 32%, var(--panel));
+}
+.tabber-toolbar .tabber-search:active {
+  transform: scale(0.96);
+}
+.tabber-search-icon {
+  inline-size: 20px;
+  block-size: 20px;
+  stroke-width: 2.1;
+}
+.tabber-advanced-control {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  white-space: nowrap;
+}
+.tabber-advanced-control input {
+  margin: 0;
+}
+.file-explorer-changes-panel[data-file-explorer-view="tabber"] .changes-groups[data-tabber-mode="normal"] .file-tree-row {
+  padding-inline-start: var(--space-8) !important;
+}
+.file-tree-row.tabber-normal-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  grid-template-rows: auto auto;
+  column-gap: var(--space-8);
+  row-gap: var(--space-4);
+  padding-block: var(--space-8);
+  margin-block: var(--space-2);
+  border-radius: var(--radius-control);
+}
+.file-tree-row.tabber-normal-row > .file-tree-name {
+  display: contents;
+}
+.file-tree-row.tabber-normal-row > :is(.file-tree-icon, .file-tree-agent, .file-tree-diff, .file-tree-dir-count, .file-tree-git-status) {
+  display: none;
+}
+.file-tree-row.tabber-row .tabber-normal-primary {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-tree-row.tabber-row .tabber-normal-primary .pane-tab-core {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-width: 0;
+}
+.file-tree-row.tabber-row .tabber-normal-window-identity {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-weight: 400;
+  white-space: nowrap;
+}
+.file-tree-row.tabber-row .tabber-normal-description {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+}
+.file-tree-row.tabber-row[data-tabber-type="normal"] .agent-icon {
+  flex: 0 0 auto;
+  inline-size: var(--tabber-agent-icon-size);
+  block-size: var(--tabber-agent-icon-size);
+}
 .file-tree-row.tabber-row[data-tabber-type="session"] > .file-tree-name {
   display: inline-flex;
   align-items: center;
@@ -3607,6 +3736,16 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   inline-size: var(--file-tree-date-column-width);
   color: var(--tabber-detail-color);
   font-weight: 600;
+}
+.file-tree-row.tabber-normal-row > .file-tree-date {
+  grid-column: 2;
+  grid-row: 1;
+  flex: 0 1 auto;
+  inline-size: auto;
+  max-inline-size: 24ch;
+  min-inline-size: 0;
+  font-size: var(--ui-font-size-2xs);
+  color: var(--muted);
 }
 .file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected):not(.current-file)[data-recency] > .file-tree-date {
   color: var(--subwindow-recency-color);

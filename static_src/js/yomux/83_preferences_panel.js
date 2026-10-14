@@ -123,12 +123,12 @@ function preferenceSettingLocaleKeys(path) {
 
 function preferenceSettingItem(path, options = {}) {
   const localeKeys = preferenceSettingLocaleKeys(path);
-  const {labelParams = {}, helpParams = {}, ...itemOptions} = options;
+  const {label: explicitLabel, help: explicitHelp, labelParams = {}, helpParams = {}, ...itemOptions} = options;
   return {
     path,
-    label: t(localeKeys.label, labelParams),
+    label: explicitLabel ?? t(localeKeys.label, labelParams),
     ...itemOptions,
-    help: t(localeKeys.help, helpParams),
+    help: explicitHelp ?? t(localeKeys.help, helpParams),
   };
 }
 
@@ -280,6 +280,13 @@ function preferenceSections() {
       preferenceSettingItem('general.auto_focus', {type: 'boolean'}),
       preferenceSettingItem('general.startup_tips', {type: 'boolean'}),
       preferenceSettingItem('general.default_layout', {type: 'radio', choices: layoutModePreferenceChoices()}),
+      preferenceSettingItem('general.default_tabber_mode', {
+        type: 'radio',
+        choices: modelPreferenceChoices('general.default_tabber_mode', ['normal', 'advanced'], {
+          normal: 'pref.general.default_tabber_mode.normal',
+          advanced: 'pref.general.default_tabber_mode.advanced',
+        }),
+      }),
       preferenceSettingItem('appearance.date_time_hour_cycle', {type: 'radio', choices: [
         {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
         {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},

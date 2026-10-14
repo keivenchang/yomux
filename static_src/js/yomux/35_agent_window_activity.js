@@ -94,6 +94,7 @@ function agentWindowPhysicalKey(agent, info = null) {
 
 function agentWindowStateKey(state) {
   const key = String(state || '').trim();
+  if (key === 'run') return STATE_KEY.working;
   if (key === 'paused') return STATE_KEY.blocked;
   return key === 'blocked' ? STATE_KEY.blocked : key;
 }
@@ -347,14 +348,24 @@ function agentWindowSnapshotRevisionsMismatch(hasStateRows, stateRevision, activ
 }
 
 function sessionAgentWindowStatusModel(session, info = null, autoPayload = null) {
+  const view = tabberViewDescriptorForSession(session);
+  if (view) {
+    info = sessionMetadataForLayoutItem(session, info);
+    session = view.sourceSession;
+  }
   const statePayload = autoPayload || autoApproveStates.get(session) || {};
   const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
     ? tabberActivityPayload.agent_windows[String(session || '')]
     : null;
   let stateRows = agentWindowActivitySnapshotFresh(statePayload) ? agentWindowPayloadRows(statePayload.agent_windows) : [];
-  const activityRows = agentWindowActivitySnapshotFresh(tabberActivityPayload)
+  let activityRows = agentWindowActivitySnapshotFresh(tabberActivityPayload)
     ? agentWindowPayloadRows(activityPayload)
     : [];
+  if (view) {
+    const matchesWindow = agent => tmuxWindowNumber(agent.window ?? agent.window_index) === Number(view.windowIndex);
+    stateRows = stateRows.filter(matchesWindow);
+    activityRows = activityRows.filter(matchesWindow);
+  }
   const stateRevision = agentWindowSnapshotRevision(statePayload);
   const activityRevision = agentWindowSnapshotRevision(tabberActivityPayload);
   // Go has no Python auto-approve snapshot. During a pane-capture miss, its shared activity
@@ -998,6 +1009,9 @@ function agentWindowActivityRefreshSessions(options = {}) {
 
 function refreshAgentWindowActivityDisplays(sessionNames = sessions) {
   const changedSessions = [...new Set((Array.isArray(sessionNames) ? sessionNames : []).map(String).filter(Boolean))];
+  for (const [item, view] of tabberViewSessions) {
+    if (changedSessions.includes(view.sourceSession)) changedSessions.push(item);
+  }
   if (!changedSessions.length) return;
   if (typeof updateSessionStateClasses === 'function') {
     updateSessionStateClasses(changedSessions);
@@ -1019,7 +1033,6 @@ function refreshAgentWindowActivityDisplays(sessionNames = sessions) {
       && typeof itemInLayout === 'function'
       && typeof tabberItemId !== 'undefined'
       && itemInLayout(tabberItemId)) refreshTabberPanels();
-  if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
   scheduleAgentWindowActivityAnimationSync();
 }
 
@@ -1256,6 +1269,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
 }
 
 function agentWindowActivityOptionsForStatus(agent, session = '', options = {}) {
+  session = tabberViewDescriptorForSession(session)?.sourceSession || session;
   return {
     session,
     window: agent?.window,

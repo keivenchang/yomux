@@ -148,6 +148,8 @@ _agent_auth_status: dict[str, dict[str, object]] | None = None
 _agent_auth_expires_at = 0.0
 _agent_auth_stale_until = 0.0
 _agent_auth_refreshing = False
+_agent_auth_refresh_thread: threading.Thread | None = None
+_agent_auth_refresh_admission_closed = False
 
 
 def _logged_in_flag_from_json(stdout: str) -> bool | None:
@@ -281,23 +283,43 @@ def _cached_agent_auth_status(*, allow_stale: bool) -> tuple[dict[str, dict[str,
 
 def start_agent_auth_status_refresh(*, force: bool = False) -> bool:
     global _agent_auth_refreshing
-    with _agent_auth_lock:
-        if _agent_auth_refreshing:
-            return False
-        if not force and _agent_auth_status is not None and _agent_auth_expires_at - time.monotonic() > _AGENT_AUTH_REFRESH_MARGIN_SECONDS:
-            return False
-        _agent_auth_refreshing = True
+    global _agent_auth_refresh_thread
 
     def refresh() -> None:
         global _agent_auth_refreshing
+        global _agent_auth_refresh_thread
         try:
             _refresh_agent_auth_status(preserve_previous_known=True)
         finally:
             with _agent_auth_lock:
                 _agent_auth_refreshing = False
+                if _agent_auth_refresh_thread is threading.current_thread():
+                    _agent_auth_refresh_thread = None
 
-    threading.Thread(target=refresh, name="agent-auth-status-refresh", daemon=True).start()
+    with _agent_auth_lock:
+        if _agent_auth_refresh_admission_closed or _agent_auth_refreshing:
+            return False
+        if not force and _agent_auth_status is not None and _agent_auth_expires_at - time.monotonic() > _AGENT_AUTH_REFRESH_MARGIN_SECONDS:
+            return False
+        _agent_auth_refreshing = True
+        worker = threading.Thread(target=refresh, name="agent-auth-status-refresh", daemon=True)
+        _agent_auth_refresh_thread = worker
+        try:
+            # Start under the admission lock so fixture retirement cannot observe an
+            # admitted refresh before its thread exists and then remove its runtime root.
+            worker.start()
+        except BaseException:
+            _agent_auth_refresh_thread = None
+            _agent_auth_refreshing = False
+            raise
     return True
+
+
+def _close_agent_auth_status_refresh_admission_for_tests() -> threading.Thread | None:
+    global _agent_auth_refresh_admission_closed
+    with _agent_auth_lock:
+        _agent_auth_refresh_admission_closed = True
+        return _agent_auth_refresh_thread
 
 
 def agent_auth_status(
@@ -327,8 +349,11 @@ def _clear_agent_auth_status_cache_for_tests() -> None:
     global _agent_auth_expires_at
     global _agent_auth_stale_until
     global _agent_auth_refreshing
+    global _agent_auth_refresh_thread
     with _agent_auth_lock:
         _agent_auth_status = None
         _agent_auth_expires_at = 0.0
         _agent_auth_stale_until = 0.0
-        _agent_auth_refreshing = False
+        if _agent_auth_refresh_thread is None or not _agent_auth_refresh_thread.is_alive():
+            _agent_auth_refreshing = False
+            _agent_auth_refresh_thread = None

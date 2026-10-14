@@ -21,6 +21,9 @@ const (
 	syntheticOpenCodeSession      = "ses-synthetic"
 )
 
+// TabberViewSessionPrefix marks the reserved-looking name prefix used for internal window-view aliases.
+const TabberViewSessionPrefix = "__yomux_view_"
+
 // AgentProcess and AgentTmuxPane are deliberately small snapshots. Keeping the
 // OS-shaped inputs separate from AgentRecord makes the inventory testable and
 // prevents a transient process exit from becoming a partially populated row.
@@ -32,15 +35,17 @@ type AgentProcess struct {
 }
 
 type AgentTmuxPane struct {
-	Session    string
-	Window     string
-	WindowName string
-	Pane       string
-	PaneID     string
-	Directory  string
-	Command    string
-	Title      string
-	PID        int
+	Session      string
+	SessionID    string
+	ViewSourceID string
+	Window       string
+	WindowName   string
+	Pane         string
+	PaneID       string
+	Directory    string
+	Command      string
+	Title        string
+	PID          int
 }
 
 type AgentRecord struct {
@@ -752,42 +757,81 @@ func parseTmuxSessions(text string) map[string]struct{} {
 }
 
 func linuxTmuxPanes(ctx context.Context) ([]AgentTmuxPane, error) {
-	commandContext, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	sessions, err := linuxTmuxSessions(commandContext)
+	panes, err := linuxTmuxPaneRoster(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if len(sessions) == 0 {
-		return []AgentTmuxPane{}, nil
+	return filterOwnedTabberViewAliases(panes), nil
+}
+
+// TabberViewSessionAliases returns only aliases whose source tmux session is
+// present in the same roster. Historical token facts can outlive the view
+// session, so callers use this bounded live mapping when presenting old series.
+func TabberViewSessionAliases(ctx context.Context) (map[string]string, error) {
+	panes, err := linuxTmuxPaneRoster(ctx)
+	if err != nil {
+		return nil, err
 	}
-	format := "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{pane_pid}"
+	return tabberViewSessionAliases(panes), nil
+}
+
+func tabberViewSessionAliases(panes []AgentTmuxPane) map[string]string {
+	sourceNames := make(map[string]string, len(panes))
+	for _, pane := range panes {
+		if pane.SessionID != "" && pane.ViewSourceID == "" {
+			sourceNames[pane.SessionID] = pane.Session
+		}
+	}
+	aliases := make(map[string]string)
+	for _, pane := range panes {
+		if !strings.HasPrefix(pane.Session, TabberViewSessionPrefix) || pane.ViewSourceID == "" {
+			continue
+		}
+		if sourceName, exists := sourceNames[pane.ViewSourceID]; exists && sourceName != pane.Session {
+			aliases[pane.Session] = sourceName
+		}
+	}
+	return aliases
+}
+
+func linuxTmuxPaneRoster(ctx context.Context) ([]AgentTmuxPane, error) {
+	commandContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	format := "#{session_name}\t#{session_id}\t#{@yomux_view_source_id}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{pane_pid}"
 	output, err := runBoundedCommand(commandContext, tmuxCommandArgs("list-panes", "-a", "-F", format))
 	if err != nil || output.ExitCode != 0 {
+		if TmuxNoServerError(output.Stderr) {
+			return []AgentTmuxPane{}, nil
+		}
 		return nil, errors.New("tmux list-panes failed")
 	}
-	panes := parseAgentTmuxPanes(string(output.Stdout))
+	return parseAgentTmuxPanes(string(output.Stdout)), nil
+}
+
+func filterOwnedTabberViewAliases(panes []AgentTmuxPane) []AgentTmuxPane {
+	aliases := tabberViewSessionAliases(panes)
 	filtered := make([]AgentTmuxPane, 0, len(panes))
 	for _, pane := range panes {
-		if _, ok := sessions[pane.Session]; ok {
+		_, ownedAlias := aliases[pane.Session]
+		if !ownedAlias {
 			filtered = append(filtered, pane)
 		}
 	}
-	return filtered, nil
+	return filtered
 }
 
 func parseAgentTmuxPanes(text string) []AgentTmuxPane {
 	result := []AgentTmuxPane{}
 	for _, line := range strings.Split(text, "\n") {
 		parts := strings.Split(line, "\t")
-		if len(parts) != 9 {
+		if len(parts) != 11 {
 			continue
 		}
-		pid, err := strconv.Atoi(parts[8])
+		pid, err := strconv.Atoi(parts[10])
 		if err != nil || pid <= 0 {
 			continue
 		}
-		result = append(result, AgentTmuxPane{Session: parts[0], Window: parts[1], WindowName: parts[2], Pane: parts[3], PaneID: parts[4], Directory: parts[5], Command: parts[6], Title: parts[7], PID: pid})
+		result = append(result, AgentTmuxPane{Session: parts[0], SessionID: parts[1], ViewSourceID: parts[2], Window: parts[3], WindowName: parts[4], Pane: parts[5], PaneID: parts[6], Directory: parts[7], Command: parts[8], Title: parts[9], PID: pid})
 	}
 	return result
 }

@@ -271,7 +271,7 @@ def bootstrap_settings_payload(settings_data: dict) -> dict:
     """Return first-paint settings without the heavy Preferences-only metadata."""
     if not isinstance(settings_data, dict):
         return {}
-    payload = {key: settings_data[key] for key in ("settings", "defaults", "path", "display_path", "mtime_ns", "error") if key in settings_data}
+    payload = {key: settings_data[key] for key in ("settings", "defaults", "path", "display_path", "mtime_ns", "error", "tabber_mode_explicit") if key in settings_data}
     catalog = settings_data.get("catalog") if isinstance(settings_data.get("catalog"), dict) else {}
     locale_key_overrides: dict[str, dict[str, str]] = {}
     for path, entry in catalog.items():
@@ -324,6 +324,7 @@ def html_page(
     capability_snapshot: dict | None = None,
     stats_only: bool = False,
     backend_label: str = "",
+    tmux_topology: dict | None = None,
 ) -> str:
     settings_data = settings_payload()
     locale = bootstrap_locale(settings_data, accept_language)
@@ -331,6 +332,7 @@ def html_page(
     backend_label = backend_label.strip()
     bootstrap = {
         "sessions": sessions,
+        "tmuxTopology": tmux_topology or {},
         "recentSessions": recent_sessions if isinstance(recent_sessions, list) else sessions,
         # Dev-velocity #1b: when true the page subscribes to /api/dev-reload and reloads on bundle change.
         "dev": dev,

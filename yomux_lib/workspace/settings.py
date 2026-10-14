@@ -182,6 +182,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "general": {
         "auto_focus": False,
         "default_layout": "split",
+        "default_tabber_mode": "normal",
         "default_sessions": [],
         "language": SYSTEM_LOCALE_PREFERENCE,
         "reload_on_update": True,
@@ -273,10 +274,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "image_preview_max_px": 320,
         "indexed_dirs": [],
         "index_refresh_seconds": 60,
+        "index_background_refresh_seconds": 900,
         "index_max_files": 1000000,
         "index_persist": True,
-        "index_persist_max_files": 1000000,
-        "index_persist_max_mb": 512,
+        "index_persist_max_mb": 1024,
         "index_exclude_dir_names": list(DEFAULT_INDEX_EXCLUDE_DIR_NAMES),
         "index_exclude_paths": list(DEFAULT_INDEX_EXCLUDE_PATHS),
         "companion_dirs": [],
@@ -419,8 +420,8 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("editor", "autosave_delay_seconds"): (0.5, 60),
     ("file_explorer", "image_preview_max_px"): (120, 1200),
     ("file_explorer", "index_refresh_seconds"): (0, 3600),
+    ("file_explorer", "index_background_refresh_seconds"): (0, 86400),
     ("file_explorer", "index_max_files"): (1000, 1000000),
-    ("file_explorer", "index_persist_max_files"): (1000, 1000000),
     ("file_explorer", "index_persist_max_mb"): (1, 1024),
     ("file_explorer", "dir_cache_ms"): (0, 10000),
     ("file_explorer", "new_entry_highlight_ms"): (0, 600000),
@@ -441,6 +442,7 @@ SETTING_LIST_LIMITS: dict[tuple[str, str], int] = {
 
 SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("general", "default_layout"): {"single", "split", "grid"},
+    ("general", "default_tabber_mode"): {"normal", "advanced"},
     # i18n: only locales that ship a catalog are accepted; "system" matches the browser/OS.
     ("general", "language"): set(LANGUAGE_PREFERENCES),
     ("appearance", "theme"): {"system", "dark", "light"},
@@ -500,6 +502,7 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
 
 SETTING_PAYLOAD_CHOICE_ORDER: dict[tuple[str, str], tuple[str, ...]] = {
     ("general", "default_layout"): ("single", "split", "grid"),
+    ("general", "default_tabber_mode"): ("normal", "advanced"),
     ("appearance", "active_color"): UI_COLOR_CHOICES,
     ("appearance", "separator_color"): SEPARATOR_COLOR_CHOICES,
     ("appearance", "editor_cursor_color"): CURSOR_COLOR_CHOICES,
@@ -527,19 +530,20 @@ SETTING_HIDDEN_CHOICES: dict[tuple[str, str], set[str]] = {
 SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "auto_focus"): "true/false. Default false. When false, layout switches and hover gestures do not move focus or auto-open menus, panes, terminals, editors, Finder/File Explorer, Preferences, or other views.",
     ("general", "default_layout"): "single | split | grid. Reserved default for new visits.",
+    ("general", "default_tabber_mode"): "normal | advanced. Starting Tabber mode, shared across browsers and restored after server restarts.",
     ("general", "language"): language_preference_description(),
     ("general", "default_sessions"): "Legacy reserved list of tmux sessions. The running server defaults to all discovered sessions unless launched with --sessions.",
     ("general", "reload_on_update"): "true/false. Default true. When true, an open client asks whether to reload the browser once the running server reports a YOMUX_VERSION or client bundle revision that differs from the page boot values. This does not check origin/main.",
     ("general", "reload_on_update_auto"): "true/false. Default false. When reload_on_update is on, reload immediately instead of showing the browser reload prompt — but only when it is safe (no unsaved editor changes and not mid-typing).",
     ("general", "startup_tips"): "true/false. Default true. When true, a small startup Tip teaches one YOmux feature after the app loads; users can dismiss it or turn Tips off forever.",
     ("file_explorer", "indexed_dirs"): "Directories with a pre-built Quick Open index, one path per line. In Finder/File Explorer, right-click a directory and choose Allow index to add it or Disallow index to remove it. You can also add or remove paths here.",
-    ("file_explorer", "index_refresh_seconds"): "Seconds, 0-3600. How often the quick-open index is proactively refreshed in the background. 0 = only rebuild when you search.",
+    ("file_explorer", "index_background_refresh_seconds"): "Seconds, 0-86400. Refresh hidden indexes every 15 minutes by default. 0 disables periodic background reconciliation.",
+    ("file_explorer", "index_refresh_seconds"): "Seconds, 0-3600. How often indexes with visible consumers are reconciled. 0 = only rebuild when you search.",
     ("file_explorer", "index_max_files"): "Files, 1000-1000000. Maximum Quick Open entries per root; larger roots report partial coverage instead of silently growing an unbounded index.",
     ("file_explorer", "index_persist"): "true/false. Persist bounded Quick Open indexes for restart and cross-process handoff; active in-memory search remains available when false.",
-    ("file_explorer", "index_persist_max_files"): "Files, 1000-1000000. Maximum entry count eligible for recoverable Quick Open cache persistence.",
-    ("file_explorer", "index_persist_max_mb"): "MiB, 1-1024. Maximum searchable SQLite snapshot size. Atomic refresh may temporarily use up to twice this budget, including the database and write-ahead log.",
+    ("file_explorer", "index_persist_max_mb"): "MiB, 1-1024. Combined active index database and WAL budget across all roots. Replacement is bounded by a 2048 MiB transient ceiling; retained rollback files are reported separately.",
     ("file_explorer", "index_exclude_dir_names"): "Directory names excluded from Quick Open indexing wherever they appear, one name per line. Pre-populated with common VCS, secret, dependency, cache, and build directories such as .git, .ssh, __pycache__, node_modules, and target.",
-    ("file_explorer", "index_exclude_paths"): "Quick Open exclusions, one rule per line. A bare directory name excludes that exact name anywhere. A plain absolute or home-relative path excludes that subtree. glob:<relative glob> matches paths below every indexed root (for example glob:**/.uploads/**). regex:<regular expression> matches each root-relative POSIX path (for example regex:(^|/)target(?:/|$)). Invalid regex rules are ignored.",
+    ("file_explorer", "index_exclude_paths"): "Quick Open exclusions, one rule per line. A plain absolute, home-relative, or root-relative path excludes that subtree. glob:<relative glob> matches paths below every indexed root (for example glob:**/.uploads/**). regex:<regular expression> matches each root-relative POSIX path (for example regex:(^|/)target(?:/|$)). Invalid regex rules report a settings synchronization error.",
     ("file_explorer", "companion_dirs"): "Extra directories always included when computing per-session repo status (branch, dirty count, ahead/behind), one path per line. Useful for companion repos that sit alongside your session workdirs but are rarely the active pane cwd — e.g. ~/vendor/frontend-crates.",
     ("github", "watched_prs"): "Pull requests to watch independently of any open session, one per line. Each is 'owner/repo#N' or a full https://github.com/owner/repo/pull/N URL. They show in YO!info and can notify on merge / CI / review changes (see notifications.notify_transitions).",
     ("updates", "check_interval_minutes"): "Minutes, 1+. How often the origin/main update checker runs when updates.notify_level is not none.",
@@ -682,6 +686,7 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("file_explorer", "index_exclude_paths"): "Finder",
     ("file_explorer", "index_max_files"): "Finder",
     ("file_explorer", "index_refresh_seconds"): "Finder",
+    ("file_explorer", "index_background_refresh_seconds"): "Finder",
     ("file_explorer", "companion_dirs"): "Finder",
     ("file_explorer", "dir_cache_ms"): "Finder",
     ("file_explorer", "new_entry_highlight_ms"): "Finder",
@@ -1198,13 +1203,15 @@ def write_settings_file(settings: dict[str, Any], path: Path = SETTINGS_PATH) ->
         _settings_payload_cache_clear_unlocked(path)
 
 
-def _read_settings_file_unlocked(path: Path = SETTINGS_PATH) -> tuple[dict[str, Any], str]:
+def _read_settings_file_unlocked(path: Path = SETTINGS_PATH, *, stored_values: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
     if not path.exists():
         _write_settings_file_unlocked(default_settings(), path)
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         return default_settings(), str(exc)
+    if stored_values is not None and isinstance(raw, dict):
+        stored_values.update(raw)
     settings = sanitize_settings(raw)
     represented = copy.deepcopy(settings)
     represented_cost = represented["cost"]
@@ -1250,7 +1257,8 @@ def stats_prune_local_time(path: Path = SETTINGS_PATH) -> str:
 
 
 def _settings_payload_unlocked(path: Path = SETTINGS_PATH) -> dict[str, Any]:
-    settings, error = _read_settings_file_unlocked(path)
+    stored_values: dict[str, Any] = {}
+    settings, error = _read_settings_file_unlocked(path, stored_values=stored_values)
     stat = path.stat() if path.exists() else None
     if error:
         return {
@@ -1265,6 +1273,9 @@ def _settings_payload_unlocked(path: Path = SETTINGS_PATH) -> dict[str, Any]:
         }
     return {
         "settings": settings,
+        # Effective defaults cannot tell a legacy browser whether the user has
+        # explicitly selected Normal. Keep that provenance from the same YAML read.
+        "tabber_mode_explicit": isinstance(stored_values.get("general"), dict) and "default_tabber_mode" in stored_values["general"],
         "defaults": default_settings(),
         "choices": settings_payload_choices(),
         "catalog": settings_catalog(settings),

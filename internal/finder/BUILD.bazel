@@ -3,7 +3,10 @@ load("//:tools/bazel_rules.bzl", "go_test_pair")
 
 package(default_visibility = ["//:__subpackages__"])
 
-exports_files(["BUILD.bazel"])
+exports_files([
+    "BUILD.bazel",
+    "search_rank_weights.json",
+])
 
 go_library(
     name = "finder_lib",
@@ -11,17 +14,26 @@ go_library(
         ["*.go"],
         exclude = ["*_test.go"],
     ),
+    embedsrcs = ["search_rank_weights.json"],
     importpath = "github.com/keivenchang/yomux/internal/finder",
     deps = [
         "//internal/cache:cache_lib",
         "//internal/productenv:productenv_lib",
         "@com_github_mattn_go_sqlite3//:go_default_library",
         "@org_golang_x_sys//unix",
+        "@org_golang_x_text//cases",
+        "@org_golang_x_text//language",
     ],
 )
 
 go_test_pair(
     name = "finder",
     srcs = glob(["*_test.go"]),
+    data = [
+        "//:static_src/js/yomux/10_core_utils.js",
+        "//:static_src/js/yomux/20_layout_state.js",
+    ],
     embed = [":finder_lib"],
+    race_shard_count = 2,
+    shard_count = 2,
 )

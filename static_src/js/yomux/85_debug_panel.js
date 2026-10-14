@@ -139,6 +139,8 @@ function debugGraphApplyHostMetrics(bucket, source, {runtimeSse = false} = {}) {
   target.systemMemoryUsedTotalBytes = Math.max(target.systemMemoryUsedTotalBytes, Number(source.system_memory_used_total_bytes || 0));
   target.systemMemoryCapacityTotalBytes = Math.max(target.systemMemoryCapacityTotalBytes, Number(source.system_memory_capacity_total_bytes || 0));
   target.systemMemoryCount = Math.max(target.systemMemoryCount, Number(source.system_memory_count || 0));
+  target.processCensusIncompleteCpu ||= source.process_census_incomplete_cpu === true;
+  target.processCensusIncompleteMemory ||= source.process_census_incomplete_memory === true;
   const macMemoryFields = {
     macPhysicalMemoryTotalBytes: 'mac_physical_memory_total_bytes', macMemoryUsedTotalBytes: 'mac_memory_used_total_bytes',
     macCachedFilesTotalBytes: 'mac_cached_files_total_bytes', macSwapUsedTotalBytes: 'mac_swap_used_total_bytes',
@@ -783,6 +785,20 @@ function debugGraphHostMetricBucketValue(bucket, series) {
 
 function debugGraphHostMetricBucketHasData(bucket, series) {
   return Number(debugGraphHostMetricBucketItem(bucket, series)?.samples || 0) > 0;
+}
+
+function debugGraphHostProcessFamilyHasData(bucket, mapName, processId, incompleteKey) {
+  const processes = bucket?.hostMetrics?.[mapName];
+  return bucket?.hostMetrics?.[incompleteKey] !== true
+    && processes instanceof Map
+    && processes.size > 0
+    && !processes.has(processId);
+}
+
+function debugGraphHostProcessFamilyHasUnknownData(bucket, mapName, processId, incompleteKey) {
+  const processes = bucket?.hostMetrics?.[mapName];
+  return bucket?.hostMetrics?.[incompleteKey] === true
+    && (!(processes instanceof Map) || !processes.has(processId));
 }
 
 // True when any cached bucket (any range) carries a GPU device sample. Distinguishes a
@@ -1532,10 +1548,18 @@ function debugGraphHostProcessSeriesDefs(buckets, metric) {
     // bucket in between -- the sawtooth in the Memory pressure chart. Absence must come from the
     // same per-process map this series reads (`bucket.hostMetrics[mapName]`): non-empty (a real
     // census ran this bucket) and missing this exact `hostProcessId` (that census did not find it).
-    familyHasData: bucket => {
-      const source = bucket?.hostMetrics?.[mapName];
-      return source instanceof Map && source.size > 0 && !source.has(hostProcessId);
-    },
+    familyHasData: bucket => debugGraphHostProcessFamilyHasData(
+      bucket,
+      mapName,
+      hostProcessId,
+      cpu ? 'processCensusIncompleteCpu' : 'processCensusIncompleteMemory',
+    ),
+    familyHasUnknownData: bucket => debugGraphHostProcessFamilyHasUnknownData(
+      bucket,
+      mapName,
+      hostProcessId,
+      cpu ? 'processCensusIncompleteCpu' : 'processCensusIncompleteMemory',
+    ),
     ...(cpu ? {cpuBinary: true} : {displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge}),
   }));
 }
@@ -1743,13 +1767,14 @@ function debugGraphProjectSeriesSamples(def, buckets) {
       heldSample = holdMs > 0 ? {value, provenance} : null;
       continue;
     }
+    const familyUnknown = typeof def.familyHasUnknownData === 'function' && def.familyHasUnknownData(bucket) === true;
     const familyObserved = typeof def.familyHasData === 'function' && def.familyHasData(bucket) === true;
     censusGapValues.push(familyObserved);
-    if (familyObserved || debugGraphDisplayHoldOutage(bucket)) heldSample = null;
+    if (familyUnknown || familyObserved || debugGraphDisplayHoldOutage(bucket)) heldSample = null;
     const bucketStartMs = Number(bucket?.startMs) || 0;
     const bucketDurationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
     const bucketEndMs = bucketStartMs + bucketDurationMs;
-    const held = heldSample && bucketStartMs >= heldSample.provenance.sampleTimeMs
+    const held = !familyUnknown && heldSample && bucketStartMs >= heldSample.provenance.sampleTimeMs
       && bucketEndMs <= heldSample.provenance.expiresAtMs;
     values.push(held ? heldSample.value : value);
     hasDataValues.push(Boolean(held));
@@ -3199,8 +3224,8 @@ function debugGraphLivePulseHtml(groupSeries, buckets, domain, nowMs = Date.now(
 }
 
 function debugGraphStatsAgentState(state) {
-  const key = String(state || '').trim().toLowerCase();
-  if (key === 'run' || key === 'working') return STATE_KEY.working;
+  const key = agentWindowStateKey(String(state || '').trim().toLowerCase());
+  if (key === STATE_KEY.working) return STATE_KEY.working;
   if (key === 'ask' || key === 'approval' || key === 'needs-input') return 'attention';
   if (key === 'transition' || key === 'cooldown') return 'cooldown';
   if (key === 'error' || key === 'failed' || key === 'blocked') return 'blocked';
@@ -3587,8 +3612,14 @@ function debugGraphTokenSpikeAxisDescriptor(buckets) {
 
 function debugGraphChartLabel(group, buckets = []) {
   const label = debugGraphLocalizedLabel(group);
+  const incompleteKey = group?.key === 'cpu'
+    ? 'processCensusIncompleteCpu'
+    : group?.key === 'memory'
+      ? 'processCensusIncompleteMemory'
+      : '';
+  const partial = incompleteKey && (buckets || []).some(bucket => bucket?.hostMetrics?.[incompleteKey] === true);
   const detailKey = group?.key === 'cpu' ? 'cpuLabel' : group?.key === 'memory' ? 'systemMemoryLabel' : '';
-  if (!detailKey) return label;
+  if (!detailKey) return partial ? `${label} (partial process data)` : label;
   const logicalCpus = Math.max(0, Number(cpuTopology?.logicalCpus) || 0);
   const physicalCores = Math.max(0, Number(cpuTopology?.physicalCores) || 0);
   const topologyDetail = group?.key !== 'cpu' || logicalCpus <= 0
@@ -3597,7 +3628,8 @@ function debugGraphChartLabel(group, buckets = []) {
       ? `${logicalCpus} logical CPUs / ${physicalCores} physical cores`
       : `${logicalCpus} logical CPUs`;
   const detail = topologyDetail || buckets.map(bucket => String(bucket?.hostMetrics?.[detailKey] || '').trim()).find(Boolean);
-  return detail ? `${label} (${detail})` : label;
+  const chartLabel = detail ? `${label} (${detail})` : label;
+  return partial ? `${chartLabel} (partial process data)` : chartLabel;
 }
 
 function debugGraphChartShellHtml(gridHtml = '', domain = debugGraphDomain()) {
@@ -4470,6 +4502,38 @@ function paintJsDebugCurrentStatsDelta(snapshot, delta, {forceGraphRefresh = tru
   return true;
 }
 
+function jsDebugSessionAliasTopologyKey() {
+  return `${transcriptMetadataState.epoch}:${tmuxTopologyGeneration}:${sessions.join('\u001f')}:${JSON.stringify(Array.from(tabberViewSessions, ([item, view]) => [item, view.sourceSession, view.windowId]))}`;
+}
+
+async function refreshJsDebugSessionAliases() {
+  const state = jsDebugCurrentStatsClientState;
+  if (!state.client || !jsDebugStatsPanelVisible()) return;
+  const key = jsDebugSessionAliasTopologyKey();
+  if (state.sessionAliasKey === key) return;
+  if (state.sessionAliasPromise) return state.sessionAliasPromise;
+  state.sessionAliasPromise = (async () => {
+    try {
+      const payload = await apiFetch('/api/stats-session-aliases');
+      if (key !== jsDebugSessionAliasTopologyKey()) return;
+      debugGraphStatsCurrentModule()?.setSessionAliases?.(payload?.aliases || {});
+      state.sessionAliasKey = key;
+      state.paintedGenerationKey = '';
+      state.pendingGenerationKey = '';
+      paintJsDebugCurrentStatsGeneration(state.client.controller?.()?.generation?.(), {forceGraphRefresh: true});
+    } catch (error) {
+      recordJsDebugCurrentStatsFailure({
+        message: `YO!stats session labels unavailable: ${jsDebugErrorText(error)}`,
+        source: '/api/stats-session-aliases',
+      });
+    } finally {
+      state.sessionAliasPromise = null;
+      if (key !== jsDebugSessionAliasTopologyKey()) void refreshJsDebugSessionAliases();
+    }
+  })();
+  return state.sessionAliasPromise;
+}
+
 function ensureJsDebugCurrentStatsClient() {
   if (jsDebugCurrentStatsClientState.client) return jsDebugCurrentStatsClientState.client;
   const statsCurrent = debugGraphStatsCurrentModule();
@@ -4532,6 +4596,7 @@ function syncJsDebugCurrentStatsClient({select = false} = {}) {
     return true;
   }
   if (!client) return false;
+  void refreshJsDebugSessionAliases();
   const documentVisible = jsDebugStatsDocumentVisible();
   client.setVisible(documentVisible);
   if (!documentVisible) return true;
@@ -4790,6 +4855,8 @@ function jsDebugCurrentBucketRecord(bucket) {
     else if (name === 'transition_sessions') record.transition_session_total = value;
     else if (name === 'idle_sessions') record.idle_session_total = value;
     else if (name === 'agent_window_snapshot_revision') record.agent_window_snapshot_revision = value;
+    else if (name === 'process_census_incomplete:cpu') record.host_metrics.process_census_incomplete_cpu = value > 0;
+    else if (name === 'process_census_incomplete:system_memory') record.host_metrics.process_census_incomplete_memory = value > 0;
     else if (name === 'system_memory_used_bytes') {
       record.host_metrics.system_memory_used_total_bytes = value;
       record.host_metrics.system_memory_count = 1;
@@ -5149,6 +5216,7 @@ async function initializeJsDebugStatsBeforeStreams() {
 if (typeof document !== 'undefined' && document?.addEventListener) {
   document.addEventListener('visibilitychange', () => {
     const visible = document.visibilityState === 'visible';
+    if (!visible && jsDebugGraphRangeSliderInteraction) completeDebugGraphRangeSliderInteraction(jsDebugGraphRangeSliderInteraction.panel);
     if (jsDebugGraphExactResolutionEnabled) syncJsDebugCurrentStatsClient();
     syncJsDebugStatsPolling({pollNow: visible, forceGraphRefresh: visible});
     // Visibility changes re-run subview activation so the live ticker resumes, but they are not
@@ -5203,7 +5271,7 @@ function jsDebugTextForClipboard() {
     header,
     ...(apiSummaryRows.length ? ['Slow API by max latency:', ...apiSummaryRows, ''] : []),
     ...(sseSummaryRows.length ? ['Slow SSE server work:', ...sseSummaryRows, ''] : []),
-    ...(sseLatencySummaryRows.length ? ['Slow SSE receive latency:', ...sseLatencySummaryRows, ''] : []),
+    ...(sseLatencySummaryRows.length ? ['Oldest SSE event age at receipt:', ...sseLatencySummaryRows, ''] : []),
     ...(clientPerfRows.length ? ['Client work counters:', ...clientPerfRows, ''] : []),
     ...rows,
   ].join('\n');
@@ -7808,10 +7876,6 @@ function flushDeferredDebugGraphRefresh(graph) {
 
 function refreshDebugGraphElement(graph, {force = false} = {}) {
   if (!graph) return false;
-  if (jsDebugGraphRangeSliderDragging) {
-    graph.dataset.jsDebugGraphRefreshPending = 'true';
-    return false;
-  }
   if (debugGraphInteractionBelongsToPanel(graph.closest('.js-debug-panel'))) {
     graph.dataset.jsDebugGraphRefreshPending = 'true';
     return false;
@@ -7884,6 +7948,7 @@ function applyDebugSubTab(panel) {
 }
 
 function setDebugSubTab(tab) {
+  if (jsDebugGraphRangeSliderInteraction) completeDebugGraphRangeSliderInteraction(jsDebugGraphRangeSliderInteraction.panel);
   loadJsDebugStatsUiPreferences();
   debugRuntimeState.subTab = normalizedJsDebugSubTab(tab);
   saveJsDebugStatsUiPreferences();
@@ -8168,6 +8233,25 @@ function setDebugGraphRangeFromSlider(slider, {render = true, snap = false} = {}
   return true;
 }
 
+function completeDebugGraphRangeSliderInteraction(panel, event = null, commit = false) {
+  const interaction = jsDebugGraphRangeSliderInteraction;
+  if (!interaction || interaction.panel !== panel) return false;
+  if (event?.pointerId != null && event.pointerId !== interaction.pointerId) return false;
+  if (event?.type === 'change' && event.target !== interaction.slider) return false;
+  jsDebugGraphRangeSliderInteraction = null;
+  const {slider} = interaction;
+  if (commit) {
+    const option = debugGraphRangeOptionForSlider(slider);
+    if (option && option.seconds !== debugRuntimeState.graphRangeSeconds) setDebugGraphRangeFromSlider(slider, {snap: true});
+  }
+  // Restore controls before deferred rendering, including detached originating inputs.
+  slider.value = String(jsDebugGraphRangeOptionIndex(debugRuntimeState.graphRangeSeconds));
+  updateDebugGraphRangeSliderLabel(slider, debugGraphAvailableRangeOptions()[jsDebugGraphRangeOptionIndex(debugRuntimeState.graphRangeSeconds)]);
+  syncDebugGraphControls(slider.closest('[data-js-debug-graph], [data-js-debug-daemons-graph], [data-js-yocost-graphs]'));
+  flushDeferredDebugGraphInteractionRefresh(panel);
+  return true;
+}
+
 function debugGraphPointerRatioFromRect(clientX, rect) {
   const left = Number(rect?.left);
   const width = Number(rect?.width);
@@ -8340,7 +8424,8 @@ function debugGraphSelectionRatioForEvent(event, selection = jsDebugGraphSelecti
 function debugGraphInteractionBelongsToPanel(panel) {
   if (!panel) return false;
   return jsDebugGraphSelectionState?.panel === panel
-    || jsDebugGraphTouchCandidateState?.panel === panel;
+    || jsDebugGraphTouchCandidateState?.panel === panel
+    || jsDebugGraphRangeSliderInteraction?.panel === panel;
 }
 
 function flushDeferredDebugGraphInteractionRefresh(panel) {
@@ -8588,6 +8673,7 @@ function handleDebugGraphPointerCancel(event, panel) {
 }
 
 function cancelDebugGraphSelection(panel) {
+  if (jsDebugGraphRangeSliderInteraction?.panel === panel) completeDebugGraphRangeSliderInteraction(panel);
   let interactionEnded = false;
   const candidate = jsDebugGraphTouchCandidateState;
   if (candidate?.panel === panel) {
@@ -8671,22 +8757,28 @@ function handleDebugGraphControlEvent(event, panel) {
   const slider = event.target.closest('[data-js-debug-range-slider]');
   if (slider && panel.contains(slider)) {
     if (event.type === 'pointerdown') {
-      jsDebugGraphRangeSliderDragging = true;
-      // Claim the event at the graph shell so chart-selection handling cannot
-      // inspect or replace the native range input during its drag gesture.
-      // Do not preventDefault: the browser owns the range-thumb movement.
+      if (jsDebugGraphRangeSliderInteraction || event.isPrimary === false || (event.button != null && event.button !== 0)) return true;
+      jsDebugGraphRangeSliderInteraction = {panel, slider, pointerId: event.pointerId, preview: debugGraphRangeOptionForSlider(slider)};
+      // Native input owns thumb movement; only a completed gesture changes history.
       return true;
     }
     if (event.type === 'input') {
-      jsDebugGraphRangeSliderDragging = true;
-      return setDebugGraphRangeFromSlider(slider, {render: false});
+      const interaction = jsDebugGraphRangeSliderInteraction;
+      if (interaction) {
+        if (interaction.slider !== slider) return true;
+        interaction.preview = debugGraphRangeOptionForSlider(slider);
+        updateDebugGraphRangeSliderLabel(slider, interaction.preview);
+        return true;
+      }
+      const option = debugGraphRangeOptionForSlider(slider);
+      if (option && option.seconds !== debugRuntimeState.graphRangeSeconds) return setDebugGraphRangeFromSlider(slider, {snap: true});
+      return true;
     }
-    const dragEnded = event.type === 'change' || event.type === 'pointerup' || event.type === 'pointercancel';
-    if (dragEnded) {
-      jsDebugGraphRangeSliderDragging = false;
-      const changed = event.type === 'change' && setDebugGraphRangeFromSlider(slider, {snap: true});
-      flushDeferredDebugGraphInteractionRefresh(panel);
-      return changed;
+    if (event.type === 'change') {
+      return completeDebugGraphRangeSliderInteraction(panel, event, true);
+    }
+    if (event.type === 'pointerup' || event.type === 'pointercancel' || event.type === 'lostpointercapture') {
+      return completeDebugGraphRangeSliderInteraction(panel, event, event.type === 'pointerup');
     }
     return false;
   }
@@ -8711,6 +8803,7 @@ function bindDebugPanel(panel) {
     });
     scope.replace('actions', disposeActions, dispose => dispose?.());
     scope.ownEvent('focusout', panel, 'focusout', event => {
+    if (jsDebugGraphRangeSliderInteraction?.slider === event.target) completeDebugGraphRangeSliderInteraction(panel);
     const graph = event.target?.closest?.('[data-js-debug-graph]');
     if (!graph) return;
     setTimeout(() => { flushDeferredDebugGraphRefresh(graph); }, 0);
@@ -8738,8 +8831,13 @@ function bindDebugPanel(panel) {
     handleDebugGraphPointerCancel(event, panel);
   });
     scope.ownEvent('lostpointercapture', panel, 'lostpointercapture', event => {
+    completeDebugGraphRangeSliderInteraction(panel, event);
     handleDebugGraphPointerCancel(event, panel);
   });
+    scope.ownEvent('range-release', document, 'pointerup', event => completeDebugGraphRangeSliderInteraction(panel, event, true), {capture: true});
+    scope.ownEvent('range-cancel', document, 'pointercancel', event => completeDebugGraphRangeSliderInteraction(panel, event), {capture: true});
+    scope.ownEvent('range-blur', window, 'blur', () => completeDebugGraphRangeSliderInteraction(panel));
+    scope.ownEvent('range-pagehide', window, 'pagehide', () => completeDebugGraphRangeSliderInteraction(panel));
     scope.ownEvent('input', panel, 'input', event => {
     handleDebugGraphControlEvent(event, panel);
   });
@@ -8825,7 +8923,17 @@ function bindDebugPanel(panel) {
       statusEl.textContent = t('debug.cleared');
     }
     });
-    return () => scope.dispose('debug-panel-unbound');
+    if (typeof MutationObserver === 'function') {
+      const visibilityObserver = new MutationObserver(() => {
+        if (jsDebugGraphRangeSliderInteraction?.panel === panel && jsDebugGraphRangeSliderInteraction.slider.getClientRects().length === 0) completeDebugGraphRangeSliderInteraction(panel);
+      });
+      visibilityObserver.observe(document.getElementById('grid'), {attributes: true, subtree: true, attributeFilter: ['hidden', 'style', 'class']});
+      scope.replace('range-visibility', visibilityObserver, observer => observer.disconnect());
+    }
+    return () => {
+      completeDebugGraphRangeSliderInteraction(panel);
+      scope.dispose('debug-panel-unbound');
+    };
   });
 }
 

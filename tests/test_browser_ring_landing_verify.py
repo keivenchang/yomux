@@ -928,8 +928,25 @@ def _load_real_stats_page(
     driver.get("about:blank")
     driver.execute_cdp_cmd("Network.clearBrowserCookies", {})
     harness.authenticate(credentials)
-    harness.load(tabs=("files", "__debug__", str(runtime.tmux.sessions[0])))
-    driver.find_element(By.CSS_SELECTOR, '.dockview-pane-tab[data-pane-tab="__debug__"]').click()
+    url = harness.load(tabs=("files", "__debug__", str(runtime.tmux.sessions[0])))
+    WebDriverWait(driver, 12, poll_frequency=0.05).until(
+        lambda _driver: _driver.execute_script("return typeof setTabberMode === 'function'")
+    )
+    driver.execute_async_script(
+        """
+        const url = arguments[0];
+        const done = arguments[arguments.length - 1];
+        setTabberMode('advanced');
+        history.replaceState(null, '', url);
+        applyLayoutSlots(initialLayoutSlots(), {prune: false});
+        requestAnimationFrame(() => requestAnimationFrame(() => done(true)));
+        """,
+        url,
+    )
+    debug_tab = WebDriverWait(driver, 12, poll_frequency=0.05).until(
+        lambda _driver: _driver.find_element(By.CSS_SELECTOR, '.dockview-pane-tab[data-pane-tab="__debug__"]')
+    )
+    debug_tab.click()
     WebDriverWait(driver, 12, poll_frequency=0.05).until(
         lambda _driver: driver.find_element(By.CSS_SELECTOR, '.js-debug-panel [data-js-debug-subtab="graph"]')
     ).click()

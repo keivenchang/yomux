@@ -256,6 +256,25 @@ func (d *OpenCodeDatabase) CommitSourceScan(version int64, sessionIDs []string) 
 	d.sourceVersionMu.Unlock()
 }
 
+// ReadConversationTitle reads the persisted agent title for one exact conversation.
+func (d *OpenCodeDatabase) ReadConversationTitle(ctx context.Context, sessionID string) (string, error) {
+	rows, err := d.reader.Rows(ctx, "SELECT title FROM session WHERE id = ?", sessionID)
+	if err != nil {
+		return "", fmt.Errorf("read OpenCode conversation title: %w", err)
+	}
+	if len(rows) == 0 {
+		return "", nil
+	}
+	if len(rows) != 1 || len(rows[0]) != 1 {
+		return "", fmt.Errorf("malformed OpenCode title row")
+	}
+	title, ok := openCodeString(rows[0][0])
+	if !ok {
+		return "", fmt.Errorf("malformed OpenCode title")
+	}
+	return title, nil
+}
+
 // ReadContextItems returns the newest bounded OpenCode conversation items for a
 // single persisted session. It reads only message/part identity and display
 // fields, and never mutates the external database.

@@ -440,7 +440,7 @@ func TestHostCollectorSeparatesOwnedCPUFromSameNamedHostUsers(t *testing.T) {
 	}
 }
 
-func TestHostCollectorKeepsOwnedMeasurementsWhenProcessCensusIsIncomplete(t *testing.T) {
+func TestHostCollectorKeepsReadableProcessMeasurementsWhenCensusIsIncomplete(t *testing.T) {
 	sources := &capturedHostSources{
 		cpu: []CPUSnapshot{
 			{Host: CPUHostCounters{Busy: 100, Total: 200}, ProcessTicksPerSecond: 100, ProcessCensusIncomplete: true, Processes: map[string]CPUProcessCounters{
@@ -480,18 +480,20 @@ func TestHostCollectorKeepsOwnedMeasurementsWhenProcessCensusIsIncomplete(t *tes
 	if cpuPayload == nil || memoryPayload == nil {
 		t.Fatalf("partial census erased host measurements: cpu=%#v memory=%#v", cpuPayload, memoryPayload)
 	}
-	if _, ok := cpuPayload["process_cpu_percent"]; ok {
-		t.Fatalf("partial CPU census published a host-wide process map: %#v", cpuPayload)
+	processCPU, ok := cpuPayload["process_cpu_percent"].(map[string]any)
+	if !ok || processCPU[hostProcessInstanceSeriesKey("yolomux-go", "101:10")] != 10.0 || cpuPayload["process_census_incomplete"] != true {
+		t.Fatalf("partial CPU census lost readable process data or its incomplete marker: %#v", cpuPayload)
 	}
 	owned, ok := cpuPayload["owned_process_cpu_percent"].(map[string]any)
 	if !ok || owned["yolomux-go"] != 10.0 {
 		t.Fatalf("partial census lost the owned Go CPU reading: %#v", cpuPayload)
 	}
-	if _, ok := memoryPayload["process_memory_bytes"]; ok {
-		t.Fatalf("partial memory census published a host-wide process map: %#v", memoryPayload)
+	processMemory, ok := memoryPayload["process_memory_bytes"].(map[string]any)
+	if !ok || processMemory["python"] != uint64(4096) || memoryPayload["process_census_incomplete"] != true {
+		t.Fatalf("partial memory census lost readable process data or its incomplete marker: %#v", memoryPayload)
 	}
 	latest := collector.Latest()
-	if !latest.CPUValid || latest.ProcessCPUPercent != nil || !latest.MemoryValid || latest.ProcessMemoryBytes != nil {
+	if !latest.CPUValid || len(latest.ProcessCPUPercent) == 0 || !latest.MemoryValid || latest.ProcessMemoryBytes["python"] != 4096 {
 		t.Fatalf("latest telemetry exposed incomplete process groups: %+v", latest)
 	}
 }

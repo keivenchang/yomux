@@ -31,10 +31,9 @@ type CPUSnapshot struct {
 	Host                  CPUHostCounters
 	Processes             map[string]CPUProcessCounters
 	ProcessTicksPerSecond uint64
-	// ProcessCensusIncomplete marks snapshots that retain the owned process
-	// after a host-wide census failed or was partial. Those rows may support
-	// owned-process measurements but must not be published as a complete host
-	// process breakdown.
+	// ProcessCensusIncomplete marks snapshots where some host processes could
+	// not be read. Deltas for stable readable processes remain useful as a
+	// partial breakdown.
 	ProcessCensusIncomplete bool
 }
 
@@ -181,11 +180,6 @@ func (s *CPUDeltaSampler) Sample(snapshot CPUSnapshot, wallDuration time.Duratio
 			result.OwnedProcessCPUPercent = map[string]float64{binary: processPercent}
 		}
 	}
-	if result.ProcessCensusIncomplete {
-		result.Reason = CPUValid
-		return result
-	}
-
 	groupKeys := s.groupKeys
 	autoGroups := len(groupKeys) == 0
 	if autoGroups {

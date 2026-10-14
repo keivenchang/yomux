@@ -173,17 +173,17 @@
   "file_lines": {
     "static_src/css/yomux/30_preferences_changes.css": 3720,
     "static_src/css/yomux/50_terminal_file_tree.css": 4336,
-    "static_src/css/yomux/60_editor_file_panels.css": 3620,
-    "static_src/js/yomux/10_core_utils.js": 7998,
-    "static_src/js/yomux/20_layout_state.js": 7302,
-    "static_src/js/yomux/40_file_explorer_files.js": 7025,
-    "static_src/js/yomux/85_debug_panel.js": 8816,
-    "static_src/js/yomux/99_terminal_boot.js": 7295,
+    "static_src/css/yomux/60_editor_file_panels.css": 3624,
+    "static_src/js/yomux/10_core_utils.js": 8003,
+    "static_src/js/yomux/20_layout_state.js": 7444,
+    "static_src/js/yomux/40_file_explorer_files.js": 7072,
+    "static_src/js/yomux/85_debug_panel.js": 8836,
+    "static_src/js/yomux/99_terminal_boot.js": 7347,
     "yomux_lib/app.py": 18640,
     "yomux_lib/infra/listener_census.py": 656,
     "yomux_lib/infra/state_services.py": 1220,
     "yomux_lib/search/file_index.py": 5035,
-    "yomux_lib/server.py": 3816,
+    "yomux_lib/server.py": 3820,
     "yomux_lib/stats_current/service.py": 5918,
     "yomux_lib/workspace/session_files.py": 4573
   },
@@ -280,6 +280,60 @@
       "writer": "static_src/js/yomux/10_core_utils.js"
     },
     {
+      "count": 3,
+      "name": "activeFile",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
+    },
+    {
+      "count": 2,
+      "name": "activeFile",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/70_layout_actions.js"
+    },
+    {
+      "count": 1,
+      "name": "activeFile",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/92_codemirror_editor.js"
+    },
+    {
+      "count": 2,
+      "name": "activeSessions",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "agentStatusPulsePeriodMs",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 2,
+      "name": "applyingIndexedDirsSetting",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "autoFocusEnabled",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "changesFolderCollapsed",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/86_changes_10_session_files.js"
+    },
+    {
+      "count": 2,
+      "name": "changesRepoCollapsed",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/86_changes_10_session_files.js"
+    },
+    {
       "count": 1,
       "name": "clientPerfInteractionDurableCount",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
@@ -314,642 +368,6 @@
       "name": "clientPerfLongTaskSamples",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 1,
-      "name": "collapsedPreferenceSections",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 1,
-      "name": "debugModeEnabled",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 6,
-      "name": "fileExplorerViewSettings",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 4,
-      "name": "focusedPanelItem",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 4,
-      "name": "focusedTerminal",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 1,
-      "name": "jsDebugEventCaptureInstalled",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 1,
-      "name": "jsDebugEvents",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 4,
-      "name": "jsDebugRenderDragDeferred",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 3,
-      "name": "jsDebugRenderForce",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 3,
-      "name": "jsDebugRenderTimer",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 2,
-      "name": "lastActiveNonFileExplorerPaneItem",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 3,
-      "name": "lastActivePaneItem",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 5,
-      "name": "lastFocusedTmuxSession",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 1,
-      "name": "tabMetaVisible",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 1,
-      "name": "terminalRemovalLatencySamples",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 2,
-      "name": "activeSessions",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "commandPaletteMode",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "diffExpandUnchanged",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "diffRefFrom",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "diffRefTo",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "diffRefsByRepo",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 2,
-      "name": "documentTitleIdleSinceMs",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "editorPreviewFontSize",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "fileEditorBlameEnabled",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "fileEditorLineNumbersEnabled",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "fileEditorPreviewDisplayMode",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "fileEditorThemeMode",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "fileEditorWrapEnabled",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerChangesSelectedSession",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerFinderSelectedSession",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 3,
-      "name": "fileExplorerMode",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerRoot",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerRootMode",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerSelectionAnchor",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerSelectionLead",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerShowHidden",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "filledWorkspaceLayout",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "globalThemeMode",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "infoPanelSubTab",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "keyboardShortcutsNode",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 5,
-      "name": "layoutItems",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 2,
-      "name": "layoutSlots",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "legacyYoCostMigrationRequested",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 2,
-      "name": "notificationDelivery",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 2,
-      "name": "pendingLayoutRender",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 2,
-      "name": "pendingLayoutRenderFrame",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "pinnedTabItems",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "preferencesResetConfirmVisible",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 2,
-      "name": "preferencesSearchText",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 3,
-      "name": "sessions",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "sharedImageViewerPath",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 2,
-      "name": "sidePaneLayoutWasConstrained",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "startupHelpersEnabled",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "stateTrackingReady",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 2,
-      "name": "tabStripOverflowCheckFrame",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "terminalThemeMode",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 3,
-      "name": "tmuxSessionMutationCurrent",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "topbarResizeObserver",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "visibleSessions",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
-      "count": 1,
-      "name": "globalThemeMode",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/30_app_menus.js"
-    },
-    {
-      "count": 4,
-      "name": "openAppMenuId",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/30_app_menus.js"
-    },
-    {
-      "count": 3,
-      "name": "openAppMenuOpenedAt",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/30_app_menus.js"
-    },
-    {
-      "count": 3,
-      "name": "openAppMenuPinned",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/30_app_menus.js"
-    },
-    {
-      "count": 4,
-      "name": "pendingSessionButtonsRender",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/30_app_menus.js"
-    },
-    {
-      "count": 1,
-      "name": "terminals",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/30_app_menus.js"
-    },
-    {
-      "count": 3,
-      "name": "yoloRulesPayload",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/30_app_menus.js"
-    },
-    {
-      "count": 2,
-      "name": "applyingIndexedDirsSetting",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerFilesystemLastFullAt",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 2,
-      "name": "fileExplorerFilesystemPushToken",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 3,
-      "name": "fileExplorerFilesystemWatchToken",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerFinderSelectedSession",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerIndexExcludePaths",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 2,
-      "name": "fileExplorerIndexedDirs",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerLastInteractionAt",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 2,
-      "name": "fileExplorerLastListError",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerManualSelectionActive",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 3,
-      "name": "fileExplorerPathError",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 2,
-      "name": "fileExplorerRefreshDeferred",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerRepoInfoCacheLoaded",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 3,
-      "name": "fileExplorerRoot",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerRootMode",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 6,
-      "name": "fileExplorerSelectionAnchor",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 5,
-      "name": "fileExplorerSelectionLead",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerSyncManualCollapseTargetKey",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerSyncManualCollapsedPaths",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerVisibleSyncRoot",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerVisibleSyncSession",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 3,
-      "name": "fileImagePreviewController",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 2,
-      "name": "fileImagePreviewPopover",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "preferencesSearchText",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 2,
-      "name": "repoRoot",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 2,
-      "name": "sessions",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "tabberActivityPayload",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "tabberLaunchWarmupStarted",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 1,
-      "name": "tabberSessionFileLookbackHours",
-      "owner": "static_src/js/yomux/10_core_utils.js",
-      "writer": "static_src/js/yomux/40_file_explorer_files.js"
-    },
-    {
-      "count": 3,
-      "name": "activeFile",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
-    },
-    {
-      "count": 2,
-      "name": "codeMirrorApiPromise",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
-    },
-    {
-      "count": 2,
-      "name": "codeMirrorBundlePromise",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
-    },
-    {
-      "count": 3,
-      "name": "fileExplorerSelectionAnchor",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerSelectionLead",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
-    },
-    {
-      "count": 3,
-      "name": "fileTreeRenamePath",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
-    },
-    {
-      "count": 2,
-      "name": "filesystemRefreshInFlight",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
-    },
-    {
-      "count": 1,
-      "name": "layoutItems",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
-    },
-    {
-      "count": 4,
-      "name": "sharedImageViewerPath",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
-    },
-    {
-      "count": 1,
-      "name": "agentStatusPulsePeriodMs",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 1,
-      "name": "autoFocusEnabled",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
     },
     {
       "count": 1,
@@ -994,10 +412,64 @@
       "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
     },
     {
+      "count": 2,
+      "name": "codeMirrorApiPromise",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
+    },
+    {
+      "count": 2,
+      "name": "codeMirrorBundlePromise",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
+    },
+    {
+      "count": 1,
+      "name": "collapsedPreferenceSections",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
+    },
+    {
+      "count": 1,
+      "name": "collapsedPreferenceSections",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/86_changes_30_preferences.js"
+    },
+    {
+      "count": 1,
+      "name": "commandPaletteMode",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
       "count": 1,
       "name": "dateTimeHourCycle",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "debugModeEnabled",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
+    },
+    {
+      "count": 1,
+      "name": "devAutoReloadSource",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/99_client_event_transport.js"
+    },
+    {
+      "count": 2,
+      "name": "devAutoReloadSource",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/99_terminal_shortcuts_boot.js"
+    },
+    {
+      "count": 1,
+      "name": "diffExpandUnchanged",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
     },
     {
       "count": 1,
@@ -1006,16 +478,64 @@
       "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
     },
     {
+      "count": 1,
+      "name": "diffRefFrom",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "diffRefFrom",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/86_changes_00_refs.js"
+    },
+    {
+      "count": 1,
+      "name": "diffRefTo",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "diffRefTo",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/86_changes_00_refs.js"
+    },
+    {
+      "count": 1,
+      "name": "diffRefsByRepo",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 2,
+      "name": "documentTitleIdleSinceMs",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
       "count": 2,
       "name": "editorFontSize",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
     },
     {
+      "count": 1,
+      "name": "editorPreviewFontSize",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
       "count": 2,
       "name": "editorPreviewFontSize",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "editorPreviewFontSize",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/86_changes_30_preferences.js"
     },
     {
       "count": 1,
@@ -1045,6 +565,12 @@
       "count": 1,
       "name": "fileEditorBlameEnabled",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "fileEditorBlameEnabled",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
     },
     {
@@ -1060,10 +586,22 @@
       "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
     },
     {
+      "count": 1,
+      "name": "fileEditorLineNumbersEnabled",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
       "count": 2,
       "name": "fileEditorLineNumbersEnabled",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "fileEditorPreviewDisplayMode",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
     },
     {
       "count": 3,
@@ -1072,16 +610,76 @@
       "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
     },
     {
+      "count": 1,
+      "name": "fileEditorThemeMode",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
       "count": 2,
       "name": "fileEditorThemeMode",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
     },
     {
+      "count": 1,
+      "name": "fileEditorWrapEnabled",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
       "count": 2,
       "name": "fileEditorWrapEnabled",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerChangesSelectedSession",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 2,
+      "name": "fileExplorerChangesSelectedSession",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/86_changes_10_session_files.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerFilesystemLastFullAt",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 2,
+      "name": "fileExplorerFilesystemPushToken",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 3,
+      "name": "fileExplorerFilesystemWatchToken",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerFinderSelectedSession",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerFinderSelectedSession",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerFinderSelectedSession",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/86_changes_10_session_files.js"
     },
     {
       "count": 2,
@@ -1103,9 +701,51 @@
     },
     {
       "count": 1,
+      "name": "fileExplorerIndexExcludePaths",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
       "name": "fileExplorerIndexRefreshSeconds",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 2,
+      "name": "fileExplorerIndexedDirs",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerLastInteractionAt",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 2,
+      "name": "fileExplorerLastListError",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerManualSelectionActive",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 3,
+      "name": "fileExplorerMode",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerMode",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/86_changes_20_differ.js"
     },
     {
       "count": 1,
@@ -1114,94 +754,100 @@
       "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
     },
     {
+      "count": 3,
+      "name": "fileExplorerPathError",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 2,
+      "name": "fileExplorerRefreshDeferred",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerRepoInfoCacheLoaded",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerRoot",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 3,
+      "name": "fileExplorerRoot",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerRootMode",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerRootMode",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
       "count": 1,
       "name": "fileExplorerRootMode",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
     },
     {
-      "count": 2,
-      "name": "globalThemeMode",
+      "count": 1,
+      "name": "fileExplorerSelectionAnchor",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 6,
+      "name": "fileExplorerSelectionAnchor",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 3,
+      "name": "fileExplorerSelectionAnchor",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
     },
     {
       "count": 1,
-      "name": "latencyRefreshMs",
+      "name": "fileExplorerSelectionLead",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 5,
+      "name": "fileExplorerSelectionLead",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
     },
     {
       "count": 1,
-      "name": "popoverHideDelayMs",
+      "name": "fileExplorerSelectionLead",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
     },
     {
       "count": 1,
-      "name": "popoverShowDelayMs",
+      "name": "fileExplorerSelectionLead",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+      "writer": "static_src/js/yomux/86_changes_20_differ.js"
     },
     {
       "count": 1,
-      "name": "remoteResizeDelayMs",
+      "name": "fileExplorerShowHidden",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 1,
-      "name": "startupHelpersEnabled",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 1,
-      "name": "tabberActivityRefreshMs",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 2,
-      "name": "terminalFontSize",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 1,
-      "name": "terminalScrollback",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 1,
-      "name": "terminalThemeMode",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 1,
-      "name": "toastDurationMs",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 1,
-      "name": "uploadMaxBytes",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 1,
-      "name": "workflowTransitionGlowSeconds",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 1,
-      "name": "yomuxFontsReadyPromise",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+      "writer": "static_src/js/yomux/20_layout_state.js"
     },
     {
       "count": 1,
@@ -1211,27 +857,63 @@
     },
     {
       "count": 1,
-      "name": "pendingPreferencesRender",
+      "name": "fileExplorerSyncManualCollapseTargetKey",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/60_popovers_tabs.js"
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
     },
     {
       "count": 1,
-      "name": "pendingTabStripRender",
+      "name": "fileExplorerSyncManualCollapsedPaths",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/60_popovers_tabs.js"
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 6,
+      "name": "fileExplorerViewSettings",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
     },
     {
       "count": 1,
-      "name": "tabInteractionController",
+      "name": "fileExplorerVisibleSyncRoot",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/60_popovers_tabs.js"
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerVisibleSyncSession",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 3,
+      "name": "fileImagePreviewController",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
     },
     {
       "count": 2,
-      "name": "activeFile",
+      "name": "fileImagePreviewPopover",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/70_layout_actions.js"
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 3,
+      "name": "fileTreeRenamePath",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
+    },
+    {
+      "count": 2,
+      "name": "filesystemRefreshInFlight",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
+    },
+    {
+      "count": 1,
+      "name": "filledWorkspaceLayout",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
     },
     {
       "count": 2,
@@ -1240,10 +922,22 @@
       "writer": "static_src/js/yomux/70_layout_actions.js"
     },
     {
+      "count": 4,
+      "name": "focusedPanelItem",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
+    },
+    {
       "count": 1,
       "name": "focusedPanelItem",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/70_layout_actions.js"
+    },
+    {
+      "count": 4,
+      "name": "focusedTerminal",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
     },
     {
       "count": 3,
@@ -1253,33 +947,57 @@
     },
     {
       "count": 1,
-      "name": "lastFocusedTmuxSession",
+      "name": "focusedTerminal",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/70_layout_actions.js"
-    },
-    {
-      "count": 2,
-      "name": "sessionRenameDialog",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/70_layout_actions.js"
-    },
-    {
-      "count": 2,
-      "name": "layoutResizeState",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/78_panel_shell.js"
+      "writer": "static_src/js/yomux/99_terminal_boot.js"
     },
     {
       "count": 1,
-      "name": "pendingTabStripRender",
+      "name": "globalThemeMode",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/78_panel_shell.js"
+      "writer": "static_src/js/yomux/20_layout_state.js"
     },
     {
-      "count": 3,
-      "name": "responsiveLayoutPruneTimer",
+      "count": 1,
+      "name": "globalThemeMode",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/78_panel_shell.js"
+      "writer": "static_src/js/yomux/30_app_menus.js"
+    },
+    {
+      "count": 2,
+      "name": "globalThemeMode",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "globalThemeMode",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/86_changes_30_preferences.js"
+    },
+    {
+      "count": 1,
+      "name": "grid",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/82_chat_panel.js"
+    },
+    {
+      "count": 1,
+      "name": "grid",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/84_stats_current.js"
+    },
+    {
+      "count": 1,
+      "name": "grid",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/85_debug_panel.js"
+    },
+    {
+      "count": 1,
+      "name": "infoPanelSubTab",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
     },
     {
       "count": 3,
@@ -1300,54 +1018,6 @@
       "writer": "static_src/js/yomux/81_yoagent_panel.js"
     },
     {
-      "count": 1,
-      "name": "grid",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/82_chat_panel.js"
-    },
-    {
-      "count": 3,
-      "name": "pendingPreferencesRender",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/83_preferences_panel.js"
-    },
-    {
-      "count": 7,
-      "name": "preferencesResetConfirmVisible",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/83_preferences_panel.js"
-    },
-    {
-      "count": 1,
-      "name": "preferencesScrollActiveUntil",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/83_preferences_panel.js"
-    },
-    {
-      "count": 2,
-      "name": "preferencesScrollFlushTimer",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/83_preferences_panel.js"
-    },
-    {
-      "count": 1,
-      "name": "preferencesSearchText",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/83_preferences_panel.js"
-    },
-    {
-      "count": 1,
-      "name": "grid",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/84_stats_current.js"
-    },
-    {
-      "count": 1,
-      "name": "grid",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/85_debug_panel.js"
-    },
-    {
       "count": 2,
       "name": "jsDebugCostAgeNextRefreshAtMs",
       "owner": "static_src/js/yomux/84_debug_observation.js",
@@ -1358,6 +1028,18 @@
       "name": "jsDebugCostPanelNextRefreshAtMs",
       "owner": "static_src/js/yomux/84_debug_observation.js",
       "writer": "static_src/js/yomux/85_debug_panel.js"
+    },
+    {
+      "count": 1,
+      "name": "jsDebugEventCaptureInstalled",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
+    },
+    {
+      "count": 1,
+      "name": "jsDebugEvents",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
     },
     {
       "count": 6,
@@ -1378,8 +1060,8 @@
       "writer": "static_src/js/yomux/85_debug_panel.js"
     },
     {
-      "count": 3,
-      "name": "jsDebugGraphRangeSliderDragging",
+      "count": 2,
+      "name": "jsDebugGraphRangeSliderInteraction",
       "owner": "static_src/js/yomux/84_debug_observation.js",
       "writer": "static_src/js/yomux/85_debug_panel.js"
     },
@@ -1402,16 +1084,34 @@
       "writer": "static_src/js/yomux/85_debug_panel.js"
     },
     {
+      "count": 4,
+      "name": "jsDebugRenderDragDeferred",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
+    },
+    {
       "count": 2,
       "name": "jsDebugRenderDragDeferred",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/85_debug_panel.js"
     },
     {
+      "count": 3,
+      "name": "jsDebugRenderForce",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
+    },
+    {
       "count": 2,
       "name": "jsDebugRenderForce",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/85_debug_panel.js"
+    },
+    {
+      "count": 3,
+      "name": "jsDebugRenderTimer",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
     },
     {
       "count": 1,
@@ -1445,99 +1145,75 @@
     },
     {
       "count": 1,
+      "name": "keyboardShortcutsNode",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 2,
+      "name": "lastActiveNonFileExplorerPaneItem",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
+    },
+    {
+      "count": 3,
+      "name": "lastActivePaneItem",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
+    },
+    {
+      "count": 5,
+      "name": "lastFocusedTmuxSession",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
+    },
+    {
+      "count": 1,
+      "name": "lastFocusedTmuxSession",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/70_layout_actions.js"
+    },
+    {
+      "count": 1,
+      "name": "latencyRefreshMs",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
       "name": "latencySamples",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/85_debug_panel.js"
     },
     {
-      "count": 2,
-      "name": "sessions",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/85_debug_panel.js"
-    },
-    {
       "count": 1,
-      "name": "diffRefFrom",
+      "name": "layoutItems",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_00_refs.js"
-    },
-    {
-      "count": 1,
-      "name": "diffRefTo",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_00_refs.js"
-    },
-    {
-      "count": 1,
-      "name": "changesFolderCollapsed",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_10_session_files.js"
+      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
     },
     {
       "count": 2,
-      "name": "changesRepoCollapsed",
+      "name": "layoutResizeState",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_10_session_files.js"
+      "writer": "static_src/js/yomux/78_panel_shell.js"
     },
     {
       "count": 2,
-      "name": "fileExplorerChangesSelectedSession",
+      "name": "layoutSlots",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_10_session_files.js"
+      "writer": "static_src/js/yomux/20_layout_state.js"
     },
     {
       "count": 1,
-      "name": "fileExplorerFinderSelectedSession",
+      "name": "layoutSlots",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_10_session_files.js"
+      "writer": "static_src/js/yomux/75_dockview_layout.js"
     },
     {
       "count": 1,
-      "name": "repoRoot",
+      "name": "legacyYoCostMigrationRequested",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_10_session_files.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerMode",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_20_differ.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerSelectionLead",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_20_differ.js"
-    },
-    {
-      "count": 1,
-      "name": "collapsedPreferenceSections",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_30_preferences.js"
-    },
-    {
-      "count": 1,
-      "name": "editorPreviewFontSize",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_30_preferences.js"
-    },
-    {
-      "count": 1,
-      "name": "globalThemeMode",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_30_preferences.js"
-    },
-    {
-      "count": 1,
-      "name": "preferencesResetConfirmVisible",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_30_preferences.js"
-    },
-    {
-      "count": 1,
-      "name": "preferencesSearchText",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_30_preferences.js"
+      "writer": "static_src/js/yomux/20_layout_state.js"
     },
     {
       "count": 2,
@@ -1552,82 +1228,40 @@
       "writer": "static_src/js/yomux/88_markdown_preview.js"
     },
     {
-      "count": 1,
-      "name": "activeFile",
+      "count": 2,
+      "name": "notificationDelivery",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/92_codemirror_editor.js"
+      "writer": "static_src/js/yomux/20_layout_state.js"
     },
     {
-      "count": 1,
-      "name": "yoloRulesPayload",
+      "count": 4,
+      "name": "openAppMenuId",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/92_codemirror_editor.js"
+      "writer": "static_src/js/yomux/30_app_menus.js"
     },
     {
-      "count": 1,
-      "name": "devAutoReloadSource",
+      "count": 3,
+      "name": "openAppMenuOpenedAt",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/99_client_event_transport.js"
+      "writer": "static_src/js/yomux/30_app_menus.js"
     },
     {
-      "count": 1,
-      "name": "selfUpdateAvailableTarget",
-      "owner": "static_src/js/yomux/99_terminal_boot.js",
-      "writer": "static_src/js/yomux/99_client_event_transport.js"
+      "count": 3,
+      "name": "openAppMenuPinned",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/30_app_menus.js"
     },
     {
-      "count": 1,
-      "name": "tmuxSignalState",
+      "count": 2,
+      "name": "openAppMenuReturnFocus",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/99_client_event_transport.js"
-    },
-    {
-      "count": 1,
-      "name": "focusedTerminal",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/99_terminal_boot.js"
+      "writer": "static_src/js/yomux/30_app_menus.js"
     },
     {
       "count": 4,
       "name": "pasteUploadInFlight",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/99_terminal_boot.js"
-    },
-    {
-      "count": 3,
-      "name": "serverVersionReloadHandled",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/99_terminal_boot.js"
-    },
-    {
-      "count": 1,
-      "name": "sessions",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/99_terminal_boot.js"
-    },
-    {
-      "count": 1,
-      "name": "watchedPrsData",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/99_terminal_boot.js"
-    },
-    {
-      "count": 4,
-      "name": "yoagentScrollbackLocked",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/99_terminal_boot.js"
-    },
-    {
-      "count": 1,
-      "name": "yoloRulesPayload",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/99_terminal_boot.js"
-    },
-    {
-      "count": 2,
-      "name": "devAutoReloadSource",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/99_terminal_shortcuts_boot.js"
     },
     {
       "count": 2,
@@ -1640,6 +1274,432 @@
       "name": "pendingGlobalShortcutChordTimer",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/99_terminal_shortcuts_boot.js"
+    },
+    {
+      "count": 2,
+      "name": "pendingLayoutRender",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 2,
+      "name": "pendingLayoutRenderFrame",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "pendingPreferencesRender",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/60_popovers_tabs.js"
+    },
+    {
+      "count": 3,
+      "name": "pendingPreferencesRender",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/83_preferences_panel.js"
+    },
+    {
+      "count": 4,
+      "name": "pendingSessionButtonsRender",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/30_app_menus.js"
+    },
+    {
+      "count": 1,
+      "name": "pendingTabStripRender",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/60_popovers_tabs.js"
+    },
+    {
+      "count": 1,
+      "name": "pendingTabStripRender",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/78_panel_shell.js"
+    },
+    {
+      "count": 1,
+      "name": "pinnedTabItems",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "popoverHideDelayMs",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "popoverShowDelayMs",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "preferencesResetConfirmVisible",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 7,
+      "name": "preferencesResetConfirmVisible",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/83_preferences_panel.js"
+    },
+    {
+      "count": 1,
+      "name": "preferencesResetConfirmVisible",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/86_changes_30_preferences.js"
+    },
+    {
+      "count": 1,
+      "name": "preferencesScrollActiveUntil",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/83_preferences_panel.js"
+    },
+    {
+      "count": 2,
+      "name": "preferencesScrollFlushTimer",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/83_preferences_panel.js"
+    },
+    {
+      "count": 2,
+      "name": "preferencesSearchText",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "preferencesSearchText",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "preferencesSearchText",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/83_preferences_panel.js"
+    },
+    {
+      "count": 1,
+      "name": "preferencesSearchText",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/86_changes_30_preferences.js"
+    },
+    {
+      "count": 1,
+      "name": "remoteResizeDelayMs",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 2,
+      "name": "repoRoot",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "repoRoot",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/86_changes_10_session_files.js"
+    },
+    {
+      "count": 3,
+      "name": "responsiveLayoutPruneTimer",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/78_panel_shell.js"
+    },
+    {
+      "count": 1,
+      "name": "selfUpdateAvailableTarget",
+      "owner": "static_src/js/yomux/99_terminal_boot.js",
+      "writer": "static_src/js/yomux/99_client_event_transport.js"
+    },
+    {
+      "count": 3,
+      "name": "serverVersionReloadHandled",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/99_terminal_boot.js"
+    },
+    {
+      "count": 2,
+      "name": "sessionRenameDialog",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/70_layout_actions.js"
+    },
+    {
+      "count": 3,
+      "name": "sessions",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 2,
+      "name": "sessions",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 2,
+      "name": "sessions",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/85_debug_panel.js"
+    },
+    {
+      "count": 1,
+      "name": "sessions",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/99_terminal_boot.js"
+    },
+    {
+      "count": 1,
+      "name": "sharedImageViewerPath",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 4,
+      "name": "sharedImageViewerPath",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/45_file_explorer_actions.js"
+    },
+    {
+      "count": 2,
+      "name": "sidePaneLayoutWasConstrained",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "startupHelpersEnabled",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "startupHelpersEnabled",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "stateTrackingReady",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "tabInteractionController",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/60_popovers_tabs.js"
+    },
+    {
+      "count": 1,
+      "name": "tabMetaVisible",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
+    },
+    {
+      "count": 2,
+      "name": "tabStripOverflowCheckFrame",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "tabberActivityPayload",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "tabberActivityRefreshMs",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "tabberLaunchWarmupStarted",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "tabberMode",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "tabberNormalSelections",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "tabberSessionFileLookbackHours",
+      "owner": "static_src/js/yomux/10_core_utils.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 3,
+      "name": "tabberSidebarNarrowOverride",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 2,
+      "name": "tabberSidebarRequestedVisible",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 2,
+      "name": "tabberSidebarResizeFrame",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 1,
+      "name": "tabberSidebarResizeObserver",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 5,
+      "name": "tabberSidebarSinglePane",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 2,
+      "name": "tabberSidebarVisible",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 2,
+      "name": "terminalFontSize",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "terminalRemovalLatencySamples",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/10_core_utils.js"
+    },
+    {
+      "count": 1,
+      "name": "terminalScrollback",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "terminalThemeMode",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "terminalThemeMode",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "terminals",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/30_app_menus.js"
+    },
+    {
+      "count": 1,
+      "name": "tmuxSessionCreationTail",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 3,
+      "name": "tmuxSessionMutationCurrent",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "tmuxSignalState",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/99_client_event_transport.js"
+    },
+    {
+      "count": 1,
+      "name": "toastDurationMs",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "topbarResizeObserver",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "uploadMaxBytes",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "visibleSessions",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/20_layout_state.js"
+    },
+    {
+      "count": 1,
+      "name": "watchedPrsData",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/99_terminal_boot.js"
+    },
+    {
+      "count": 1,
+      "name": "workflowTransitionGlowSeconds",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 4,
+      "name": "yoagentScrollbackLocked",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/99_terminal_boot.js"
+    },
+    {
+      "count": 3,
+      "name": "yoloRulesPayload",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/30_app_menus.js"
+    },
+    {
+      "count": 1,
+      "name": "yoloRulesPayload",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/92_codemirror_editor.js"
+    },
+    {
+      "count": 1,
+      "name": "yoloRulesPayload",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/99_terminal_boot.js"
+    },
+    {
+      "count": 1,
+      "name": "yomuxFontsReadyPromise",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/50_editor_settings_runtime.js"
     }
   ],
   "source_text_assertions": {
@@ -2103,8 +2163,8 @@
     "tests/backend_health_indicator.test.js": 447,
     "tests/browser_helpers/cross_surface_quick_open_suite.js": 86,
     "tests/browser_helpers/editor_preview_info_graph_suite.js": 72,
-    "tests/browser_helpers/editor_preview_suite.js": 10036,
-    "tests/cross_surface_state.test.js": 6658,
+    "tests/browser_helpers/editor_preview_suite.js": 10038,
+    "tests/cross_surface_state.test.js": 6684,
     "tests/diagnostic_redaction.test.js": 146,
     "tests/drop_action_result.test.js": 58,
     "tests/editor_preview_core.test.js": 264,
@@ -2117,20 +2177,20 @@
     "tests/helpers/login_throttle.py": 54,
     "tests/i18n_locale_registry.test.js": 301,
     "tests/i18n_structured_message.test.js": 267,
-    "tests/layout_async.test.js": 14504,
-    "tests/layout_restore.test.js": 5382,
+    "tests/layout_async.test.js": 14997,
+    "tests/layout_restore.test.js": 5463,
     "tests/open_file_413_reason.test.js": 154,
     "tests/open_file_missing_guard.test.js": 550,
     "tests/operation_receipt_repair.test.js": 148,
     "tests/side_panes.test.js": 737,
-    "tests/stats_current_panel.test.js": 5871,
-    "tests/stats_current_ui.test.js": 3641,
+    "tests/stats_current_panel.test.js": 5894,
+    "tests/stats_current_ui.test.js": 3861,
     "tests/subsystems/app_batchd_product.py": 131,
     "tests/subsystems/app_darwin_memory.py": 68,
     "tests/subsystems/browser_harness_lifecycle.py": 284,
     "tests/subsystems/stats_24h_http.py": 534,
-    "tests/system_health_panel.test.js": 2530,
-    "tests/tabber.test.js": 3186,
+    "tests/system_health_panel.test.js": 2533,
+    "tests/tabber.test.js": 3198,
     "tests/test_activity.py": 281,
     "tests/test_activity_summary.py": 904,
     "tests/test_activity_summary_disabled.py": 91,
@@ -2158,26 +2218,26 @@
     "tests/test_backend_health_store.py": 942,
     "tests/test_background_scheduler.py": 102,
     "tests/test_background_scheduler_contract.py": 197,
-    "tests/test_batchd.py": 4021,
+    "tests/test_batchd.py": 4025,
     "tests/test_batchd_failure_isolation.py": 346,
     "tests/test_bfs_index.py": 1294,
     "tests/test_boot_healthz_probe.py": 393,
-    "tests/test_browser_boot.py": 1624,
+    "tests/test_browser_boot.py": 1553,
     "tests/test_browser_daemons_theme.py": 151,
-    "tests/test_browser_dockview.py": 10373,
+    "tests/test_browser_dockview.py": 10648,
     "tests/test_browser_editor.py": 8240,
-    "tests/test_browser_finder.py": 6717,
+    "tests/test_browser_finder.py": 6744,
     "tests/test_browser_finder_fs_repro.py": 46,
     "tests/test_browser_golden.py": 78,
-    "tests/test_browser_layout.py": 18362,
-    "tests/test_browser_ring_landing_verify.py": 1340,
-    "tests/test_browser_stats_coverage.py": 900,
-    "tests/test_browser_stats_widen.py": 3105,
+    "tests/test_browser_layout.py": 18390,
+    "tests/test_browser_ring_landing_verify.py": 1331,
+    "tests/test_browser_stats_coverage.py": 901,
+    "tests/test_browser_stats_widen.py": 3527,
     "tests/test_browser_tree_metadata.py": 235,
     "tests/test_cache.py": 39,
     "tests/test_chat_service.py": 214,
     "tests/test_chat_store.py": 916,
-    "tests/test_check_runner.py": 4499,
+    "tests/test_check_runner.py": 4544,
     "tests/test_claude_permission_hook.py": 149,
     "tests/test_client_event_broker_backlog_disambiguation.py": 955,
     "tests/test_client_events.py": 435,
@@ -2187,7 +2247,7 @@
     "tests/test_defect2_harness.py": 600,
     "tests/test_dev_restart_script.py": 1252,
     "tests/test_diagnostic_redaction.py": 1018,
-    "tests/test_docker_image.py": 269,
+    "tests/test_docker_image.py": 509,
     "tests/test_drop_actions.py": 160,
     "tests/test_e2e_api_errors.py": 490,
     "tests/test_e2e_auto_approve.py": 404,
@@ -2207,10 +2267,10 @@
     "tests/test_filesystem_operation_route_contract.py": 141,
     "tests/test_finder_fs_repro.py": 165,
     "tests/test_fixture_content_root.py": 128,
-    "tests/test_fixture_parents.py": 71,
+    "tests/test_fixture_parents.py": 72,
     "tests/test_fs_preflight.py": 137,
     "tests/test_gate_aged_state.py": 757,
-    "tests/test_gate_agent_state.py": 1399,
+    "tests/test_gate_agent_state.py": 1404,
     "tests/test_gate_api_errors.py": 288,
     "tests/test_gate_auth.py": 141,
     "tests/test_gate_backend_health_indicator.py": 610,
@@ -2219,36 +2279,36 @@
     "tests/test_gate_bundle_vm.py": 190,
     "tests/test_gate_chat.py": 70,
     "tests/test_gate_chat_host_local.py": 115,
-    "tests/test_gate_coexistence.py": 2325,
+    "tests/test_gate_coexistence.py": 2311,
     "tests/test_gate_contract.py": 822,
     "tests/test_gate_contracts_q.py": 12,
     "tests/test_gate_corruption_ui.py": 112,
-    "tests/test_gate_daemon_monitor_acceptance.py": 451,
-    "tests/test_gate_daemon_monitor_statsd_recovery.py": 295,
+    "tests/test_gate_daemon_monitor_acceptance.py": 94,
+    "tests/test_gate_daemon_monitor_statsd_recovery.py": 130,
     "tests/test_gate_differ.py": 1696,
-    "tests/test_gate_editor.py": 945,
+    "tests/test_gate_editor.py": 949,
     "tests/test_gate_f8_harness.py": 896,
     "tests/test_gate_finder.py": 1148,
     "tests/test_gate_findings.py": 203,
     "tests/test_gate_host_partitioned_db.py": 78,
     "tests/test_gate_i18n_raw_keys.py": 73,
     "tests/test_gate_interaction.py": 925,
-    "tests/test_gate_isolated_dev_server.py": 153,
-    "tests/test_gate_isolation.py": 4771,
+    "tests/test_gate_isolated_dev_server.py": 170,
+    "tests/test_gate_isolation.py": 4772,
     "tests/test_gate_launch.py": 583,
     "tests/test_gate_orphans.py": 472,
     "tests/test_gate_panels.py": 1432,
     "tests/test_gate_route_sweep.py": 1010,
     "tests/test_gate_safety.py": 229,
-    "tests/test_gate_scheduler.py": 80,
-    "tests/test_gate_stats.py": 792,
+    "tests/test_gate_scheduler.py": 95,
+    "tests/test_gate_stats.py": 793,
     "tests/test_gate_stats_nonbrowser.py": 309,
-    "tests/test_gate_stats_range.py": 626,
+    "tests/test_gate_stats_range.py": 629,
     "tests/test_gate_stats_ring_buffer.py": 2469,
     "tests/test_gate_stats_socket_runtime.py": 136,
     "tests/test_gate_sweep_p.py": 39,
     "tests/test_gate_terminal_files.py": 92,
-    "tests/test_gate_tmux.py": 1683,
+    "tests/test_gate_tmux.py": 1686,
     "tests/test_gate_tmux_identity.py": 261,
     "tests/test_gate_tmux_recovery.py": 41,
     "tests/test_gate_transcript_roots.py": 339,
@@ -2266,9 +2326,9 @@
     "tests/test_install_metadata.py": 31,
     "tests/test_instance_isolation.py": 499,
     "tests/test_journey_phase_contracts.py": 60,
-    "tests/test_launcher_ephemeral_server.py": 78,
+    "tests/test_launcher_ephemeral_server.py": 92,
     "tests/test_launcher_probe.py": 40,
-    "tests/test_launcher_row_wiring.py": 218,
+    "tests/test_launcher_row_wiring.py": 221,
     "tests/test_listener_census.py": 955,
     "tests/test_live_browser_soak.py": 4103,
     "tests/test_live_browser_soak_stats_revisions.py": 49,
@@ -2316,13 +2376,13 @@
     "tests/test_search_indexer.py": 517,
     "tests/test_search_indexer_bfs_cutover.py": 986,
     "tests/test_search_progress_notifier_isolation.py": 143,
-    "tests/test_server_lease.py": 582,
+    "tests/test_server_lease.py": 622,
     "tests/test_server_logs.py": 125,
-    "tests/test_server_query.py": 3302,
+    "tests/test_server_query.py": 3303,
     "tests/test_server_static.py": 329,
     "tests/test_service_failure_matrix.py": 256,
-    "tests/test_session_actions.py": 406,
-    "tests/test_session_files.py": 6173,
+    "tests/test_session_actions.py": 407,
+    "tests/test_session_files.py": 6249,
     "tests/test_sessions.py": 1200,
     "tests/test_settings.py": 927,
     "tests/test_shared_config_lock.py": 121,
@@ -2363,18 +2423,18 @@
     "tests/test_stats_resolution.py": 140,
     "tests/test_stats_v7_to_v8_migration.py": 595,
     "tests/test_statsd_ring_invalidation_storm.py": 570,
-    "tests/test_statusd.py": 1933,
+    "tests/test_statusd.py": 1944,
     "tests/test_statusd_protocol.py": 104,
     "tests/test_system_status_latency_probe.py": 653,
-    "tests/test_system_status_latency_tool.py": 337,
+    "tests/test_system_status_latency_tool.py": 332,
     "tests/test_system_status_snapshot.py": 458,
     "tests/test_terminal_state_guard.py": 90,
     "tests/test_test_isolation.py": 176,
     "tests/test_text_client_common_metadata.py": 816,
     "tests/test_textshape_guard.py": 158,
-    "tests/test_tls_config.py": 785,
+    "tests/test_tls_config.py": 786,
     "tests/test_tmux_runtime.py": 323,
-    "tests/test_tmux_signals.py": 654,
+    "tests/test_tmux_signals.py": 655,
     "tests/test_tmux_theme.py": 88,
     "tests/test_tmux_utils.py": 507,
     "tests/test_tmux_wall.py": 229,
@@ -2399,7 +2459,7 @@
     "tests/test_yoagent_stream_events.py": 185,
     "tests/test_yoagent_stream_state.py": 538,
     "tests/test_yoagent_transports.py": 866,
-    "tests/test_yolo_rules.py": 377,
+    "tests/test_yolo_rules.py": 384,
     "tests/test_yolomux_root.py": 206,
     "tests/test_yostats_active_browser_window.py": 1502,
     "tests/tmux_wall.test.js": 64

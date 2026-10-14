@@ -33,6 +33,9 @@ function hiddenFromLayoutStatusMessage(item) {
 
 function removeSessionFromLayout(item, options = {}) {
   if (!itemInLayout(item)) return;
+  if (!tabLayoutManipulationAllowed() && isTmuxSession(item) && tabberNormalSelections?.includes(item)) {
+    return toggleTabberNormalPane(item);
+  }
   const isFiles = isFileExplorerItem(item);
   const sourceSlot = slotForItem(item);
   if (isFiles) rememberFileExplorerOpenIntent(false);
@@ -50,6 +53,9 @@ function removeSessionFromLayout(item, options = {}) {
 }
 
 function removePaneFromLayout(item) {
+  if (!tabLayoutManipulationAllowed() && isTmuxSession(item) && tabberNormalSelections?.includes(item)) {
+    return removeSessionFromLayout(item);
+  }
   const slot = slotForSession(item);
   if (!slot) return;
   const moved = paneTabs(slot);
@@ -262,6 +268,7 @@ function nextNarrowPaneFrameItem(item, slots = layoutSlots) {
 }
 
 function canPaneExpand(item, slots = layoutSlots) {
+  if (!tabLayoutManipulationAllowed()) return false;
   const targetSlot = slotForItem(item, slots);
   if (!targetSlot || slotIsSidePane(targetSlot, slots)) return false;
   if (!activeItemForSide(targetSlot, slots)) return false;
@@ -273,6 +280,7 @@ function canPaneExpand(item, slots = layoutSlots) {
 }
 
 function minimizePaneFromLayout(item) {
+  if (!tabLayoutManipulationAllowed()) return false;
   const sourceSlot = slotForSession(item);
   if (!sourceSlot) return;
   const returnItem = historicalFileReturnItem(item);
@@ -386,6 +394,7 @@ function layoutModeStatusMessage(mode) {
 }
 
 function applyNonFinderLayoutMode(mode) {
+  if (!tabLayoutManipulationAllowed()) return false;
   const items = visibleNonFinderPaneItems();
   if (!items.length) return;
   const normalized = normalizeLayoutMode(mode);
@@ -509,6 +518,7 @@ function slotForNewTmuxSession(session) {
 }
 
 async function placeTmuxSession(session, options = {}) {
+  if (!tabLayoutManipulationAllowed()) return selectSession(session, options);
   const currentSlot = slotForSession(session);
   if (currentSlot) {
     activatePaneTab(currentSlot, session, options);
@@ -548,6 +558,10 @@ async function openFileSurfacePane(item) {
   const resolved = resolveLayoutItem(item);
   if (typeof paneItemCapabilityAvailable === 'function' && !paneItemCapabilityAvailable(resolved)) return false;
   if (!layoutIsFileSurfaceItem(resolved)) return false;
+  if (!tabberIsAdvanced() && resolved !== tabberItemId) {
+    if (itemInLayout(resolved)) return activatePaneTab(slotForItem(resolved), resolved, {userInitiated: true});
+    return toggleTabberNormalPane(resolved);
+  }
   const currentSlot = slotForItem(resolved);
   if (currentSlot) {
     activatePaneTab(currentSlot, resolved, {userInitiated: true});
@@ -581,6 +595,7 @@ async function openFileSurface(item) {
 async function openFileSurfaceFromMenu(item) {
   const resolved = resolveLayoutItem(item);
   if (!layoutIsFileSurfaceItem(resolved)) return false;
+  if (!tabberIsAdvanced()) return openFileSurfacePane(resolved);
   if (sidePaneConstrainedMode()) return openFileSurfacePane(resolved);
   // Pass only absent items to the left-edge creator. Existing triplet tabs are already placed by the
   // user, possibly in the right Vertical Side Pane or another vertical leaf, and must not be re-homed.
@@ -921,7 +936,8 @@ function tabDirectionalActionCapabilities(item, sourceSlot = slotForItem(item), 
   const sourceRect = sourceSlot ? layoutSlotScreenRect(sourceSlot) : null;
   const sourceRole = sourceSlot ? paneRoleForSlot(sourceSlot, slots) : paneRoleDefinition(paneRoleGeneric);
   const allowed = Boolean(
-    isLayoutItem(item)
+    tabLayoutManipulationAllowed()
+      && isLayoutItem(item)
       && sourceSlot
       && !narrowSingleColumnMode()
       && !tabIsPinned(item)
@@ -982,7 +998,8 @@ function tabSplitCapabilities(item, sourceSlot = slotForItem(item), slots = layo
 function tabCanFillWorkspace(item, slots = layoutSlots) {
   const sourceSlot = slotForItem(item, slots);
   return Boolean(
-    isLayoutItem(item)
+    tabLayoutManipulationAllowed()
+      && isLayoutItem(item)
       && sourceSlot
       && !slotIsSidePane(sourceSlot, slots)
       && layoutLeafSlots(slots[layoutTreeKey]).length > 1
@@ -995,6 +1012,7 @@ function tabWorkspaceIsFilled(item) {
 }
 
 function toggleTabWorkspaceFill(item) {
+  if (!tabLayoutManipulationAllowed()) return false;
   if (!isLayoutItem(item)) return false;
   if (tabWorkspaceIsFilled(item)) {
     const saved = filledWorkspaceLayout;
@@ -1319,6 +1337,11 @@ function activatePaneTab(side, session, options = {}) {
 }
 
 async function selectSession(session, options = {}) {
+  if (!tabLayoutManipulationAllowed() && session !== tabberItemId) {
+    const slot = slotForItem(session);
+    if (slot) return activatePaneTab(slot, session, options);
+    return toggleTabberNormalPane(session);
+  }
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight({yieldToInput: true});
@@ -1421,7 +1444,10 @@ function selectAdjacentPaneTab(direction, options = {}) {
 }
 
 function sessionAgentKind(session) {
-  const info = transcriptMetadataState.payload.sessions?.[session];
+  const tabberView = tabberViewSessions.get(String(session || ''));
+  if (tabberView?.agentKey) return visibleAgentClient(String(tabberView.agentKey).toLowerCase());
+  const sourceSession = tabberView?.sourceSession || session;
+  const info = transcriptMetadataState.payload.sessions?.[sourceSession];
   const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
   const kind = String(agent?.kind || '').toLowerCase();
   return visibleAgentClient(kind);
@@ -1621,6 +1647,22 @@ function sessionShortcutLabel(session) {
 }
 
 function sessionLabel(session) {
+  const item = String(session || '');
+  const tabberView = tabberViewSessions.get(item);
+  if (tabberView?.sourceSession && tabberView.sourceSession !== item) {
+    const sourceLabel = sessionLabel(tabberView.sourceSession);
+    const storedLabel = String(tabberView.label || '').trim();
+    const windowLabel = String(tabberView.windowName || '').trim()
+      || (storedLabel.startsWith(sourceLabel) ? storedLabel.slice(sourceLabel.length).trim() : '')
+      || (storedLabel.startsWith(tabberViewSessionPrefix) ? '' : storedLabel)
+      || `window ${tabberView.windowIndex}`;
+    const label = `${sourceLabel} ${windowLabel}`.trim();
+    if (tabberView.label !== label) {
+      tabberViewSessions.set(item, {...tabberView, label});
+      persistTabberViewSessions();
+    }
+    return label;
+  }
   const rename = tmuxSessionMutationCurrent;
   if (rename?.state === 'active' && rename.kind === 'rename' && rename.session === session) {
     session = rename.newName;
@@ -2141,6 +2183,7 @@ async function ensureSession(session) {
   if (existing) return existing;
   const promise = (async () => {
     try {
+      if (tabberViewSessions.has(key) && !await ensureTabberViewSessionReady(key)) return false;
       const payload = await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
       statusEl.innerHTML = payload.created
         ? `<span class="ok">${localizedHtml('status.sessionCreatedWithAgent', {session: sessionLabel(session), agent: 'Claude'})}</span>`
@@ -2294,6 +2337,11 @@ async function runTmuxSessionMutation(kind, options, request, commit) {
 }
 
 async function createNextSession(agent, options = {}) {
+  // Creation adds a conversation; a second click must not supersede the first intent.
+  return withTmuxSessionCreationLease(() => createNextSessionWithLease(agent, options));
+}
+
+async function createNextSessionWithLease(agent, options = {}) {
   if (readOnlyMode) {
     statusErr(localizedHtml('status.readOnlyCreateSessions'));
     return;
@@ -2304,27 +2352,38 @@ async function createNextSession(agent, options = {}) {
     const dangerouslyYolo = options.dangerouslyYolo === true;
     const terminal = agent === 'term' ? String(options.terminal || '').trim() : '';
     const terminalQuery = terminal ? `&terminal=${encodeURIComponent(terminal)}` : '';
-    const plan = await apiFetchJson('/api/create-session-plan', {cache: 'no-store'});
-    const reservedSession = String(plan?.session || '').trim();
-    const serverGeneration = Number(plan?.generation || 0);
-    if (!reservedSession || !Number.isSafeInteger(serverGeneration) || serverGeneration <= 0) {
-      throw new Error('create-session plan did not provide a bounded lifecycle identity');
+    let mutation;
+    // A plan is a lifecycle identity, not a tmux name reservation. A competing creator
+    // can consume that name; only the backend's explicit pre-mutation refusal permits replanning.
+    for (let attempt = 0; attempt < 99; attempt += 1) {
+      try {
+        const plan = await apiFetchJson('/api/create-session-plan', {cache: 'no-store'});
+        const reservedSession = String(plan?.session || '').trim();
+        const serverGeneration = Number(plan?.generation || 0);
+        if (!reservedSession || !Number.isSafeInteger(serverGeneration) || serverGeneration <= 0) {
+          throw new Error('create-session plan did not provide a bounded lifecycle identity');
+        }
+        mutation = await runTmuxSessionMutation(
+          'create',
+          {session: reservedSession, serverGeneration},
+          () => apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}&dangerously_yolo=${dangerouslyYolo ? '1' : '0'}&session=${encodeURIComponent(reservedSession)}&generation=${encodeURIComponent(String(serverGeneration))}${terminalQuery}`, {method: 'POST'}),
+          async payload => {
+            adoptTopologyGeneration(payload);
+            markPendingTmuxSession(payload.session);
+            const previousActive = activeSessions.slice();
+            updateSessionList(payload.sessions || []);
+            renderSessionButtons();
+            renderPanels(previousActive);
+            if (!tabberIsAdvanced()) await toggleTabberNormalPane(payload.session);
+            else await placeTmuxSession(payload.session);
+            await ensureTerminalRunning(payload.session);
+          },
+        );
+        break;
+      } catch (error) {
+        if (error?.status !== 409 || error.payload?.reason_code !== 'create_session_plan_stale' || attempt === 98) throw error;
+      }
     }
-    const mutation = await runTmuxSessionMutation(
-      'create',
-      {session: reservedSession, serverGeneration},
-      () => apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}&dangerously_yolo=${dangerouslyYolo ? '1' : '0'}&session=${encodeURIComponent(reservedSession)}&generation=${encodeURIComponent(String(serverGeneration))}${terminalQuery}`, {method: 'POST'}),
-      async payload => {
-        adoptTopologyGeneration(payload);
-        markPendingTmuxSession(payload.session);
-        const previousActive = activeSessions.slice();
-        updateSessionList(payload.sessions || []);
-        renderSessionButtons();
-        renderPanels(previousActive);
-        await placeTmuxSession(payload.session);
-        await ensureTerminalRunning(payload.session);
-      },
-    );
     if (!mutation.committed) return false;
     const payload = mutation.payload;
     renderAutoApproveButtons();
@@ -2472,6 +2531,7 @@ function replaceTmuxSessionsInClient(renameEntries, nextSessions, options = {}) 
   }
   moveUploadResultRecords(replacements);
   replaceSessionMetadataEntries(replacements);
+  renameTabberSessionsInClient(replacements);
   setSessionOrder(next);
   const focusSession = previousFocusedPanelItem
     ? replacements.get(previousFocusedPanelItem) || previousFocusedPanelItem
@@ -2510,7 +2570,7 @@ function sessionRenameDialogKeydown(event) {
   if (event.key === 'Escape') closeSessionRenameDialog();
 }
 
-function showSessionRenameDialog(session) {
+function showSessionRenameDialog(session, descriptionWindow = null, descriptionWindowId = '') {
   if (readOnlyMode) {
     statusErr(localizedHtml('status.readOnlyRenameSessions'));
     return false;
@@ -2523,10 +2583,13 @@ function showSessionRenameDialog(session) {
   overlay.className = 'app-modal-overlay session-rename-backdrop';
   overlay.setAttribute('role', 'presentation');
   const titleName = sessionLabel(session);
+  const descriptionMode = descriptionWindow !== null;
+  const renameLabel = descriptionMode ? 'Rename Description' : t('common.renameTmuxSession');
+  const initialValue = descriptionMode ? tabberWindowDescription(session, descriptionWindow) : session;
   overlay.innerHTML = `
-    <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('common.renameTmuxSession'))}">
-      <div class="session-rename-title">${esc(t('common.renameNamed', {name: titleName}))}</div>
-      <input class="session-rename-input" name="sessionName" value="${esc(session)}" aria-label="${esc(t('rename.inputAria'))}" autocomplete="off">
+    <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="${esc(renameLabel)}">
+      <div class="session-rename-title">${esc(descriptionMode ? renameLabel : t('common.renameNamed', {name: titleName}))}</div>
+      <input class="session-rename-input" name="sessionName" value="${esc(initialValue)}" aria-label="${esc(descriptionMode ? renameLabel : t('rename.inputAria'))}" autocomplete="off">
       <div class="session-rename-error" hidden></div>
       <div class="session-rename-actions">
         <button type="button" class="session-rename-cancel">${esc(t('common.cancel'))}</button>
@@ -2550,7 +2613,7 @@ function showSessionRenameDialog(session) {
     event.preventDefault();
     if (submit.disabled) return;
     const nextName = input.value.trim();
-    const nameError = tmuxSessionNameError(nextName);
+    const nameError = descriptionMode ? (nextName.length > 160 ? 'Description must be 160 characters or fewer' : '') : tmuxSessionNameError(nextName);
     if (nameError) {
       showError(nameError);
       input.focus();
@@ -2560,7 +2623,9 @@ function showSessionRenameDialog(session) {
     submit.disabled = true;
     input.readOnly = true;
     try {
-      const renameResult = await renameTmuxSession(session, nextName);
+      const renameResult = descriptionMode
+        ? await renameTabberDescription(session, descriptionWindow, descriptionWindowId, nextName)
+        : await renameTmuxSession(session, nextName);
       if (renameResult !== true) {
         showError(renameResult?.error || t('status.renameFailedSeeStatus'));
         input.focus();
@@ -2827,7 +2892,9 @@ function fitTerminal(session, options = {}) {
   if (changed) item.term.resize(size.cols, size.rows);
   if (claim) sendRemoteResize(session, {activate: true});
   else if (changed) scheduleRemoteResize(session);
-  if (!unchanged || options.force === true) refreshTerminal(session);
+  // A remote ownership claim renews tmux's foreground client even when the browser's
+  // measured viewport moved by a pixel. Repainting xterm is only needed when its cell grid changed.
+  if (claim ? changed : (!unchanged || options.force === true)) refreshTerminal(session);
 }
 
 function sendRemoteResize(session, options = {}) {
@@ -2897,12 +2964,23 @@ function refreshTerminal(session, options = {}) {
     }
     for (const callback of callbacks) callback();
     // xterm already owns an animation-frame renderer; another frame here delays activation.
-    item.term.refresh(0, Math.max(0, item.term.rows - 1));
+    // Fit and activation subscribers can join that queued repaint after parsing has settled.
+    if (!item.refreshViewportFrame || item.refreshViewportRows !== item.term.rows) {
+      item.refreshViewportRows = item.term.rows;
+      item.term.refresh(0, Math.max(0, item.term.rows - 1));
+      if (!item.refreshViewportFrame) {
+        item.refreshViewportFrame = requestAnimationFrame(() => {
+          if (terminals.get(session) !== item) return;
+          item.refreshViewportFrame = 0;
+        });
+      }
+    }
     scheduleTerminalReferenceUnderlineRepaint(session);
     syncTerminalAttentionHighlight(session);
   };
   // One parse fence and viewport refresh serve fit, activation, and paint completion.
-  if (typeof item.term.write === 'function') item.term.write('', parsed);
+  if (item.pendingTerminalWrites === 0) parsed();
+  else if (typeof item.term.write === 'function') item.term.write('', parsed);
   else parsed();
 }
 
@@ -3903,6 +3981,7 @@ function closeTerminalItem(session, item) {
     tmuxSessionLifecycleReleaseTimer(item.sessionLifecycleToken, item.scrollTimer);
   }
   if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
+  if (item.refreshViewportFrame) cancelAnimationFrame(item.refreshViewportFrame);
   if (item.fitTimer) clearTimeout(item.fitTimer);
   if (item.blankScreenRefreshTimer) {
     clearTimeout(item.blankScreenRefreshTimer);
@@ -3912,6 +3991,8 @@ function closeTerminalItem(session, item) {
   item.fileUnderlineController?.dispose?.();
   item.containerBindingDispose?.();
   item.fitFrame = 0;
+  item.refreshViewportFrame = 0;
+  item.refreshViewportRows = 0;
   item.refreshPending = false;
   item.refreshAfterParse = [];
   item.fitTimer = 0;
@@ -4216,7 +4297,16 @@ function dropIntentInlineSize(intent) {
   return Math.max(0, Number(rect?.width) || 0);
 }
 
+function tabDragAllowed() {
+  return tabLayoutManipulationAllowed();
+}
+
+function tabLayoutManipulationAllowed() {
+  return typeof tabberIsAdvanced !== 'function' || tabberIsAdvanced();
+}
+
 function dropItemCanBeDragged(item, options = {}) {
+  if (!tabDragAllowed()) return false;
   if (isLayoutItem(item)) return true;
   return options.allowCandidate === true && isFileEditorItem(item);
 }
@@ -4529,6 +4619,7 @@ function classifyLayoutDrag(event, {intentForFile, intentForSession, suppressSes
   }
   const session = dragPayload(event);
   if (!session?.session) return null;
+  if (!tabDragAllowed()) return {kind: 'session', payload: session, intent: null, allowed: false, dropEffect: 'none'};
   if (suppressSession(event)) return {kind: 'session', payload: session, intent: null, allowed: false, dropEffect: 'none'};
   const intent = intentForSession?.(event) || null;
   if (intent) intent.item = session.session;

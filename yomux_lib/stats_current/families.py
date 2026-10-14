@@ -120,10 +120,12 @@ CURRENT_FAMILIES = (
     FamilySpec(
         "cpu", "cpu", 1, 1, FoldKind.AVERAGE,
         (_field("process_percent", NUMBER), _field("system_percent", NUMBER),
-         _field("process_cpu_percent", PROCESS_CPU_PERCENT, required=False)),
+         _field("process_cpu_percent", PROCESS_CPU_PERCENT, required=False),
+         _field("process_census_incomplete", BOOLEAN, required=False)),
         (
             "system_cpu_percent", "system_cpu_min_percent", "system_cpu_max_percent",
             "process_cpu_percent", "process_cpu_min_percent", "process_cpu_max_percent", "process_cpu_percent_by_binary",
+            "process_census_incomplete:cpu",
         ), True,
     ),
     FamilySpec(
@@ -162,6 +164,7 @@ CURRENT_FAMILIES = (
             _field("mac_compressed_memory_bytes", NUMBER, required=False), _field("mac_pressure_percent", NUMBER, required=False),
             _field("mac_pressure_level", NUMBER, required=False),
             _field("process_memory_bytes", PROCESS_MEMORY_BYTES, required=False),
+            _field("process_census_incomplete", BOOLEAN, required=False),
             # A reverted pre-v6 Mac experiment persisted this key. Keep it
             # readable so one retired observation cannot block statsd startup;
             # the materializer deliberately does not publish it.
@@ -171,7 +174,7 @@ CURRENT_FAMILIES = (
             "system_memory_used_bytes", "system_memory_capacity_bytes", "mac_physical_memory_bytes", "mac_memory_used_bytes",
             "mac_cached_files_bytes", "mac_swap_used_bytes", "mac_app_memory_bytes", "mac_wired_memory_bytes",
             "mac_compressed_memory_bytes", "mac_pressure_percent", "mac_pressure_level",
-            "process_memory_bytes",
+            "process_memory_bytes", "process_census_incomplete:system_memory",
         ), True,
     ),
     FamilySpec(

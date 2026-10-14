@@ -271,7 +271,7 @@ func TestTerminalUnchangedOwnershipReconcilesWithoutSIGWINCH(t *testing.T) {
 	}
 	defer pair.close()
 	controls := 0
-	pair.requestControl = func(cols, rows, txn int) {
+	pair.requestControl = func(cols, rows, txn int, authority ...bool) {
 		if cols != 120 || rows != 36 || txn != 0 {
 			t.Fatalf("ownership dimensions: %d %d %d", cols, rows, txn)
 		}

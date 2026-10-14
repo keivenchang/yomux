@@ -130,7 +130,7 @@ def relative_age_text(timestamp: float | None, now: datetime | None = None, loca
         return server_plural(locale, "summary.relative.minute", minutes)
     if seconds < 86400:
         hours = max(1, round(seconds / 3600))
-        return server_plural(locale, "summary.relative.hour", hours)
+        return server_plural(locale, "relative.hour", hours)
     days = max(1, round(seconds / 86400))
     return server_plural(locale, "summary.relative.day", days)
 
@@ -145,7 +145,7 @@ def compact_relative_age_text(timestamp: float | None, now: datetime | None = No
     if seconds < 3600:
         return server_plural(locale, "relative.compact.minute", max(1, round(seconds / 60)))
     if seconds < 86400:
-        return server_plural(locale, "relative.compact.hour", max(1, round(seconds / 3600)))
+        return server_plural(locale, "relative.hour", max(1, round(seconds / 3600)))
     return server_plural(locale, "relative.compact.day", max(1, round(seconds / 86400)))
 
 

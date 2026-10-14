@@ -57,17 +57,21 @@ func goRuntimeLabel() string {
 }
 
 type server struct {
-	runtimeMemory        runtimeMemoryState
-	root                 string
-	host                 string
-	port                 int
-	sessionFilesListener string
-	dangerouslyYolo      bool
-	config               string
-	httpMode             bool
-	mu                   sync.Mutex
-	children             map[*exec.Cmd]struct{}
-	events               *eventBroker
+	runtimeMemory          runtimeMemoryState
+	cpuCaptureMu           sync.Mutex
+	cpuCapture             finder.CPUCapture
+	root                   string
+	host                   string
+	port                   int
+	sessionFilesListener   string
+	dangerouslyYolo        bool
+	config                 string
+	httpMode               bool
+	mu                     sync.Mutex
+	clientEventMu          sync.Mutex
+	clientEventConnections map[string]int
+	children               map[*exec.Cmd]struct{}
+	events                 *eventBroker
 
 	eventLogPath                        string
 	background                          *goBackgroundOwner
@@ -76,11 +80,17 @@ type server struct {
 	indexSettingsMu                     sync.RWMutex
 	indexSettingsUpdateMu               sync.Mutex
 	indexSettings                       finderIndexSettings
+	indexActiveSettings                 finderIndexSettings
+	indexApplicationEpoch               uint64
+	indexWorkerIncarnation              string
+	indexSettingsError                  string
+	indexSettingsFileDigest             [32]byte
 	indexSettingsFencePending           bool
 	indexSettingsFencePreserveSnapshots bool
 	indexSettingsFenceRoots             []string
-	indexMonitorMu                      sync.Mutex
-	indexMonitors                       map[string]*finderIndexMonitor
+	indexRefreshMu                      sync.Mutex
+	indexRefreshDeadlines               map[string]indexRefreshDeadline
+	indexRefreshWake                    chan struct{}
 	finderJobs                          *work.Scheduler
 	finderBulkJobs                      *work.Scheduler
 	finderStreamJobs                    *work.Scheduler
@@ -185,10 +195,6 @@ type server struct {
 	pythonHTMLState
 	tmuxMetadataState
 	operationState
-}
-
-type finderIndexMonitor struct {
-	cancel context.CancelFunc
 }
 
 const goPerformanceRecordLimit = 4096
@@ -377,7 +383,7 @@ type ptyPair struct {
 	master         *os.File
 	slave          *os.File
 	tty            string
-	requestControl func(cols, rows, txn int)
+	requestControl func(cols, rows, txn int, authority ...bool)
 }
 
 // Ownership renewal must reconcile tmux even when the local PTY size is stable.
@@ -415,6 +421,7 @@ func (c *wsConn) frame(opcode byte, payload []byte) error {
 }
 
 func (s *server) registerFilesystemRoutes(mux *http.ServeMux) {
+	mux.Handle("/api/runtime/cpu-profile", s.protected(http.HandlerFunc(s.runtimeCPUProfile), "admin"))
 	mux.Handle("/api/session-files", s.protected(http.HandlerFunc(s.sessionFiles)))
 	mux.Handle("/api/session-files-stream", s.protected(http.HandlerFunc(s.sessionFilesStream)))
 	mux.Handle("/api/session-files-batch", s.protected(http.HandlerFunc(s.sessionFilesBatch)))
@@ -448,6 +455,8 @@ func (s *server) registerFilesystemRoutes(mux *http.ServeMux) {
 
 func (s *server) registerSessionRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/ensure-session", s.protected(http.HandlerFunc(s.ensureSession)))
+	mux.Handle("/api/tabber-description", s.protected(http.HandlerFunc(s.tabberDescription)))
+	mux.Handle("/api/tabber-view-session", s.protected(http.HandlerFunc(s.tabberViewSession)))
 	mux.Handle("/api/create-session-plan", s.protected(http.HandlerFunc(s.createSessionPlan)))
 	mux.Handle("/api/create-session", s.protected(http.HandlerFunc(s.createSession)))
 	mux.Handle("/api/rename-session", s.protected(http.HandlerFunc(s.renameSession)))
@@ -599,6 +608,11 @@ func main() {
 	s.capabilities.Set("core.settings.v1", capabilities.Entry{Available: true})
 	finderService, finderErr := finder.NewWithLimits(rootPath, func(kind string, payload map[string]any) error {
 		_, err := s.events.publish(kind, payload)
+		if err == nil && kind == "fs_changed" && payload["reason"] != "watch-roots-replaced" {
+			if paths, ok := payload["paths"].([]string); ok {
+				s.queueFinderIndexRepairsForPaths(paths)
+			}
+		}
 		return err
 	}, finder.UploadLimits{MaxBytes: s.fileTransferMaxBytes(), MaxFiles: s.fileTransferMaxFiles(), FilenameTemplate: s.fileTransferFilenameTemplate()})
 	if finderErr != nil {
@@ -615,7 +629,9 @@ func main() {
 		fatal("Finder initialization failed: " + finderErr.Error())
 	}
 	s.finder = finderService
+	s.indexRefreshWake = make(chan struct{}, 1)
 	s.searchIndex = finder.NewSearchIndexWorkerClient(stateDir)
+	s.searchIndex.OnComplete = s.publishFinderIndexCompletion
 	s.finder.SetSearchIndexWorker(s.searchIndex)
 	if err := s.loadFinderIndexSettings(); err != nil {
 		slog.Warn("Finder index settings unavailable; indexed search is disabled until settings load", "error", err)
@@ -652,6 +668,7 @@ func main() {
 	mux.Handle("/api/stats-observations", s.protected(http.HandlerFunc(s.statsObservations)))
 	mux.Handle("/api/stats-refill", s.protected(http.HandlerFunc(s.statsRefill)))
 	mux.Handle("/api/stats-retry", s.protected(http.HandlerFunc(s.statsRetry)))
+	mux.Handle("/api/stats-session-aliases", s.protected(http.HandlerFunc(s.statsSessionAliases)))
 	mux.Handle("/api/stats-snapshot", s.protected(http.HandlerFunc(s.statsSnapshot)))
 	mux.Handle("/api/stats-delta", s.protected(http.HandlerFunc(s.statsDelta)))
 	mux.Handle("/api/stats-stream", s.protected(http.HandlerFunc(s.statsStream)))
@@ -1364,7 +1381,7 @@ func (s *server) fsFastList(w http.ResponseWriter, r *http.Request) {
 	// slow backfill cannot delay the plain directory rows. FastList performs only one-level
 	// descriptor-bound filesystem metadata reads; repository history, status, and +/- counts arrive
 	// through the later session-files/enrichment requests.
-	payload, finderErr := s.finder.FastList(r.Context(), path)
+	payload, finderErr := s.finder.FastListNameQuery(r.Context(), path, r.URL.Query().Get("name_query"))
 	finderHTTPJSON(w, finderRequestIDForHTTP(), payload, finderErr)
 }
 
@@ -1709,95 +1726,17 @@ func (s *server) fsWatchDiff(w http.ResponseWriter, r *http.Request) {
 	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
 }
 
-func (s *server) monitorFinderIndex(root string) {
-	if s.finder == nil || s.events == nil || !s.finderSearchOptions(root, "", false).Indexed {
+func (s *server) publishFinderIndexCompletion(status map[string]any) {
+	root, _ := status["root"].(string)
+	if root == "" || s.events == nil {
 		return
 	}
-	s.indexMonitorMu.Lock()
-	if s.indexMonitors == nil {
-		s.indexMonitors = make(map[string]*finderIndexMonitor)
-	}
-	if _, running := s.indexMonitors[root]; running {
-		s.indexMonitorMu.Unlock()
-		return
-	}
-	monitorContext, cancel := context.WithCancel(context.Background())
-	monitor := &finderIndexMonitor{cancel: cancel}
-	s.indexMonitors[root] = monitor
-	s.indexMonitorMu.Unlock()
-	go func() {
-		defer func() {
-			s.indexMonitorMu.Lock()
-			if s.indexMonitors[root] == monitor {
-				delete(s.indexMonitors, root)
-			}
-			s.indexMonitorMu.Unlock()
-		}()
-		ticker := time.NewTicker(250 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-monitorContext.Done():
-				return
-			case <-ticker.C:
-				if !s.finderSearchOptions(root, "", false).Indexed {
-					return
-				}
-				status, finderErr := s.finder.IndexStatus(context.Background(), root)
-				if finderErr != nil {
-					return
-				}
-				if status["building"] == true || (status["indexed"] != true && status["index_state"] != "error") {
-					continue
-				}
-				generation := status["generation"]
-				workerIncarnation := status["worker_incarnation"]
-				scopeDigest := sha256.Sum256([]byte(root))
-				_, _ = s.events.publish("search_progress", map[string]any{
-					"scope_id": hex.EncodeToString(scopeDigest[:])[:16], "generation": generation, "worker_incarnation": workerIncarnation,
-					"revision": generation, "coverage": status["progressive_coverage"],
-					"index_state": status["index_state"], "stale": status["stale"],
-				})
-				return
-			}
-		}
-	}()
-}
-
-func (s *server) stopFinderIndexMonitor(root string) {
-	s.indexMonitorMu.Lock()
-	defer s.indexMonitorMu.Unlock()
-	if monitor := s.indexMonitors[root]; monitor != nil {
-		delete(s.indexMonitors, root)
-		monitor.cancel()
-	}
-}
-
-func (s *server) reconcileFinderIndexes(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		s.indexSettingsMu.RLock()
-		roots := append([]string(nil), s.indexSettings.roots...)
-		s.indexSettingsMu.RUnlock()
-		for _, root := range roots {
-			options := s.finderSearchOptions(root, "", false)
-			if !options.Indexed || options.RefreshSec <= 0 {
-				continue
-			}
-			requestContext, cancel := context.WithTimeout(ctx, 5*time.Second)
-			_, finderErr := s.ensureFinderIndex(requestContext, root, options)
-			cancel()
-			if finderErr != nil && ctx.Err() == nil {
-				slog.Warn("Finder index safety refresh could not be scheduled", "root", root, "error", finderErr.Message)
-			}
-		}
-	}
+	scopeDigest := sha256.Sum256([]byte(root))
+	_, _ = s.events.publish("search_progress", map[string]any{
+		"scope_id": hex.EncodeToString(scopeDigest[:])[:16], "generation": status["generation"],
+		"worker_incarnation": status["worker_incarnation"], "index_state": status["index_state"],
+		"stale": status["stale"], "revision": status["generation"], "coverage": status["progressive_coverage"],
+	})
 }
 
 func (s *server) queueFinderIndexRepairs(payload map[string]any) {
@@ -1823,6 +1762,13 @@ func (s *server) queueFinderIndexRepairs(payload map[string]any) {
 	if len(paths) == 0 {
 		return
 	}
+	s.queueFinderIndexRepairsForPaths(paths)
+}
+
+func (s *server) queueFinderIndexRepairsForPaths(paths []string) {
+	if s.finder == nil || s.searchIndex == nil || len(paths) == 0 {
+		return
+	}
 	s.indexSettingsMu.RLock()
 	roots := append([]string(nil), s.indexSettings.roots...)
 	s.indexSettingsMu.RUnlock()
@@ -1831,13 +1777,18 @@ func (s *server) queueFinderIndexRepairs(payload map[string]any) {
 		if !options.Indexed {
 			continue
 		}
+		changedPaths := make([]string, 0, len(paths))
 		for _, path := range paths {
 			relative, relativeErr := filepath.Rel(root, path)
 			ancestor, ancestorErr := filepath.Rel(path, root)
 			if relativeErr == nil && (relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))) || ancestorErr == nil && (ancestor == "." || (ancestor != ".." && !strings.HasPrefix(ancestor, ".."+string(filepath.Separator)))) {
-				s.finder.QueueIndexRepair(root, options, func() { s.monitorFinderIndex(root) })
-				break
+				changedPaths = append(changedPaths, path)
 			}
+		}
+		if len(changedPaths) > 0 {
+			options.ChangedPaths = changedPaths
+			options.ForceRefresh = true
+			s.finder.QueueIndexRepair(root, options, nil)
 		}
 	}
 }
@@ -1888,7 +1839,6 @@ func (s *server) fsSearch(w http.ResponseWriter, r *http.Request) {
 			payload, err := s.finder.SearchStreamWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, queryTrue(r.URL.Query().Get("direct_only")), queryTrue(r.URL.Query().Get("minimal")), searchOptions, func(files []map[string]any, coverage map[string]any) error {
 				return writeFinderSSE("chunk", map[string]any{"files": files, "coverage": coverage})
 			})
-			s.maybeMonitorFinderIndex(root, payload)
 			return finderProduct{data: payload}, err
 		})
 		if finderErr != nil {
@@ -1901,7 +1851,6 @@ func (s *server) fsSearch(w http.ResponseWriter, r *http.Request) {
 	if recursive && !directOnly && cursor == "" && !indexedOnly {
 		s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "search", root, func(ctx context.Context) (map[string]any, *finder.Error) {
 			payload, err := s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, false, queryTrue(r.URL.Query().Get("minimal")), searchOptions)
-			s.maybeMonitorFinderIndex(root, payload)
 			return payload, err
 		})
 		return
@@ -1909,7 +1858,6 @@ func (s *server) fsSearch(w http.ResponseWriter, r *http.Request) {
 	if batchSearch {
 		s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "search", root, func(ctx context.Context) (map[string]any, *finder.Error) {
 			payload, err := s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, directOnly, queryTrue(r.URL.Query().Get("minimal")), searchOptions)
-			s.maybeMonitorFinderIndex(root, payload)
 			return payload, err
 		})
 		return
@@ -1917,14 +1865,12 @@ func (s *server) fsSearch(w http.ResponseWriter, r *http.Request) {
 	if cursor != "" {
 		s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "search", root, func(ctx context.Context) (map[string]any, *finder.Error) {
 			payload, err := s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, directOnly, queryTrue(r.URL.Query().Get("minimal")), searchOptions)
-			s.maybeMonitorFinderIndex(root, payload)
 			return payload, err
 		})
 		return
 	}
 	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
 		payload, err := s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, directOnly, queryTrue(r.URL.Query().Get("minimal")), searchOptions)
-		s.maybeMonitorFinderIndex(root, payload)
 		return finderProduct{data: payload}, err
 	})
 	if finderErr != nil {
@@ -1934,17 +1880,8 @@ func (s *server) fsSearch(w http.ResponseWriter, r *http.Request) {
 	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
 }
 
-func (s *server) maybeMonitorFinderIndex(root string, payload map[string]any) {
-	if payload != nil && (payload["index_state"] == "warming" || payload["building"] == true) {
-		s.monitorFinderIndex(root)
-	}
-}
-
 func (s *server) ensureFinderIndex(ctx context.Context, root string, options finder.SearchOptions) (map[string]any, *finder.Error) {
 	payload, finderErr := s.finder.EnsureIndex(ctx, root, options)
-	if finderErr == nil {
-		s.maybeMonitorFinderIndex(root, payload)
-	}
 	return payload, finderErr
 }
 
@@ -1969,6 +1906,12 @@ func (s *server) fsIndexStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if payload := product.data; payload != nil {
+		if refreshRoot, err := filepath.Abs(root); err == nil {
+			payload["refresh_schedule"] = s.indexRefreshDiagnostics(filepath.Clean(refreshRoot))
+		}
+		for key, value := range s.finderIndexSettingsStatus() {
+			payload[key] = value
+		}
 		options := s.finderSearchOptions(root, "", false)
 		if options.Indexed {
 			payload["max_files"] = options.MaxFiles
@@ -2058,7 +2001,6 @@ func (s *server) fsUnindex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "unindex", path, func(ctx context.Context) (map[string]any, *finder.Error) {
-		s.stopFinderIndexMonitor(path)
 		return s.finder.Unindex(ctx, path)
 	})
 }
@@ -2716,6 +2658,30 @@ func (s *server) clientEvents(w http.ResponseWriter, r *http.Request) {
 	clientID := normalizeClientID(r.URL.Query().Get("client_id"))
 	stream, unsubscribe := s.events.subscribeClient(clientID, channels...)
 	defer unsubscribe()
+	if clientID != "" {
+		s.clientEventMu.Lock()
+		if s.clientEventConnections == nil {
+			s.clientEventConnections = make(map[string]int)
+		}
+		s.clientEventConnections[clientID]++
+		s.clientEventMu.Unlock()
+		defer func() {
+			s.clientEventMu.Lock()
+			connections := s.clientEventConnections[clientID] - 1
+			if connections <= 0 {
+				delete(s.clientEventConnections, clientID)
+				if s.finder != nil {
+					// Keep reconnect admission serialized with lease release. Otherwise a
+					// new stream can renew this client between the count reaching zero
+					// and this old stream removing that renewed lease.
+					s.finder.ReleaseWatchClient(clientID)
+				}
+			} else {
+				s.clientEventConnections[clientID] = connections
+			}
+			s.clientEventMu.Unlock()
+		}()
+	}
 	revisions := s.events.readySnapshotFor(stream)
 	s.events.mu.Lock()
 	epoch := s.events.epoch
@@ -4483,7 +4449,7 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 		name = nextName
 	} else if name != nextName {
 		jsonResponse(w, http.StatusConflict, map[string]any{
-			"ok": false, "error": "create-session lifecycle reservation no longer matches the next available name",
+			"ok": false, "error": "create-session lifecycle reservation no longer matches the next available name", "reason_code": "create_session_plan_stale",
 		})
 		return
 	}
@@ -4498,7 +4464,7 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 	if hasRequestedName {
 		if generation <= 0 {
 			jsonResponse(w, http.StatusConflict, map[string]any{
-				"ok": false, "error": "create-session lifecycle reservation no longer matches the next available name",
+				"ok": false, "error": "create-session lifecycle reservation no longer matches the next available name", "reason_code": "create_session_plan_stale",
 			})
 			return
 		}
@@ -4623,10 +4589,8 @@ func (s *server) settings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if r.Method == http.MethodPost {
-		s.indexSettingsUpdateMu.Lock()
-		defer s.indexSettingsUpdateMu.Unlock()
-	}
+	s.indexSettingsUpdateMu.Lock()
+	defer s.indexSettingsUpdateMu.Unlock()
 	var body string
 	if r.Method == http.MethodPost {
 		user, _ := r.Context().Value(authContextKey{}).(authUser)
@@ -4676,6 +4640,9 @@ print(json.dumps(result, separators=(",", ":"), ensure_ascii=False), end="")`
 		return
 	}
 	if errorMessage, ok := payload["error"].(string); ok && strings.TrimSpace(errorMessage) != "" {
+		s.indexSettingsMu.Lock()
+		s.indexSettingsError = errorMessage
+		s.indexSettingsMu.Unlock()
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{
 			"error":    errorMessage,
 			"code":     "settings_file_malformed",
@@ -4687,36 +4654,10 @@ print(json.dumps(result, separators=(",", ":"), ensure_ascii=False), end="")`
 		})
 		return
 	}
-	previousIndexRoots, indexSettingsChanged, indexSettingsErr := s.updateFinderIndexSettings(payload)
-	if indexSettingsErr != nil {
-		slog.Error("Finder index settings update failed", "error", indexSettingsErr)
-		jsonResponse(w, http.StatusServiceUnavailable, typedError("Finder index settings unavailable", "common.requestFailed", true))
-		return
+	if err := s.applyFinderIndexSettings(r.Context(), payload); err != nil {
+		payload["index_synchronization_error"] = err.Error()
 	}
-	s.indexSettingsMu.RLock()
-	indexSettingsFencePending := s.indexSettingsFencePending
-	indexSettingsFencePreserveSnapshots := s.indexSettingsFencePreserveSnapshots
-	indexSettings := s.indexSettings
-	s.indexSettingsMu.RUnlock()
-	if r.Method == http.MethodPost && (indexSettingsChanged || indexSettingsFencePending) && s.searchIndex != nil {
-		s.indexSettingsMu.RLock()
-		roots := append(append([]string(nil), s.indexSettingsFenceRoots...), previousIndexRoots...)
-		roots = append(roots, indexSettings.roots...)
-		s.indexSettingsMu.RUnlock()
-		uniqueRoots := uniqueFinderIndexRoots(roots)
-		for _, root := range uniqueRoots {
-			s.stopFinderIndexMonitor(root)
-		}
-		if err := s.searchIndex.FenceSettings(r.Context(), uniqueRoots, indexSettings.revision, indexSettingsFencePreserveSnapshots); err != nil {
-			jsonResponse(w, http.StatusServiceUnavailable, typedError("Finder index settings are still being fenced", "common.requestFailed", true))
-			return
-		}
-		s.indexSettingsMu.Lock()
-		s.indexSettingsFencePending = false
-		s.indexSettingsFencePreserveSnapshots = false
-		s.indexSettingsFenceRoots = nil
-		s.indexSettingsMu.Unlock()
-	}
+	payload["index_settings_status"] = s.finderIndexSettingsStatus()
 	if r.Method == http.MethodPost && s.finder != nil {
 		s.finder.SetUploadLimits(finder.UploadLimits{
 			MaxBytes:         s.fileTransferMaxBytes(),
@@ -4819,6 +4760,10 @@ func (s *server) renameSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if newName == "" {
 		writeRenameError(http.StatusBadRequest, "rename.error.required", "session name is required", map[string]any{})
+		return
+	}
+	if isTabberViewSessionName(newName) {
+		writeRenameError(http.StatusBadRequest, "rename.error.invalidChars", "session name is reserved for internal window views", map[string]any{})
 		return
 	}
 	if len(newName) > 64 {
@@ -4960,9 +4905,15 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) writePythonHome(w http.ResponseWriter, r *http.Request, user authUser) {
+	topology, topologyErr := s.tmuxTopologySnapshot(true)
+	if topologyErr != nil {
+		http.Error(w, "session roster unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	request := map[string]any{
-		"sessions": s.sessionNames(), "role": user.role, "username": user.username,
-		"language": r.Header.Get("Accept-Language"), "capabilities": s.capabilities.Snapshot(),
+		"sessions": topology.sessions, "role": user.role, "username": user.username,
+		"tmux_topology": map[string]any{"generation": topology.generation, "epoch": s.metadataEpoch()},
+		"language":      r.Header.Get("Accept-Language"), "capabilities": s.capabilities.Snapshot(),
 		"stats_only": queryTrue(r.URL.Query().Get("stats_only")), "backend": goRuntimeLabel(),
 		"dangerously_yolo": s.dangerouslyYolo,
 	}
@@ -5063,17 +5014,25 @@ func (s *server) claimResizeAuthority(ctx context.Context, session, activeClient
 		return
 	}
 	target := s.exactTarget(session)
-	format := "#{client_tty}\t#{client_session}\t#{client_width}\t#{client_height}"
+	format := "#{client_tty}\t#{client_session}\t#{client_width}\t#{client_height}\t#{window_id}"
 	out, err := s.tmuxCommandContext(ctx, "list-clients", "-F", format).Output()
 	if err != nil {
 		return
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	activeWindow := ""
+	for _, line := range lines {
+		fields := strings.Split(line, "\t")
+		if len(fields) == 5 && fields[0] == activeClient {
+			activeWindow = fields[4]
+		}
+	}
+	for _, line := range lines {
 		if ctx.Err() != nil {
 			return
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 4 || fields[1] != session {
+		if len(fields) < 4 || (fields[1] != session && (len(fields) != 5 || activeWindow == "" || fields[4] != activeWindow)) {
 			continue
 		}
 		client := fields[0]
@@ -5090,18 +5049,19 @@ func (s *server) claimResizeAuthority(ctx context.Context, session, activeClient
 
 // Terminal controls share the connection's lifetime and latest resize owner. A
 // slow tmux client must never hold the goroutine delivering keyboard bytes.
-func (s *server) startTerminalControls(conn *wsConn, session, tty string) (func(int, int, int), func()) {
+func (s *server) startTerminalControls(conn *wsConn, session, tty string, resize ...func(int, int) error) (func(int, int, int, ...bool), func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	wake := make(chan struct{}, 1)
 	done := make(chan struct{})
 	var mu sync.Mutex
 	var cols, rows, txn, generation int
-	var claim bool
+	var claim, pendingResize bool
 	var activeCancel context.CancelFunc
-	request := func(nextCols, nextRows, nextTxn int) {
+	request := func(nextCols, nextRows, nextTxn int, authority ...bool) {
 		mu.Lock()
 		if nextCols > 0 && nextRows > 0 {
-			cols, rows, claim = nextCols, nextRows, true
+			cols, rows, pendingResize = nextCols, nextRows, true
+			claim = len(authority) == 0 || authority[0]
 		}
 		if nextTxn > 0 {
 			txn = nextTxn
@@ -5129,22 +5089,28 @@ func (s *server) startTerminalControls(conn *wsConn, session, tty string) (func(
 			case <-wake:
 			default:
 			}
-			currentCols, currentRows, currentTxn, currentGeneration, currentClaim := cols, rows, txn, generation, claim
+			currentCols, currentRows, currentTxn, currentGeneration, currentClaim, currentResize := cols, rows, txn, generation, claim, pendingResize
 			commandCtx, commandCancel := context.WithCancel(ctx)
 			activeCancel = commandCancel
 			mu.Unlock()
-			if currentClaim && tty != "" && s.supportsIgnoreSize() {
+			var controlErr error
+			if currentResize && len(resize) > 0 {
+				controlErr = s.resizeTerminalNative(commandCtx, session, tty, currentCols, currentRows, resize[0], currentClaim)
+			} else if currentClaim && tty != "" && s.supportsIgnoreSize() {
 				s.claimResizeAuthority(commandCtx, session, tty, currentCols, currentRows)
 			} else {
 				_ = s.tmuxCommandContext(commandCtx, "refresh-client", "-t", s.exactTarget(session)).Run()
 			}
-			if commandCtx.Err() == nil && currentTxn > 0 {
+			if commandCtx.Err() == nil && controlErr == nil && currentTxn > 0 {
 				payload, _ := json.Marshal(map[string]any{"type": "refresh-ack", "txn": currentTxn})
 				_ = conn.frame(1, payload)
 			}
+			if controlErr != nil && commandCtx.Err() == nil {
+				slog.Warn("terminal resize did not converge", "session", session, "cols", currentCols, "rows", currentRows, "error", controlErr)
+			}
 			mu.Lock()
 			if generation == currentGeneration {
-				claim, txn, activeCancel = false, 0, nil
+				claim, pendingResize, txn, activeCancel = false, false, 0, nil
 			}
 			mu.Unlock()
 			commandCancel()
@@ -5292,7 +5258,16 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 		delete(s.children, cmd)
 		s.mu.Unlock()
 	}()
-	requestControl, stopControls := s.startTerminalControls(conn, session, pty.tty)
+	requestControl, stopControls := s.startTerminalControls(conn, session, pty.tty, func(rows, cols int) error {
+		changed := pty.rows != rows || pty.cols != cols
+		if err := pty.resize(rows, cols); err != nil {
+			return err
+		}
+		if changed && cmd.Process != nil {
+			_ = cmd.Process.Signal(syscall.SIGWINCH)
+		}
+		return nil
+	})
 	pty.requestControl = requestControl
 	defer stopControls()
 	go func() {
@@ -5362,15 +5337,7 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 		if msg.Rows > 0 && msg.Cols > 0 {
 			rows := clampDimension(msg.Rows, 2, 300, 36)
 			cols := clampDimension(msg.Cols, 20, 500, 120)
-			changed := pty.rows != rows || pty.cols != cols
-			if pty.resize(rows, cols) == nil {
-				if changed && process.Process != nil {
-					_ = process.Process.Signal(syscall.SIGWINCH)
-				}
-				if msg.Activate || (msg.Foreground != nil && *msg.Foreground) {
-					pty.requestControl(cols, rows, 0)
-				}
-			}
+			pty.requestControl(cols, rows, 0, msg.Activate || msg.Foreground != nil && *msg.Foreground)
 		}
 	case "tmux-scroll":
 		if (msg.Direction == "up" || msg.Direction == "down") && msg.Lines > 0 {

@@ -84,7 +84,7 @@ func TestGoSearchIndexConcurrentInstancesOwnDisjointDatabases(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			defer store.db.Close()
+			defer func() { store.db.Close() }()
 			engine := newSearchIndexEngine(store)
 			if err := engine.build(indexBuildJob{root: root, identity: fileID(info), maxFiles: 10, maxBytes: DefaultIndexBytes}); err != nil {
 				t.Error(err)
@@ -119,7 +119,7 @@ func TestGoQuickOpenRefreshReflectsRenamesAndDeletions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	build := indexBuildJob{root: root, identity: fileID(info), maxFiles: 10, maxBytes: DefaultIndexBytes}
 	if err := engine.build(build); err != nil {
@@ -215,7 +215,7 @@ func TestSearchIndexPreservesExplicitSnapshotBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	engine.activeBuild = true
 	const budget = int64(1024 * 1024 * 1024)
@@ -235,7 +235,7 @@ func TestSearchIndexRejectsSchedulingWithFencedSettingsRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	if _, err := engine.handle(indexRequest{Action: "fence", Root: root, SettingsRevision: 42}); err != nil {
 		t.Fatal(err)
@@ -267,7 +267,7 @@ func TestSearchIndexSettingsFenceCoversDescendantsAndWorkerRestart(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	if err := engine.build(indexBuildJob{root: indexedRoot, identity: fileID(info), maxFiles: 10, maxBytes: DefaultIndexBytes, settingsRevision: 41}); err != nil {
 		t.Fatal(err)
@@ -317,7 +317,7 @@ func TestSearchIndexPreservesSnapshotForCompatibleSettingsRefresh(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	if err := engine.build(indexBuildJob{root: root, identity: fileID(info), maxFiles: 10, maxBytes: DefaultIndexBytes, settingsRevision: 41}); err != nil {
 		t.Fatal(err)
@@ -336,8 +336,8 @@ func TestSearchIndexPreservesSnapshotForCompatibleSettingsRefresh(t *testing.T) 
 	if err := store.db.QueryRow(`SELECT settings_revision FROM roots WHERE root=?`, root).Scan(&revision); err != nil {
 		t.Fatal(err)
 	}
-	if revision != 42 {
-		t.Fatalf("preserved snapshot revision = %d, want 42", revision)
+	if revision != 41 {
+		t.Fatalf("preserved snapshot build revision = %d, want 41", revision)
 	}
 }
 
@@ -351,7 +351,7 @@ func TestSearchIndexNewSettingsRevisionSupersedesRemovedAncestorFence(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	if _, err := engine.fenceSettings([]string{configuredRoot}, 42, true); err != nil {
 		t.Fatal(err)
@@ -386,7 +386,7 @@ func TestSearchIndexSettingsFenceRetryRepeatsCleanupAtSameRevision(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	if _, err := engine.fenceSettings([]string{configuredRoot}, 42, true); err != nil {
 		t.Fatal(err)
@@ -394,7 +394,7 @@ func TestSearchIndexSettingsFenceRetryRepeatsCleanupAtSameRevision(t *testing.T)
 	if _, err := store.db.Exec(`INSERT INTO roots(root,identity,generation,state,coverage) VALUES(?,?,?,?,?)`, nestedRoot, "identity", 1, "ready", "complete"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`INSERT INTO entries(root,generation,relative_path,name,file_identity,size,mtime_ns) VALUES(?,?,?,?,?,?,?)`, nestedRoot, 1, "blog.md", "blog.md", "file", 1, 1); err != nil {
+	if err := engine.writeDiscoveredPaths(nestedRoot, 1, []discoveredIndexPath{{relative: "blog.md", name: "blog.md", identity: "file", size: 1, mtimeNS: 1}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := engine.fenceSettings([]string{configuredRoot}, 42, true); err != nil {
@@ -422,7 +422,7 @@ func TestSearchIndexSettingsRevisionBlocksBuildWhenRemovedRootWasOmitted(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	if _, err := engine.fenceSettings(nil, 43, true); err != nil {
 		t.Fatal(err)
@@ -452,7 +452,7 @@ func TestSearchIndexStartupSyncRemovesUnconfiguredSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	if err := engine.build(indexBuildJob{root: removedRoot, identity: fileID(info), maxFiles: 10, maxBytes: DefaultIndexBytes, settingsRevision: 42}); err != nil {
 		t.Fatal(err)
@@ -482,7 +482,7 @@ func TestSearchIndexStartupSyncPreservesMatchingConfiguredSnapshot(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	if err := engine.build(indexBuildJob{root: configuredRoot, identity: fileID(info), maxFiles: 10, maxBytes: DefaultIndexBytes, settingsRevision: 43}); err != nil {
 		t.Fatal(err)
@@ -494,7 +494,7 @@ func TestSearchIndexStartupSyncPreservesMatchingConfiguredSnapshot(t *testing.T)
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM roots WHERE root=?`, configuredRoot).Scan(&rootCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM entries WHERE root=?`, configuredRoot).Scan(&entryCount); err != nil {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM entries WHERE root=(SELECT id FROM root_keys WHERE path=?)`, configuredRoot).Scan(&entryCount); err != nil {
 		t.Fatal(err)
 	}
 	if rootCount != 1 || entryCount != 1 {
@@ -515,7 +515,7 @@ func TestSearchIndexCursorRequiresMatchingWorkerIncarnation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	first := newSearchIndexEngine(store)
 	if err := first.build(indexBuildJob{root: root, identity: fileID(info), maxFiles: 10, maxBytes: DefaultIndexBytes}); err != nil {
 		t.Fatal(err)
@@ -570,7 +570,7 @@ func TestSearchIndexRemovalWaitsForSnapshotReader(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.db.Close()
+			defer func() { store.db.Close() }()
 			engine := newSearchIndexEngine(store)
 			if err := engine.build(indexBuildJob{root: root, identity: fileID(info), maxFiles: 10, maxBytes: DefaultIndexBytes}); err != nil {
 				t.Fatal(err)
@@ -596,7 +596,7 @@ func TestSearchIndexRemovalWaitsForSnapshotReader(t *testing.T) {
 			case <-time.After(100 * time.Millisecond):
 			}
 			var name string
-			if err := store.db.QueryRow(`SELECT name FROM entries WHERE root=?`, root).Scan(&name); err != nil || name != "techblog.md" {
+			if err := store.db.QueryRow(`SELECT name FROM entries WHERE root=(SELECT id FROM root_keys WHERE path=?)`, root).Scan(&name); err != nil || name != "techblog.md" {
 				t.Fatalf("pinned search lost techblog.md: name=%q err=%v", name, err)
 			}
 			engine.schedule(root, fileID(info), 10, DefaultIndexBytes, 0, nil, nil, 1)
@@ -634,7 +634,7 @@ func TestSearchIndexDoesNotPublishMissingRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	published, err := engine.publishGeneration(indexBuildJob{root: "/missing", identity: "identity"}, 1, "ready", "complete", 0, 4096, "", 0, nil)
 	if published || err == nil {
@@ -655,7 +655,7 @@ func TestSearchIndexPublicationWaitsForSnapshotReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	job := indexBuildJob{root: root, identity: fileID(info), maxFiles: 10, maxBytes: DefaultIndexBytes}
 	if err := engine.build(job); err != nil {
@@ -665,7 +665,7 @@ func TestSearchIndexPublicationWaitsForSnapshotReader(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT generation FROM roots WHERE root=?`, root).Scan(&prior); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`INSERT INTO entries SELECT root,?,relative_path,name,file_identity,size,mtime_ns FROM entries WHERE root=? AND generation=?`, prior+1, root, prior); err != nil {
+	if _, err := store.db.Exec(`INSERT INTO entries SELECT root,?,directory,name,file_identity,size,mtime_ns FROM entries WHERE root=(SELECT id FROM root_keys WHERE path=?) AND generation=?`, prior+1, root, prior); err != nil {
 		t.Fatal(err)
 	}
 	engine.crawlPause.Lock()
@@ -699,7 +699,7 @@ func TestSearchIndexPublicationWaitsForSnapshotReader(t *testing.T) {
 		t.Fatalf("pinned generation = %d, want %d: %v", pinned, prior, err)
 	}
 	var name string
-	if err := store.db.QueryRow(`SELECT name FROM entries WHERE root=? AND generation=?`, root, pinned).Scan(&name); err != nil || name != "techblog.md" {
+	if err := store.db.QueryRow(`SELECT name FROM entries WHERE root=(SELECT id FROM root_keys WHERE path=?) AND generation=?`, root, pinned).Scan(&name); err != nil || name != "techblog.md" {
 		t.Fatalf("pinned search lost techblog.md: name=%q err=%v", name, err)
 	}
 	engine.crawlPause.Unlock()
@@ -746,7 +746,7 @@ func TestSearchIndexPublishesSearchableGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	if err := engine.build(indexBuildJob{root: root, identity: fileID(info), maxFiles: 2000, maxBytes: DefaultIndexBytes}); err != nil {
 		t.Fatal(err)
@@ -816,7 +816,7 @@ func TestSearchIndexPathDiscoveryPreservesNamesAndSkipsSymlinks(t *testing.T) {
 	}
 	got := make(map[string]bool, len(paths))
 	for _, path := range paths {
-		got[path.relative] = true
+		got[path.relativePath()] = true
 	}
 	for _, want := range []string{"line\nbreak.md", "café.md"} {
 		if !got[want] {
@@ -832,7 +832,7 @@ func TestSearchIndexPathDiscoveryPreservesNamesAndSkipsSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	if err := engine.build(indexBuildJob{root: root, identity: fileID(info), maxFiles: 100, maxBytes: DefaultIndexBytes, excludePaths: []string{"excluded"}}); err != nil {
 		t.Fatal(err)
@@ -885,7 +885,7 @@ func TestSearchIndexTraversesBeyondDirectSearchDirectoryLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	if err := engine.build(indexBuildJob{root: root, identity: fileID(info), maxFiles: DefaultIndexedFiles, maxBytes: DefaultIndexBytes}); err != nil {
 		t.Fatal(err)
@@ -923,7 +923,7 @@ func TestSearchIndexReplacementRootDoesNotReusePriorIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	job := indexBuildJob{root: root, identity: fileID(priorInfo), maxFiles: 100, maxBytes: DefaultIndexBytes}
 	if err := engine.build(job); err != nil {
@@ -1003,7 +1003,7 @@ func TestSearchIndexGenerationSurvivesUnindexAndResultLimitIsSeparate(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	job := indexBuildJob{root: root, identity: fileID(info), maxFiles: 100, maxBytes: DefaultIndexBytes}
 	if err := engine.build(job); err != nil {
@@ -1036,7 +1036,7 @@ func TestSearchIndexRefreshInterval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	now := time.Now()
 	if _, err := store.db.Exec(`INSERT INTO roots(root,identity,generation,state,coverage,count,bytes,updated_ns,settings_revision) VALUES(?, ?, 1, 'ready', 'complete', 1, 10, ?, 7)`, "/root", "identity", now.UnixNano()); err != nil {
@@ -1057,8 +1057,11 @@ func TestSearchIndexRefreshInterval(t *testing.T) {
 	if !engine.needsRefresh("/root", "identity", 300, 7, now.Add(5*time.Minute)) {
 		t.Fatal("expired snapshot did not request a crawl")
 	}
-	if !engine.needsRefresh("/root", "identity", 0, 7, now) {
-		t.Fatal("zero refresh interval did not request an on-search crawl")
+	if engine.needsRefresh("/root", "identity", 0, 7, now) {
+		t.Fatal("zero refresh interval requested a periodic crawl for a valid cached snapshot")
+	}
+	if !engine.needsRefresh("/missing", "identity", 0, 7, now) {
+		t.Fatal("zero refresh interval suppressed initial on-search indexing")
 	}
 }
 
@@ -1067,7 +1070,7 @@ func TestSearchIndexSearchHonorsCanceledContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -1121,7 +1124,7 @@ func TestSearchIndexPurgeQuiescesBuildsAndClearsRootMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	engine.schedule(root, fileID(info), 1000, DefaultIndexBytes, 0, nil, nil, 1)
 	if _, err := engine.handle(indexRequest{Action: "purge"}); err != nil {
@@ -1151,6 +1154,104 @@ func TestSearchIndexTokensMatchOnePathSegmentEach(t *testing.T) {
 	if _, matched := searchEntrySortKey("notes.md", "src/tech/blog/notes.md", []string{"tech", "blog"}); !matched {
 		t.Fatal("multi-token query failed to match separate path segments")
 	}
+	if _, matched := searchEntrySortKey("20261012-022.png", "interviews/yo7110/20261012-022.png", []string{"/"}); !matched {
+		t.Fatal("slash query failed to match a nested path")
+	}
+	if _, matched := searchEntrySortKey("20261012-022.png", "interviews/yo7110/20261012-022.png", []string{"interviews/yo7110"}); !matched {
+		t.Fatal("contiguous path query failed to match directory segments")
+	}
+	if _, matched := searchEntrySortKey("20261012-022.png", "interviews/yo7110/20261012-022.png", []string{"yo7110/interviews"}); !matched {
+		t.Fatal("reversed two-segment path query failed to match")
+	}
+	if _, matched := searchEntrySortKey("20261012-022.png", "interviews/yo7110/20261012-022.png", []string{"interviews/2026"}); !matched {
+		t.Fatal("path query failed to match terms across directory and basename components")
+	}
+	if _, matched := searchEntrySortKey("20261012-022.png", "interviews/yo7110/20261012-022.png", []string{"2026/interviews"}); !matched {
+		t.Fatal("reversed path query failed to match terms across directory and basename components")
+	}
+	if _, matched := searchEntrySortKey("20261012-022.png", "Interviews/yo7110/20261012-022.png", []string{"interviews/"}); !matched {
+		t.Fatal("case-insensitive folder path query failed to match")
+	}
+	if _, matched := searchEntrySortKey("20261012-022.png", "interviews/yo7110/20261012-022.png", []string{"inter/"}); !matched {
+		t.Fatal("partial trailing-slash folder query failed to match")
+	}
+	if _, matched := searchEntrySortKey("20261012-022.png", "Interviews/yo7110/20261012-022.png", []string{"inter/"}); !matched {
+		t.Fatal("case-insensitive partial trailing-slash folder query failed to match")
+	}
+	if _, matched := searchEntrySortKey("interviews.md", "interviews.md", []string{"interviews/"}); matched {
+		t.Fatal("trailing-slash folder query matched only a basename")
+	}
+	if _, matched := searchEntrySortKey("interviews.md", "interviews.md", []string{"inter/"}); matched {
+		t.Fatal("partial trailing-slash folder query matched only a basename")
+	}
+	if _, matched := searchEntrySortKey("20261012-022.png", "20261012-022.png", []string{"/"}); matched {
+		t.Fatal("slash query matched a root-level file without a path separator")
+	}
+}
+
+func TestSearchIndexPublishesSlashQueriesAcrossNestedComponents(t *testing.T) {
+	root := t.TempDir()
+	relative := filepath.Join("interviews", "yo7110", "2026-interview.md")
+	path := filepath.Join(root, relative)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("interview fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doitPath := filepath.Join(root, "DOIT-123.md")
+	if err := os.WriteFile(doitPath, []byte("doit fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pathDoitFile := filepath.Join(root, "doit", "123.md")
+	if err := os.MkdirAll(filepath.Dir(pathDoitFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pathDoitFile, []byte("slash path fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pathDoitDirectory := filepath.Join(root, "DOIT-123", "notes.md")
+	if err := os.MkdirAll(filepath.Dir(pathDoitDirectory), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pathDoitDirectory, []byte("directory decoy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := openSearchIndexStore(filepath.Join(t.TempDir(), "index.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.db.Close() }()
+	engine := newSearchIndexEngine(store)
+	if err := engine.build(indexBuildJob{root: root, identity: fileID(info), maxFiles: 10, maxBytes: DefaultIndexBytes}); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{"interviews/", "inter/", "inter/06", "inter/2026", "interv/20", "2026/interviews"} {
+		result, err := engine.search(root, fileID(info), query, 10, "", 0)
+		if err != nil {
+			t.Fatalf("search %q: %v", query, err)
+		}
+		files, _ := result["files"].([]map[string]any)
+		if len(files) != 1 || files[0]["relative_path"] != filepath.ToSlash(relative) {
+			t.Errorf("search %q returned %#v, want %q", query, files, filepath.ToSlash(relative))
+		}
+	}
+	result, err := engine.search(root, fileID(info), "doit/123", 10, "", 0)
+	if err != nil {
+		t.Fatalf("search doit/123: %v", err)
+	}
+	files, _ := result["files"].([]map[string]any)
+	got := make(map[string]bool, len(files))
+	for _, file := range files {
+		got[file["relative_path"].(string)] = true
+	}
+	if len(got) != 2 || !got["DOIT-123.md"] || !got["doit/123.md"] || got["DOIT-123/notes.md"] {
+		t.Errorf("search doit/123 returned %#v, want root-level DOIT-123.md and exact doit/123.md only", files)
+	}
 }
 
 func TestSearchIndexReportsPartialCoverageAtFileLimit(t *testing.T) {
@@ -1169,7 +1270,7 @@ func TestSearchIndexReportsPartialCoverageAtFileLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
 	if err := engine.build(indexBuildJob{root: root, identity: fileID(info), maxFiles: 2, maxBytes: DefaultIndexBytes}); err != nil {
 		t.Fatal(err)
@@ -1181,6 +1282,71 @@ func TestSearchIndexReportsPartialCoverageAtFileLimit(t *testing.T) {
 	if status["index_coverage"] != "partial" || status["count"] != 2 {
 		t.Fatalf("bounded index status = %#v", status)
 	}
+}
+
+func TestSearchIndexRefreshPublishesExpectedPartialCoverageAtFileLimit(t *testing.T) {
+	root := t.TempDir()
+	for index := 0; index < 4; index++ {
+		path := filepath.Join(root, "file-"+string(rune('a'+index))+".txt")
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := openSearchIndexStore(filepath.Join(t.TempDir(), "index.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { store.db.Close() }()
+	engine := newSearchIndexEngine(store)
+	job := indexBuildJob{root: root, identity: fileID(info), maxFiles: 10, maxBytes: DefaultIndexBytes}
+	if err := engine.build(job); err != nil {
+		t.Fatal(err)
+	}
+	prior, err := engine.status(root, job.identity)
+	if err != nil || prior["index_coverage"] != "complete" || prior["count"] != 4 {
+		t.Fatalf("complete snapshot before bounded refresh = %#v, error=%v", prior, err)
+	}
+	job.maxFiles = 2
+	if err := engine.build(job); err != nil {
+		t.Fatalf("expected file-limit refresh to publish partial coverage, got error: %v", err)
+	}
+	status, err := engine.status(root, job.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status["index_coverage"] != "partial" || status["count"] != 2 || status["error"] != indexCoverageFileLimit {
+		t.Fatalf("bounded refresh status = %#v, want partial coverage for two entries", status)
+	}
+	if _, err := store.db.Exec(`UPDATE roots SET state='error' WHERE root=?`, root); err != nil {
+		t.Fatal(err)
+	}
+	legacyStatus, err := engine.status(root, job.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyStatus["index_state"] != "partial" || legacyStatus["stale"] != false || legacyStatus["error"] != indexCoverageFileLimit {
+		t.Fatalf("legacy file-limit state projection = %#v, want searchable partial coverage", legacyStatus)
+	}
+	if err := store.markRootRefreshing(root, job.identity, legacyStatus["generation"].(int), time.Now().UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	engine.mu.Lock()
+	engine.builds[root] = true
+	engine.mu.Unlock()
+	refreshStatus, err := engine.status(root, job.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshStatus["index_state"] != "partial" || refreshStatus["stale"] != false || refreshStatus["error"] != indexCoverageFileLimit || refreshStatus["building"] != true {
+		t.Fatalf("legacy file-limit state during refresh = %#v, want current searchable partial coverage", refreshStatus)
+	}
+	engine.mu.Lock()
+	delete(engine.builds, root)
+	engine.mu.Unlock()
 }
 
 func TestSearchIndexCleansOrphanedGenerationsBeforeRefresh(t *testing.T) {
@@ -1197,7 +1363,7 @@ func TestSearchIndexCleansOrphanedGenerationsBeforeRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	if _, err := store.db.Exec(`INSERT INTO roots(root,identity,generation,state,coverage) VALUES(?,?,0,'warming','pending')`, root, fileID(info)); err != nil {
 		t.Fatal(err)
 	}
@@ -1208,19 +1374,13 @@ func TestSearchIndexCleansOrphanedGenerationsBeforeRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	statement, err := tx.Prepare(`INSERT INTO entries(root,generation,relative_path,name,file_identity,size,mtime_ns) VALUES(?,2,?,?,?,1,1)`)
-	if err != nil {
-		t.Fatal(err)
-	}
+	paths := make([]discoveredIndexPath, 0, 8000)
 	for index := 0; index < 8000; index++ {
 		name := fmt.Sprintf("%04d-%s", index, strings.Repeat("x", 120))
-		if _, err := statement.Exec(root, name, name, "orphan"); err != nil {
-			_ = statement.Close()
-			_ = tx.Rollback()
-			t.Fatal(err)
-		}
+		paths = append(paths, discoveredIndexPath{relative: name, name: name, identity: "orphan", size: 1, mtimeNS: 1})
 	}
-	if err := statement.Close(); err != nil {
+	if err := writeNormalizedPaths(tx, root, 2, paths); err != nil {
+		tx.Rollback()
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -1263,9 +1423,9 @@ func TestSearchIndexReportsPartialCoverageBeforeSQLiteStorageLimit(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
-	if err := engine.build(indexBuildJob{root: root, identity: fileID(info), maxFiles: 5000, maxBytes: 1024 * 1024}); err != nil {
+	if err := engine.build(indexBuildJob{root: root, identity: fileID(info), maxFiles: 5000, maxBytes: 512 * 1024}); err != nil {
 		t.Fatalf("storage-limited build returned an error instead of publishing partial coverage: %v", err)
 	}
 	status, err := engine.status(root, fileID(info))
@@ -1278,9 +1438,52 @@ func TestSearchIndexReportsPartialCoverageBeforeSQLiteStorageLimit(t *testing.T)
 	}
 }
 
-func TestSearchIndexRefreshReusesFreePagesAndPreservesSnapshotOnBudgetFailure(t *testing.T) {
+func TestSearchIndexRefreshPreservesCoverageAtStorageLimit(t *testing.T) {
 	root := t.TempDir()
-	for i := 0; i < 1500; i++ {
+	for index := 0; index < 12000; index++ {
+		name := fmt.Sprintf("f%08d", index)
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := openSearchIndexStore(filepath.Join(t.TempDir(), "index.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { store.db.Close() }()
+	engine := newSearchIndexEngine(store)
+	job := indexBuildJob{root: root, identity: fileID(info), maxFiles: 15000, maxBytes: 4 * 1024 * 1024}
+	if err := engine.build(job); err != nil {
+		t.Fatal(err)
+	}
+	prior, err := engine.status(root, job.identity)
+	if err != nil || prior["index_coverage"] != "complete" || prior["count"] != 12000 {
+		t.Fatalf("complete snapshot before storage-limited refresh = %#v, error=%v", prior, err)
+	}
+	job.maxBytes = 256 * 1024
+	if err := engine.build(job); err == nil {
+		t.Fatal("over-budget replacement was accepted")
+	}
+	status, err := engine.status(root, job.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status["generation"] != prior["generation"] || status["count"] != 12000 || status["over_budget"] != true {
+		t.Fatalf("rejected replacement lost retained snapshot: %#v", status)
+	}
+	results, err := engine.search(root, job.identity, "", 10, "", 0)
+	if err != nil || results["count"] != 10 {
+		t.Fatalf("retained snapshot not searchable: %#v %v", results, err)
+	}
+}
+
+func TestSearchIndexRefreshUsesSharedBudgetAndPreservesRejectedGeneration(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 6000; i++ {
 		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("%04d-%s-techblog.md", i, strings.Repeat("x", 140))), []byte("x"), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -1293,9 +1496,9 @@ func TestSearchIndexRefreshReusesFreePagesAndPreservesSnapshotOnBudgetFailure(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.db.Close()
+	defer func() { store.db.Close() }()
 	engine := newSearchIndexEngine(store)
-	job := indexBuildJob{root: root, identity: fileID(info), maxFiles: 2000, maxBytes: 2 * 1024 * 1024}
+	job := indexBuildJob{root: root, identity: fileID(info), maxFiles: 8000, maxBytes: 2 * 1024 * 1024}
 	for i := 0; i < 4; i++ {
 		if err := engine.build(job); err != nil {
 			t.Fatal(err)
@@ -1304,7 +1507,7 @@ func TestSearchIndexRefreshReusesFreePagesAndPreservesSnapshotOnBudgetFailure(t 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if status["count"] != 1500 {
+		if status["count"] != 6000 {
 			t.Fatalf("refresh %d lost files: %#v", i, status)
 		}
 		allocated, err := store.allocatedBytes()
@@ -1341,29 +1544,27 @@ func TestSearchIndexRefreshReusesFreePagesAndPreservesSnapshotOnBudgetFailure(t 
 	if secondStatus["count"] != 1 {
 		t.Fatalf("second root did not fit: %#v", secondStatus)
 	}
-	status, _ := engine.status(root, job.identity)
-	generation := status["generation"]
-	job.maxFiles = 1
+	status, err := engine.status(root, job.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousGeneration := status["generation"]
+	job.maxFiles = 8000
+	job.maxBytes = 256 * 1024
 	if err := engine.build(job); err == nil {
-		t.Fatal("expected failed refresh")
+		t.Fatal("replacement should be blocked")
 	}
 	status, err = engine.status(root, job.identity)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status["generation"] != generation || status["count"] != 1500 {
-		t.Fatalf("lost prior snapshot: %#v", status)
-	}
-	matches, err := engine.search(root, job.identity, "techblog", 10, "", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(matches["files"].([]map[string]any)) == 0 {
-		t.Fatal("preserved snapshot is not searchable")
+	if status["count"] != 6000 || status["generation"] != previousGeneration {
+		t.Fatalf("rejected replacement lost coverage: %#v", status)
 	}
 	// A genuinely empty eligible scope must replace the old snapshot.
 	job.excludePaths = []string{"glob:**"}
 	job.maxFiles = 2000
+	job.maxBytes = 2 * 1024 * 1024
 	if err := engine.build(job); err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,7 @@ package stats
 /*
 #include <mach/mach.h>
 #include <mach/host_info.h>
+#include <mach/mach_time.h>
 #include <sys/proc_info.h>
 #include <sys/sysctl.h>
 #include <libproc.h>
@@ -19,7 +20,7 @@ struct yomux_process {
 	int ppid;
 	uint64_t start_sec;
 	uint64_t start_usec;
-	uint64_t cpu_ns;
+	uint64_t cpu_mach_ticks;
 	uint64_t rss;
 	char path[PROC_PIDPATHINFO_MAXSIZE];
 	char cwd[MAXPATHLEN];
@@ -40,6 +41,15 @@ static int yomux_host_cpu(uint64_t *total, uint64_t *idle) {
 		if (i == CPU_STATE_IDLE) *idle = info.cpu_ticks[i];
 	}
 	return *total ? 0 : -1;
+}
+
+static int yomux_timebase(uint32_t *numerator, uint32_t *denominator) {
+	// PROC_PIDTASKINFO exposes Recount counters in Mach ticks, not nanoseconds.
+	mach_timebase_info_data_t info;
+	if (mach_timebase_info(&info) != KERN_SUCCESS || info.denom == 0) return -1;
+	*numerator = info.numer;
+	*denominator = info.denom;
+	return 0;
 }
 
 static int yomux_open_files(int pid, char **paths, int capacity) {
@@ -119,7 +129,7 @@ static int yomux_process(int pid, struct yomux_process *row) {
 		row->ppid = (int)info.pbsd.pbi_ppid;
 		row->start_sec = info.pbsd.pbi_start_tvsec;
 		row->start_usec = info.pbsd.pbi_start_tvusec;
-		row->cpu_ns = info.ptinfo.pti_total_user + info.ptinfo.pti_total_system;
+		row->cpu_mach_ticks = info.ptinfo.pti_total_user + info.ptinfo.pti_total_system;
 		row->rss = info.ptinfo.pti_resident_size;
 		if (proc_pidpath(row->pid, row->path, sizeof(row->path)) <= 0) {
 			strlcpy(row->path, info.pbsd.pbi_name, sizeof(row->path));
@@ -143,6 +153,7 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"math/bits"
 	"os"
 	"sort"
 	"sync"
@@ -214,10 +225,49 @@ func readDarwinProcess(pid int) (DarwinProcess, error) {
 	if status < 0 {
 		return DarwinProcess{}, errors.New("Darwin process observation unavailable")
 	}
+	cpuNanoseconds, ok := darwinProcessCPUNanoseconds(uint64(row.cpu_mach_ticks))
+	if !ok {
+		return DarwinProcess{}, errors.New("Darwin process CPU timebase unavailable")
+	}
 	path := C.GoString(&row.path[0])
 	start := fmt.Sprintf("%d:%d", uint64(row.start_sec), uint64(row.start_usec))
 	startedAt := float64(uint64(row.start_sec)) + float64(uint64(row.start_usec))/1e6
-	return DarwinProcess{PID: int(row.pid), PPID: int(row.ppid), Identity: fmt.Sprintf("%d:%s", int(row.pid), start), Command: C.GoString(&row.command[0]), Executable: path, Directory: C.GoString(&row.cwd[0]), CPUSeconds: float64(uint64(row.cpu_ns)) / 1e9, RSSBytes: uint64(row.rss), StartedAt: startedAt}, nil
+	return DarwinProcess{PID: int(row.pid), PPID: int(row.ppid), Identity: fmt.Sprintf("%d:%s", int(row.pid), start), Command: C.GoString(&row.command[0]), Executable: path, Directory: C.GoString(&row.cwd[0]), CPUSeconds: float64(cpuNanoseconds) / 1e9, RSSBytes: uint64(row.rss), StartedAt: startedAt}, nil
+}
+
+var darwinProcessTimebase struct {
+	sync.Once
+	numerator   uint32
+	denominator uint32
+	valid       bool
+}
+
+func darwinProcessCPUNanoseconds(machTicks uint64) (uint64, bool) {
+	darwinProcessTimebase.Do(func() {
+		var numerator, denominator C.uint32_t
+		if C.yomux_timebase(&numerator, &denominator) != 0 || denominator == 0 {
+			return
+		}
+		darwinProcessTimebase.numerator = uint32(numerator)
+		darwinProcessTimebase.denominator = uint32(denominator)
+		darwinProcessTimebase.valid = true
+	})
+	if !darwinProcessTimebase.valid {
+		return 0, false
+	}
+	return darwinMachTicksToNanoseconds(machTicks, darwinProcessTimebase.numerator, darwinProcessTimebase.denominator)
+}
+
+func darwinMachTicksToNanoseconds(machTicks uint64, numerator, denominator uint32) (uint64, bool) {
+	if denominator == 0 {
+		return 0, false
+	}
+	high, low := bits.Mul64(machTicks, uint64(numerator))
+	if high >= uint64(denominator) {
+		return 0, false
+	}
+	nanoseconds, _ := bits.Div64(high, low, uint64(denominator))
+	return nanoseconds, true
 }
 
 func darwinSystemLogicalCPUs() int { return int(C.yomux_logical_cpus()) }

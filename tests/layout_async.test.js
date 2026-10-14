@@ -43,9 +43,8 @@ const {runSuite} = require('./layout_url.test.js');
 
 function installTreePublicationHelpers(context) {
   for (const [path, names] of [
-    ['10_core_utils.js', ['setAttributeIfChanged', 'setInnerHtmlIfChanged', 'clientElementIsVisible']],
+    ['10_core_utils.js', ['setAttributeIfChanged', 'setStylePropertyIfChanged', 'setInnerHtmlIfChanged', 'clientElementIsVisible']],
     ['40_file_explorer_files.js', ['setRowDataset', 'setHiddenIfChanged']],
-    ['99_terminal_boot.js', ['setStylePropertyIfChanged']],
   ]) {
     const source = fs.readFileSync(`static_src/js/yomux/${path}`, 'utf8');
     if (names.includes('setInnerHtmlIfChanged')) vm.runInContext('const elementHtmlState = new WeakMap();', context);
@@ -740,7 +739,7 @@ test('Finder Sync cursor restoration respects newer input for both existing and 
   }
 });
 
-test('ancestor metadata shares directory chains and merges duplicate file attribution', () => {
+test('ancestor metadata prefers newest duplicate records and excludes untracked lines from totals', () => {
   const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
   const start = source.indexOf('function fileTreeChangedAncestorStats(');
   const end = source.indexOf('\nfunction normalizeGitStatus(', start);
@@ -750,19 +749,25 @@ test('ancestor metadata shares directory chains and merges duplicate file attrib
     sessionFileIsDifferVisible: file => file.status !== 'T',
     sessionFileAbsolutePath: file => file.abs_path,
     sessionFileAgentKinds: file => file.agents || [],
+    sessionFileCountsAreTracked: file => file?.diff_tracked === true,
     dirnameOf: path => path.slice(0, path.lastIndexOf('/')) || '/',
     normalizeDirectoryPath: path => { normalizations += 1; return path; },
   };
   vm.createContext(context);
   vm.runInContext(source.slice(start, end), context);
-  const files = Array.from({length: 100}, (_, index) => ({abs_path: `/repo/src/file-${index}`, status: 'M', added: 2, removed: 1, agents: ['codex'], mtime: 10}));
+  const files = Array.from({length: 100}, (_, index) => ({abs_path: `/repo/src/file-${index}`, status: 'M', added: 2, removed: 1, diff_tracked: true, agents: ['codex'], mtime: 10}));
   files.push({...files[0], added: 500, removed: 500, agents: ['claude'], mtime: 20});
+  files.push({abs_path: '/repo/src/untracked.txt', status: '?', added: 407, removed: 0, diff_tracked: false, mtime: 30});
   files.push({abs_path: '/repo/src/transcript', status: 'T', added: 1000});
   const result = context.fileTreeChangedAncestorStats({files});
+  const reversedResult = context.fileTreeChangedAncestorStats({files: [...files].reverse()});
   for (const directory of ['/repo/src', '/repo']) {
-    assert.deepEqual(JSON.parse(JSON.stringify(result.get(directory))), {count: 100, agents: ['codex', 'claude'], mtime: 20, added: 200, removed: 100});
+    const expected = {count: 101, agents: ['claude', 'codex'], mtime: 30, added: 698, removed: 599};
+    assert.deepEqual(JSON.parse(JSON.stringify(result.get(directory))), expected);
+    assert.deepEqual(JSON.parse(JSON.stringify(reversedResult.get(directory))), expected,
+      'directory totals do not depend on which session reports the duplicate path first');
   }
-  assert.ok(normalizations <= 3, `one directory chain, not one chain per file: ${normalizations}`);
+  assert.ok(normalizations <= 6, `each projection reuses one directory chain, not one chain per file: ${normalizations}`);
 });
 
 test('Finder metadata never replaces Differ or repository diff status, including hidden rows', () => {
@@ -1201,6 +1206,61 @@ async function completeRenderFrames(rendering, frames) {
 }
 
 async function runLayoutAsyncSuite() {
+  await testAsync('partial and superseded directory responses preserve deletion tombstones', async () => {
+    const api = loadYomux('', ['source']);
+    api.markFileExplorerDeletedPathsForTest(['/tmp/deleted.md']);
+    api.setApiFetchJsonForTest(async () => ({entries: [{name: 'yo7110.md', kind: 'file'}], truncated: true}));
+    await api.fetchQuickOpenPathDirectoryForTest('/tmp', 'yo711', {});
+    assert.deepEqual(api.fileExplorerDeletedPathTombstonesForTest(), ['/tmp/deleted.md']);
+    await api.fetchDirectoryForTest('/tmp', {user: true, fresh: true, enrich: false});
+    assert.deepEqual(api.fileExplorerDeletedPathTombstonesForTest(), ['/tmp/deleted.md']);
+    let complete;
+    api.setApiFetchJsonForTest(() => new Promise(resolve => { complete = resolve; }));
+    const pending = api.fetchDirectoryForTest('/tmp', {fresh: true, enrich: false});
+    api.invalidateFileExplorerFsCachesForTest();
+    complete({entries: [], truncated: false});
+    await pending;
+    assert.deepEqual(api.fileExplorerDeletedPathTombstonesForTest(), ['/tmp/deleted.md']);
+    api.setApiFetchJsonForTest(async () => ({entries: [], truncated: false}));
+    await api.fetchDirectoryForTest('/tmp', {user: true, fresh: true, enrich: false});
+    assert.deepEqual(api.fileExplorerDeletedPathTombstonesForTest(), []);
+  });
+
+  await testAsync('a hidden index-status callback performs no request', async () => {
+    const api = loadYomux('?sessions=__finder__', ['source']);
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    api.applyFileIndexStatusPayloadForTest('/repo', {status: 'building', indexed: true});
+    const requests = [];
+    api.setApiFetchJsonForTest(async url => { requests.push(url); return {status: 'building'}; });
+    api.setDocumentVisibilityForTest('hidden');
+    await api.refreshBuildingFileIndexStatusesForTest();
+    assert.deepEqual(requests, []);
+    assert.equal(api.runtimeIntervalActiveForTest('file-index-building'), false);
+  });
+
+  await testAsync('hidden window aliases retire their streams and completed summaries remain cached', async () => {
+    const api = loadYomux('', ['source']);
+    const alias = '__yomux_view_stream';
+    api.setTranscriptInfoForTest('source', {window_metadata: [{window_id: '@12', window_index: 0}]});
+    api.storeTabberViewSessionForTest(alias, {sourceSession: 'source', windowIndex: 0, windowId: '@12'});
+    api.applyLayoutSlotsForTest({left: {tabs: [alias, 'source'], active: alias}});
+    api.testElementForId(`transcript-pane-${alias}`).classList.add('active');
+    api.startTranscriptStreamForTest(alias);
+    const stream = api.transcriptStreamForTest(alias);
+    assert.ok(stream);
+    api.applyLayoutSlotsForTest({left: {tabs: [alias, 'source'], active: 'source'}});
+    api.syncPanelVisibilityForTest([alias]);
+    assert.equal(stream.closeCount, 1);
+    assert.equal(api.transcriptStreamForTest(alias), null);
+    api.testElementForId('summary-pane-source').classList.add('active');
+    api.startSummaryStreamForTest('source');
+    const summary = api.summaryStreamForTest('source');
+    assert.ok(summary);
+    summary.listeners.get('done')[0]({data: '{}'});
+    api.syncPanelVisibilityForTest(['source']);
+    assert.equal(api.summaryStreamForTest('source'), null, 'completed one-shot summary never regenerates on layout sync');
+  });
+
 await testAsync('yielding tree preparation hands off first paint once and retires superseded continuation work', async () => {
   const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
   const frames = [], tasks = [], priorities = [];
@@ -1826,6 +1886,97 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     await flushAsyncWork();
     await search;
     assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), ['/home/test/yolomux.dev/low/t5t-notes.md', '/home/test/yolomux.dev/t5t.md']);
+  });
+
+  await testAsync('Quick Open keeps streamed files matching a trailing-slash path prefix', async () => {
+    const api = loadYomux();
+    const root = '/home/test/yolomux.dev';
+    const path = `${root}/interviews/yo7110/2026-interview.md`;
+    api.setFileExplorerIndexedDirsForTest([root]);
+    api.installCommandPaletteFixtureForTest();
+    api.setCommandPaletteStateForTest('files', 'interviews/');
+    api.setCommandPaletteQueryForTest('interviews/');
+    const stream = controllableSseResponse();
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      assert.equal(String(url), `/api/fs/search-stream?root=${encodeURIComponent(root)}&query=interviews%2F&limit=500&recursive=true`);
+      return Promise.resolve(stream.response);
+    });
+    const search = api.refreshFileQuickOpenCandidatesForTest('interviews/');
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(requests.length, 1, 'the trailing-slash query reaches the indexed stream unchanged');
+    stream.push(sseFrame('start', {root, query: 'interviews/'}));
+    await flushAsyncWork();
+    stream.push(sseFrame('chunk', {files: [
+      {path, name: '2026-interview.md', relative_path: 'interviews/yo7110/2026-interview.md'},
+      {path: `${root}/interviews.md`, name: 'interviews.md', relative_path: 'interviews.md'},
+    ]}));
+    await flushAsyncWork();
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), [path], 'the streamed path-prefix match remains visible');
+    assert.ok(api.commandPaletteStateForTest().items.some(item => item.path === path), 'the streamed path-prefix match is rendered as a selectable result');
+    stream.close();
+    await search;
+  });
+
+  await testAsync('Quick Open renders reversed two-segment path matches from the indexed stream', async () => {
+    const api = loadYomux();
+    const root = '/home/test/yolomux.dev';
+    const path = `${root}/interviews/yo7110/2026-interview.md`;
+    const query = '2026/interviews';
+    api.setFileExplorerIndexedDirsForTest([root]);
+    api.installCommandPaletteFixtureForTest();
+    api.setCommandPaletteStateForTest('files', query);
+    api.setCommandPaletteQueryForTest(query);
+    const stream = controllableSseResponse();
+    api.setFetchForTest(url => {
+      assert.equal(String(url), `/api/fs/search-stream?root=${encodeURIComponent(root)}&query=${encodeURIComponent(query)}&limit=500&recursive=true`);
+      return Promise.resolve(stream.response);
+    });
+    const search = api.refreshFileQuickOpenCandidatesForTest(query);
+    await flushAsyncWork();
+    stream.push(sseFrame('start', {root, query}));
+    await flushAsyncWork();
+    stream.push(sseFrame('chunk', {files: [{path, name: '2026-interview.md', relative_path: 'interviews/yo7110/2026-interview.md'}]}));
+    await flushAsyncWork();
+    assert.ok(api.commandPaletteStateForTest().items.some(item => item.path === path), 'a reverse-ordered path query still displays the backend match');
+    stream.close();
+    await search;
+  });
+
+  await testAsync('Quick Open keeps root-level DOIT matches for slash-separated numeric queries', async () => {
+    const api = loadYomux();
+    const root = '/home/test/yolomux.dev';
+    const path = `${root}/DOIT-123.md`;
+    const query = 'doit/123';
+    api.setFileExplorerIndexedDirsForTest([root]);
+    api.installCommandPaletteFixtureForTest();
+    api.setCommandPaletteStateForTest('files', query);
+    api.setCommandPaletteQueryForTest(query);
+    const stream = controllableSseResponse();
+    api.setFetchForTest(url => {
+      assert.equal(String(url), `/api/fs/search-stream?root=${encodeURIComponent(root)}&query=${encodeURIComponent(query)}&limit=500&recursive=true`);
+      return Promise.resolve(stream.response);
+    });
+    const search = api.refreshFileQuickOpenCandidatesForTest(query);
+    await flushAsyncWork();
+    stream.push(sseFrame('start', {root, query}));
+    await flushAsyncWork();
+    const exactPathMatch = `${root}/doit/123.md`;
+    const directoryDecoy = `${root}/DOIT-123/notes.md`;
+    stream.push(sseFrame('chunk', {files: [
+      {path, name: 'DOIT-123.md', relative_path: 'DOIT-123.md'},
+      {path: exactPathMatch, name: '123.md', relative_path: 'doit/123.md'},
+      {path: directoryDecoy, name: 'notes.md', relative_path: 'DOIT-123/notes.md'},
+    ]}));
+    await flushAsyncWork();
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), [path, exactPathMatch], 'the basename shorthand and exact slash path remain in the stream candidates');
+    assert.ok(api.commandPaletteStateForTest().items.some(item => item.path === path), 'the root-level DOIT result remains selectable');
+    assert.ok(api.commandPaletteStateForTest().items.some(item => item.path === exactPathMatch), 'a genuine slash-separated path result remains selectable');
+    assert.equal(api.commandPaletteStateForTest().items.some(item => item.path === directoryDecoy), false, 'a DOIT-looking directory does not activate the basename shorthand');
+    stream.close();
+    await search;
   });
 
   await testAsync('Quick Open emits DIS basename matches in the first indexed stream chunk', async () => {
@@ -2494,7 +2645,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
   });
 
   await testAsync('one terminal authentication owner retires long-lived transports after the first 401', async () => {
-    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [1500]});
+    const api = loadYomux('?sessions=__finder__,1', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [1500]});
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    api.applyFileIndexStatusPayloadForTest('/repo', {status: 'building', indexed: true});
     let requests = 0;
     api.setFetchForTest(() => {
       requests += 1;
@@ -2509,6 +2662,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     api.resetRuntimeIntervalForTest('latency', () => null, 3000);
     api.resetRuntimeIntervalForTest('debug-stats', () => null, 500);
     api.installClientEventStreamForTest();
+    api.testElementForId('transcript-pane-1').classList.add('active');
     api.startTranscriptStreamForTest('1');
     const transcriptSource = api.transcriptStreamForTest('1');
     assert.ok(api.clientEventTransportStateForTest().source, 'the client-events stream is live before authentication expires');
@@ -2523,6 +2677,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(firstError?.status, 401);
     assert.equal(firstError?.terminalAuthentication, true);
     assert.equal(secondError?.status, 401, 'blocked siblings receive the same typed terminal outcome');
+    assert.equal(api.runtimeIntervalActiveForTest('file-index-refresh'), false);
+    assert.equal(api.runtimeIntervalActiveForTest('file-index-building'), false);
     assert.equal(api.runtimeIntervalActiveForTest('latency'), false, 'the /api/ping interval is retired');
     assert.equal(api.runtimeIntervalActiveForTest('debug-stats'), false, 'the snapshot interval is retired');
     assert.equal(api.clientEventTransportStateForTest().source, null, 'the shared client-events EventSource is closed');
@@ -3758,7 +3914,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     };
     let addedReads = 0;
     api.setFinderSessionFilesPayloadForTest({session: '1', loaded: false, repos: [{repo: '/repo'}], files: [{
-      abs_path: '/repo/d0/other/file.txt', status: 'M',
+      abs_path: '/repo/d0/other/file.txt', status: 'M', diff_tracked: true,
       get added() { addedReads += 1; return 3; }, removed: 0,
     }]});
     let firstWaveAddedReads = null;
@@ -3775,7 +3931,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(unchangedDirectoryWrites, 0, 'ancestor traversal preserves unaffected sibling directory rows');
     let replacementReads = 0;
     api.setFinderSessionFilesPayloadForTest({session: '1', loaded: false, repos: [{repo: '/repo'}], files: [{
-      abs_path: '/repo/d0/other/file.txt', status: 'M',
+      abs_path: '/repo/d0/other/file.txt', status: 'M', diff_tracked: true,
       get added() { replacementReads += 1; return 7; }, removed: 0,
     }]});
     pending.get(directories.at(-1)).resolve(jsonResponse({entries: [{name: 'new.txt', kind: 'file'}]}));
@@ -4741,6 +4897,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
 
   await testAsync('retired summary and transcript streams cannot paint or reconnect into a same-name generation', async () => {
     const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [1500]});
+    api.testElementForId('summary-pane-1').classList.add('active');
+    api.testElementForId('transcript-pane-1').classList.add('active');
     api.startSummaryStreamForTest('1');
     api.startTranscriptStreamForTest('1');
     const oldSummary = api.summaryStreamForTest('1');
@@ -5587,6 +5745,17 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     }), true, 'the current worker continues publishing after the stale response');
   });
 
+  test('same-revision full settings metadata completes a deferred boot refresh', () => {
+    const api = loadYomux();
+    const state = api.settingsStateForTest();
+    const bootPayload = {settings: state.settings, defaults: state.defaults, mtime_ns: 123, deferred_metadata: true};
+    assert.equal(api.applySettingsPayloadForTest(bootPayload, {initial: true}), true);
+    assert.equal(api.clientSettingsMetadataDeferredForTest(), true);
+    const fullPayload = {...bootPayload, deferred_metadata: undefined, choices: {}, catalog: {}};
+    assert.equal(api.applySettingsPayloadForTest(fullPayload), false, 'an equal mtime does not reapply settings');
+    assert.equal(api.clientSettingsMetadataDeferredForTest(), false, 'the full payload satisfies deferred metadata despite an equal mtime');
+  });
+
   await testAsync('changing an index limit refreshes settled root status details', async () => {
     const api = loadYomux();
     api.setFileExplorerIndexedDirsForTest(['/repo']);
@@ -5616,6 +5785,35 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(failed.stale, true);
     assert.equal(api.fileIndexStatusFromPayloadForTest({index_state: 'error', index_coverage: 'partial', error: 'disk full'}), 'error');
     assert.ok(api.fileIndexFreshnessMessageForTest(failed));
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const row = new TestElement('finder-index-row');
+    row.dataset.path = '/repo';
+    const badge = new TestElement('finder-index-badge');
+    row.querySelector = selector => selector.includes('.file-tree-git-status') ? badge : null;
+    api.setDocumentQuerySelectorAllForTest(selector =>
+      selector === '.file-tree-row.kind-dir[data-path]' ? [row] : []
+    );
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {index_state: 'error', error: 'permission denied'}), true);
+    const indexErrorTitle = api.fileExplorerIndexBadgeTitleForTest('/repo');
+    assert.equal(indexErrorTitle, 'error: permission denied',
+      `the Finder badge preserves the actionable backend index error (got ${JSON.stringify(indexErrorTitle)})`);
+    assert.equal(badge.getAttribute('title'), 'error: permission denied');
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {index_state: 'error', error: 'database busy', generation: 1}), true);
+    assert.equal(api.fileExplorerIndexBadgeTitleForTest('/repo'), 'error: database busy');
+    assert.equal(badge.getAttribute('title'), 'error: database busy',
+      `same-state index failures refresh the rendered explanation (got ${JSON.stringify(badge.getAttribute('title'))})`);
+    api.seedFileIndexPartialWarningRootForTest('/repo');
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {
+      index_state: 'partial', index_coverage: 'partial', generation: 2, count: 100,
+      max_files: 100, coverage_reason: 'per-root file limit reached',
+    }), true);
+    assert.ok(badge.getAttribute('title').includes('100 files after indexing 100'), 'the row shows the first partial limit');
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {
+      index_state: 'partial', index_coverage: 'partial', generation: 3, count: 200,
+      max_files: 200, coverage_reason: 'per-root file limit reached',
+    }), true);
+    assert.ok(badge.getAttribute('title').includes('200 files after indexing 200'),
+      'same-state partial coverage refreshes the rendered count and limit');
   });
 
   await testAsync('a connected event stream keeps polling a building root until its badge settles', async () => {
@@ -7885,6 +8083,20 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(api.transcriptMetadataStateForTest().payload.sessions['glm-5_3'], undefined);
   });
 
+  test('identical status publications advance revisions without reporting visible changes', () => {
+    const api = loadYomux('', ['1']);
+    const snapshot = revision => ({session_order: ['1'], agent_window_snapshot_revision: revision,
+      sessions: {'1': {target: '1', enabled: false, last_action: 'off'}}});
+    const options = {render: false, deferForMetadata: false};
+    assert.deepStrictEqual(canonical(api.applyAutoApprovePayloadForTest(snapshot(1), options).changedSessions), ['1']);
+    assert.deepStrictEqual(canonical(api.applyAutoApprovePayloadForTest(snapshot(1), options).changedSessions), []);
+    assert.deepStrictEqual(canonical(api.applyAutoApprovePayloadForTest(snapshot(2), options).changedSessions), []);
+    const changed = snapshot(3);
+    changed.sessions['1'].enabled = true;
+    assert.deepStrictEqual(canonical(api.applyAutoApprovePayloadForTest(changed, options).changedSessions), ['1']);
+    assert.deepStrictEqual(canonical(api.applyAutoApprovePayloadForTest(snapshot(1), options).changedSessions), [], 'older publications cannot undo the current state');
+  });
+
   test('tmux lifecycle generations make kill-create reuse ABA-safe', () => {
     const api = loadYomux('', ['1']);
     const originalToken = api.tmuxSessionLifecycleTokenForTest('1');
@@ -7983,12 +8195,13 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(await api.applySessionMetadataPayloadForTest(
       metadataFor(2, ['1'], {work_graph: {version: 1, generation: 9}}), quiet), true);
 
-    // FINDING 1: all FOUR terminal outcomes, each with a freshly held payload.
+    // Each refusal accounts for the sealed payload without regressing metadata.
     let committedRenderCalls = 0;
     const terminalCases = [
       ['malformed_payload', null, quiet],
       ['superseded_request', metadataFor(3, ['1']), {...quiet, requestIsCurrent: () => false}],
-      ['older_work_graph_generation', metadataFor(1, ['1'], {work_graph: {version: 1, generation: 4}}), quiet],
+      ['older_metadata_generation', metadataFor(1, ['1']), quiet],
+      ['older_work_graph_generation', metadataFor(2, ['1'], {work_graph: {version: 1, generation: 4}}), quiet],
       // The committed-render outcome is current at the entry gate and superseded at the render
       // gate, which is the only way to reach the fourth terminal exit.
       ['committed_render_superseded', metadataFor(5, ['1']), {
@@ -8092,7 +8305,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(dropped, false, 'an older same-epoch metadata build with an older graph is refused');
     assert.deepStrictEqual(
       {applied: afterDrop.lastApply.applied, reason: afterDrop.lastApply.reason, session: afterDrop.lastApply.session},
-      {applied: false, reason: 'older_work_graph_generation', session: '1'},
+      {applied: false, reason: 'older_metadata_generation', session: undefined},
     );
     assert.equal(afterDrop.generation, 8, 'a refused payload cannot move the rendered generation backward');
     assert.equal(afterDrop.payload.sessions['1'].marker, 'newer-build', 'a stale payload cannot replace the newer build');
@@ -8695,6 +8908,59 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     api.metadataRequestCountForTest = () => metadataRequestCount;
     return api;
   }
+
+  await testAsync('create replans only an explicit pre-mutation name collision', async () => {
+    for (const reason of ['create_session_plan_stale', 'unrelated_conflict']) {
+      const api = loadYomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1'], 'http:', 'Linux x86_64', 'admin');
+      let plans = 0, creates = 0;
+      api.setFetchForTest(url => {
+        const path = new URL(String(url), 'http://localhost').pathname;
+        if (path === '/api/create-session-plan') {
+          plans += 1;
+          return Promise.resolve(jsonResponse({session: String(plans + 1), generation: plans + 7, ok: true}));
+        }
+        if (path === '/api/create-session') {
+          creates += 1;
+          if (creates === 1) return Promise.resolve(jsonResponse({ok: false, reason_code: reason, error: 'occupied'}, 409));
+          return Promise.resolve(jsonResponse({session: '3', sessions: ['1', '3'], agent: 'codex', created: true, ok: true}));
+        }
+        return Promise.resolve(jsonResponse({ok: true}));
+      });
+      await api.createNextSessionForTest('codex');
+      assert.equal(plans, reason === 'create_session_plan_stale' ? 2 : 1);
+      assert.equal(creates, plans);
+      if (plans === 2) assert.equal(api.tmuxSessionLifecycleRecordForTest('3').phase !== 'retired', true);
+    }
+  });
+
+  await testAsync('overlapping New Chat intents both create through the lifecycle owner', async () => {
+    const api = loadYomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1'], 'http:', 'Linux x86_64', 'admin');
+    let plans = 0, creates = 0;
+    const firstPost = deferredFetch();
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/create-session-plan') {
+        plans += 1;
+        return Promise.resolve(jsonResponse({session: String(plans + 1), generation: plans + 7, ok: true}));
+      }
+      if (parsed.pathname === '/api/create-session') {
+        creates += 1;
+        if (creates === 1) return firstPost.promise;
+        return Promise.resolve(jsonResponse({session: '3', sessions: ['1', '2', '3'], agent: 'codex', created: true, ok: true}));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+    const first = api.createNextSessionForTest('codex');
+    const second = api.createNextSessionForTest('codex');
+    await flushAsyncWork();
+    assert.equal(creates, 1);
+    firstPost.resolve(jsonResponse({session: '2', sessions: ['1', '2'], agent: 'codex', created: true, ok: true}));
+    await Promise.all([first, second]);
+    assert.equal(plans, 2);
+    assert.equal(creates, 2);
+    assert.equal(api.tmuxSessionLifecycleRecordForTest('2').phase !== 'retired', true);
+    assert.equal(api.tmuxSessionLifecycleRecordForTest('3').phase !== 'retired', true);
+  });
 
   await testAsync('create mutation relies on backend metadata publication instead of polling', async () => {
     // Create/remove lifecycle changes are published asynchronously by the backend. The client
@@ -9486,6 +9752,75 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.ok(tree.querySelector('.file-tree-row[data-path="/repo/b/sibling.txt"]'), 'the unrelated sibling listing also publishes');
   });
 
+  await testAsync('Finder cached expansion joins and supersession retain the current disclosure owner', async () => {
+    for (const scenario of ['new-generation', 'same-generation', 'manual-collapse']) {
+      const api = loadYomux('', ['1']);
+      const directory = '/repo/branch';
+      const tree = api.fileExplorerTreeForTest();
+      api.setFileExplorerRootForTest('/repo');
+      api.setFileExplorerDirListingForTest(directory, [{name: 'child.txt', kind: 'file'}]);
+      api.renderTreeChildrenForTest(tree, '/repo', [{name: 'branch', kind: 'dir'}], 0, [], {view: 'finder'});
+      const row = tree.querySelector(`.file-tree-row[data-path="${directory}"]`);
+      const held = deferredFetch();
+      api.setFetchForTest(() => held.promise);
+      api.setFileExplorerSyncStateForTest({generation: 1});
+      const first = api.expandDirectoryRowForTest(row, directory, {generation: 1, user: true});
+      assert.ok(tree.querySelector(`.file-tree-row[data-path="${directory}/child.txt"]`), 'cached children paint before settlement');
+      let second;
+      if (scenario === 'manual-collapse') api.collapseDirectoryRowForTest(row, directory, {manual: true});
+      else {
+        const generation = scenario === 'same-generation' ? 1 : 2;
+        api.setFileExplorerSyncStateForTest({generation});
+        second = api.ensureDirectoryRowExpandedForTest(row, directory, {generation, user: true});
+      }
+      await second;
+      await first;
+      held.resolve(jsonResponse({path: directory, entries: [{name: 'child.txt', kind: 'file'}]}));
+      await flushAsyncWork();
+      const expanded = scenario !== 'manual-collapse';
+      assert.equal(row.getAttribute('aria-expanded'), String(expanded), scenario);
+      assert.equal(Boolean(tree.querySelector(`.file-tree-row[data-path="${directory}/child.txt"]`)), expanded, scenario);
+      assert.equal(api.fileExplorerExpandedForTest().includes(directory), expanded, scenario);
+      assert.equal(row.classList.contains('loading-children'), false, scenario);
+    }
+  });
+
+  await testAsync('explicit editor reveal retires a held startup root open in Normal and Advanced layouts', async () => {
+    for (const mode of ['fixed', 'sync']) {
+      for (const tabberMode of ['normal', 'advanced']) {
+        const path = '/home/test/repo-a/src/a.md';
+        const api = loadYomux(`?sessions=files&layout=row@35(slot1,left)&tabs=slot1:files;left:file:${path}`, []);
+        api.setTabberModeForTest(tabberMode, {refresh: false});
+        api.setFileExplorerRootForTest('/home/test');
+        api.setFileExplorerRootMode(mode, {sync: false});
+        api.setFileExplorerDirListingForTest('/home/test/repo-a', [{name: 'src', kind: 'dir'}]);
+        api.setFileExplorerDirListingForTest('/home/test/repo-a/src', [{name: 'a.md', kind: 'file'}]);
+        const entries = [{name: 'repo-a', kind: 'dir'}];
+        const tree = api.fileExplorerTreeForTest();
+        api.renderTreeChildrenForTest(tree, '/home/test', entries, 0, [], {view: 'finder'});
+        const held = deferredFetch();
+        let requested = false;
+        api.setFetchForTest(url => {
+          const directory = new URL(String(url), 'https://yomux.test').searchParams.get('path');
+          if (directory === '/home/test' && !requested) {
+            requested = true;
+            return held.promise;
+          }
+          return Promise.resolve(jsonResponse({path: directory, entries: directory === '/home/test' ? entries : []}));
+        });
+        const opening = api.openFileExplorerAtForTest('/home/test', {refreshPanels: false});
+        await flushAsyncWork();
+        assert.equal(requested, true, 'the startup root open is held');
+        api.setFocusedPanelItem(`file:${path}`, {userInitiated: true});
+        await flushAsyncWork();
+        await flushAsyncWork();
+        held.resolve(jsonResponse({path: '/home/test', entries}));
+        assert.equal(await opening, false, `${mode}/${tabberMode}: explicit input retires the stale root owner`);
+        if (mode === 'fixed') assert.equal(api.fileExplorerRootForTest(), '/home/test', 'Fixed reveal preserves the root');
+      }
+    }
+  });
+
   await testAsync('Finder cached expansion refresh cannot overwrite newer pushed children', async () => {
     const api = loadYomux('', ['1']);
     const root = '/repo';
@@ -9578,7 +9913,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(api.fileExplorerSyncStateForTest().inFlightSignature, '', 'the remaining sibling transaction settles normally');
   });
 
-  test('Finder joins changed files once per render and preserves first duplicate status', () => {
+  test('Finder joins changed files once per render and refreshes duplicate path status', () => {
     const api = loadYomux('', ['1']);
     const files = Array.from({length: 13644}, (_, index) => ({abs_path: `/repo/unshown-${index}`, status: 'M'}));
     files.push({abs_path: '/repo/src/file.md', status: 'M', added: 2, removed: 1});
@@ -9599,7 +9934,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       [['/repo/src', [{name: 'file.md', kind: 'file'}]]], {view: 'finder'});
     render();
     const row = tree.querySelector('.file-tree-row[data-path="/repo/src/file.md"]');
-    assert.equal(row.querySelector('.file-tree-git-status').textContent, 'M', 'Finder retains first-match duplicate semantics');
+    assert.equal(row.querySelector('.file-tree-git-status').textContent, 'M', 'Finder retains the selected duplicate record');
     assert.equal(scannedItems, 0, 'recursive rows must share an indexed lookup rather than scan the payload');
     retained[13644].status = 'A';
     render();
@@ -9879,30 +10214,35 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(hiddenCalls.length, 0, 'a hidden Tabber does not fetch for another client\'s completion');
   });
 
-  await testAsync('Quick Open reuses one cached parent listing across path filters', async () => {
+  await testAsync('Quick Open filters a parent listing by fuzzy filename query', async () => {
     const api = loadYomux();
     const calls = [];
     api.installCommandPaletteFixtureForTest();
     api.setFetchForTest((url, options = {}) => {
+      const parsed = new URL(String(url), 'http://localhost');
+      const nameQuery = parsed.searchParams.get('name_query') || '';
       calls.push({url: String(url), signal: options.signal});
-      return Promise.resolve(jsonResponse({path: '/tmp', entries: [
+      const allEntries = [
         {name: 'helloworld', kind: 'dir'},
         {name: 'hello-world.txt', kind: 'file'},
         {name: 'unrelated.txt', kind: 'file'},
-      ]}));
+      ];
+      const entries = allEntries.filter(entry => !nameQuery || ['helloworld', 'hello-world.txt'].includes(entry.name));
+      return Promise.resolve(jsonResponse({path: '/tmp', entries}));
     });
 
     api.setCommandPaletteStateForTest('files', '/tmp/hw');
     api.setCommandPaletteQueryForTest('/tmp/hw');
     await api.refreshFileQuickOpenCandidatesForTest('/tmp/hw');
     assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(item => item.path)), [
-      '/tmp/helloworld', '/tmp/hello-world.txt', '/tmp/unrelated.txt',
+      '/tmp/helloworld', '/tmp/hello-world.txt',
     ]);
 
     api.setCommandPaletteQueryForTest('/tmp/helloworld');
     await api.refreshFileQuickOpenCandidatesForTest('/tmp/helloworld');
-    assert.equal(calls.length, 1, 'changing only the path filter reuses the cached parent listing');
-    assert.equal(calls[0].url, '/api/fs/fast/list?path=%2Ftmp', 'path mode loads one direct parent listing');
+    assert.equal(calls.length, 2, 'changing the path filter requests a fresh server-side filename match');
+    assert.equal(calls[0].url, '/api/fs/fast/list?path=%2Ftmp&name_query=hw', 'the first path filter reaches the direct-list route');
+    assert.equal(calls[1].url, '/api/fs/fast/list?path=%2Ftmp&name_query=helloworld', 'the next filename filter is sent explicitly');
     assert.deepStrictEqual(canonical(api.commandPaletteStateForTest().items.filter(item => item.category === 'file').map(item => item.label)), [
       'Open folder in File Explorer', 'helloworld/', 'hello-world.txt',
     ]);
@@ -9910,7 +10250,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     api.invalidateFileExplorerRootsForTest(['/tmp']);
     api.setCommandPaletteQueryForTest('/tmp/hw');
     await api.refreshFileQuickOpenCandidatesForTest('/tmp/hw');
-    assert.equal(calls.length, 2, 'a filesystem invalidation forces the next path query to reload its parent');
+    assert.equal(calls.length, 3, 'a filesystem invalidation still triggers a new filtered path request');
   });
 
   await testAsync('Quick Open path listing rejects stale completions after a parent change', async () => {
@@ -9928,11 +10268,11 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     });
 
     const stale = api.refreshFileQuickOpenCandidatesForTest('/tmp-old/old');
-    assert.equal(pending[0].url, '/api/fs/fast/list?path=%2Ftmp-old', 'absolute path mode loads its containing directory through the fast listing route');
+    assert.equal(pending[0].url, '/api/fs/fast/list?path=%2Ftmp-old&name_query=old', 'absolute path mode filters its containing directory through the fast listing route');
     api.abortFileQuickOpenSearchForTest();
 
     const current = api.refreshFileQuickOpenCandidatesForTest('/tmp-new/new');
-    assert.equal(pending[1].url, '/api/fs/fast/list?path=%2Ftmp-new', 'a parent change loads the new directory once');
+    assert.equal(pending[1].url, '/api/fs/fast/list?path=%2Ftmp-new&name_query=new', 'a parent change loads the new directory with its own filename query');
     pending[1].resolve(jsonResponse({path: '/tmp-new', entries: [{name: 'new.txt', kind: 'file'}]}));
     await current;
     pending[0].resolve(jsonResponse({path: '/tmp-old', entries: [{name: 'old.txt', kind: 'file'}]}));
@@ -10125,8 +10465,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const api = loadYomux('', ['1']);
       const slots = api.emptyLayoutSlots();
       slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
-      slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
-      slots.right = api.paneStateWithTabs(['1'], '1');
+      slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+      slots.right = {...api.paneStateWithTabs([api.differItemId], api.differItemId), paneRole: 'side', side: 'right'};
       api.setLayoutSlotsForTest(slots);
       api.setFileExplorerModeForTest('diff');
       api.setFileExplorerChangesSelectedSessionForTest('1');
@@ -10329,8 +10669,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
-    slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
-    slots.right = api.paneStateWithTabs(['1'], '1');
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    slots.right = {...api.paneStateWithTabs([api.differItemId], api.differItemId), paneRole: 'side', side: 'right'};
     api.setLayoutSlotsForTest(slots);
     api.setFileExplorerModeForTest('diff');
     api.setFileExplorerChangesSelectedSessionForTest('1');
@@ -10547,8 +10887,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
-    slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
-    slots.right = api.paneStateWithTabs(['1'], '1');
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    slots.right = {...api.paneStateWithTabs([api.differItemId], api.differItemId), paneRole: 'side', side: 'right'};
     api.setLayoutSlotsForTest(slots);
     api.setFileExplorerModeForTest('diff');
     api.setFileExplorerChangesSelectedSessionForTest('1');
@@ -10584,8 +10924,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
-    slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
-    slots.right = api.paneStateWithTabs(['1'], '1');
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    slots.right = {...api.paneStateWithTabs([api.differItemId], api.differItemId), paneRole: 'side', side: 'right'};
     api.setLayoutSlotsForTest(slots);
     api.setFileExplorerModeForTest('diff');
     api.setFileExplorerChangesSelectedSessionForTest('1');

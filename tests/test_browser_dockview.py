@@ -14,6 +14,226 @@ from tests.gate_harness import release_fixture_client_event_demand
 from tests.tmux_runtime import run_isolated_tmux
 
 
+def test_advanced_mode_navigation_and_balanced_transition(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser, tmp_path, "?sessions=one,two,three&layout=left&tabs=left:one",
+        sessions=["one", "two", "three"], grid_width=1800, grid_height=800,
+        settings={"general": {"default_tabber_mode": "normal"}},
+    )
+    wait = WebDriverWait(browser, 10)
+    wait.until(lambda driver: driver.execute_script("return typeof setTabberMode === 'function' && !!dockviewLayoutState.api"))
+    browser.execute_script("setTabberMode('normal'); window.__advancedRetainedTerminal = terminals.get('one');")
+    wait.until(lambda driver: driver.execute_script("return document.body.classList.contains('tabber-mode-normal')"))
+    normal_chrome = browser.execute_script("""
+      const display = selector => getComputedStyle(document.querySelector(selector)).display;
+      const toggle = document.querySelector('#topbarTabberToggle');
+      return {brand: display('.topbar .brand-cell'), menus: display('.topbar .app-menu-bar'),
+        search: display('.topbar .topbar-search'), languageWidth: document.querySelector('.topbar .topbar-language')?.getBoundingClientRect().width,
+        activity: display('.topbar .topbar-right-tools'), latency: display('.topbar .actions'),
+        toggleVisible: Boolean(toggle && toggle.getBoundingClientRect().width > 0)};
+    """)
+    assert normal_chrome['brand'] != 'none' and normal_chrome['menus'] != 'none', normal_chrome
+    assert normal_chrome['search'] != 'none' and normal_chrome['languageWidth'] > 0, normal_chrome
+    assert normal_chrome['activity'] != 'none' and normal_chrome['latency'] != 'none', normal_chrome
+    assert normal_chrome['toggleVisible'] is True, normal_chrome
+    checkbox = wait.until(lambda driver: driver.find_element('css selector', '.dockview-pane-header-actions [data-tabber-advanced]'))
+    assert checkbox.is_displayed()
+    assert browser.execute_script("return !document.querySelector('.tabber-toolbar [data-tabber-advanced]')")
+    checkbox.click()
+    wait.until(lambda driver: driver.execute_script("return tabberIsAdvanced() && activePaneItems().includes('__finder__') && activePaneItems().filter(isTmuxSession).length === 2"))
+    metrics = browser.execute_script("""
+      const content = layoutSlotKeys().filter(slot => !slotIsSidePane(slot));
+      const panes = content.map(slot => document.getElementById(panelDomId(activeItemForSide(slot))).getBoundingClientRect());
+      const control = document.querySelector('[data-tabber-advanced]').closest('label').getBoundingClientRect();
+      const minimize = document.querySelector('[data-tabber-advanced]').closest('.dockview-pane-header-actions').querySelector('[data-pane-minimize]').getBoundingClientRect();
+      return {counts: content.map(slot => paneTabs(slot).length), widths: panes.map(rect => rect.width),
+        controlBeforeMinimize: control.right <= minimize.left + 1,
+        retained: terminals.get('one') === window.__advancedRetainedTerminal};
+    """)
+    assert metrics['counts'] == [2, 1], metrics
+    assert abs(metrics['widths'][0] - metrics['widths'][1]) <= 3, metrics
+    assert metrics['controlBeforeMinimize'] and metrics['retained'], metrics
+    dark = browser.execute_script("return getComputedStyle(document.querySelector('.tabber-advanced-control')).color")
+    set_browser_visual_profile(browser, theme='light')
+    assert browser.find_element('css selector', '[data-tabber-advanced]').is_selected()
+    light = browser.execute_script("return getComputedStyle(document.querySelector('.tabber-advanced-control')).color")
+    assert dark != light, {'dark': dark, 'light': light}
+    browser.find_element('css selector', '[data-tabber-advanced]').click()
+    wait.until(lambda driver: driver.execute_script("return !tabberIsAdvanced() && activePaneItems().filter(isTmuxSession).length <= 1"))
+    assert browser.find_element('css selector', '[data-tabber-advanced]').is_displayed()
+
+
+def test_narrow_normal_tabber_opens_in_the_single_content_pane(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser, tmp_path, "?sessions=one&layout=left&tabs=left:one", sessions=["one"],
+        grid_width=1200, grid_height=800, settings={"general": {"default_tabber_mode": "normal"}},
+    )
+    wait = WebDriverWait(browser, 10)
+    wait.until(lambda driver: driver.execute_script("return typeof setTabberMode === 'function' && !!dockviewLayoutState.api"))
+    browser.execute_script("setTabberMode('normal');")
+    browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": False})
+    try:
+        wait.until(lambda driver: driver.execute_script("return !tabberSidebarCanFit() && !tabberSidebarVisible && layoutSlotKeys().filter(slot => !slotIsSidePane(slot)).length === 1"))
+        wait.until(lambda driver: driver.execute_script("const button=document.getElementById('topbarTabberToggle'); return Boolean(button && button.getBoundingClientRect().width > 0)"))
+        browser.execute_script("document.getElementById('topbarTabberToggle').click()")
+        wait.until(lambda driver: driver.execute_script("return tabberSidebarSinglePane && activePaneItems().length === 1 && activePaneItems()[0] === '__tabber__'"))
+        label = browser.execute_script("return document.querySelector('.dockview-pane-tab[data-pane-tab=\"__tabber__\"] .pane-tab-core')?.innerText || ''")
+        assert 'Tabber' not in label, label
+        order = browser.execute_script("const actions=document.querySelector('.dockview-pane-header-actions'); const control=actions.querySelector('[data-tabber-advanced]'); const minimize=actions.querySelector('[data-pane-minimize]'); return Boolean(control && minimize && control.getBoundingClientRect().width > 0 && control.getAttribute('aria-label') === 'Advanced' && (control.closest('label').compareDocumentPosition(minimize) & Node.DOCUMENT_POSITION_FOLLOWING))")
+        assert order is True
+        assert browser.execute_script("return document.getElementById('topbarTabberToggle').getAttribute('aria-pressed')") == 'true'
+        browser.execute_script("document.getElementById('topbarTabberToggle').click()")
+        wait.until(lambda driver: driver.execute_script("return !tabberSidebarSinglePane && activePaneItems().some(isTmuxSession)"))
+    finally:
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+
+
+def test_normal_mode_keeps_global_topbar_and_tabber_launchers(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser, tmp_path, "?sessions=one&layout=left&tabs=left:one", sessions=["one"],
+        grid_width=1600, grid_height=800, settings={"general": {"default_tabber_mode": "normal"}},
+    )
+    wait = WebDriverWait(browser, 10)
+    wait.until(lambda driver: driver.execute_script("return typeof setTabberMode === 'function' && !!dockviewLayoutState.api"))
+    browser.execute_script("setTabberMode('normal')")
+    wait.until(lambda driver: driver.execute_script("return document.body.classList.contains('tabber-mode-normal')"))
+    chrome = browser.execute_script("""
+      const hidden = selector => getComputedStyle(document.querySelector(selector)).display === 'none';
+      const language = document.querySelector('.topbar-language');
+      const toggle = document.querySelector('#topbarTabberToggle');
+      return {brand: !hidden('.topbar .brand-cell'), menus: !hidden('.topbar .app-menu-bar'),
+        search: !hidden('.topbar .topbar-search'), language: Boolean(language?.getClientRects().length),
+        activity: !hidden('.topbar .topbar-right-tools'), latency: !hidden('.topbar .actions'),
+        tabberToggle: Boolean(toggle?.getClientRects().length)};
+    """)
+    assert chrome == {"brand": True, "menus": True, "search": True, "language": True,
+                      "activity": True, "latency": True, "tabberToggle": True}, chrome
+    topbar_controls = browser.execute_script("""
+      const names = [...document.querySelectorAll('.app-menu-button')].map(button => button.textContent.trim());
+      return {names, refresh: Boolean(document.querySelector('#refreshMeta')?.getClientRects().length),
+        logout: Boolean(document.querySelector('#logoutButton')?.getClientRects().length)};
+    """)
+    assert all(name in topbar_controls['names'] for name in ['File', 'View', 'tmux', 'Tabs', 'Help']), topbar_controls
+    assert topbar_controls['refresh'] and topbar_controls['logout'], topbar_controls
+    new_chat = wait.until(lambda driver: driver.execute_script(
+        "return panelNodes.get(tabberItemId)?.querySelector('[data-tabber-new-chat]') || null"
+    ))
+    browser.execute_script("arguments[0].click()", new_chat)
+    wait.until(lambda driver: driver.execute_script("""
+      const popover = document.querySelector('.app-menu[data-app-menu="file"] > .app-menu-popover');
+      return Boolean(document.querySelector('.app-menu[data-app-menu="file"].open')
+        && popover?.getClientRects().length && getComputedStyle(popover).visibility === 'visible');
+    """))
+    wait.until(lambda driver: driver.execute_script("""
+      const popover = document.querySelector('.app-menu[data-app-menu="file"] > .app-menu-popover');
+      return Boolean(popover?.contains(document.activeElement));
+    """))
+    browser.execute_script("document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true}))")
+    wait.until(lambda driver: driver.execute_script("""
+      return !document.querySelector('.app-menu[data-app-menu="file"].open')
+        && document.activeElement?.matches('[data-tabber-new-chat], #topbarTabberToggle');
+    """))
+    new_chat = wait.until(lambda driver: driver.execute_script(
+        "return panelNodes.get(tabberItemId)?.querySelector('[data-tabber-new-chat]') || null"
+    ))
+    browser.execute_script("arguments[0].click()", new_chat)
+    wait.until(lambda driver: driver.execute_script("""
+      return document.querySelector('.app-menu[data-app-menu="file"] .app-menu-command')?.getClientRects().length > 0;
+    """))
+    browser.execute_script("document.querySelector('.app-menu[data-app-menu=\"file\"] .app-menu-button').focus()")
+    wait.until(lambda driver: driver.execute_script("return document.activeElement?.matches('.app-menu[data-app-menu=\"file\"] .app-menu-button')"))
+    browser.execute_script("document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true}))")
+    wait.until(lambda driver: driver.execute_script("""
+      return !document.querySelector('.app-menu.open')
+        && document.activeElement?.matches('[data-tabber-new-chat], #topbarTabberToggle');
+    """))
+    new_chat = wait.until(lambda driver: driver.execute_script(
+        "return panelNodes.get(tabberItemId)?.querySelector('[data-tabber-new-chat]') || null"
+    ))
+    browser.execute_script("arguments[0].click()", new_chat)
+    wait.until(lambda driver: driver.execute_script("""
+      return document.querySelector('.app-menu[data-app-menu="file"].open .app-menu-command')?.getClientRects().length > 0;
+    """))
+    browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": False})
+    try:
+        wait.until(lambda driver: driver.execute_script("""
+          const toggle = document.getElementById('topbarTabberToggle');
+          return !tabberSidebarVisible && !tabberSidebarCanFit() && toggle?.getClientRects().length > 0;
+        """))
+        browser.execute_script("document.querySelector('.app-menu[data-app-menu=\"file\"] .app-menu-button')?.focus()")
+        wait.until(lambda driver: driver.execute_script(
+            "return document.activeElement?.matches('.app-menu[data-app-menu=\"file\"] .app-menu-button')"
+        ))
+        browser.execute_script("document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true}))")
+        wait.until(lambda driver: driver.execute_script("""
+          return !document.querySelector('.app-menu.open')
+            && document.activeElement?.id === 'topbarTabberToggle';
+        """))
+    finally:
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+    browser.execute_script("setTabberMode('advanced')")
+    wait.until(lambda driver: driver.execute_script("""
+      return tabberIsAdvanced() && !document.body.classList.contains('tabber-mode-normal')
+        && document.querySelector('.topbar-search')?.getBoundingClientRect().width > 0;
+    """))
+
+
+def test_advanced_finder_reload_restores_expanded_directory_children(browser, tmp_path):
+    root = '/home/test'
+    dev = f'{root}/dev'
+    load_live_runtime_boot_fixture(
+        browser, tmp_path,
+        '?sessions=files,one&layout=left&tabs=left:__finder__;right:one',
+        transcript_sessions={'one': {'current_path': root, 'git_root': root, 'branch': '', 'panes': []}},
+        fs_entries={
+            root: [{'name': 'dev', 'kind': 'dir'}],
+            dev: [{'name': 'project-a', 'kind': 'dir'}, {'name': 'project-b', 'kind': 'dir'}],
+        },
+    )
+    wait = WebDriverWait(browser, 10)
+    wait.until(lambda driver: driver.execute_script(
+        "return typeof setTabberMode === 'function' && typeof currentFileExplorerRoot === 'function';"
+    ))
+    browser.execute_script("setTabberMode('advanced')")
+    wait.until(lambda driver: driver.execute_script("return fileExplorerRootModeValue() === 'sync';"))
+    selector = f'#panel-__finder__ .file-tree-row[data-path="{dev}"]'
+    wait.until(lambda driver: driver.find_elements('css selector', selector))
+    browser.find_element('css selector', selector).click()
+    wait.until(lambda driver: driver.execute_script(
+        "const row=document.querySelector(arguments[0]); const children=childContainerForRow(row,arguments[1]);"
+        "return row?.getAttribute('aria-expanded')==='true' && children?.querySelectorAll('.file-tree-row[data-path]').length===2;",
+        selector, dev,
+    ))
+    wait.until(lambda driver: driver.execute_script(
+        "return JSON.parse(new URLSearchParams(location.search).get('state')||'{}').finder?.expanded?.includes(arguments[0])===true;",
+        dev,
+    ))
+
+    browser.refresh()
+    wait.until(lambda driver: driver.execute_script(
+        "return typeof currentFileExplorerRoot === 'function' && document.querySelector(arguments[0]) !== null;",
+        selector,
+    ))
+    restored = browser.execute_async_script("""
+      const done=arguments[arguments.length-1], selector=arguments[0], dev=arguments[1];
+      const deadline=performance.now()+8000;
+      const read=()=>{
+        const row=document.querySelector(selector), children=childContainerForRow(row,dev);
+        const childPaths=[...document.querySelectorAll(`#panel-__finder__ .file-tree-row[data-path^="${dev}/"]`)].map(node=>node.dataset.path);
+        const state={ready:row?.getAttribute('aria-expanded')==='true' && childPaths.length===2,
+          advanced:tabberIsAdvanced(), root:currentFileExplorerRoot(), rowExpanded:row?.getAttribute('aria-expanded'),
+          childPaths, pending:[...fileExplorerPendingExpansions], expanded:[...fileExplorerExpanded],
+          savedExpanded:JSON.parse(new URLSearchParams(location.search).get('state')||'{}').finder?.expanded||[],
+          errors:jsDebugFailureEvents('error'), rejections:jsDebugFailureEvents('rejection')};
+        if (state.ready || performance.now()>=deadline) return done(state);
+        setTimeout(read,25);
+      };
+      read();
+    """, selector, dev)
+    assert restored['ready'], restored
+    assert browser.execute_script("return tabberIsAdvanced() && !document.body.classList.contains('tabber-mode-normal')")
+
+
 def test_dockview_representative_light_retina_visual_profile(browser, tmp_path):
     """Keep one real Dockview render covered outside the default dark/DPR=1 profile."""
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
@@ -266,7 +486,7 @@ def test_dockview_real_xterm_tab_switch_accepts_input_and_output(browser, monkey
                     "return itemInLayout(arguments[0]) && !activeSessions.includes(arguments[0]);", session,
                 ), "Tabber must exercise the background-tab activation path"
             selector = (
-                f'#panel-__tabber__ .file-tree-row[data-tabber-type="session"][data-tabber-session="{session}"] .file-tree-name'
+                f'#panel-__tabber__ .file-tree-row[data-tabber-type="normal"][data-tabber-session="{session}"] .file-tree-name'
                 if index == 2 else f'.dockview-pane-tab[data-pane-tab="{session}"]'
             )
             click_visible_selector(browser, selector)
@@ -758,6 +978,110 @@ def test_dockview_quick_open_highlights_contiguous_path_match(browser, tmp_path)
     assert metrics["errors"] == [], metrics
 
 
+def test_dockview_quick_open_matches_nested_slash_path_terms(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
+    wait_for_dockview(browser, min_tabs=1)
+    path = "/home/test/dynamo/notes/interviews/yo7110/2026-interview.md"
+    metrics = browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        const waitFor = window.__yomuxTestWaitFor;
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), 'https://localhost');
+          if (url.pathname === '/api/fs/search' || url.pathname === '/api/batch/search') {
+            return new Response(JSON.stringify({
+              root: '/home/test/dynamo/notes',
+              files: [{name: '2026-interview.md', path, relative_path: 'interviews/yo7110/2026-interview.md', size: 1, mtime_ns: 1}],
+            }), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          return originalFetch(input, options);
+        };
+        (async () => {
+          openFileQuickOpen();
+          const input = document.querySelector('.command-palette-input');
+          const visibleQueries = [];
+          for (const query of ['interviews/', 'inter/', 'inter/06', 'inter/2026', 'interv/20', '2026/interviews']) {
+            input.value = query;
+            input.dispatchEvent(new Event('input', {bubbles: true}));
+            await waitFor(() => !fileQuickOpenState.loading
+              && fileQuickOpenState.activeSearchQuery === query
+              && fileQuickOpenState.candidates.some(file => file.path === path), {description: `Quick Open result for ${query}`});
+            const index = commandPaletteState.items.findIndex(item => item.path === path);
+            const row = Array.from(document.querySelectorAll('.command-palette-row')).find(node => Number(node.dataset.commandIndex) === index);
+            if (!row || row.getBoundingClientRect().height <= 0) throw new Error(`Quick Open did not visibly render ${query}`);
+            visibleQueries.push(query);
+          }
+          const index = commandPaletteState.items.findIndex(item => item.path === path);
+          const row = Array.from(document.querySelectorAll('.command-palette-row')).find(node => Number(node.dataset.commandIndex) === index);
+          done({
+            visibleQueries,
+            text: row?.textContent || '',
+            errors: jsDebugFailureEvents('error'),
+          });
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """,
+        path,
+    )
+    assert metrics.get("error") is None, metrics
+    assert metrics["visibleQueries"] == ["interviews/", "inter/", "inter/06", "inter/2026", "interv/20", "2026/interviews"], metrics
+    assert "2026-interview.md" in metrics["text"], metrics
+    assert metrics["errors"] == [], metrics
+
+
+def test_dockview_quick_open_path_prefix_finds_entries_past_listing_limit(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
+    wait_for_dockview(browser, min_tabs=1)
+    path = "/tmp/yo7110.md"
+    metrics = browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        const waitFor = window.__yomuxTestWaitFor;
+        const requests = [];
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), 'https://localhost');
+          if (url.pathname === '/api/fs/fast/list' && url.searchParams.get('path') === '/tmp') {
+            const nameQuery = url.searchParams.get('name_query') || '';
+            requests.push(nameQuery);
+            const entries = nameQuery
+              ? [{name: 'yo7110.md', kind: 'file', size: 3754, mtime_ns: 1}]
+              : [{name: 'unrelated.txt', kind: 'file', size: 1, mtime_ns: 1}];
+            return new Response(JSON.stringify({path: '/tmp', entries, truncated: nameQuery === '', entry_limit: 1000}), {
+              status: 200,
+              headers: {'Content-Type': 'application/json'},
+            });
+          }
+          return originalFetch(input, options);
+        };
+        const type = async value => {
+          const input = document.querySelector('.command-palette-input');
+          input.value = value;
+          input.dispatchEvent(new Event('input', {bubbles: true}));
+          const prefix = value.slice('/tmp/'.length);
+          const directory = value.endsWith('/') ? value : value.slice(0, value.lastIndexOf('/'));
+          const identity = `path:${directory}\n${prefix}`;
+          await waitFor(() => !fileQuickOpenState.loading && fileQuickOpenState.candidateQueryIdentity === identity, {description: `Quick Open query ${value}`});
+        };
+        (async () => {
+          openFileQuickOpen();
+          await type('/tmp/');
+          await type('/tmp/yo711');
+          await waitFor(() => commandPaletteState.items.some(item => item.path === path), {description: 'prefix-matched file beyond the ordinary directory listing limit'});
+          const item = commandPaletteState.items.find(candidate => candidate.path === path);
+          done({requests, item: item ? {label: item.label, detail: item.detail} : null, errors: jsDebugFailureEvents('error')});
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """,
+        path,
+    )
+    assert metrics.get("error") is None, metrics
+    assert metrics["requests"] == ["", "yo711"], metrics
+    assert metrics["item"] == {"label": "yo7110.md", "detail": "/tmp/yo7110.md"}, metrics
+    assert metrics["errors"] == [], metrics
+
+
 def test_dockview_empty_tab_strip_context_menu_uses_active_session(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
     wait_for_dockview(browser, min_tabs=1)
@@ -787,6 +1111,70 @@ def test_dockview_empty_tab_strip_context_menu_uses_active_session(browser, tmp_
     assert "Rename tmux session '1'" in result["labels"], result
     assert "Transcript for session '1'" in result["labels"], result
     assert "Kill tmux session '1'" in result["labels"], result
+
+
+def test_dockview_editor_and_differ_tabs_close_from_right_click_menu(browser, tmp_path):
+    path = "/home/test/yolomux.dev/CONTEXT-CLOSE.md"
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1,differ",
+        sessions=["1"],
+        fs_entries={"/home/test/yolomux.dev": [{"name": "CONTEXT-CLOSE.md", "kind": "file"}]},
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const path = arguments[0];
+        const waitFor = window.__yomuxTestWaitFor;
+        const rightClick = tab => {
+          const rect = tab.getBoundingClientRect();
+          const event = new MouseEvent('contextmenu', {
+            bubbles: true, cancelable: true,
+            clientX: Math.round(rect.left + rect.width / 2),
+            clientY: Math.round(rect.bottom),
+          });
+          tab.dispatchEvent(event);
+          return {prevented: event.defaultPrevented, labels: Array.from(document.querySelectorAll('.session-context-menu button')).map(button => button.textContent.trim())};
+        };
+        (async () => {
+          let tab = document.querySelector('.dockview-pane-tab[data-pane-tab="__differ__"]');
+          if (!tab) throw new Error('Differ tab is missing');
+          const differMenu = rightClick(tab);
+          const differClose = Array.from(document.querySelectorAll('.session-context-menu button')).find(button => button.textContent.trim() === 'Close');
+          if (!differClose) throw new Error(`Differ close action missing: ${JSON.stringify(differMenu)}`);
+          differClose.click();
+          await waitFor(() => !itemInLayout(differItemId), {description: 'Differ closed from tab context menu'});
+
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = async (input, init = {}) => {
+            const url = new URL(String(input), 'https://localhost');
+            if (url.pathname === '/api/fs/read') {
+              return new Response(JSON.stringify({path, content: 'original source\\n', size: 15, mtime: 1, mtime_ns: 1, realpath: path, file_id: 'context-close:1', git_tracked: false, git_history: [], git_has_history: false}), {status: 200, headers: {'Content-Type': 'application/json'}});
+            }
+            return originalFetch(input, init);
+          };
+          const fileItem = await openFileInEditor(path, {name: 'CONTEXT-CLOSE.md'}, {userInitiated: true});
+          await waitFor(() => document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(fileItem)}"]`), {description: 'editor tab rendered'});
+          tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(fileItem)}"]`);
+          const editorMenu = rightClick(tab);
+          const editorClose = Array.from(document.querySelectorAll('.session-context-menu button')).find(button => button.textContent.trim().startsWith('Close '));
+          if (!editorClose) throw new Error(`Editor close action missing: ${JSON.stringify(editorMenu)}`);
+          editorClose.click();
+          await waitFor(() => !itemInLayout(fileItem), {description: 'editor closed from tab context menu'});
+          done({differMenu, editorMenu, differClosed: !itemInLayout(differItemId), editorClosed: !itemInLayout(fileItem)});
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """,
+        path,
+    )
+    assert result.get("error") is None, result
+    assert result["differMenu"]["prevented"] is True, result
+    assert "Close" in result["differMenu"]["labels"], result
+    assert result["editorMenu"]["prevented"] is True, result
+    assert any(label.startswith("Close ") for label in result["editorMenu"]["labels"]), result
+    assert result["differClosed"] is True, result
+    assert result["editorClosed"] is True, result
 
 
 def test_dockview_empty_pane_close_removes_only_selected_placeholder(browser, tmp_path):
@@ -914,6 +1302,8 @@ def test_dockview_tabber_toolbar_controls_use_the_tabber_panel_view(browser, tmp
         },
     )
     wait_for_dockview(browser, min_tabs=1)
+    # This assertion covers the expanded tree toolbar, which is now Advanced-only.
+    browser.execute_async_script("const done = arguments[0]; setTabberMode('advanced'); requestAnimationFrame(() => requestAnimationFrame(() => done(true))); ")
     result = browser.execute_async_script(
         """
         const done = arguments[0];
@@ -1490,6 +1880,8 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
         transcript_sessions=transcript_sessions,
     )
     wait_for_dockview(browser, min_tabs=5)
+    # Preserve this existing tree-heavy activation workload as an Advanced-mode check.
+    browser.execute_script("setTabberMode('advanced');")
     browser.execute_async_script(
         """
         const done = arguments[0];
@@ -1746,6 +2138,14 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
         assert result["immediate"] is True, result
         assert result["firstPanelPreserved"] is True and result["secondPanelPreserved"] is True, result
         browser.execute_async_script("const done=arguments[arguments.length-1]; requestAnimationFrame(() => requestAnimationFrame(() => done(true))); ")
+        deferred = browser.execute_script("return {tabs: window.__tabSwitchPerf.tabRefreshCalls(), reservations: window.__tabSwitchPerf.reservationCalls()};")
+        assert deferred == {"tabs": 0, "reservations": 0}, deferred
+        pending = browser.execute_script("window.__tabSwitchPaintOwner = dockviewLayoutState.tabActivationPerf; return {activation: Boolean(window.__tabSwitchPaintOwner), items: dockviewLayoutState.deferredTabRefreshItems.size};")
+        assert pending["activation"] and pending["items"] > 0, pending
+        # This fixture cannot emit terminal paint. Explicitly retire that owner;
+        # its normal drain must enrich headers exactly once without a lost item.
+        assert browser.execute_script("if (dockviewLayoutState.tabActivationPerf !== window.__tabSwitchPaintOwner) return false; dockviewClearTabActivationPerf(); delete window.__tabSwitchPaintOwner; return true;")
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return !dockviewLayoutState.tabActivationPerf && !dockviewLayoutState.deferredTabRefreshItems.size && !dockviewLayoutState.deferredTabRefreshFrame && !dockviewLayoutState.deferredMetadataTabStripTimer && window.__tabSwitchPerf.tabRefreshCalls() > 0 && window.__tabSwitchPerf.reservationCalls() > 0;"))
         deferred = browser.execute_script("return {tabs: window.__tabSwitchPerf.tabRefreshCalls(), reservations: window.__tabSwitchPerf.reservationCalls()};")
         assert deferred["tabs"] > 0 and deferred["reservations"] > 0, deferred
         assert_fixture_client_event_demand_claimed(browser)
@@ -2450,7 +2850,7 @@ def test_separator_color_preference_recolors_drop_previews(browser, tmp_path):
     wait_for_dockview_tab_geometry(browser, min_tabs=2)
     metrics = browser.execute_script(
         """
-        applySettingsPayload({settings: {appearance: {separator_color: 'purple'}}, defaults: {}, mtime_ns: 9301}, {force: true});
+        applyFixtureSettingsPatch({appearance: {separator_color: 'purple'}}, {immediate: true});
         const expectedProbe = document.createElement('div');
         expectedProbe.style.borderLeft = '2px dashed var(--pane-resizer-hover-bg)';
         expectedProbe.style.position = 'absolute';
@@ -2527,7 +2927,7 @@ def test_dockview_active_ring_follows_pane_spacing_without_thickening_sash(brows
     wait_for_dockview_tab_geometry(browser, min_tabs=2)
     metrics = browser.execute_script(
         """
-        applySettingsPayload({settings: {appearance: {pane_spacing: 6, pane_ring_opacity: 75}}, defaults: {}, mtime_ns: 9001}, {force: true});
+        applyFixtureSettingsPatch({appearance: {pane_spacing: 6, pane_ring_opacity: 75}}, {immediate: true});
         const activePanel = document.querySelector('#panel-1');
         const inactivePanel = document.querySelector('#panel-2');
         activePanel.classList.add('active-pane', 'focused-pane');
@@ -2613,7 +3013,7 @@ def test_dockview_pane_spacing_multiple_values_keep_terminal_inside_ring(browser
         const docStyle = getComputedStyle(document.documentElement);
         const snapshots = [];
         for (const value of [0, 3, 12, 20]) {
-          applySettingsPayload({settings: {appearance: {pane_spacing: value, pane_ring_opacity: 75}}, defaults: {}, mtime_ns: 9100 + value}, {force: true});
+          applyFixtureSettingsPatch({appearance: {pane_spacing: value, pane_ring_opacity: 75}}, {immediate: true});
           const groupStyle = getComputedStyle(activeGroup);
           const ring = getComputedStyle(activeGroup, '::after');
           const groupRect = activeGroup.getBoundingClientRect();
@@ -3012,10 +3412,24 @@ def test_terminal_fit_ignores_duplicate_resize_observer_echoes(browser, tmp_path
         const afterEcho = {cols: item.term.cols, rows: item.term.rows, calls: [...window.__terminalResizeCalls]};
         container.style.width = '360px';
         fitTerminal('1');
+        const originalRefresh = item.term.refresh.bind(item.term);
+        let refreshCalls = 0;
+        item.term.refresh = (...args) => { refreshCalls += 1; return originalRefresh(...args); };
+        const originalSend = item.socket.send.bind(item.socket);
+        const ownershipCalls = [];
+        item.socket.send = payload => {
+          const message = JSON.parse(payload);
+          if (message.type === 'resize' && message.activate === true) ownershipCalls.push(message);
+          return originalSend(payload);
+        };
+        fitTerminal('1', {claim: true});
+        item.term.refresh = originalRefresh;
+        item.socket.send = originalSend;
         return {
           afterFirst,
           afterEcho,
           afterWidthChange: {cols: item.term.cols, rows: item.term.rows, calls: [...window.__terminalResizeCalls]},
+          afterUnchangedOwnershipClaim: {refreshCalls, ownershipCalls},
         };
         """
     )
@@ -3024,6 +3438,8 @@ def test_terminal_fit_ignores_duplicate_resize_observer_echoes(browser, tmp_path
     assert metrics["afterWidthChange"]["cols"] == 40
     assert metrics["afterWidthChange"]["rows"] == 14
     assert metrics["afterWidthChange"]["calls"] == [{"cols": 79, "rows": 14}, {"cols": 40, "rows": 14}]
+    assert metrics["afterUnchangedOwnershipClaim"]["refreshCalls"] == 0, metrics
+    assert len(metrics["afterUnchangedOwnershipClaim"]["ownershipCalls"]) == 1, metrics
 
 
 def test_dockview_header_actions_stay_on_first_row(browser, tmp_path):
@@ -6390,6 +6806,15 @@ def test_dockview_narrow_pinned_active_tab_keeps_minimize_affordance(browser, tm
                 active: activeItemForSide('left'),
                 singleColumn: narrowSingleColumnMode(),
                 minimizeButtons: activeMinimizeCount(),
+                minimizeRect: (() => {
+                  const button = document.querySelector('[data-pane-minimize="1"]');
+                  const rect = button?.getBoundingClientRect();
+                  return rect ? {width: rect.width, height: rect.height, top: rect.top} : null;
+                })(),
+                siblingRects: Array.from(document.querySelectorAll('.dockview-pane-header-actions .tabs .tab'))
+                  .filter(button => !button.matches('[data-pane-minimize]') && visible(button))
+                  .map(button => ({className: button.className, width: button.getBoundingClientRect().width,
+                    height: button.getBoundingClientRect().height, top: button.getBoundingClientRect().top})),
               };
                   requestAnimationFrame(() => requestAnimationFrame(() => {
                     done({
@@ -6403,6 +6828,15 @@ def test_dockview_narrow_pinned_active_tab_keeps_minimize_affordance(browser, tm
         assert metrics["errors"] == [], metrics
         assert metrics["pinnedActive"]["singleColumn"] is True, metrics
         assert metrics["pinnedActive"]["active"] == "1" and metrics["pinnedActive"]["minimizeButtons"] == 1, metrics
+        assert metrics["pinnedActive"]["minimizeRect"]["width"] >= 36, metrics
+        assert metrics["pinnedActive"]["minimizeRect"]["height"] >= 36, metrics
+        assert any(
+            sibling["width"] <= 20
+            and sibling["height"] <= 20
+            and abs((sibling["top"] + sibling["height"] / 2)
+                    - (metrics["pinnedActive"]["minimizeRect"]["top"] + metrics["pinnedActive"]["minimizeRect"]["height"] / 2)) <= 1
+            for sibling in metrics["pinnedActive"]["siblingRects"]
+        ), metrics
     finally:
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
         browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
@@ -7650,7 +8084,7 @@ def test_dockview_root_right_drop_is_easy_and_preserves_triplet_home_width(
         grid_height=620,
     )
     wait_for_dockview(browser, min_tabs=min_tabs)
-    wait_for_dockview_tab_geometry(browser, min_tabs=min_tabs, min_width=40)
+    wait_for_dockview_tab_geometry(browser, min_tabs=min_tabs, min_width=35)
     before = dockview_layout_metrics(browser)
     home_before = next(group for group in before["groups"] if "__finder__" in group["tabs"])
     content_before = [group for group in before["groups"] if any(item in group["tabs"] for item in remaining_items)]
@@ -10704,9 +11138,11 @@ def test_dockview_tabber_toolbar_controls_update_the_independent_surface(browser
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          window.__bootFetches.length = 0;
+          await window.__yomuxTestWaitFor(() => transcriptMetadataState.loaded && !transcriptMetadataState.request,
+            {description: 'initial Tabber session metadata'});
+          const originalApiFetchJson = apiFetchJson;
           const now = Date.now() / 1000;
-          applyTabberActivityPayload({
+          const activityFixture = {
             activity: {
               '1': {active_recency_ts: now - 60},
               '2': {active_recency_ts: now - 7200},
@@ -10715,7 +11151,15 @@ def test_dockview_tabber_toolbar_controls_update_the_independent_surface(browser
             },
             agents: [],
             agent_windows: {},
-          });
+            session_order: ['1', '2'],
+            sessions: {1: {panes: []}, 2: {panes: []}},
+            topology_generation: Math.max(Number(tmuxTopologyGeneration || 0), Number(transcriptMetadataState.rosterGeneration || 0)),
+          };
+          apiFetchJson = (url, ...args) => String(url).startsWith('/api/activity')
+            ? originalApiFetchJson(url, ...args).then(() => activityFixture)
+            : originalApiFetchJson(url, ...args);
+          await fetchTabberActivity({visible: true});
+          window.__bootFetches.length = 0;
           transcriptMetadataState.payload = {
             sessions: {
               '1': {panes: [{index: 0, index_text: '0', name: 'bash', active: true, window_active: true}], project: {git: {root: '/repo/one', branch: 'main'}}},
@@ -10725,7 +11169,74 @@ def test_dockview_tabber_toolbar_controls_update_the_independent_surface(browser
           transcriptMetadataState.loaded = true;
           refreshTabberPanels();
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          const panel = panelNodes.get(tabberItemId);
+          let panel = panelNodes.get(tabberItemId);
+          const advanced = document.querySelector('[data-tabber-advanced]');
+          if (!advanced) throw new Error('Tabber toolbar is missing the Advanced checkbox');
+          if (advanced.checked) {
+            advanced.click();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            panel = panelNodes.get(tabberItemId);
+          }
+          let newChat = panel?.querySelector('[data-tabber-new-chat]');
+          const advancedControl = document.querySelector('[data-tabber-advanced]');
+          const toolbarBounds = panel?.querySelector('.tabber-toolbar')?.getBoundingClientRect();
+          const controlsVisible = Boolean(newChat && advancedControl && toolbarBounds && toolbarBounds.width > 0
+            && newChat.getBoundingClientRect().width > 0 && advancedControl.getBoundingClientRect().width > 0);
+          const initialNormal = advancedControl?.checked === false;
+          setFileExplorerViewSetting('tabber', 'treeDateMode', 'date');
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          panel = panelNodes.get(tabberItemId);
+          newChat = panel?.querySelector('[data-tabber-new-chat]');
+          const normalRows = Array.from(panel.querySelectorAll('.file-tree-row[data-tabber-type="normal"]'));
+          const normalRowsNotDraggable = normalRows.length > 0
+            && normalRows.every(row => row.draggable === false && !row.hasAttribute('draggable'));
+          normalRows.forEach(row => {
+            const date = row.querySelector('.file-tree-date');
+            if (date) date.textContent = 'Oct 11 at 03:53 AM';
+          });
+          const normalDateVisible = normalRows.some(row => {
+            const cell = row.querySelector('.file-tree-date');
+            const bounds = cell?.getBoundingClientRect();
+            return Boolean(cell?.textContent.trim() && bounds?.width > 0 && bounds?.height > 0
+              && getComputedStyle(cell).visibility !== 'hidden');
+          });
+          const normalDateMetrics = {
+            rows: normalRows.map(row => {
+              const cell = row.querySelector('.file-tree-date');
+              const bounds = cell?.getBoundingClientRect();
+              const range = document.createRange();
+              if (cell) range.selectNodeContents(cell);
+              const textBounds = range.getBoundingClientRect();
+              return {text: cell?.textContent.trim() || '', cellLeft: bounds?.left || 0, cellRight: bounds?.right || 0,
+                textLeft: textBounds.left, textRight: textBounds.right};
+            }),
+          };
+          newChat?.click();
+          const newChatOpensFileMenu = document.querySelector('.app-menu[data-app-menu="file"]')?.classList.contains('open') === true;
+          const newChatMenu = document.querySelector('.app-menu[data-app-menu="file"] > .app-menu-popover');
+          const newChatMenuBounds = newChatMenu?.getBoundingClientRect();
+          const newChatMenuVisible = Boolean(newChatMenuBounds?.width > 0 && newChatMenuBounds?.height > 0
+            && getComputedStyle(newChatMenu).visibility === 'visible');
+          await window.__yomuxTestWaitFor(() => newChatMenu?.contains(document.activeElement),
+            {description: 'New Chat menu keyboard focus'});
+          const menuFocusWasCommand = document.activeElement?.classList.contains('app-menu-command') === true;
+          const menuCommand = document.activeElement;
+          menuCommand?.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true}));
+          const newChatRestoredFocus = document.activeElement?.matches('[data-tabber-new-chat], #topbarTabberToggle') === true;
+          closeAppMenus();
+          if (advancedControl && !advancedControl.checked) {
+            advancedControl.click();
+            await window.__yomuxTestWaitFor(() => tabberIsAdvanced(),
+              {timeoutMs: 3000, intervalMs: 10, description: 'Tabber advanced mode is active'});
+          }
+          dockviewActivateUserTerminalTab(tabberItemId);
+          await window.__yomuxTestWaitFor(() => {
+            const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="__tabber__"]');
+            return itemIsActivePaneTab(tabberItemId)
+              && tab?.classList.contains('active')
+              && document.querySelector('.file-explorer-panel[data-file-explorer-view="tabber"]');
+          }, {timeoutMs: 3000, intervalMs: 10, description: 'Tabber toolbar is active before changing its controls'});
+          panel = panelNodes.get(tabberItemId);
           const rowSessions = () => Array.from(panel.querySelectorAll('.file-tree-row[data-tabber-type="session"]')).map(row => row.dataset.tabberSession);
           const sessionRows = () => Array.from(panel.querySelectorAll('.file-tree-row[data-tabber-type="session"]'));
           const initial = rowSessions();
@@ -10733,6 +11244,11 @@ def test_dockview_tabber_toolbar_controls_update_the_independent_surface(browser
           const sort = panel.querySelector('[data-file-explorer-tree-sort]');
           sort.value = 'za';
           sort.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+          await window.__yomuxTestWaitFor(() => {
+            panel = document.querySelector('.file-explorer-panel[data-file-explorer-view="tabber"]');
+            return panel && rowSessions().join(',') === '2,1';
+          }, {timeoutMs: 3000, intervalMs: 10, description: 'Tabber rows reordered after changing the sort control'});
+          panel = document.querySelector('.file-explorer-panel[data-file-explorer-view="tabber"]');
           const sorted = rowSessions();
 
           const date = panel.querySelector('[data-file-explorer-tree-dates]');
@@ -10746,11 +11262,33 @@ def test_dockview_tabber_toolbar_controls_update_the_independent_surface(browser
           const expanded = sessionRows().every(row => row.getAttribute('aria-expanded') === 'true');
 
           const lookback = panel.querySelector('[data-tabber-lookback]');
+          if (tabberActivityState.request) await tabberActivityState.request;
+          const priorLookback = tabberSessionFileLookbackHours;
+          setTabberSessionFileLookbackHours(24, {refresh: false});
+          window.__bootFetches.length = 0;
           lookback.value = '48';
           lookback.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
-          await Promise.resolve(tabberActivityState.request);
+          const activityRequest = tabberActivityState.request;
+          await Promise.resolve(activityRequest);
           const activityFetch = window.__bootFetches.find(entry => entry.path === '/api/activity' && new URLSearchParams(entry.search).get('hours') === '48');
+          const activityRequests = window.__bootFetches.filter(entry => entry.path === '/api/activity');
+          const lookbackValue = lookback.value;
+          const lookbackHours = tabberSessionFileLookbackHours;
+          lookback.value = String(priorLookback);
+          setTabberSessionFileLookbackHours(priorLookback, {refresh: false});
           done({
+            controlsVisible,
+            initialNormal,
+            normalRowCount: normalRows.length,
+            normalRowsNotDraggable,
+            normalDateVisible,
+            normalDateMetrics,
+            newChatOpensFileMenu,
+            newChatMenuVisible,
+            newChatRestoredFocus,
+            menuFocusWasCommand,
+            returnFocusResolverSet: typeof openAppMenuReturnFocus === 'function',
+            activeElementAfterEscape: document.activeElement?.outerHTML?.slice(0, 160) || '',
             initial,
             sorted,
             sortValue: panel.querySelector('[data-file-explorer-tree-sort]').value,
@@ -10758,18 +11296,374 @@ def test_dockview_tabber_toolbar_controls_update_the_independent_surface(browser
             dateAfter,
             collapsed,
             expanded,
-            lookbackValue: panel.querySelector('[data-tabber-lookback]').value,
-            lookbackHours: tabberSessionFileLookbackHours,
+            lookbackValue,
+            lookbackHours,
             activityFetch: activityFetch || null,
+            activityRequests,
             errors: [...(jsDebugFailureEvents('error')), ...(jsDebugFailureEvents('rejection'))],
           });
         })().catch(error => done({error: String(error?.stack || error)}));
         """
     )
     assert "error" not in result and result["errors"] == [], result
+    assert result["controlsVisible"] is True and result["initialNormal"] is True, result
+    assert result["normalRowCount"] > 0 and result["normalRowsNotDraggable"] is True, result
+    assert result["normalDateVisible"] is True, result["normalDateMetrics"]
+    clipped_dates = [row for row in result["normalDateMetrics"]["rows"]
+                     if row["text"] and (row["textLeft"] < row["cellLeft"] or row["textRight"] > row["cellRight"])]
+    assert clipped_dates == [], {"normalDateMetrics": result["normalDateMetrics"], "clippedDates": clipped_dates}
+    assert result["newChatOpensFileMenu"] is True, result
+    assert result["newChatMenuVisible"] is True, result
+    assert result["newChatRestoredFocus"] is True, {key: result[key] for key in ("newChatRestoredFocus", "menuFocusWasCommand", "returnFocusResolverSet", "activeElementAfterEscape")}
     assert result["initial"] == ["1", "2"] and result["sorted"] == ["2", "1"], result
     assert result["sortValue"] == "za", result
     assert result["dateBefore"] != result["dateAfter"], result
     assert result["collapsed"] is True and result["expanded"] is True, result
     assert result["lookbackValue"] == "48" and result["lookbackHours"] == 48, result
     assert result["activityFetch"] is not None, result
+
+
+def test_dockview_tabber_chat_and_search_controls_match_both_themes(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=tabber,1&layout=row@22(side,main)&tabs=side:@side-left,tabber;main:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    controls = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const wait = window.__yomuxTestWaitFor;
+          const advanced = document.querySelector('[data-tabber-advanced]');
+          if (!advanced) throw new Error('Tabber toolbar is missing the Advanced checkbox');
+          if (advanced.checked) { advanced.click(); await wait(() => !tabberIsAdvanced(), {description: 'Normal Tabber'}); }
+          const panel = panelNodes.get(tabberItemId);
+          const chat = panel?.querySelector('[data-tabber-new-chat]');
+          const search = panel?.querySelector('[data-tabber-search]');
+          if (!chat || !search) throw new Error('Tabber Chat and Search controls are missing');
+          search.click();
+          await wait(() => commandPaletteState.node && !commandPaletteState.node.hidden, {description: 'Quick Open from Tabber Search'});
+          const result = {
+            chatLabel: chat.textContent.trim(),
+            chatAriaLabel: chat.getAttribute('aria-label'),
+            chatIcon: Boolean(chat.querySelector('svg.tabber-new-chat-icon')),
+            searchAriaLabel: search.getAttribute('aria-label'),
+            searchIcon: Boolean(search.querySelector('svg.tabber-search-icon')),
+            searchOpensQuickOpen: document.activeElement === commandPaletteState.node.querySelector('.command-palette-input'),
+          };
+          closeCommandPalette();
+          done(result);
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in controls, controls
+    assert controls["chatLabel"] == "New Chat" and controls["chatAriaLabel"] == "New Chat", controls
+    assert controls["chatIcon"] is True and controls["searchIcon"] is True, controls
+    assert controls["searchAriaLabel"] == "Search", controls
+    assert controls["searchOpensQuickOpen"] is True, controls
+
+
+def test_dockview_normal_tabber_sidebar_auto_hides_and_can_be_toggled(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=tabber,1&layout=row@22(side,main)&tabs=side:@side-left,tabber;main:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const wait = window.__yomuxTestWaitFor;
+          const advanced = document.querySelector('[data-tabber-advanced]');
+          if (!advanced) throw new Error('Tabber Advanced control is missing');
+          if (advanced.checked) { advanced.click(); await wait(() => !tabberIsAdvanced(), {description: 'Normal mode'}); }
+          const toggle = document.querySelector('#topbarTabberToggle');
+          if (!toggle) throw new Error('topbar Tabber toggle is missing');
+          if (toggle.getAttribute('aria-pressed') !== 'true') toggle.click();
+          await wait(() => itemInLayout(tabberItemId), {description: 'wide Normal sidebar is visible'});
+          done(true);
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    browser.set_window_size(520, 900)
+    wait = WebDriverWait(browser, 8)
+    wait.until(lambda driver: driver.execute_script("return !itemInLayout(tabberItemId)"))
+    collapsed = browser.execute_script(
+        """
+        const toggle = document.querySelector('#topbarTabberToggle');
+        return {mode: tabberMode, visible: itemInLayout(tabberItemId), toggleVisible: toggle?.getBoundingClientRect().width > 0,
+          pressed: toggle?.getAttribute('aria-pressed'), content: paneItems(layoutSlots).filter(item => item !== tabberItemId),
+          width: document.querySelector('.yomux-dockview')?.getBoundingClientRect().width || 0};
+        """
+    )
+    assert collapsed["mode"] == "normal" and collapsed["visible"] is False, collapsed
+    assert collapsed["toggleVisible"] is True and collapsed["pressed"] == "false", collapsed
+    assert collapsed["content"] == ["1"] and collapsed["width"] > 0, collapsed
+
+    browser.set_window_size(1200, 700)
+    wait.until(lambda driver: driver.execute_script("return itemInLayout(tabberItemId)"))
+    browser.set_window_size(520, 900)
+    wait.until(lambda driver: driver.execute_script("return !itemInLayout(tabberItemId)"))
+    browser.find_element("css selector", "#topbarTabberToggle").click()
+    wait.until(lambda driver: driver.execute_script("return tabberSidebarSinglePane && activePaneItems().length === 1 && activePaneItems()[0] === tabberItemId"))
+    shown = browser.execute_script(
+        """
+        const slot = slotForItem(tabberItemId);
+        return {pressed: document.querySelector('#topbarTabberToggle')?.getAttribute('aria-pressed'),
+          side: slotIsSidePane(slot), singlePane: tabberSidebarSinglePane,
+          content: paneItems(layoutSlots).filter(item => item !== tabberItemId)};
+        """
+    )
+    assert shown == {"pressed": "true", "side": False, "singlePane": True, "content": []}, shown
+
+    browser.find_element("css selector", "#topbarTabberToggle").click()
+    wait.until(lambda driver: driver.execute_script("return !tabberSidebarSinglePane && activePaneItems().some(isTmuxSession)"))
+    browser.set_window_size(1200, 700)
+    wait.until(lambda driver: driver.execute_script("return itemInLayout(tabberItemId) && slotIsSidePane(slotForItem(tabberItemId))"))
+    browser.find_element("css selector", "#topbarTabberToggle").click()
+    wait.until(lambda driver: driver.execute_script("return !itemInLayout(tabberItemId)"))
+    browser.find_element("css selector", "#topbarTabberToggle").click()
+    wait.until(lambda driver: driver.execute_script("return itemInLayout(tabberItemId)"))
+
+    for theme in ("dark", "light"):
+        set_browser_visual_profile(browser, theme=theme)
+        paint = browser.execute_script(
+            """
+            const panel = panelNodes.get(tabberItemId);
+            const chat = panel.querySelector('[data-tabber-new-chat]');
+            const search = panel.querySelector('[data-tabber-search]');
+            const rgb = value => (value.match(/[\\d.]+/g) || []).slice(0, 3).map(Number);
+            const chatStyle = getComputedStyle(chat);
+            const searchStyle = getComputedStyle(search);
+            const searchBounds = search.getBoundingClientRect();
+            return {
+              chatBackground: rgb(chatStyle.backgroundColor),
+              chatForeground: rgb(chatStyle.color),
+              chatRadius: chatStyle.borderRadius,
+              chatIconSize: chat.querySelector('svg').getBoundingClientRect().width,
+              searchBackground: rgb(searchStyle.backgroundColor),
+              searchRadius: searchStyle.borderRadius,
+              searchWidth: searchBounds.width,
+              searchHeight: searchBounds.height,
+              searchIconSize: search.querySelector('svg').getBoundingClientRect().width,
+            };
+            """
+        )
+        assert paint["chatBackground"][2] > paint["chatBackground"][0], {"theme": theme, "paint": paint}
+        assert min(paint["chatForeground"]) >= 245, {"theme": theme, "paint": paint}
+        assert float(paint["chatRadius"].removesuffix("px")) >= 30, {"theme": theme, "paint": paint}
+        assert paint["chatIconSize"] >= 16, {"theme": theme, "paint": paint}
+        assert paint["searchRadius"] == "50%", {"theme": theme, "paint": paint}
+        assert abs(paint["searchWidth"] - paint["searchHeight"]) <= 1, {"theme": theme, "paint": paint}
+        assert paint["searchBackground"] != paint["chatBackground"], {"theme": theme, "paint": paint}
+        assert paint["searchIconSize"] >= 18, {"theme": theme, "paint": paint}
+
+    browser.find_element("css selector", "#topbarTabberToggle").click()
+    wait.until(lambda driver: driver.execute_script("return !itemInLayout(tabberItemId)"))
+    browser.set_window_size(520, 900)
+    wait.until(lambda driver: driver.execute_script("return !itemInLayout(tabberItemId)"))
+    browser.set_window_size(1200, 700)
+    wait.until(lambda driver: driver.execute_script("return !itemInLayout(tabberItemId)"))
+
+
+def test_dockview_tabber_normal_shows_one_pane_and_hides_drop_prompt(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=tabber,1,2,3,4&layout=row@22(side,main)&tabs=side:@side-left,tabber;main:1,2",
+        sessions=["1", "2", "3", "4"],
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const wait = window.__yomuxTestWaitFor;
+          const advancedControl = () => document.querySelector('[data-tabber-advanced]');
+          if (!advancedControl()) throw new Error('Tabber toolbar is missing the Advanced checkbox');
+          if (advancedControl().checked) { advancedControl().click(); await frame(); }
+          storeTabberNormalSelections([]);
+          await applyTabberNormalSelections();
+          await frame();
+          const emptyTitles = [...document.querySelectorAll('.empty-pane-panel strong')];
+          const dropPromptHidden = emptyTitles.every(title => title.hidden || getComputedStyle(title).display === 'none');
+          const rosterRows = [...document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type]')];
+          const utilityRows = rosterRows.filter(row => row.dataset.tabberType === 'tab');
+          const firstUtility = rosterRows.findIndex(row => row.dataset.tabberType === 'tab');
+          const utilityLabels = utilityRows.map(row => row.querySelector('.tabber-normal-primary')?.textContent.trim() || '');
+          const utilityTabsAtBottom = utilityRows.length > 0
+            && firstUtility === rosterRows.length - utilityRows.length
+            && utilityLabels.every((label, index) => index === 0 || label.localeCompare(utilityLabels[index - 1], undefined, {numeric: true, sensitivity: 'base'}) >= 0);
+          const visibleDropPrompt = [...document.querySelectorAll('.empty-pane-panel strong')]
+            .some(title => title.getClientRects().length && title.textContent.trim() === 'Drop a tab here');
+          const row = session => {
+            const found = [...document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="normal"]')]
+              .find(item => item.dataset.tabberPaneItem === session);
+            if (!found) throw new Error(`missing Normal row for ${session}`);
+            return found;
+          };
+          row('1').click();
+          await wait(() => tabberNormalSelections?.length === 1 && tabberNormalSelections[0] === '1' && panelNodes.get('1'), {description: 'first pane selection'});
+          const terminal1 = terminals.get('1');
+          row('2').click();
+          await wait(() => tabberNormalSelections?.length === 1 && tabberNormalSelections[0] === '2' && panelNodes.get('2'), {description: 'single pane replacement'});
+          await frame();
+          const switched = {selection: [...tabberNormalSelections], visibleSessions: paneItems(layoutSlots).filter(isTmuxSession), terminalIdentityRetained: terminals.get('1') === terminal1};
+          row('2').click();
+          await wait(() => tabberNormalSelections?.length === 0 && !paneItems(layoutSlots).some(isTmuxSession), {description: 'selected row deselects its pane'});
+          row('1').click();
+          await wait(() => tabberNormalSelections?.length === 1 && tabberNormalSelections[0] === '1' && panelNodes.get('1'), {description: 'reopen retained terminal'});
+          const reopenedIdentity = terminals.get('1') === terminal1;
+      const normal = {dropPromptHidden, visibleDropPrompt, utilityTabsAtBottom, utilityLabels, switched, deselected: tabberNormalSelections.length === 1 && tabberNormalSelections[0] === '1', reopenedIdentity,
+            headerless: dockviewLayoutState.api.groups.every(group => group.panels.length === 1)
+              && dockviewLayoutState.api.groups.filter(group => group.panels.some(panel => panel.id !== '__tabber__'))
+                .every(group => group.header.hidden)};
+          document.querySelector('[data-tabber-advanced]')?.click();
+          await wait(() => tabberIsAdvanced() && tabDragAllowed(), {description: 'Advanced mode is enabled'});
+          await wait(() => fileSurfaceItems.every(itemInLayout), {description: 'Advanced restores Finder, Differ, and Tabber tabs'}).catch(() => false);
+          const advancedFileSurfaces = fileSurfaceItems.map(item => ({item, inLayout:itemInLayout(item), slot:slotForItem(item)}));
+          if (!advancedFileSurfaces.every(surface => surface.inLayout && surface.slot)) {
+            throw new Error(`Advanced file surfaces did not restore: ${JSON.stringify({advancedFileSurfaces, constrained:sidePaneConstrainedMode(), width:window.innerWidth, layout:layoutSlots})}`);
+          }
+          await applyLayoutSlots(layoutSlotsForItems(['1', '2'], 'split'));
+          await frame();
+          const advancedState = {mode:tabberMode, drag:tabDragAllowed(), visible:paneItems(layoutSlots),
+            groups:dockviewLayoutState.api.groups.map(group=>({panels:group.panels.map(panel=>panel.id),headerHidden:group.header.hidden}))};
+          const advancedParity = tabberIsAdvanced() && tabDragAllowed() && paneItems(layoutSlots).filter(isTmuxSession).length === 2
+            && dockviewLayoutState.api.groups.filter(group => group.panels.some(panel => ['1', '2'].includes(panel.id))).every(group => !group.header.hidden);
+          done({normal, advancedFileSurfaces, advancedParity, advancedState, errors: [...jsDebugFailureEvents('error'), ...jsDebugFailureEvents('rejection')]});
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in result and result["errors"] == [], result
+    assert result["normal"]["dropPromptHidden"] is True and result["normal"]["visibleDropPrompt"] is False, result
+    assert result["normal"]["utilityTabsAtBottom"] is True, result
+    assert result["normal"]["switched"]["selection"] == ["2"] and result["normal"]["switched"]["visibleSessions"] == ["2"], result
+    assert result["normal"]["switched"]["terminalIdentityRetained"] is True, result
+    assert result["normal"]["deselected"] is True and result["normal"]["reopenedIdentity"] is True, result
+    assert all(surface["inLayout"] and surface["slot"] for surface in result["advancedFileSurfaces"]), result
+    assert result["normal"]["headerless"] is True and result["advancedParity"] is True, result["advancedState"]
+
+
+def test_dockview_tabber_normal_shows_recency_for_agent_and_bash_windows(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=tabber,1&layout=row@22(side,main)&tabs=side:@side-left,tabber;main:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          if (tabberIsAdvanced()) document.querySelector('[data-tabber-advanced]').click();
+          await window.__yomuxTestWaitFor(() => !tabberIsAdvanced(), {description: 'Normal Tabber'});
+          const base = transcriptMetadataState.payload.sessions['1'];
+          const basePane = base.panes[0];
+          transcriptMetadataState.payload.sessions['1'] = {
+            ...base,
+            panes: [
+              {...basePane, window: '0', window_index: 0, pane: '0', pane_index: 0, window_name: 'codex', process_label: 'codex', command: 'codex', active: true, window_active: true},
+              {...basePane, window: '1', window_index: 1, pane: '0', pane_index: 0, window_name: 'bash', process_label: 'bash', command: 'bash', active: true, window_active: false},
+            ],
+            window_metadata: [{window_index: 0, window_id: '@ai', description: 'AI screen'}, {window_index: 1, window_id: '@shell', description: 'Shell'}],
+          };
+          const now = Date.now() / 1000;
+          const aiActivity = now - 60;
+          const shellActivity = now - 30 * 60;
+          tabberActivityPayload = {
+            ...tabberActivityPayload,
+            activity: {'1:0': {active_recency_ts: aiActivity, last_output_ts: aiActivity}, '1:1': {active_recency_ts: shellActivity, last_output_ts: shellActivity}},
+            agents: [{session: '1', window: '0', agent_kind: 'codex', sort_ts: aiActivity, last_used_ts: aiActivity}],
+          };
+          tabberActivityState.loaded = true;
+          setFileExplorerTreeDateMode('relative', 'tabber');
+          refreshTabberPanels();
+          await frame();
+          const rows = [...document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="normal"]')];
+          const dates = rows.map(row => {
+            const cell = row.querySelector('.file-tree-date');
+            const rect = cell.getBoundingClientRect();
+            return {label: row.querySelector('.tabber-normal-description')?.textContent.trim(), primary: row.querySelector('.tabber-normal-primary')?.textContent.trim(), text: cell.textContent.trim(), hidden: cell.hidden, width: rect.width, display: getComputedStyle(cell).display};
+          });
+          const newestFirst = aiActivity > shellActivity && dates[0]?.label === 'AI screen' && dates[1]?.label === 'Shell';
+          tabberActivityPayload = {...tabberActivityPayload, activity: {}, agents: []};
+          autoApproveStates.set('1', {agent_windows: []});
+          refreshTabberPanels();
+          await frame();
+          const undated = [...document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="normal"]')]
+            .map(row => ({primary: row.querySelector('.tabber-normal-primary')?.textContent.trim(), date: row.querySelector('.file-tree-date')?.textContent.trim()}));
+          done({rows: rows.length, labels: dates.map(date => date.label), dates, newestFirst, undated});
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in result, result
+    assert result["rows"] == 2 and result["labels"] == ["AI screen", "Shell"], result
+    assert result["newestFirst"] is True, result
+    assert result["dates"][0]["primary"].endswith("0:codex") and result["dates"][1]["primary"].endswith("1:bash"), result
+    assert result["dates"][0]["text"] != result["dates"][1]["text"], result
+    assert all(date["text"] and not date["hidden"] and date["width"] > 0 and date["display"] != "none" for date in result["dates"]), result
+    assert [row["primary"].split()[-1] for row in result["undated"]] == ["0:codex", "1:bash"] and all(not row["date"] for row in result["undated"]), result
+
+
+def test_dockview_tabber_native_click_selects_numbered_sessions(browser, tmp_path):
+    sessions = ["16006", "16007", "16008"]
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=tabber,16006,16007,16008&layout=row@22(side,main)&tabs=side:@side-left,tabber;main:16006",
+        sessions=sessions,
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    roster = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const advanced = document.querySelector('[data-tabber-advanced]');
+          if (advanced?.checked) {
+            advanced.click();
+            await window.__yomuxTestWaitFor(() => !tabberIsAdvanced(), {description: 'Normal Tabber mode'});
+          }
+          await refreshSessionMetadata();
+          await openTabberActivityOverview();
+          await Promise.all([loadAutoStatuses.request, tabberActivityState.request]);
+          await window.__yomuxTestWaitFor(() => document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="normal"]').length > 0,
+            {description: 'Normal Tabber rows'}).catch(() => false);
+          done({
+            mode: tabberMode,
+            sessions: [...visibleSessions],
+            rows: [...document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type]')].map(row => ({
+              type: row.dataset.tabberType,
+              session: row.dataset.tabberSession,
+              paneItem: row.dataset.tabberPaneItem,
+              path: row.dataset.path,
+              visible: row.getBoundingClientRect().width > 0 && row.getBoundingClientRect().height > 0,
+            })),
+          });
+        })().catch(error => done({error: String(error)}));
+        """
+    )
+    assert "error" not in roster, roster
+    assert all(any(row["paneItem"] == session for row in roster["rows"]) for session in sessions), roster
+    wait = WebDriverWait(browser, 8)
+    for session in ("16007", "16008", "16006"):
+        selector = f'#panel-__tabber__ .file-tree-row[data-tabber-type="normal"][data-tabber-pane-item="{session}"]'
+        click_visible_selector(browser, selector)
+        wait.until(lambda driver: driver.execute_script(
+            "return tabberNormalSelections.length === 1 && tabberNormalSelections[0] === arguments[0]"
+            " && activePaneItems().filter(isTmuxSession).join(',') === arguments[0]"
+            " && Boolean(panelNodes.get(arguments[0])?.querySelector('.xterm'))",
+            session,
+        ))
+    selector = '#panel-__tabber__ .file-tree-row[data-tabber-type="normal"][data-tabber-pane-item="16006"]'
+    click_visible_selector(browser, selector)
+    wait.until(lambda driver: driver.execute_script(
+        "return tabberNormalSelections.length === 0 && !activePaneItems().some(isTmuxSession)"
+    ))

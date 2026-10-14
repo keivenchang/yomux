@@ -403,6 +403,11 @@ func validateCurrentFamilyObservation(item Observation) error {
 			return invalid("observation", "payload", "service_load.running must be a boolean")
 		}
 	}
+	if value, ok := item.Payload["process_census_incomplete"]; ok {
+		if _, valid := value.(bool); !valid {
+			return invalid("observation", "payload", "process_census_incomplete must be a boolean")
+		}
+	}
 	for _, name := range []string{"label", "kind"} {
 		if value, ok := item.Payload[name]; ok {
 			if text, valid := value.(string); !valid || strings.TrimSpace(text) == "" {
@@ -446,11 +451,11 @@ func validateCurrentFamilyObservation(item Observation) error {
 
 func currentFamilyFields(family string) (map[string]bool, map[string]bool) {
 	fields := map[string][]string{
-		"cpu":           {"process_percent", "system_percent", "process_cpu_percent", "owned_process_cpu_percent"},
+		"cpu":           {"process_percent", "system_percent", "process_cpu_percent", "owned_process_cpu_percent", "process_census_incomplete"},
 		"agent_status":  {"states", "session_states", "snapshot_revision", "counts", "agents"},
 		"gpu":           {"util_percent", "memory_used_bytes", "memory_capacity_bytes", "label"},
 		"service_load":  {"running", "cpu_percent", "rss_bytes"},
-		"system_memory": {"used_bytes", "capacity_bytes", "mac_physical_memory_bytes", "mac_memory_used_bytes", "mac_cached_files_bytes", "mac_swap_used_bytes", "mac_app_memory_bytes", "mac_wired_memory_bytes", "mac_compressed_memory_bytes", "mac_pressure_percent", "mac_pressure_level", "process_memory_bytes", "pressure_percent"},
+		"system_memory": {"used_bytes", "capacity_bytes", "mac_physical_memory_bytes", "mac_memory_used_bytes", "mac_cached_files_bytes", "mac_swap_used_bytes", "mac_app_memory_bytes", "mac_wired_memory_bytes", "mac_compressed_memory_bytes", "mac_pressure_percent", "mac_pressure_level", "process_memory_bytes", "process_census_incomplete", "pressure_percent"},
 		"system_disk":   {"mountpoint", "used_percent", "unavailable_reason"},
 		"browser":       {"kind", "latency_ms", "bytes", "duration_ms", "endpoint", "method", "request_id", "status", "journey_id", "code_revision", "browser_family", "connection_protocol", "max_concurrency", "entry_count", "input_delay_ms", "processing_ms", "presentation_delay_ms", "interaction_type", "operation_kind", "outcome", "signature", "message", "stack", "source", "provenance", "route", "event_type", "wall_time", "delivery_outcome", "line", "column", "fanout_count", "queue_ms", "connect_ms", "tls_ms", "ttfb_ms", "download_ms", "apply_render_ms", "navigation_ms", "bundle_parse_eval_ms", "first_paint_ms", "first_contentful_paint_ms", "first_api_ms", "fanout_ms", "interactive_ms", "app_ready_ms", "upload_queue_depth", "upload_drops", "upload_retries", "instrumentation_cost_ms"},
 	}

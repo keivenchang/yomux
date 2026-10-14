@@ -75,12 +75,12 @@ func TestDarwinProcessSnapshotMarksUnreadablePIDIncomplete(t *testing.T) {
 	sampler.Sample(snapshot, time.Second)
 	sample := sampler.Sample(next, time.Second)
 	facts := BuildCPUFacts(sample, sample.ProcessCPUPercent, hostFactContext())
-	if len(facts.Observations) != 1 || facts.Observations[0].Payload["process_cpu_percent"] != nil || facts.Observations[0].Payload["owned_process_cpu_percent"] == nil {
-		t.Fatalf("partial census CPU facts = %+v, want owned CPU without host process breakdown", facts)
+	if len(facts.Observations) != 1 || facts.Observations[0].Payload["process_cpu_percent"].(map[string]any)[hostProcessInstanceSeriesKey("yomux-go", owner.Identity)] != 10.0 || facts.Observations[0].Payload["process_census_incomplete"] != true {
+		t.Fatalf("partial census CPU facts = %+v, want measured process CPU and an incomplete marker", facts)
 	}
 	memoryFacts := BuildSystemMemoryFacts(MemoryCounters{CapacityBytes: 1000, UsedBytes: 200, ProcessCensusIncomplete: !complete}, []ProcessCensusRow{owner.censusRow()}, nil, hostFactContext())
-	if len(memoryFacts.Observations) != 1 || memoryFacts.Observations[0].Payload["process_memory_bytes"] != nil {
-		t.Fatalf("partial census memory facts = %+v, want host memory without process breakdown", memoryFacts)
+	if len(memoryFacts.Observations) != 1 || memoryFacts.Observations[0].Payload["process_memory_bytes"].(map[string]any)[hostProcessInstanceSeriesKey("yomux-go", owner.Identity)] != uint64(100) || memoryFacts.Observations[0].Payload["process_census_incomplete"] != true {
+		t.Fatalf("partial census memory facts = %+v, want measured process RSS and an incomplete marker", memoryFacts)
 	}
 }
 

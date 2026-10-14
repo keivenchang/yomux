@@ -146,6 +146,8 @@ const jsDebugCurrentStatsClientState = {
   client: null,
   selectionKey: '',
   startPromise: null,
+  sessionAliasPromise: null,
+  sessionAliasKey: '',
   failureLatched: false,
   paintedGenerationKey: '',
   pendingGenerationKey: '',
@@ -212,7 +214,7 @@ const jsDebugGraphZoomMinBuckets = 3;
 // tap pins the value tooltip (it must NOT clear on the pointerleave that fires
 // when the finger lifts); a mouse still clears on leave as before.
 let jsDebugGraphLastPointerType = 'mouse';
-let jsDebugGraphRangeSliderDragging = false;
+let jsDebugGraphRangeSliderInteraction = null;
 let jsDebugGraphLiveTimer = 0;
 let jsDebugGraphLifecycleScope = createLifecycleScope();
 function debugGraphLifecycleScope() {
@@ -1509,7 +1511,7 @@ function debugEventMetaText(event) {
     debugTimeText(event.ts),
     Number.isFinite(event.durationMs) ? `${event.durationMs} ms` : '',
     Number.isFinite(event.computeMs) ? `server ${event.computeMs} ms` : '',
-    Number.isFinite(event.receiveLatencyMs) ? `receive ${event.receiveLatencyMs} ms` : '',
+    Number.isFinite(event.receiveLatencyMs) ? `age at receipt ${event.receiveLatencyMs} ms` : '',
     Number.isFinite(event.frameBytes) ? `rx ${event.frameBytes} B` : '',
     Number.isFinite(event.bytes) && event.bytes !== event.frameBytes ? `data ${event.bytes} B` : '',
     Number.isFinite(event.responseBytes) ? `${event.responseBytes} B rx` : '',
@@ -1642,6 +1644,8 @@ function debugGraphNewHostMetrics() {
     systemMemoryUsedTotalBytes: 0,
     systemMemoryCapacityTotalBytes: 0,
     systemMemoryCount: 0,
+    processCensusIncompleteCpu: false,
+    processCensusIncompleteMemory: false,
     macMemoryDetailCount: 0,
     macPhysicalMemoryTotalBytes: 0,
     macMemoryUsedTotalBytes: 0,
@@ -1967,6 +1971,8 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
     targetHost.systemMemoryUsedTotalBytes += Number(sourceHost.systemMemoryUsedTotalBytes || 0) * scale;
     targetHost.systemMemoryCapacityTotalBytes += Number(sourceHost.systemMemoryCapacityTotalBytes || 0) * scale;
     targetHost.systemMemoryCount += Number(sourceHost.systemMemoryCount || 0) * scale;
+    targetHost.processCensusIncompleteCpu ||= sourceHost.processCensusIncompleteCpu === true;
+    targetHost.processCensusIncompleteMemory ||= sourceHost.processCensusIncompleteMemory === true;
     targetHost.macMemoryDetailCount += Number(sourceHost.macMemoryDetailCount || 0) * scale;
     for (const key of ['macPhysicalMemoryTotalBytes', 'macMemoryUsedTotalBytes', 'macCachedFilesTotalBytes', 'macSwapUsedTotalBytes', 'macAppMemoryTotalBytes', 'macWiredMemoryTotalBytes', 'macCompressedMemoryTotalBytes']) targetHost[key] += Number(sourceHost[key] || 0) * scale;
     if (Number.isFinite(Number(sourceHost.macMemoryPressureTotalPercent))) targetHost.macMemoryPressureTotalPercent = Number(sourceHost.macMemoryPressureTotalPercent);

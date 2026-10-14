@@ -288,7 +288,7 @@ class E2EBrowserHarness:
                 "openFileExplorerAt": "function",
                 "expandDirectoryRow": "function",
             },
-            dom_anchors=("#grid", FINDER_PANEL_SELECTOR),
+            dom_anchors=("#grid",),
             timeout=min(self.bound, 12),
         )
         demand = wait_for_fixture_client_event_demand(self.driver, timeout=min(self.bound, 12))
@@ -362,6 +362,7 @@ class E2EBrowserHarness:
         url = f"{self.base_url}/?{query}"
         self.driver.get(url)
         self._wait_for_real_app(url)
+        self.driver.execute_script("setTabberMode('advanced'); applyLayoutSlots(initialLayoutSlots(), {prune:false});")
         return url
 
     def authenticate(self, credentials: GateAuthCredentials) -> BrowserAuthentication:

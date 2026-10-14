@@ -698,14 +698,12 @@ func (c *HostCollector) collectMemory(parent context.Context, fact HostFactConte
 	if c.latest.MemoryValid {
 		c.latest.MemoryUsedBytes = memory.UsedBytes
 		c.latest.MemoryCapacityBytes = memory.CapacityBytes
-		if !memory.ProcessCensusIncomplete {
-			for _, row := range topProcessMemory(rows) {
-				if row.Binary != "" && row.RSSBytes > 0 {
-					if c.latest.ProcessMemoryBytes == nil {
-						c.latest.ProcessMemoryBytes = make(map[string]uint64)
-					}
-					c.latest.ProcessMemoryBytes[row.Binary] = row.RSSBytes
+		for _, row := range topProcessMemory(rows) {
+			if row.Binary != "" && row.RSSBytes > 0 {
+				if c.latest.ProcessMemoryBytes == nil {
+					c.latest.ProcessMemoryBytes = make(map[string]uint64)
 				}
+				c.latest.ProcessMemoryBytes[row.Binary] = row.RSSBytes
 			}
 		}
 	} else {

@@ -8,6 +8,7 @@ from datetime import timezone
 import pytest
 
 from yomux_lib.activity_summary import activity_signature
+from yomux_lib.activity_summary import compact_relative_age_text
 from yomux_lib.activity_summary import build_recent_agents_payload
 from yomux_lib.activity_summary import build_global_activity_summary
 from yomux_lib.activity_summary import build_session_activity_summary
@@ -331,6 +332,10 @@ def test_localized_activity_relative_time_and_deterministic_session_table():
     now = datetime(2026, 7, 2, 12, 0, tzinfo=timezone.utc)
     timestamp = now.timestamp() - 120
 
+    assert relative_age_text(now.timestamp() - 3600, now=now) == "1 hour ago"
+    assert relative_age_text(now.timestamp() - 7200, now=now) == "2 hours ago"
+    assert compact_relative_age_text(now.timestamp() - 3600, now=now) == "1 hour ago"
+    assert compact_relative_age_text(now.timestamp() - 7200, now=now) == "2 hours ago"
     assert relative_age_text(timestamp, now=now, locale="es") == "hace 2 minutos"
     assert relative_age_text(timestamp, now=now, locale="zh-Hant") == "2 分鐘前"
 

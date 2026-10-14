@@ -80,7 +80,7 @@ test('stale Go activity snapshots are not adopted as current agent status', () =
   ];`, context);
   assert.deepEqual([...context.result], [true, false, true]);
   assert.match(terminalSource, /function adoptTabberActivityAsAutoStatusFallback\(options = \{\}\) \{[\s\S]*agentWindowActivitySnapshotFresh\(payload\)/);
-  assert.match(agentActivitySource, /const activityRows = agentWindowActivitySnapshotFresh\(tabberActivityPayload\)/);
+  assert.match(agentActivitySource, /let activityRows = agentWindowActivitySnapshotFresh\(tabberActivityPayload\)/);
 });
 
 function test(name, body) {
@@ -174,6 +174,99 @@ function sourceFunction(name, nextName) {
   assert.notEqual(end, -1, `${nextName} follows ${name}`);
   return source.slice(start, end);
 }
+
+test('host CPU and memory graphs label partial data and keep missing processes unknown', () => {
+  const context = {
+    debugGraphLocalizedLabel: group => group.label,
+    cpuTopology: {logicalCpus: 8, physicalCores: 4},
+    result: null,
+  };
+  vm.runInNewContext(`${sourceFunction('debugGraphChartLabel', 'debugGraphChartShellHtml')}
+    result = [
+      debugGraphChartLabel({key: 'cpu', label: 'CPU'}, [{hostMetrics: {processCensusIncompleteCpu: true}}]),
+      debugGraphChartLabel({key: 'memory', label: 'Memory'}, [{hostMetrics: {processCensusIncompleteMemory: true}}]),
+    ];`, context);
+  assert.deepEqual([...context.result], [
+    'CPU (8 logical CPUs / 4 physical cores) (partial process data)',
+    'Memory (partial process data)',
+  ]);
+
+  const familyContext = {result: null};
+  vm.runInNewContext(`${sourceFunction('debugGraphHostProcessFamilyHasData', 'debugGraphAnyGpuDeviceSamplesCached')}
+    const missingProcess = 'pid:42';
+    result = [
+      debugGraphHostProcessFamilyHasData({hostMetrics: {cpuProcesses: new Map([['pid:7', {}]]), processCensusIncompleteCpu: true}}, 'cpuProcesses', missingProcess, 'processCensusIncompleteCpu'),
+      debugGraphHostProcessFamilyHasData({hostMetrics: {cpuProcesses: new Map([['pid:7', {}]])}}, 'cpuProcesses', missingProcess, 'processCensusIncompleteCpu'),
+    ];`, familyContext);
+  assert.deepEqual([...familyContext.result], [false, true]);
+
+  const unknownContext = {result: null};
+  vm.runInNewContext(`${sourceFunction('debugGraphHostProcessFamilyHasUnknownData', 'debugGraphAnyGpuDeviceSamplesCached')}
+    result = [
+      debugGraphHostProcessFamilyHasUnknownData({hostMetrics: {memoryProcesses: new Map(), processCensusIncompleteMemory: true}}, 'memoryProcesses', 'pid:42', 'processCensusIncompleteMemory'),
+      debugGraphHostProcessFamilyHasUnknownData({hostMetrics: {memoryProcesses: new Map([['pid:42', {}]]), processCensusIncompleteMemory: true}}, 'memoryProcesses', 'pid:42', 'processCensusIncompleteMemory'),
+    ];`, unknownContext);
+  assert.deepEqual([...unknownContext.result], [true, false]);
+
+  const recordContext = {result: null};
+  vm.runInNewContext(`${sourceFunction('jsDebugCurrentSeriesValue', 'jsDebugCurrentCpuProjectionValue')}
+    ${sourceFunction('jsDebugCurrentCpuProjectionValue', 'jsDebugCurrentServiceLoadItem')}
+    ${sourceFunction('jsDebugCurrentBucketRecord', 'jsDebugCurrentSnapshotAgentWindowRevision')}
+    result = jsDebugCurrentBucketRecord({start: 10, duration: 1, series: {
+      'process_cpu_percent:python': {value: 8},
+      'process_memory_bytes:python': {value: 4096},
+      'process_census_incomplete:cpu': {value: 1},
+      'process_census_incomplete:system_memory': {value: 1},
+    }});`, recordContext);
+  assert.deepEqual(JSON.parse(JSON.stringify(recordContext.result.host_metrics)), {
+    cpu_processes: {python: {label: 'python', total_percent: 8, samples: 1}},
+    memory_processes: {python: {label: 'python', total_bytes: 4096, samples: 1}},
+    gpu_devices: {}, disk_mounts: {}, service_load: {},
+    process_census_incomplete_cpu: true,
+    process_census_incomplete_memory: true,
+  });
+});
+
+test('partial host process data stays visible and memory joins the System graph', () => {
+  const extract = (name, nextName) => {
+    const start = currentSource.indexOf(`function ${name}(`);
+    const end = currentSource.indexOf(`\n  function ${nextName}(`, start);
+    assert.notEqual(start, -1, `${name} exists`);
+    assert.notEqual(end, -1, `${nextName} follows ${name}`);
+    return currentSource.slice(start, end);
+  };
+  const groupContext = {CURRENT_STATS_SERIES_METADATA: {}};
+  vm.runInNewContext(`${extract('currentStatsSeriesMetadata', 'currentStatsSeriesUnit')}
+    ${extract('currentStatsSeriesGroup', 'currentStatsGroupDefinitions')}
+    result = [
+      currentStatsSeriesGroup('process_cpu_percent:python', 'stats', null),
+      currentStatsSeriesGroup('process_memory_bytes:python', 'stats', null),
+      currentStatsSeriesGroup('process_census_incomplete:cpu', 'stats', null),
+    ];`, groupContext);
+  assert.deepEqual([...groupContext.result], ['cpu', 'system', null]);
+
+  const chartContext = {
+    CURRENT_STATS_SVG_WIDTH: 500, CURRENT_STATS_SVG_HEIGHT: 300,
+    CURRENT_STATS_PLOT_LEFT: 30, CURRENT_STATS_PLOT_RIGHT: 10,
+    CURRENT_STATS_PLOT_TOP: 10, CURRENT_STATS_PLOT_BOTTOM: 24,
+    currentStatsEscape: value => String(value), currentStatsNumber: value => String(value),
+    currentStatsPath: () => ({path: '', points: []}), currentStatsTime: () => '00:00',
+    currentStatsMetric: value => String(value), currentStatsChartUnit: () => 'percent',
+    result: null,
+  };
+  vm.runInNewContext(`${extract('currentStatsChartHtml', 'currentStatsPath')}
+    result = currentStatsChartHtml({
+      definition: {id: 'cpu', title: 'CPU', families: ['cpu']},
+      series: new Map(), gaps: [],
+      generation: {resolution_seconds: 1, buckets: [{series: {
+        'process_census_incomplete:cpu': {value: 1},
+      }}]},
+      frame: {window_start: 0, window_end: 10, range_seconds: 10},
+      maximum: 100, rendererId: 1,
+    });`, chartContext);
+  assert.match(chartContext.result, /CPU \(partial process data\)/);
+  assert.match(chartContext.result, /Some process readings are unknown; readable processes remain shown\./);
+});
 
 test('stats renderer prefers the canonical module and accepts the legacy alias', () => {
   const canonical = {name: 'canonical'};
@@ -445,14 +538,13 @@ test('Services omits the duplicated web process while CPU names it clearly', () 
   assert.match(serviceSource, /source instanceof Map && source\.size > 0 && !\(debugGraphServiceLoadSampleCount\(source\.get\(key\), metric\) > 0\)/);
 });
 
-test('a sparse per-process RSS hold survives ordinary system-memory-only buckets and clears only on a real census miss', () => {
-  // Forces the sawtooth red before the fix: an old-form `familyHasData` (true whenever the
-  // bucket has ANY system-memory samples) clears the hold on bucket 2 below even though no
-  // per-process census ran that bucket, producing a synthetic zero exactly like the reported
-  // chart. The corrected form only clears on bucket 4, where a real census ran and did not
-  // include this process.
+test('per-process RSS holds through sparse samples but becomes a gap when its census is incomplete', () => {
+  // A normal sparse bucket retains its measured RSS. A partial census missing that process is
+  // unknown and breaks the line; a complete census missing it confirms the process is gone.
   const processSeries = slice(source, 'const jsDebugGraphHostProcessVisualAssignments = Object.freeze({', '\nfunction normalizedDebugGraphServiceLoadMode(');
   const projectSeries = sourceFunction('debugGraphProjectSeriesSamples', 'debugGraphSeriesData');
+  const processFamilySource = sourceFunction('debugGraphHostProcessFamilyHasData', 'debugGraphAnyGpuDeviceSamplesCached');
+  const unknownFamilySource = sourceFunction('debugGraphHostProcessFamilyHasUnknownData', 'debugGraphAnyGpuDeviceSamplesCached');
   const context = {
     result: null,
     Map, Set, Number, String, Math, Boolean,
@@ -469,13 +561,16 @@ test('a sparse per-process RSS hold survives ordinary system-memory-only buckets
   };
   vm.runInNewContext(`
     ${processSeries}
+    ${processFamilySource}
+    ${unknownFamilySource}
     ${projectSeries}
     const censusBucket = {startMs: 0, durationMs: 5000, hostMetrics: {memoryProcesses: new Map([['python', {label: 'python', totalBytes: 400, samples: 1}]])}};
     const def = debugGraphMemoryProcessSeriesDefs([censusBucket])[0];
     const observedBucket = censusBucket;
     const sparseBucket = {startMs: 5000, durationMs: 5000, hostMetrics: {memoryProcesses: new Map()}};
-    const censusMissBucket = {startMs: 15000, durationMs: 5000, hostMetrics: {memoryProcesses: new Map([['other', {label: 'other', totalBytes: 200, samples: 1}]])}};
-    const projection = debugGraphProjectSeriesSamples(def, [observedBucket, sparseBucket, sparseBucket, censusMissBucket]);
+    const unknownBucket = {startMs: 10000, durationMs: 5000, hostMetrics: {memoryProcesses: new Map(), processCensusIncompleteMemory: true}};
+    const censusMissBucket = {startMs: 20000, durationMs: 5000, hostMetrics: {memoryProcesses: new Map([['other', {label: 'other', totalBytes: 200, samples: 1}]])}};
+    const projection = debugGraphProjectSeriesSamples(def, [observedBucket, sparseBucket, unknownBucket, sparseBucket, censusMissBucket]);
     result = {
       hasData: projection.hasDataValues,
       held: projection.provenanceValues.map(p => (p ? p.held : null)),
@@ -483,9 +578,9 @@ test('a sparse per-process RSS hold survives ordinary system-memory-only buckets
     };
   `, context);
   const outcome = JSON.parse(JSON.stringify(context.result));
-  assert.deepEqual(outcome.hasData, [true, true, true, false]);
-  assert.deepEqual(outcome.held, [false, true, true, null]);
-  assert.deepEqual(outcome.values, [400, 400, 400, 0]);
+  assert.deepEqual(outcome.hasData, [true, true, false, false, false]);
+  assert.deepEqual(outcome.held, [false, true, null, null, null]);
+  assert.deepEqual(outcome.values, [400, 400, 0, 0, 0]);
 });
 
 test('CPU keeps the exact serving port as the only solid series and shows a gap, never promoting a peer', () => {
@@ -1925,6 +2020,18 @@ test('host CPU and memory labels retain separate Go process instances', () => {
   });
 });
 
+test('revision-only status publication refreshes mounted debug details', () => {
+  const boot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+  const start = boot.indexOf('function renderAutoApproveStatusSurfaces(');
+  let refreshed = 0;
+  const context = {refreshDebugAgentWindowLiveDetails() {refreshed++;}};
+  vm.runInNewContext(boot.slice(start, boot.indexOf('\nlet deferredSealedAutoApprovePayload', start)), context);
+  const result = {changedSessions: [], sessionsChanged: false};
+  context.renderAutoApproveStatusSurfaces(result);
+  assert.equal(refreshed, 1, 'revision joins refresh even when session chrome is unchanged');
+  assert.equal(result.rendered, true);
+});
+
 test('Agents keeps per-session revision joins and semantic paint', () => {
   assert.match(source, /agent_window_snapshot_revision/);
   assert.match(source, /function debugGraphLiveAgentWindowDetailHtml\(groupKey = 'activity'\)/);
@@ -2018,7 +2125,7 @@ test('Agents detail consumes the stats-owner roster when auto-approve is unavail
     agentWindowPhysicalKey: agent => String(agent?.pane_target || agent?.pane || agent?.window_index || ''),
     agentWindowIndex: agent => agent?.window_index === null || agent?.window_index === undefined ? null : Number(agent.window_index),
     agentWindowCanonicalLabel: (index, kind) => index === null ? kind : `${index}:${kind}`,
-    agentWindowStateKey: state => String(state || 'idle'),
+    agentWindowStateKey: state => String(state || 'idle') === 'run' ? 'working' : String(state || 'idle'),
     esc: value => String(value),
     document: {querySelectorAll: () => []},
     result: null,
@@ -2028,6 +2135,24 @@ test('Agents detail consumes the stats-owner roster when auto-approve is unavail
   assert.match(context.result, /debug → 0:codex → codex → working/);
   assert.match(context.result, /debug → 1:claude → claude → idle/);
   assert.doesNotMatch(context.result, /waiting for the chart snapshot/);
+});
+
+test('debug stats status normalizes Go run through the shared agent-state owner', () => {
+  const start = source.indexOf('function debugGraphStatsAgentState');
+  const end = source.indexOf('\nfunction debugGraphStatsAgentWindowRows(', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const calls = [];
+  const context = {
+    STATE_KEY: {working: 'working', idle: 'idle'},
+    agentWindowStateKey(state) {
+      calls.push(state);
+      return state === 'run' ? 'working' : state;
+    },
+  };
+  vm.runInNewContext(`${source.slice(start, end)}\nresult = debugGraphStatsAgentState('RUN');`, context);
+  assert.deepEqual(calls, ['run']);
+  assert.equal(context.result, 'working');
 });
 
 test('Agents detail replaces unversioned Go activity fallback rows with the revisioned roster', () => {
@@ -3646,7 +3771,7 @@ test('current deltas replace the authoritative report without per-bucket cost st
 
 test('same-cursor requested-resolution switches paint and complete readiness in both directions', () => {
   const functionText = sourceFunction('jsDebugCurrentStatsGenerationKey', 'ensureJsDebugCurrentStatsClient');
-  const context = {result: null, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
+  const context = {result: null, sessions: [], tabberViewSessions: new Map(), transcriptMetadataState: {epoch: 'test'}, tmuxTopologyGeneration: 1, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
   vm.runInNewContext(`
     const paints = [];
     const jsDebugCurrentStatsClientState = {paintedGenerationKey: ''};
@@ -3930,6 +4055,7 @@ test('active touch charts preserve vertical scrolling and arm only deliberate zo
   vm.runInNewContext(`
     var jsDebugGraphSelectionState = null;
     var jsDebugGraphTouchCandidateState = null;
+    let jsDebugGraphRangeSliderInteraction = null;
     var jsDebugGraphPendingResolutionChange = null;
     let jsDebugGraphZoomDomain = null;
     let jsDebugGraphLastPointerType = 'mouse';
@@ -4082,7 +4208,7 @@ test('focused Reset Zoom immediately repaints the shared full-range domain and s
      sourceFunction('refreshDebugGraphElement', 'bindDebugGraphTouchSelection'),
     sourceFunction('handleDebugGraphControlEvent', 'bindDebugPanel'),
   ].join('\n');
-  const context = {result: null, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
+  const context = {result: null, sessions: [], tabberViewSessions: new Map(), transcriptMetadataState: {epoch: 'test'}, tmuxTopologyGeneration: 1, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
   vm.runInNewContext(`
     const nowMs = 3600000;
     const Date = {now: () => nowMs};
@@ -4091,7 +4217,7 @@ test('focused Reset Zoom immediately repaints the shared full-range domain and s
     const jsDebugGraphExactResolutionEnabled = false;
     let jsDebugGraphZoomDomain = {startMs: 390000, endMs: 3417000};
      var jsDebugGraphSelectionState = {pointerType: 'touch'};
-    let jsDebugGraphRangeSliderDragging = false;
+    let jsDebugGraphRangeSliderInteraction = null;
     let resetVisible = true;
     let paintedDomain = {startMs: 390000, endMs: 3417000, rangeSeconds: 3017, zoomed: true};
     let controlsState = {resetVisible: true, sliderDisabled: true, label: '05:39-06:30 · 3017s'};
@@ -4322,6 +4448,7 @@ test('already-selected current views keep their cached generation and skip selec
       start() { calls.start += 1; return Promise.resolve(); },
     };
     const jsDebugCurrentStatsClientState = {client, selectionKey: '7200:300', startPromise: null};
+    function refreshJsDebugSessionAliases() {}
     function ensureJsDebugCurrentStatsClient() { return client; }
     function loadJsDebugStatsUiPreferences() {}
     function jsDebugStatsPanelVisible() { return true; }
@@ -4369,7 +4496,7 @@ test('current stats stream selector exposes exact production client evidence wit
 
 test('accepted current stats generations are not declared painted before a renderer commits', () => {
   const functionText = sourceFunction('paintJsDebugCurrentStatsGeneration', 'ensureJsDebugCurrentStatsClient');
-  const context = {result: null, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
+  const context = {result: null, sessions: [], tabberViewSessions: new Map(), transcriptMetadataState: {epoch: 'test'}, tmuxTopologyGeneration: 1, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
   vm.runInNewContext(`
     const snapshot = {
       range_seconds: 300,
@@ -4407,7 +4534,7 @@ test('a focused stable graph control preserves focus while a newer generation co
     sourceFunction('paintJsDebugCurrentStatsGeneration', 'ensureJsDebugCurrentStatsClient'),
   ].join('\n');
   const refreshSource = sourceFunction('refreshDebugGraphElement', 'bindDebugGraphTouchSelection');
-  const context = {result: null, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
+  const context = {result: null, sessions: [], tabberViewSessions: new Map(), transcriptMetadataState: {epoch: 'test'}, tmuxTopologyGeneration: 1, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
   vm.runInNewContext(`
     const toggle = {dataset: {jsDebugChartToggle: 'modelTokens'}};
     const panel = {};
@@ -4439,8 +4566,8 @@ test('a focused stable graph control preserves focus while a newer generation co
     const jsDebugHistoryReadiness = {phase: 'ready'};
     let jsDebugGraphSelectionState = null;
     let jsDebugGraphTouchCandidateState = null;
+    let jsDebugGraphRangeSliderInteraction = null;
     let jsDebugGraphPendingResolutionChange = null;
-    let jsDebugGraphRangeSliderDragging = false;
     function jsDebugStatsPanelVisible() { return true; }
     function jsDebugCurrentStatsGenerationKey(value) {
       return [value.range_seconds, value.requested_resolution, value.resolution_seconds, value.source_generation, value.cache_generation].join(':');
@@ -4505,7 +4632,7 @@ test('hidden panels start the document-visible client and paint only when opened
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const functionText = source.slice(start, end);
-  const context = {result: null, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
+  const context = {result: null, sessions: [], tabberViewSessions: new Map(), transcriptMetadataState: {epoch: 'test'}, tmuxTopologyGeneration: 1, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
   vm.runInNewContext(`
     let panelVisible = false;
     const document = {visibilityState: 'visible'};
@@ -4561,7 +4688,7 @@ test('hidden boot loads saved exact selection before constructing the one curren
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const functionText = source.slice(start, end);
-  const context = {result: null, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
+  const context = {result: null, sessions: [], tabberViewSessions: new Map(), transcriptMetadataState: {epoch: 'test'}, tmuxTopologyGeneration: 1, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
   vm.runInNewContext(`
     const document = {visibilityState: 'visible'};
     const debugModeEnabled = true;
@@ -4622,7 +4749,7 @@ testAsync('synchronous current-client construction failure cannot reject termina
   assert.notEqual(initializeStart, -1);
   assert.notEqual(initializeEnd, -1);
   const initializeSource = source.slice(initializeStart, initializeEnd);
-  const context = {result: null, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
+  const context = {result: null, sessions: [], tabberViewSessions: new Map(), transcriptMetadataState: {epoch: 'test'}, tmuxTopologyGeneration: 1, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
   vm.runInNewContext(`
     const failures = [];
     const jsDebugGraphExactResolutionEnabled = true;
@@ -4669,7 +4796,8 @@ testAsync('a rejected current-client start retains the exact owner without start
     vm.runInNewContext(`
       const selection = {rangeSeconds: 300, resolution: 1};
       const jsDebugCurrentStatsClientState = {client, selectionKey: '300:1', startPromise: null, failureLatched: false};
-      function ensureJsDebugCurrentStatsClient() { return client; }
+      function refreshJsDebugSessionAliases() {}
+    function ensureJsDebugCurrentStatsClient() { return client; }
       function loadJsDebugStatsUiPreferences() {}
       function jsDebugStatsPanelVisible() { return true; }
       function jsDebugStatsDocumentVisible() { return true; }
@@ -4845,7 +4973,7 @@ test('stats and cost renders defer while a chart gesture owns their live DOM', (
     const panel = {};
     let jsDebugGraphSelectionState = {panel};
     let jsDebugGraphTouchCandidateState = null;
-    let jsDebugGraphRangeSliderDragging = false;
+    let jsDebugGraphRangeSliderInteraction = null;
     let replacements = 0;
     const graph = {
       dataset: {},
@@ -4877,6 +5005,7 @@ test('stats and cost renders defer while a chart gesture owns their live DOM', (
       domain: {startMs: 0, endMs: 600000},
     };
     let jsDebugGraphTouchCandidateState = null;
+    let jsDebugGraphRangeSliderInteraction = null;
     let jsDebugGraphZoomDomain = null;
     let jsDebugGraphLastPointerType = 'mouse';
     const jsDebugGraphZoomMinBuckets = 3;
@@ -4928,7 +5057,7 @@ test('stats and cost renders defer while a chart gesture owns their live DOM', (
     const slider = {
       closest: selector => selector === '[data-js-debug-range-slider]' ? slider : null,
     };
-    let jsDebugGraphRangeSliderDragging = true;
+    let jsDebugGraphRangeSliderInteraction = {panel, slider, pointerId: 1};
     let forcedRepaints = 0;
     function flushDeferredDebugGraphRefresh(target) {
       if (target.dataset.jsDebugGraphRefreshPending !== 'true') return false;
@@ -4938,10 +5067,16 @@ test('stats and cost renders defer while a chart gesture owns their live DOM', (
     }
     function renderYoCostPanels() { return false; }
     ${sourceFunction('flushDeferredDebugGraphInteractionRefresh', 'clearDebugGraphTouchCandidate')}
+    const debugRuntimeState = {graphRangeSeconds: 300};
+    function jsDebugGraphRangeOptionIndex() { return 0; }
+    function updateDebugGraphRangeSliderLabel() {}
+    function debugGraphAvailableRangeOptions() { return []; }
+    function syncDebugGraphControls() {}
+    ${sourceFunction('completeDebugGraphRangeSliderInteraction', 'debugGraphPointerRatioFromRect')}
     ${sourceFunction('handleDebugGraphControlEvent', 'bindDebugPanel')}
-    handleDebugGraphControlEvent({type: 'pointerup', target: slider}, panel);
+    handleDebugGraphControlEvent({type: 'pointercancel', target: slider, pointerId: 1}, panel);
     result = {
-      dragging: jsDebugGraphRangeSliderDragging,
+      dragging: jsDebugGraphRangeSliderInteraction !== null,
       pending: graph.dataset.jsDebugGraphRefreshPending || '',
       forcedRepaints,
     };
@@ -4962,6 +5097,7 @@ test('stats and cost renders defer while a chart gesture owns their live DOM', (
     };
     let jsDebugGraphSelectionState = null;
     let jsDebugGraphTouchCandidateState = null;
+    let jsDebugGraphRangeSliderInteraction = null;
     let jsDebugGraphLastPointerType = 'touch';
     let forcedRepaints = 0;
     function candidate() {
@@ -5020,6 +5156,7 @@ test('stats and cost renders defer while a chart gesture owns their live DOM', (
     const panel = {dataset: {}, querySelector() { throw new Error('active cost DOM was replaced'); }};
     let jsDebugGraphSelectionState = {panel};
     let jsDebugGraphTouchCandidateState = null;
+    let jsDebugGraphRangeSliderInteraction = null;
     const dragState = {item: null};
     let jsDebugRenderForce = false;
     let jsDebugRenderDragDeferred = false;
@@ -5813,7 +5950,8 @@ test('Daemons memory series expose retained service RSS without mixing runtime o
 
 testAsync('refill confirmation, rejected request, retry and stale GET preserve one operation', async () => {
   const timers = [];
-  const context = {setTimeout(callback) { timers.push(callback); return timers.length; }, clearTimeout() {}, TextEncoder, TextDecoder};
+  const timerDelays = [];
+  const context = {setTimeout(callback, delay) { timers.push(callback); timerDelays.push(delay); return timers.length; }, clearTimeout() {}, TextEncoder, TextDecoder};
   vm.runInNewContext(currentSource, context);
   const requests = [];
   const confirmations = [];
@@ -5843,6 +5981,7 @@ testAsync('refill confirmation, rejected request, retry and stale GET preserve o
   assert.equal(owner.busy(), true);
   requests[1].resolve({ok: true, json: async () => ({state: 'running', operation_id: 'one', phase: 'Reading history'})});
   await settle();
+  assert.equal(timerDelays.at(-1), 1000);
   requests[0].resolve({ok: true, json: async () => ({state: 'idle'})});
   await settle();
   assert.equal(owner.status().operation_id, 'one');
@@ -5877,6 +6016,7 @@ testAsync('refill confirmation, rejected request, retry and stale GET preserve o
   await settle();
   assert.equal(failed.status().state, 'failed');
   assert.equal(timers.length, timerCount + 1);
+  assert.equal(timerDelays.at(-1), 10000);
   click(failed, '[data-stats-refill]');
   assert.equal(confirmations.at(-1).options.title, 'Refill the last 24 hours?');
   confirmations.at(-1).resolve('refill');
@@ -5888,7 +6028,231 @@ testAsync('refill confirmation, rejected request, retry and stale GET preserve o
   failed.destroy();
 });
 
+testAsync('stats alias snapshots refresh after view creation and reject stale topology responses', async () => {
+  const functionText = sourceFunction('jsDebugSessionAliasTopologyKey', 'ensureJsDebugCurrentStatsClient');
+  const requests = [];
+  const applied = [];
+  const context = {
+    transcriptMetadataState: {epoch: 'test'}, tmuxTopologyGeneration: 1, sessions: ['source'], tabberViewSessions: new Map(),
+    jsDebugCurrentStatsClientState: {client: {controller: () => ({generation: () => null})}, sessionAliasKey: '', sessionAliasPromise: null},
+    jsDebugStatsPanelVisible: () => true,
+    apiFetch: () => new Promise(resolve => requests.push(resolve)),
+    debugGraphStatsCurrentModule: () => ({setSessionAliases: aliases => applied.push(aliases)}),
+    paintJsDebugCurrentStatsGeneration() {}, recordJsDebugCurrentStatsFailure() {}, jsDebugErrorText: String,
+  };
+  vm.runInNewContext(functionText, context);
+  const first = context.refreshJsDebugSessionAliases();
+  requests.shift()({aliases: {old: 'source'}});
+  await first;
+  assert.equal(applied.length, 1);
+  context.tabberViewSessions.set('new', {sourceSession: 'source', windowId: '@12'});
+  const second = context.refreshJsDebugSessionAliases();
+  context.tmuxTopologyGeneration = 2;
+  requests.shift()({aliases: {stale: 'source'}});
+  await second;
+  assert.equal(applied.length, 1, 'obsolete response cannot replace last good aliases');
+  assert.equal(requests.length, 1, 'changed topology schedules one successor');
+  requests.shift()({aliases: {new: 'renamed'}});
+  await context.jsDebugCurrentStatsClientState.sessionAliasPromise;
+  assert.deepEqual(applied[1], {new: 'renamed'});
+});
+
 Promise.all(pending).then(() => {
   console.log(`stats current panel suite: ${passed} passed, ${failed} failed`);
   if (failed) process.exitCode = 1;
 });
+
+test('range pointer preview stays uncommitted and cancelled change cannot resurrect it', () => {
+  const context = {result: null};
+  vm.runInNewContext(`
+    let jsDebugGraphRangeSliderInteraction = null;
+    const debugRuntimeState = {graphRangeSeconds: 300, graphResolutionOverrideSeconds: 10};
+    let jsDebugGraphZoomDomain = {startMs: 1, endMs: 2};
+    let requests = 0;
+    let preferences = 0;
+    const label = {textContent: '5m'};
+    const graph = {querySelector: () => slider};
+    const panel = {contains: () => true};
+    const slider = {value: '0', closest: selector => selector === '[data-js-debug-range-slider]' ? slider : selector === '[data-js-debug-range-control]' ? {querySelector: () => label} : selector === '[data-js-debug-graph]' ? graph : null};
+    function debugGraphAvailableRangeOptions() { return [{seconds: 300, label: '5m'}, {seconds: 3600, label: '1h'}]; }
+    function jsDebugGraphRangeOptionIndex(seconds) { return seconds === 300 ? 0 : 1; }
+    function syncDebugGraphControls() { slider.value = String(jsDebugGraphRangeOptionIndex(debugRuntimeState.graphRangeSeconds)); label.textContent = debugRuntimeState.graphRangeSeconds === 300 ? '5m' : '1h'; }
+    function flushDeferredDebugGraphInteractionRefresh() {}
+    function setDebugGraphRange(seconds) { debugRuntimeState.graphRangeSeconds = seconds; debugRuntimeState.graphResolutionOverrideSeconds = 60; jsDebugGraphZoomDomain = null; preferences++; requests++; }
+    ${sourceFunction('debugGraphRangeSliderIndex', 'debugGraphPointerRatioFromRect')}
+    ${sourceFunction('handleDebugGraphControlEvent', 'bindDebugPanel')}
+    handleDebugGraphControlEvent({type: 'pointerdown', target: slider, pointerId: 7}, panel);
+    slider.value = '1';
+    handleDebugGraphControlEvent({type: 'input', target: slider}, panel);
+    const preview = {range: debugRuntimeState.graphRangeSeconds, resolution: debugRuntimeState.graphResolutionOverrideSeconds, zoom: jsDebugGraphZoomDomain, requests, preferences, label: label.textContent};
+    handleDebugGraphControlEvent({type: 'pointercancel', target: slider, pointerId: 7}, panel);
+    handleDebugGraphControlEvent({type: 'change', target: slider}, panel);
+    result = {preview, range: debugRuntimeState.graphRangeSeconds, resolution: debugRuntimeState.graphResolutionOverrideSeconds, zoom: jsDebugGraphZoomDomain, requests, preferences, value: slider.value, label: label.textContent, owner: jsDebugGraphRangeSliderInteraction};
+  `, context);
+  assert.equal(context.result.preview.range, 300);
+  assert.equal(context.result.preview.label, '1h');
+  assert.equal(context.result.range, 300);
+  assert.equal(context.result.resolution, 10);
+  assert.deepEqual({...context.result.zoom}, {startMs: 1, endMs: 2});
+  assert.equal(context.result.requests, 0);
+  assert.equal(context.result.preferences, 0);
+  assert.equal(context.result.value, '0');
+  assert.equal(context.result.label, '5m');
+  assert.equal(context.result.owner, null);
+});
+
+function rangeGestureHarness() {
+  const context = {result: null};
+  vm.runInNewContext(`
+    let jsDebugGraphRangeSliderInteraction = null;
+    let jsDebugGraphZoomDomain = {startMs: 1, endMs: 2};
+    const debugRuntimeState = {graphRangeSeconds: 300, graphResolutionOverrideSeconds: 10};
+    let preferences = 0;
+    const requests = [];
+    const label = {textContent: '5m'};
+    const graph = {dataset: {}, querySelector: () => slider};
+    const panel = {contains: () => true};
+    const slider = {value: '0', getClientRects: () => visible ? [1] : [], closest: selector => selector === '[data-js-debug-range-slider]' ? slider : selector === '[data-js-debug-range-control]' ? {querySelector: () => label} : selector === '[data-js-debug-graph]' ? graph : null};
+    let visible = true;
+    const events = new Map();
+    let observerCallback;
+    let observerDisposed = false;
+    const window = {};
+    const document = {getElementById: () => panel};
+    class MutationObserver { constructor(callback) { observerCallback = callback; } observe() {} disconnect() { observerDisposed = true; } }
+    function createLifecycleScope() {
+      const disposals = [];
+      return {ownEvent: (key, target, type, fn) => events.set(key, fn), replace: (key, value, dispose) => disposals.push(() => dispose(value)), dispose: () => { events.clear(); for (const dispose of disposals) dispose(); }};
+    }
+    function bindOnce(panel, key, bind) { return bind(); }
+    function bindDebugGraphTouchSelection() {}
+    function debugPanelSubviewDescriptors() { return []; }
+    function syncDebugSubviewActivation() {}
+    function bindActionDispatcher() { return () => {}; }
+    function handleDebugGraphPointerUp() {}
+    function handleDebugGraphPointerCancel() {}
+    function setTimeout() {}
+    function debugGraphAvailableRangeOptions() { return [{seconds: 300, label: '5m'}, {seconds: 3600, label: '1h'}]; }
+    function jsDebugGraphRangeOptionIndex(seconds) { return seconds === 300 ? 0 : 1; }
+    function syncDebugGraphControls() { slider.value = String(jsDebugGraphRangeOptionIndex(debugRuntimeState.graphRangeSeconds)); label.textContent = debugRuntimeState.graphRangeSeconds === 300 ? '5m' : '1h'; }
+    function flushDeferredDebugGraphInteractionRefresh() {}
+    function loadJsDebugStatsUiPreferences() {}
+    function saveJsDebugStatsUiPreferences() { preferences++; }
+    function normalizedJsDebugGraphRange(value) { return Number(value); }
+    function debugGraphDefaultResolutionForRange() { return 60; }
+    function activeJsDebugGraphRangeSeconds() {}
+    function syncJsDebugStatsDeliveryMode() {}
+    function debugGraphDomain() { return {startMs: 0}; }
+    const jsDebugHistoryReadiness = {phase: 'ready'};
+    function requestJsDebugHistoryForCurrentDomain() { requests.push({range: debugRuntimeState.graphRangeSeconds, resolution: debugRuntimeState.graphResolutionOverrideSeconds}); return true; }
+    function refreshDebugGraphSurfaces() { syncDebugGraphControls(); }
+    ${sourceFunction('setDebugGraphRange', 'setDebugGraphResolutionOverride')}
+    ${sourceFunction('debugGraphRangeSliderIndex', 'debugGraphPointerRatioFromRect')}
+    ${sourceFunction('handleDebugGraphControlEvent', 'bindDebugPanel')}
+    ${source.slice(source.indexOf('function bindDebugPanel('), source.indexOf("\nregisterDebugRuntimeFacade('panel'"))}
+    const dispose = bindDebugPanel(panel);
+    globalThis.dispatch = (type, pointerId = 7, target = slider) => handleDebugGraphControlEvent({type, pointerId, target}, panel);
+    globalThis.preview = () => { slider.value = '1'; dispatch('input'); };
+    globalThis.cancel = kind => {
+      if (kind === 'disposal') dispose();
+      else if (kind === 'hiding') { visible = false; observerCallback(); }
+      else if (kind === 'focusout') events.get('focusout')({target: slider});
+      else if (kind === 'blur') events.get('range-blur')();
+      else events.get(kind)({type: kind === 'range-release' ? 'pointerup' : kind === 'range-cancel' ? 'pointercancel' : kind, pointerId: 7, target: kind === 'range-release' ? panel : slider});
+    };
+    globalThis.snapshot = () => ({range: debugRuntimeState.graphRangeSeconds, resolution: debugRuntimeState.graphResolutionOverrideSeconds, zoom: jsDebugGraphZoomDomain, preferences, requests, owner: jsDebugGraphRangeSliderInteraction, value: slider.value, label: label.textContent, listeners: events.size, observerDisposed});
+  `, context);
+  return context;
+}
+
+for (const exit of ['pointercancel', 'lostpointercapture', 'range-cancel', 'focusout', 'blur', 'hiding', 'disposal']) {
+  test(`range cancellation restores committed selection on ${exit}`, () => {
+    const harness = rangeGestureHarness();
+    harness.dispatch('pointerdown');
+    harness.preview();
+    assert.equal(harness.snapshot().owner.preview.seconds, 3600);
+    assert.equal(harness.snapshot().range, 300);
+    harness.cancel(exit);
+    harness.dispatch('change');
+    const state = harness.snapshot();
+    assert.equal(state.range, 300);
+    assert.equal(state.resolution, 10);
+    assert.deepEqual({...state.zoom}, {startMs: 1, endMs: 2});
+    assert.equal(state.preferences, 0);
+    assert.equal(state.requests.length, 0);
+    assert.equal(state.owner, null);
+    assert.equal(state.value, '0');
+    assert.equal(state.label, '5m');
+    if (exit === 'disposal') { assert.equal(state.listeners, 0); assert.equal(state.observerDisposed, true); }
+  });
+}
+
+for (const exit of ['pointerup', 'change', 'range-release']) {
+  test(`range success commits once on ${exit} and ignores delayed completion`, () => {
+    const harness = rangeGestureHarness();
+    harness.dispatch('pointerdown');
+    harness.preview();
+    harness.dispatch('pointerup', 99);
+    assert.equal(harness.snapshot().range, 300);
+    assert.notEqual(harness.snapshot().owner, null);
+    if (exit === 'range-release') harness.cancel(exit);
+    else harness.dispatch(exit);
+    harness.dispatch('change');
+    harness.cancel('lostpointercapture');
+    const state = harness.snapshot();
+    assert.equal(state.range, 3600);
+    assert.equal(state.resolution, 60);
+    assert.equal(state.zoom, null);
+    assert.equal(state.preferences, 1);
+    assert.deepEqual(Array.from(state.requests, row => ({...row})), [{range: 3600, resolution: 60}]);
+    assert.equal(state.owner, null);
+    assert.equal(state.label, '1h');
+  });
+}
+
+test('keyboard range input commits immediately without interaction ownership', () => {
+  const harness = rangeGestureHarness();
+  harness.preview();
+  harness.dispatch('change');
+  const state = harness.snapshot();
+  assert.equal(state.range, 3600);
+  assert.equal(state.owner, null);
+  assert.equal(state.preferences, 1);
+  assert.equal(state.requests.length, 1);
+});
+
+for (const surface of ['graph', 'cost', 'daemons']) {
+  test(`range interaction defers ${surface} replacement through the shared owner`, () => {
+    const context = {result: null};
+    vm.runInNewContext(`
+      const panel = {dataset: {}, querySelector() { throw new Error('active native slider replaced'); }};
+      let jsDebugGraphSelectionState = null;
+      let jsDebugGraphTouchCandidateState = null;
+      let jsDebugGraphRangeSliderInteraction = {panel};
+      ${sourceFunction('debugGraphInteractionBelongsToPanel', 'flushDeferredDebugGraphInteractionRefresh')}
+      const graph = {dataset: {}, closest: () => panel, querySelector() { throw new Error('active native slider replaced'); }};
+      const dragState = {item: null};
+      const jsDebugCostPanelNextRefreshAtMs = 0;
+      function jsDebugCostSubviewVisible() { return true; }
+      const jsDebugSystemState = {payload: {}, inFlight: false};
+      const DEBUG_SYSTEM_REGIONS = [1];
+      const debugSystemRenderedRegions = new Map();
+      const region = {dataset: {jsDebugSystemRegion: 'chart'}, set innerHTML(value) { throw new Error('active native slider replaced'); }};
+      const view = {contains: () => false, querySelectorAll: () => [region], closest: () => panel, setAttribute() {}};
+      const document = {querySelectorAll: () => [view]};
+      function debugSystemSnapshotRefusal() { return false; }
+      function debugSystemRegionHtml() { return 'new chart'; }
+      function debugSystemRestoreFocus() {}
+      function restoreElementScrollPosition() {}
+      ${sourceFunction('refreshDebugGraphElement', 'bindDebugCostSummaryTabButtons')}
+      ${sourceFunction('renderYoCostPanel', 'renderYoCostPanels')}
+      ${sourceFunction('refreshDebugSystemViews', 'toggleDebugSystemRosterRow')}
+      if ('${surface}' === 'graph') refreshDebugGraphElement(graph, {force: true});
+      if ('${surface}' === 'cost') renderYoCostPanel(panel, {force: true});
+      if ('${surface}' === 'daemons') refreshDebugSystemViews();
+      result = {owned: debugGraphInteractionBelongsToPanel(panel), graphPending: graph.dataset.jsDebugGraphRefreshPending, costPending: panel.dataset.jsDebugGraphRefreshPending, daemonsPending: panel.dataset.jsDebugSystemChartRefreshPending};
+    `, context);
+    assert.equal(context.result.owned, true);
+    assert.equal(context.result[`${surface}Pending`], 'true');
+  });
+}

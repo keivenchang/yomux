@@ -1064,6 +1064,8 @@ def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
                 _Sample(f"process_cpu_min_percent:{binary}", "minimum", float(percent), at, source),
                 _Sample(f"process_cpu_max_percent:{binary}", "maximum", float(percent), at, source),
             ))
+        if payload.get("process_census_incomplete") is True:
+            samples.append(_Sample("process_census_incomplete:cpu", "maximum", 1, at, source))
         return tuple(samples)
     if observation.family == "agent_status":
         states = payload["states"]
@@ -1186,6 +1188,8 @@ def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
                 )
                 for binary, rss_bytes in payload.get("process_memory_bytes", {}).items()
             )
+            if payload.get("process_census_incomplete") is True:
+                samples.append(_Sample("process_census_incomplete:system_memory", "maximum", 1, at, source))
         return tuple(samples)
     # Agent/model token and cost projections have one owner: usage atoms.
     return ()

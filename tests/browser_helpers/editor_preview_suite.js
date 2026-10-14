@@ -1876,7 +1876,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/const AGENT_WINDOW_VISIBLE_TONES = Object\.freeze\(\[STATE_KEY\.working, 'attention', 'blocked', 'unavailable', 'cooldown'\]\)[\s\S]*function agentWindowVisibleTone\(value\)[\s\S]*AGENT_WINDOW_VISIBLE_TONES\.includes\(value\)[\s\S]*function agentWindowStatusClassification\(item\)[\s\S]*item\?\.acknowledging === true[\s\S]*'acknowledged'[\s\S]*item\?\.acknowledged === true[\s\S]*activity\}[\s\S]*function agentWindowStatusToneForItem\(item\)[\s\S]*agentWindowStatusClassification\(item\)\.tone/.test(activitySource), 'one shared status-tone classifier renders blocked, unavailable, and the temporary gray acknowledgement before removing an acknowledged window from every surface');
     assert.equal((activitySource.match(/AGENT_WINDOW_VISIBLE_TONES\.includes/g) || []).length, 1, 'every visible-tone membership check routes through the one shared helper');
     const coreSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
-    assert.ok(/function acknowledgeTerminalAttentionFromUserAction\(session, windowIndex = null, options = \{\}\) \{[\s\S]*const explicitWindowIndex = windowIndex !== null && windowIndex !== undefined;[\s\S]*acknowledgeAgentWindowActivity\(sessionKey, explicitWindowIndex \? windowIndex : null, \{[\s\S]*preferSummary: options\.preferSummary === true \|\| !explicitWindowIndex,[\s\S]*clearPromptAttentionForSession\(sessionKey/.test(coreSource), 'parent-tab acknowledgement targets its visible attention summary while a direct sub-window keeps its exact target');
+    assert.ok(/function acknowledgeTerminalAttentionFromUserAction\(session, windowIndex = null, options = \{\}\) \{[\s\S]*const view = typeof tabberViewDescriptorForSession === 'function' \? tabberViewDescriptorForSession\(sessionKey\) : null;[\s\S]*const targetSession = view\?\.sourceSession \|\| sessionKey;[\s\S]*const targetWindowIndex = view \? view\.windowIndex : windowIndex;[\s\S]*const explicitWindowIndex = targetWindowIndex !== null && targetWindowIndex !== undefined;[\s\S]*acknowledgeAgentWindowActivity\(targetSession, explicitWindowIndex \? targetWindowIndex : null, \{[\s\S]*preferSummary: !view && \(options\.preferSummary === true \|\| !explicitWindowIndex\),[\s\S]*clearPromptAttentionForSession\(sessionKey/.test(coreSource), 'grouped window aliases acknowledge their source window, parent tabs acknowledge the summary, and direct sub-window actions keep their exact target');
     assert.ok(/const AGENT_WINDOW_AGGREGATE_TONES = Object\.freeze\(\['attention', 'blocked', 'unavailable', 'cooldown', STATE_KEY\.working\]\)[\s\S]*function sessionAgentWindowStatusSummary\(session, info = null, autoPayload = null\)[\s\S]*let acknowledging = null;[\s\S]*let acknowledgement = null;[\s\S]*visibleItems\.push\(\{agent, item, tone\}\)[\s\S]*if \(tone === 'acknowledged'\) acknowledging = \{agent, item\};[\s\S]*\['attention', 'blocked', 'cooldown'\]\.includes\(tone\)[\s\S]*acknowledgement = \{agent, item\};[\s\S]*if \(acknowledging\) selected = acknowledging;[\s\S]*const allAggregateTones = AGENT_WINDOW_AGGREGATE_TONES[\s\S]*pulseActive: visibleItems\.some[\s\S]*aggregateTones/.test(activitySource), 'the shared model retains blocked, unavailable, and every other visible child tone, briefly mirrors a child acknowledgement, and retains the highest-priority acknowledgeable child');
     assert.ok(/\.agent-window-activity--working \.agent-window-status-dot,[\s\S]*\.agent-window-activity--attention \.agent-window-status-dot,[\s\S]*\.agent-window-activity--blocked \.agent-window-status-dot,[\s\S]*\.agent-window-activity--unavailable \.agent-window-status-dot,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*font-size:\s*var\(--agent-status-ball-size\)/.test(sessionsCss), 'agent status dots inherit glyph size from the shared activity wrapper');
     assert.equal(((sessionsCss + paneTabsCss).match(/--agent-status-ball-size:/g) || []).length, 2, 'agent status-ball size has only the base owner and shared sub-window 100% reference owner');
@@ -2086,6 +2086,32 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const finderSource = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
     assert.ok(/fileExplorerTreeDateModeForView\(options\.view \|\| \(options\.differMode \? 'differ' : 'finder'\)\)/.test(changesSource), 'date text fallback mirrors the recency path instead of defaulting missing view to Differ');
     assert.ok(/renderTreeChildren\(fileExplorerTree, fileExplorerRoot, entries, 0, \{view: 'finder', deferSessionFilesDiff: true\}\)/.test(finderSource) && /renderTreeChildren\(container, root, entries, 0, \{\s*view: 'finder',[\s\S]*?isCurrent: options\.isCurrent,\s*\}\)/.test(finderSource), 'Finder top-level renders thread their view into shared row rendering');
+  });
+
+  test('Finder and Repo Differ compact large line counts through one shared formatter', () => {
+    const api = loadYomux();
+    const format = counts => api.sessionFileDiffTextForTest(counts).map(part => part.text);
+    assert.deepEqual(format({added: 199_999, removed: 4}), ['+199999', '-4'], 'counts below 200K stay exact');
+    assert.deepEqual(format({added: 200_000, removed: 333_499}), ['+200K', '-333K'], 'large counts use rounded thousands');
+    assert.deepEqual(format({added: 85_098, removed: 249_000}), ['+85K', '-249K'], 'both signs use the unit selected by the larger count');
+    assert.deepEqual(format({added: 12_345, removed: 555_000}), ['+12K', '-555K'], 'both sides use thousands when either count needs a unit');
+    assert.deepEqual(format({added: 999_500, removed: 0}), ['+1M'], 'rounded thousands roll over to millions even when the other side is zero');
+    assert.deepEqual(format({added: 12_345, removed: 1_200_000}), ['+<0.1M', '-1.2M'], 'both sides use millions when either count reaches a million');
+    assert.deepEqual(format({added: 999_500, removed: 1_000_000}), ['+1M', '-1M'], 'rounded K values roll over cleanly at one million');
+    assert.deepEqual(format({added: 1_200_000, removed: 3_400_000}), ['+1.2M', '-3.4M'], 'million-scale counts use one decimal place');
+    const entry = {name: 'large.txt', kind: 'file'};
+    const sessionFilesMap = new Map([['/repo/large.txt', {status: 'M', added: 1_200_000, removed: 3_400_000}]]);
+    const renderedDiff = options => {
+      const tree = new TestElement('line-count-tree');
+      tree.setAttribute('role', 'tree');
+      tree.classList.add('file-explorer-tree-panel');
+      api.renderTreeChildrenForTest(tree, '/repo', [entry], 0, [], {...options, sessionFilesMap});
+      return tree.querySelector('.file-tree-row[data-path="/repo/large.txt"]')
+        ?.querySelector(':scope > .file-tree-diff')?.innerHTML || '';
+    };
+    const expected = '<span class="changes-diff-add">+1.2M</span> <span class="changes-diff-remove">-3.4M</span>';
+    assert.equal(renderedDiff({view: 'finder'}), expected, 'Finder rows render compact large counts');
+    assert.equal(renderedDiff({view: 'differ', differMode: true}), expected, 'Repo Differ rows render the same compact large counts');
   });
 
   test('pane tabs and YO!info share mixed agent-window status precedence', () => {
@@ -3396,19 +3422,19 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(controls.includes('data-tmux-window-bar="1"'), false, 'DOIT.53 P1: tmux pane header controls do not render the window bar');
     assert.equal(controls.includes('tmux-window-step'), false, 'P5: tmux pane controls no longer render the old prev/next stepper');
     assert.ok(controls.includes('terminal-tab'), 'DOIT.53 P1: tmux pane header keeps only the terminal tab label in the top row');
-    assert.ok(controls.includes('>Term</button>'), 'DOIT.56 N3: terminal header button keeps the static Term label');
+    assert.ok(controls.includes('>Term</button>'), 'ordinary terminal header buttons keep the static Term label');
     assert.equal(controls.includes('>codex</button>') || controls.includes('>node</button>'), false, 'DOIT.56 N3: terminal header no longer duplicates active window/process names');
     const source = fs.readFileSync('static/yomux.js', 'utf8');
     const yoloCss = fs.readFileSync('static/yomux.css', 'utf8');
-    assert.ok(/tmuxWindowBarHtml\(session, transcriptMetadataState.payload\.sessions\?\.\[session\], \{infoBar: true\}\)/.test(source), 'tmux sub-window bar is rendered on the Info Bar');
-    assert.ok(/tmuxWindowBarHtml\(session, transcriptMetadataState.payload\.sessions\?\.\[session\], \{infoBar: true\}\)[\s\S]{0,240}meta-controls-\$\{session\}/.test(source), 'Info Bar renders the repo selector slot directly after the tmux sub-window bar');
-    assert.equal(/tmuxWindowBarHtml\(session, transcriptMetadataState.payload\.sessions\?\.\[session\], \{infoBar: true\}\) : ''\}[\s\S]{0,120}panel-detail-close/.test(source), false, 'Info Bar no longer renders the detail-close (×) button after the sub-window bar');
+    assert.ok(/function updatePanelWindowStepButtons\(session, info, controlNodes = null\)[\s\S]*tmuxWindowBarHtml\(session, sessionMetadataForLayoutItem\(session, info\), \{infoBar: true\}\)/.test(source), 'Info Bar renders the shared window bar from terminal layout-item metadata');
+    assert.ok(/if \(controls\?\.parentElement === row\) row\.insertBefore\(replacement, controls\)/.test(source), 'Info Bar keeps the repo selector slot directly after the tmux sub-window bar');
+    assert.ok(/function sessionMetadataForLayoutItem\(session, fallback = null\)[\s\S]*filter\(pane => tmuxWindowNumber\(pane\.window\) === index\)/.test(source), 'grouped Tabber window views render only the selected window metadata');
     assert.ok(/delegate\(panel, 'click', '\[data-window-dir\], \[data-window-index\]'/.test(source), 'DOIT.53 P3: in-panel window buttons use the shared delegated click path');
     assert.ok(source.includes("const repoSelectorControlSelector = '[data-repo-cycle], [data-repo-chip]';") && source.includes("delegate(panel, 'click', repoSelectorControlSelector, (event, button) => activateRepoSelectorControl(event, button, session));"), 'Info Bar repo arrows and count use one delegated panel path after moving outside scrolling metadata');
     assert.ok(/const chromeTarget = event\.target\?\.closest\?\.\(`[^`]*\$\{repoSelectorControlSelector\}/.test(source), 'Info Bar repo controls are pane chrome and do not acknowledge terminal attention');
     assert.ok(/if \(windowTarget\) \{[\s\S]*windowTarget\.dataset\.pointerActionHandled = '1'[\s\S]*handleWindowStepButtonClick\(\{target: windowTarget, currentTarget: windowTarget\}\)[\s\S]*return;[\s\S]*\}/.test(source), 'focused and unfocused pane sub-window clicks activate the original target once during pointer capture');
     assert.ok(source.includes("if (event.target?.closest?.('[data-js-debug-range-slider], .js-debug-line-chart, [data-js-debug-zoom-reset]')) return;"), 'YO!stats graph gestures bypass panel focus rerenders that replace native controls');
-    assert.ok(/function acknowledgeTerminalAttentionFromUserAction\(session, windowIndex = null, options = \{\}\)[\s\S]*const explicitWindowIndex = windowIndex !== null && windowIndex !== undefined;[\s\S]*explicitWindowIndex \? windowIndex : null/.test(source), 'direct sub-window actions preserve their explicit target while parent tabs use the canonical actionable-status summary');
+    assert.ok(/function acknowledgeTerminalAttentionFromUserAction\(session, windowIndex = null, options = \{\}\)[\s\S]*const view = typeof tabberViewDescriptorForSession === 'function' \? tabberViewDescriptorForSession\(sessionKey\) : null;[\s\S]*const targetSession = view\?\.sourceSession \|\| sessionKey;[\s\S]*const targetWindowIndex = view \? view\.windowIndex : windowIndex;[\s\S]*const explicitWindowIndex = targetWindowIndex !== null && targetWindowIndex !== undefined;[\s\S]*explicitWindowIndex \? targetWindowIndex : null/.test(source), 'grouped Tabber aliases acknowledge the source window while direct sub-window actions preserve their explicit target');
     assert.ok(/function appendTabSplitCommands\(menu, item, options = \{\}\)[\s\S]*menu\.appendChild\(actionGroups\);\s*\}/.test(source), 'Move/Swap controls flow directly into Expand pane without a stray separator');
     assert.ok(/const autoTarget = event\.target\.closest\('\[data-auto-session\]'\);[\s\S]*if \(item === activeItemForSide\(side\)\) setFocusedPanelItem\(item, \{userInitiated: true\}\);[\s\S]*'pane-tab-auto-approve':[\s\S]*if \(shouldRefocus\) focusPanel\(item, \{userInitiated: true\}\);/.test(source), 'pane-tab YO pointer gestures route through the same user-initiated focus transaction as tab clicks and keyboard activation');
     assert.ok(/\.panel\.details-collapsed \.pane-info-bar,[\s\S]*\.panel\.details-collapsed \.panel-detail-row\s*\{[\s\S]*display:\s*none/.test(yoloCss), 'Info Bar window bar collapses with the Info Bar');
@@ -4833,7 +4859,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     popover.setAttribute('role', 'tooltip');
     popover.innerHTML = '<div class="stale">old idle content</div>';
     tab.appendChild(popover);
-    api.setDocumentQuerySelectorAllForTest(selector => selector === '.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab]' ? [tab] : []);
+    api.setDocumentQuerySelectorAllForTest(selector => selector === '.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab], .tmux-pane-tab-token[data-pane-tab]' ? [tab] : []);
 
     api.setAutoApproveStateForTest('4', {agent_windows: [{kind: 'claude', state: 'working', window_index: 0, window_label: '0:claude'}]});
     api.updateSessionButtonStatesForTest();
@@ -4924,7 +4950,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     });
     const parityPopoverHtml = api.sessionPopoverHtml('5', parityInfo, 'claude', false);
     const parityPopoverText = parityPopoverHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    assert.ok(/1:claude \(pid=222\)(?:\s+○)?\s+—\s+1 hr ago/.test(parityPopoverText), 'popover keeps the active tmux sub-window row current while showing idle transcript recency');
+    assert.ok(/1:claude \(pid=222\)(?:\s+○)?\s+—\s+1 hour ago/.test(parityPopoverText), 'popover keeps the active tmux sub-window row current while showing idle transcript recency');
     assert.ok(parityPopoverText.includes(`0:codex (pid=111) — ${api.t('state.workingFor', {duration: '1m 5s'})}`), 'non-focused window keeps its own localized working state');
     assert.equal((parityPopoverHtml.match(/session-agent-row[^"]*current/g) || []).length, 1, 'popover marks exactly one agent window current');
     assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('5', parityInfo)), ['1'], 'tmux sub-window bar marks the active tmux sub-window');
@@ -4932,7 +4958,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const parityClaudeRow = parityRows.find(row => row.type === 'window' && /^1:claude/.test(row.name));
     const parityCodexRow = parityRows.find(row => row.type === 'window' && /^0:codex/.test(row.name));
     assert.equal(parityClaudeRow?.classes.includes('tabber-active-window'), true, 'Tabber marks the same active tmux sub-window as the popover and window bar');
-    assert.equal(parityClaudeRow?.date, '1 hr ago', 'Tabber current window displays idle transcript recency instead of tmux selection as activity');
+    assert.equal(parityClaudeRow?.date, '1 hour ago', 'Tabber current window displays idle transcript recency instead of tmux selection as activity');
     assert.ok((parityCodexRow?.nameHtml || '').includes('agent-window-agent-icon--working'), 'Tabber working glyph uses the same working state as the popover');
     const parityTree = api.buildTabberTree();
     const paritySession = parityTree.entries.find(entry => entry.tabber?.session === '5');
@@ -6609,6 +6635,24 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     // A plain prompt row below is NOT part of the link.
     const promptRow = api.terminalWrappedLineLinks(term, 3);
     assert.equal(promptRow.length, 0, 'the prompt row after the URL is not merged into the link');
+  });
+
+  test('hard-wrapped Codex report URL continues before trailing status text', () => {
+    const api = loadYomux();
+    const first = '• Open the Unified conformance report (http://keivenc-linux/dev/frontend-crates/frontend-';
+    const continuation = 'crates_unified-batch_DIS-3124/conformance/CONFORMANCE_v2.html) (HTTP 200).';
+    const lines = [terminalLine(first, false), terminalLine(continuation, false)];
+    const term = {cols: first.length, yomuxAgentKind: 'codex', buffer: {active: {getLine: index => lines[index] || null}}};
+    const expected = 'http://keivenc-linux/dev/frontend-crates/frontend-crates_unified-batch_DIS-3124/conformance/CONFORMANCE_v2.html';
+
+    for (const row of [1, 2]) {
+      const urls = api.terminalWrappedLineLinks(term, row).filter(reference => reference.type === 'url');
+      assert.equal(urls.length, 1, `the full report URL is exposed from row ${row}`);
+      assert.equal(urls[0].text, expected, `row ${row} resolves the complete report URL`);
+      assert.equal(urls[0].range.start.y, 1);
+      assert.equal(urls[0].range.end.y, 2, 'the link continues onto the second row');
+      assert.equal(urls[0].text.includes('HTTP 200'), false, 'the trailing status text stays outside the URL');
+    }
   });
 
   test('repeated OpenCode gutters join two- and three-line URLs without joining prose', () => {
@@ -8868,7 +8912,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     // order ends Language, Theme, Activity (activity pinned far-right).
     // #257: the topbar theme and distributed-owner controls were removed. Language and Activity
     // remain in the right group, with Activity pinned at the far right.
-    assert.ok(/function createTopbarCenterTools\(\)[\s\S]*?group\.append\(createTopbarNav\(\), createTopbarSearch\(\)\)/.test(src) && /function createTopbarRightTools\(\)[\s\S]*?group\.append\(createTopbarLanguageSwitcher\(\), createTopbarActivityStatus\(\)\)/.test(src) && /sessionButtons\.appendChild\(createAppMenuBar\(\)\)[\s\S]*?sessionButtons\.appendChild\(createTopbarCenterTools\(\)\)[\s\S]*?sessionButtons\.appendChild\(createTopbarRightTools\(\)/.test(src), '#257: File/View/tmux/Tabs/Help precede the arrows/search group, which precedes Language and Activity');
+    assert.ok(/function createTopbarCenterTools\(\)[\s\S]*?group\.append\(createTopbarNav\(\), createTopbarTabberToggle\(\), createTopbarSearch\(\)\)/.test(src) && /function createTopbarRightTools\(\)[\s\S]*?group\.append\(createTopbarLanguageSwitcher\(\), createTopbarActivityStatus\(\)\)/.test(src) && /sessionButtons\.appendChild\(createAppMenuBar\(\)\)[\s\S]*?sessionButtons\.appendChild\(createTopbarCenterTools\(\)\)[\s\S]*?sessionButtons\.appendChild\(createTopbarRightTools\(\)/.test(src), '#257: File/View/tmux/Tabs/Help precede the arrows/Tabber/Search group, which precedes Language and Activity');
     assert.equal(/createTopbarOwnerStatus/.test(src), false, '#257: the distributed-owner status control is gone with the owner/follower model');
     assert.ok(/function topbarControlIsActive\(\)[\s\S]*document\.activeElement[\s\S]*sessionButtons\?\.contains\(active\)[\s\S]*active\.matches\?\.\('select, input, \.topbar-language, \.app-menu-button'\)/.test(src), '#62: topbar detects focused controls before passive rebuilds');
     assert.ok(/if \(!options\.force && topbarControlIsActive\(\)\) \{[\s\S]*pendingSessionButtonsRender = true[\s\S]*return;\s*\}/.test(src), '#62: passive topbar renders defer while a topbar control is focused');
@@ -9384,7 +9428,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.equal(api.fileExplorerTreeDateModeTitle('relative').includes('None'), false, `${locale} Finder/Differ date-mode tooltip does not leak English None`);
       assert.equal(api.fileExplorerTreeDateModeTitle('relative').includes('Date display'), false, `${locale} Finder/Differ date-mode tooltip does not leak English title text`);
       assert.equal(api.sessionFileRelativeTimeText(1000, 1014), catalog['relative.compact.lessThan15Sec'], `${locale} Finder/Differ sub-15-second Ago text is localized`);
-      assert.equal(api.sessionFileRelativeTimeText(1000, 19720), catalog['relative.compact.hour.other'].replace('{count}', '5.2'), `${locale} Finder/Differ compact Ago text is localized`);
+      assert.equal(api.sessionFileRelativeTimeText(1000, 19720), catalog['relative.hour.other'].replace('{count}', '5.2'), `${locale} Finder/Differ compact Ago text is localized`);
       assert.equal(/\bago\b|hrs?|days?|min\b/i.test(api.sessionFileRelativeTimeText(1000, 217000)), false, `${locale} Finder/Differ compact Ago text does not leak English units`);
       assert.equal(api.editorModeLabel('edit'), catalog['editor.mode.textEdit'], `${locale} editor TextEdit mode label is localized`);
       assert.equal(api.editorModeLabel('preview'), catalog['editor.mode.viewEdit'], `${locale} editor ViewEdit mode label is localized`);

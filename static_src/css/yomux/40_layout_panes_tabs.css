@@ -12,6 +12,23 @@
 .grid.dockview-grid {
   overflow: hidden;
 }
+body.pane-popout-live #appRoot {
+  display: block;
+  padding: 0;
+}
+body.pane-popout-live #appRoot > :not(#grid) {
+  display: none !important;
+}
+body.pane-popout-live #grid {
+  position: fixed;
+  inset: 0;
+  box-sizing: border-box;
+  width: 100vw;
+  height: 100vh;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
 .panel-pool {
   display: none;
 }
@@ -1590,17 +1607,14 @@ body.app-topbar-touch-compact .pane-tab-close {
   height: var(--pane-control-touch-target-size);
   touch-action: manipulation;
 }
-/* Pane-frame actions use Dockview's separate header-actions strip, so the tab-close rule above
-   does not reach the actual minimize button. Give that button the same one-tap touch target while
-   leaving the desktop 20px geometry unchanged. */
+/* Keep the minimize action reliably tappable while preserving its compact minus glyph. */
 body.app-topbar-touch-compact .tabs .pane-minimize {
-  flex-basis: var(--pane-control-touch-target-size);
+  flex: 0 0 var(--pane-control-touch-target-size);
   width: var(--pane-control-touch-target-size);
   min-width: var(--pane-control-touch-target-size);
   max-width: var(--pane-control-touch-target-size);
   height: var(--pane-control-touch-target-size);
   min-height: var(--pane-control-touch-target-size);
-  max-height: var(--pane-control-touch-target-size);
   touch-action: manipulation;
 }
 body.app-topbar-touch-compact .yomux-dockview .dv-tabs-and-actions-container,
