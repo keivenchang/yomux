@@ -931,39 +931,6 @@ func (s *server) updateOperationProducer(id string, producer map[string]any, gen
 	return len(updated) == 1, err
 }
 
-func (s *server) recordOperationSchedule(id string, schedule map[string]any) bool {
-	allowed := map[string]bool{"task": true, "priority": true, "lane": true, "submitted_at": true, "running_started_at": true, "completed_at": true, "queue_wait_ms": true, "execution_ms": true, "transient_polls": true}
-	bounded := map[string]any{}
-	for key, value := range schedule {
-		if allowed[key] {
-			if number, ok := value.(float64); ok {
-				bounded[key] = number
-			} else {
-				bounded[key] = fmt.Sprint(value)[:min(len(fmt.Sprint(value)), 64)]
-			}
-		}
-	}
-	if len(bounded) == 0 {
-		return false
-	}
-	s.operationsMu.Lock()
-	defer s.operationsMu.Unlock()
-	record := s.operations[id]
-	if record == nil {
-		return false
-	}
-	updated := *record
-	updated.Schedule = bounded
-	updated.UpdatedAt = time.Now().UnixMilli()
-	if err := appendOperationJournal(s.operationsJournal, map[string]any{"version": operationJournalVersion, "type": "operation", "epoch": updated.Epoch, "record": &updated}); err != nil {
-		return false
-	}
-	*record = updated
-	if err := s.saveOperationsLocked(); err != nil {
-		return false
-	}
-	return true
-}
 func (s *server) terminalizeOperation(id string, result map[string]any, status int) (clientEvent, error) {
 	s.operationsMu.Lock()
 	defer s.operationsMu.Unlock()

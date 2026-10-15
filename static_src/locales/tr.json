@@ -2540,5 +2540,11 @@
   "pref.section.sizes": "Boyutlar",
   "contextmenu.copyText": "Metni kopyala",
   "contextmenu.copyWithStyle": "Stille kopyala",
-  "status.copiedStyledText": "Stille kopyalandı"
+  "status.copiedStyledText": "Stille kopyalandı",
+  "menu.tmux.kill.window": "tmux oturumunda {window} sürecini sonlandır",
+  "menu.tmux.kill.session.windows": "Tüm tmux oturumunu sonlandır ({count} pencere)",
+  "status.tmux.windowKill.confirm": "tmux oturumunda '{session}' {window} süreci sonlandırılsın mı?",
+  "status.tmux.windowKill.pending": "tmux oturumunda '{session}' {window} sonlandırılıyor",
+  "status.tmux.windowKill.failed": "tmux oturumunda '{session}' {window} sonlandırılamadı",
+  "status.tmux.windowKill.success": "tmux oturumunda '{session}' {window} sonlandırıldı"
 }

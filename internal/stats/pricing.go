@@ -62,6 +62,9 @@ func (c *PricingCatalog) RefreshResult() (string, []string) {
 func (c *PricingCatalog) RefreshDue(now time.Time) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.refreshFailed {
+		return true
+	}
 	var latest time.Time
 	for _, model := range c.Models {
 		kind := pricingSourceKind(model.Source)
@@ -105,11 +108,15 @@ func (c *PricingCatalog) AcknowledgePricingInvalidation() error {
 		GeneratedAt: c.GeneratedAt, Models: clonePricingModels(c.Models),
 	}
 	checks := clonePricingSourceChecks(c.sourceChecks)
+	var failure *pricingRefreshFailure
+	if c.refreshFailed {
+		failure = &pricingRefreshFailure{Warnings: append([]string(nil), c.refreshWarnings...)}
+	}
 	c.mu.RUnlock()
 	if cachePath == "" {
 		return fmt.Errorf("pricing invalidation state has no durable cache path")
 	}
-	if err := writePricingCache(cachePath, catalog, checks, nil, false); err != nil {
+	if err := writePricingCache(cachePath, catalog, checks, failure, false); err != nil {
 		return fmt.Errorf("persist pricing invalidation acknowledgement: %w", err)
 	}
 	c.mu.Lock()

@@ -875,8 +875,7 @@ function beginFileTabRename(tab, item) {
 function bindPaneTabPopover(tab, session) {
   const popover = tab.querySelector?.(':scope > .session-popover');
   if (!popover) return bindTabInteraction({anchor: tab, item: session});
-  const detached = tab.classList?.contains('dockview-pane-tab') === true
-    || tab.classList?.contains('tabber-session-tab') === true;
+  const detached = tab.classList?.contains('dockview-pane-tab') === true;
   if (detached) detachPaneTabPopover(tab, popover);
   return bindTabInteraction({
     anchor: tab,
@@ -979,19 +978,15 @@ function paneTabPopoverOwningPane(tab) {
 function positionPaneTabPopover(tab, popover = null) {
   const rect = tab.getBoundingClientRect();
   popover = popover || paneTabPopoverForAnchor(tab);
-  const tabberPane = tab?.classList?.contains?.('tabber-session-tab')
-    ? tab.closest?.('.file-explorer-panel, .file-explorer-changes-panel')
-    : null;
-  const tabberPaneRect = tabberPane ? appSpaceRect(tabberPane) : null;
   // A session detail explains the pane that owns the tab, not the tab's narrow label. Prefer the
   // owning pane width with one small bounded overflow allowance. File previews retain their
   // existing content-sized path.
   const filePopover = popover?.classList?.contains?.('file-popover') === true;
-  const sessionPane = !tabberPane && !filePopover
+  const sessionPane = !filePopover
     ? paneTabPopoverOwningPane(tab)
     : null;
   const sessionPaneRect = sessionPane ? appSpaceRect(sessionPane) : null;
-  const paneRect = tabberPaneRect || sessionPaneRect;
+  const paneRect = sessionPaneRect;
   const bridgeGap = 3;
   const edgeGap = popoverEdgeGapPx();
   const topbarBottom = Math.ceil(topbar?.getBoundingClientRect?.().bottom || rootCssLengthPx('--topbar-height') || 0);

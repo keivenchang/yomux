@@ -112,7 +112,9 @@ func TestTerminalViewportWaitsForRealPTYReflow(t *testing.T) {
 		t.Fatalf("fixture: %v %s", err, out)
 	}
 	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
-	if err := s.tmuxCommand("wait-for", "ready").Run(); err != nil {
+	readyCtx, cancelReady := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelReady()
+	if err := s.tmuxCommandContext(readyCtx, "wait-for", "ready").Run(); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.tmuxCommand("set-option", "-t", "source", "window-size", "largest").Run(); err != nil {
@@ -123,7 +125,8 @@ func TestTerminalViewportWaitsForRealPTYReflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(pair.close)
-	client := s.tmuxCommand("attach-session", "-t", "=source:")
+	clientCtx, cancelClient := context.WithCancel(context.Background())
+	client := s.tmuxCommandContext(clientCtx, "attach-session", "-t", "=source:")
 	client.SysProcAttr = terminalProcessAttributes()
 	client.Env = append(client.Env, "TERM=xterm-256color")
 	client.Stdin, client.Stdout, client.Stderr = pair.slave, pair.slave, pair.slave
@@ -131,6 +134,7 @@ func TestTerminalViewportWaitsForRealPTYReflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		cancelClient()
 		_ = client.Process.Signal(syscall.SIGCONT)
 		_ = client.Process.Signal(syscall.SIGTERM)
 		_ = client.Wait()
@@ -222,7 +226,8 @@ func TestTerminalViewportGeometryReadbackUsesRequestedClient(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(pair.close)
-		client := s.tmuxCommand("attach-session", "-t", s.exactTarget(name))
+		clientCtx, cancelClient := context.WithCancel(context.Background())
+		client := s.tmuxCommandContext(clientCtx, "attach-session", "-t", s.exactTarget(name))
 		client.SysProcAttr = terminalProcessAttributes()
 		client.Env = append(client.Env, "TERM=xterm-256color")
 		client.Stdin, client.Stdout, client.Stderr = pair.slave, pair.slave, pair.slave
@@ -230,6 +235,7 @@ func TestTerminalViewportGeometryReadbackUsesRequestedClient(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() {
+			cancelClient()
 			_ = client.Process.Signal(syscall.SIGTERM)
 			_ = client.Wait()
 		})
@@ -280,7 +286,9 @@ func TestTerminalResizeDoesNotOverwriteAnotherServersNavigation(t *testing.T) {
 	if out, err := a.tmuxCommand("new-session", "-d", "-s", "source", "-x", "100", "-y", "30", fmt.Sprintf("printf '%%080d\\n' 0; tmux -S %s wait-for -S ready; exec cat", shellQuote(socket))).CombinedOutput(); err != nil {
 		t.Fatalf("fixture: %v %s", err, out)
 	}
-	if err := a.tmuxCommand("wait-for", "ready").Run(); err != nil {
+	readyCtx, cancelReady := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelReady()
+	if err := a.tmuxCommandContext(readyCtx, "wait-for", "ready").Run(); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.tmuxCommand("copy-mode", "-t", "source").Run(); err != nil {

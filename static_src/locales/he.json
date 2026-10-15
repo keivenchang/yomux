@@ -2585,5 +2585,11 @@
   "pref.section.sizes": "גדלים",
   "contextmenu.copyText": "העתק טקסט",
   "contextmenu.copyWithStyle": "העתק עם סגנון",
-  "status.copiedStyledText": "הועתק עם סגנון"
+  "status.copiedStyledText": "הועתק עם סגנון",
+  "menu.tmux.kill.window": "סגור את {window} בהפעלת tmux",
+  "menu.tmux.kill.session.windows": "סגור את כל הפעלת tmux ({count} חלונות)",
+  "status.tmux.windowKill.confirm": "לסגור את {window} בהפעלת tmux '{session}'?",
+  "status.tmux.windowKill.pending": "סוגר את {window} בהפעלת tmux '{session}'",
+  "status.tmux.windowKill.failed": "לא ניתן לסגור את {window} בהפעלת tmux '{session}'",
+  "status.tmux.windowKill.success": "{window} נסגר בהפעלת tmux '{session}'"
 }

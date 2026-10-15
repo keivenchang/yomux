@@ -5310,7 +5310,7 @@ async function toggleAutoApprove(session) {
 function applyAutoApproveCommandState(session, state) {
   autoApproveStates.set(session, state);
   updateDocumentTitle();
-  updateSessionButtonStates();
+  refreshAgentWindowActivityDisplays();
   renderInfoPanel();
   renderAutoApproveButton(session, state);
   scheduleTerminalAttentionHighlight(session);
@@ -5424,6 +5424,7 @@ function adoptTabberActivityAsAutoStatusFallback(options = {}) {
       ? payload.session_order.map(session => String(session || '').trim()).filter(Boolean)
       : [],
   );
+  const sessionStates = {};
   let adopted = 0;
   // The stats-only layout can mount only the Debug/JS surface, so its layout
   // session list may not contain the machine-wide tmux sessions yet. The
@@ -5440,14 +5441,6 @@ function adoptTabberActivityAsAutoStatusFallback(options = {}) {
     if (!rows.length && !authoritativeStatus) continue;
     const existing = autoApproveStates.get(session);
     const existingRevision = agentWindowSnapshotRevision(existing);
-    // Activity responses can complete out of order. Never let an older (or an
-    // unversioned compatibility) sample erase a newer canonical state.
-    if (existingRevision > 0 && (snapshotRevision === 0 || snapshotRevision < existingRevision)) continue;
-    // A Go pane capture can briefly fail while the Codex process is still running. `unavailable`
-    // is a transport/evidence failure, not a stop signal; retaining the last concrete state keeps
-    // the green marker alive until a later sample says idle, ask, or working explicitly. Without
-    // this merge, a single transient capture miss clears the pane marker while the Agents graph
-    // (which has its own aggregate sample) still shows the run.
     const existingRows = agentWindowPayloadRows(existing?.agent_windows);
     if (onlyMissingStatusRows && existingRows.length > 0
         && agentWindowSnapshotRevision(existing) !== snapshotRevision) continue;
@@ -5471,27 +5464,28 @@ function adoptTabberActivityAsAutoStatusFallback(options = {}) {
         }
       }
     } else {
-      mergedRows = rows.map(row => {
-        if (agentWindowStateKey(row?.state) !== 'unavailable') return row;
-        const prior = existingRows.find(candidate => agentWindowSameInstance(candidate, row));
-        if (!prior || agentWindowStateKey(prior?.state) === 'unavailable') return row;
-        return {...prior, ...row, state: prior.state};
-      });
+      mergedRows = rows;
     }
     if (existingRevision === snapshotRevision && existingRows.length === mergedRows.length
         && existingRows.every((row, index) => row === mergedRows[index])) continue;
-    const nextState = autoApproveStateWithSnapshotRevision({
+    sessionStates[session] = {
       ...existing,
       target: session,
       enabled: existing?.enabled === true,
       agent_window_status_fresh: payload.agent_window_status_fresh,
+      agent_window_snapshot_revision: snapshotRevision,
       agent_windows: mergedRows,
-    }, snapshotRevision);
-    autoApproveStates.set(session, nextState);
-    reconcileTmuxWindowMetadataFromAgentWindows(session, nextState);
+    };
     adopted += 1;
   }
-  return adopted;
+  if (!adopted) return 0;
+  // Activity and SSE carry the same backend window projection. Admit both through
+  // the same revision guard and state reducer, preserving YO controls as metadata.
+  const result = applyAutoApprovePayload({
+    patch: true, collection: 'sessions', changes: sessionStates,
+    fields: {topology_generation: tmuxTopologyGeneration},
+  }, {render: false, deferForMetadata: false});
+  return result?.applied ? result.changedSessions.length : 0;
 }
 
 function loadAutoStatuses(options = {}) {
@@ -5598,7 +5592,7 @@ function renderAutoApproveStatusSurfaces(result = {}) {
   // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
   // updated the title but never re-synced the markers).
     renderAutoApproveButtons(changedSessions);
-    updateSessionButtonStates(changedSessions);
+    refreshAgentWindowActivityDisplays(changedSessions);
     trackSessionStateChanges(changedSessions);
     syncTerminalAttentionHighlights(changedSessions);
     if (result && typeof result === 'object') result.rendered = true;
@@ -5756,7 +5750,7 @@ function applyAutoApprovePayload(payload, options = {}) {
     if (previousRevision > 0 && (stateRevision > 0 && stateRevision < previousRevision
         || stateRevision === 0 && (typeof state.agent_window_status_fresh === 'boolean' || agentWindowPayloadRows(state.agent_windows).length > 0))) continue;
     const previousMismatch = agentWindowSnapshotRevisionsMismatch(agentWindowPayloadRows(previousState.agent_windows).length > 0, agentWindowSnapshotRevision(previousState), activityRevision);
-    const nextMismatch = agentWindowSnapshotRevisionsMismatch(agentWindowPayloadRows(state.agent_windows).length > 0, snapshotRevision, activityRevision);
+    const nextMismatch = agentWindowSnapshotRevisionsMismatch(agentWindowPayloadRows(state.agent_windows).length > 0, stateRevision, activityRevision);
     // Revisions still advance even when publication carries identical visible state.
     // The paired-snapshot mismatch is separately visible and must invalidate chrome.
     if (previousMismatch !== nextMismatch
@@ -5859,8 +5853,7 @@ function renderAutoApproveButton(session, payload, controlNodes = null) {
         ? t('yolo.buttonOwnedBy', {owner: autoApproveOwnerLabel(payload)})
       : t('yolo.buttonOffForSession', {session: sessionLabel(session), readonly});
     button.setAttribute('aria-label', buttonLabel);
-    if (button.closest('.tabber-session-tab')) button.removeAttribute('title');
-    else button.title = buttonLabel;
+    button.title = buttonLabel;
   }
   updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session], nodes);
   updateTypingIndicator(session);
@@ -6747,7 +6740,7 @@ function updatePanelHeader(session, info, controlNodes = null) {
 }
 
 function refreshSessionChrome(session) {
-  updateSessionButtonStates();
+  refreshAgentWindowActivityDisplays();
   updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
 }
 
@@ -7237,8 +7230,8 @@ async function updateLatency() {
   return measureClientHealth();
 }
 
-function refreshAll({forceMetadata = true} = {}) {
-  resyncVisibleTerminalRemoteSizes('refresh');
+function refreshAll({forceMetadata = true, settleTerminalResize = true} = {}) {
+  resyncVisibleTerminalRemoteSizes(settleTerminalResize ? 'refresh' : '');
   refreshVisibleTerminalScreens('manual-refresh');
   refreshTranscripts(forceMetadata ? {force: true} : {});
   refreshAutoStatuses();
@@ -7253,16 +7246,16 @@ function scheduleReconnectResync(reason = '') {
     if (!scope.current() || clientEventTransportState.resyncTimer !== timer) return;
     scope.relinquish('resync', timer);
     clientEventTransportState.resyncTimer = null;
-    refreshAll({forceMetadata: false});
+    refreshAll({forceMetadata: false, settleTerminalResize: false});
   }, reconnectResyncDebounceMs);
   clientEventTransportState.resyncTimer = timer;
   scope.ownTimer('resync', timer);
 }
 
 function resyncVisibleTerminalRemoteSizes(reason = '') {
-  void reason;
   for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);
   scheduleVisibleTerminalResizeAuthority();
+  if (reason === 'refresh') scheduleSettledTerminalResizeAuthority();
 }
 
 function installReconnectResyncHandlers() {
@@ -7371,7 +7364,7 @@ async function boot() {
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
   initialAutoStatusesPromise.then(() => {
     renderAutoApproveButtons();
-    updateSessionButtonStates();
+    refreshAgentWindowActivityDisplays();
     refreshActivePanelHeaders();
     trackSessionStateChanges();
   });

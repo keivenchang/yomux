@@ -280,7 +280,7 @@ function canPaneExpand(item, slots = layoutSlots) {
 }
 
 function minimizePaneFromLayout(item) {
-  if (!tabLayoutManipulationAllowed()) return false;
+  if (!tabLayoutManipulationAllowed()) return item === tabberItemId ? toggleTabberSidebar() : false;
   const sourceSlot = slotForSession(item);
   if (!sourceSlot) return;
   const returnItem = historicalFileReturnItem(item);
@@ -2761,6 +2761,49 @@ async function killTmuxSession(session) {
   }
 }
 
+async function killTmuxWindow(session, windowRecord) {
+  if (readOnlyMode) {
+    statusErr(localizedHtml('status.readOnlyKillSessions'));
+    return false;
+  }
+  const windowId = String(windowRecord?.windowId || '');
+  const windowName = String(windowRecord?.name || '').trim();
+  if (!isTmuxSession(session) || !/^@[0-9]+$/.test(windowId) || !windowName) return false;
+  const sessionName = sessionLabel(session) || session;
+  if (!window.confirm(localizedLabel('status.tmux.windowKill.confirm', "Kill {window} in tmux session '{session}'?", {window: windowName, session: sessionName}))) return false;
+  statusEl.textContent = localizedLabel('status.tmux.windowKill.pending', "Killing {window} in tmux session '{session}'", {window: windowName, session: sessionName});
+  let payload;
+  try {
+    payload = await apiFetchJson(
+      `/api/kill-window?session=${encodeURIComponent(session)}&window_id=${encodeURIComponent(windowId)}`,
+      {method: 'POST', lifecycleBypass: true},
+    );
+  } catch (error) {
+    if (error?.status === 409) {
+      void refreshTranscripts({force: true, refreshActivity: false});
+      refreshTabberPanels({reorder: true});
+    }
+    statusErr(esc(userMessageText(error, localizedLabel('status.tmux.windowKill.failed', "Could not kill {window} in tmux session '{session}'", {window: windowName, session: sessionName}))));
+    return false;
+  }
+  adoptTopologyGeneration(payload);
+  try {
+    await refreshTranscripts({force: true, refreshActivity: false});
+  } catch (error) {
+    recordJsDebugEvent('client_failure', {
+      failure: 'tmux_window_kill_metadata_refresh',
+      message: error?.message || String(error),
+      session,
+      windowId,
+    });
+  }
+  renderSessionButtons({force: true});
+  renderPaneTabStrips();
+  refreshTabberPanels({reorder: true});
+  statusOk(localizedLabel('status.tmux.windowKill.success', "Killed {window} in tmux session '{session}'", {window: windowName, session: sessionName}));
+  return true;
+}
+
 function focusPanel(session, options = {}) {
   const panel = document.getElementById(panelDomId(session));
   if (!panel) return;
@@ -2822,6 +2865,7 @@ function terminalCanPublishRemoteSize() {
 let lastTerminalResizeAuthoritySignature = '';
 let terminalResizeAuthorityHandlersInstalled = false;
 let terminalResizeAuthorityFrame = 0;
+let terminalResizeAuthoritySettleTimer = 0;
 
 function scheduleVisibleTerminalResizeAuthority() {
   if (terminalResizeAuthorityFrame) return;
@@ -2833,6 +2877,14 @@ function scheduleVisibleTerminalResizeAuthority() {
       claimVisibleTerminalResizeAuthority('interaction', {force: true});
     });
   });
+}
+
+function scheduleSettledTerminalResizeAuthority() {
+  if (terminalResizeAuthoritySettleTimer) clearTimeout(terminalResizeAuthoritySettleTimer);
+  terminalResizeAuthoritySettleTimer = setTimeout(() => {
+    terminalResizeAuthoritySettleTimer = 0;
+    claimVisibleTerminalResizeAuthority('settled-viewport');
+  }, nativeAppViewportSettleDelayMs);
 }
 
 function visibleTerminalResizeAuthorityEntries() {

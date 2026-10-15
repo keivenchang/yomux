@@ -172,7 +172,13 @@ function sourceFunction(name, nextName) {
   );
   assert.notEqual(start, -1, `${name} exists`);
   assert.notEqual(end, -1, `${nextName} follows ${name}`);
-  return source.slice(start, end);
+  const body = source.slice(start, end);
+  if (!body.includes('debugDisplayProductLabel(')) return body;
+  const helperStart = source.indexOf('function debugDisplayProductLabel(');
+  const helperEnd = source.indexOf('\nfunction applyJsDebugStatsSamplePush(', helperStart);
+  assert.notEqual(helperStart, -1, 'debugDisplayProductLabel exists');
+  assert.notEqual(helperEnd, -1, 'debugDisplayProductLabel ends before stats push handling');
+  return `${source.slice(helperStart, helperEnd)}\n${body}`;
 }
 
 test('host CPU and memory graphs label partial data and keep missing processes unknown', () => {
@@ -527,7 +533,7 @@ test('Services omits the duplicated web process while CPU names it clearly', () 
   const cpuSource = sourceFunction('debugGraphProcessCpuSeriesDefs', 'debugGraphGpuDeviceSeriesDefs');
   const visibleServiceSource = sourceFunction('debugGraphVisibleServiceLoadItems', 'debugGraphServiceLoadRangeAvailable');
   const serviceSource = sourceFunction('debugGraphServiceLoadSeriesDefs', 'debugGraphDisplayHoldOutage');
-  assert.match(cpuSource, /yolomux\.py \(web\) :\$\{legacyWebPort\[1\]\}/);
+  assert.match(cpuSource, /debugDisplayProductLabel\(legacyWebPort && process\.label === processId/);
   assert.match(visibleServiceSource, /if \(key === 'web'/);
   assert.match(serviceSource, /debugGraphVisibleServiceLoadItems\(buckets, group\)/);
   // familyHasData must prove THIS service was censused-and-absent, not merely that some service
@@ -541,7 +547,10 @@ test('Services omits the duplicated web process while CPU names it clearly', () 
 test('per-process RSS holds through sparse samples but becomes a gap when its census is incomplete', () => {
   // A normal sparse bucket retains its measured RSS. A partial census missing that process is
   // unknown and breaks the line; a complete census missing it confirms the process is gone.
-  const processSeries = slice(source, 'const jsDebugGraphHostProcessVisualAssignments = Object.freeze({', '\nfunction normalizedDebugGraphServiceLoadMode(');
+  const processSeries = [
+    sourceFunction('debugDisplayProductLabel', 'applyJsDebugStatsSamplePush'),
+    slice(source, 'const jsDebugGraphHostProcessVisualAssignments = Object.freeze({', '\nfunction normalizedDebugGraphServiceLoadMode('),
+  ].join('\n');
   const projectSeries = sourceFunction('debugGraphProjectSeriesSamples', 'debugGraphSeriesData');
   const processFamilySource = sourceFunction('debugGraphHostProcessFamilyHasData', 'debugGraphAnyGpuDeviceSamplesCached');
   const unknownFamilySource = sourceFunction('debugGraphHostProcessFamilyHasUnknownData', 'debugGraphAnyGpuDeviceSamplesCached');
@@ -601,7 +610,7 @@ test('CPU keeps the exact serving port as the only solid series and shows a gap,
   assert.equal(solid.length, 1);
   assert.equal(solid[0].key, 'cpu:port:9001');
   assert.equal(solid[0].color, 'green');
-  assert.equal(solid[0].labelParams.process, 'yolomux.py (web)');
+  assert.equal(solid[0].labelParams.process, 'yomux.py (web)');
   assert.equal(solid[0].currentProcessCpu, true);
   // The serving port had no sample in this bucket, so it is an honest gap, not a value.
   vm.runInNewContext(`${helpers}\nresult = debugGraphProcessCpuBucketHasData(${bucket}, 'port:9001');`, context);
@@ -611,7 +620,7 @@ test('CPU keeps the exact serving port as the only solid series and shows a gap,
   const dotted = context.result.filter(series => series.linePattern === 'dot');
   assert.equal(dotted.length, 1);
   assert.equal(dotted[0].key, 'cpu:port:9000');
-  assert.equal(dotted[0].labelParams.process, 'yolomux.py (web) :9000');
+  assert.equal(dotted[0].labelParams.process, 'yomux.py (web) :9000');
   assert.equal(dotted[0].color, 'red');
 });
 
@@ -879,9 +888,9 @@ test('Go process graph labels identify instances and preserve legacy history', (
   ]`);
   assert.deepStrictEqual([...labels], [
     'yomux-go (PID 125, port 7224, PPID 3)',
-    'yolomux-go (PID 123, port 7222, PPID 12)',
+    'yomux-go (PID 123, port 7222, PPID 12)',
     'custom server (PID 124, port 7223)',
-    'yolomux-go (legacy process; identity unavailable)',
+    'yomux-go (legacy process; identity unavailable)',
   ]);
 });
 
@@ -1054,7 +1063,7 @@ test('CPU reserves red dotted for System and violet solid for yolomux.py under t
     ${sourceFunction('debugGraphSeriesUsesArea', 'debugGraphLegendSwatchHtml')}
     ${sourceFunction('debugGraphLegendSwatchHtml', 'debugGraphIntegerAxisValues')}
     const system = {key: 'systemCpu', label: 'system avg CPU %', linePattern: 'dot', color: jsDebugGraphSeriesPalette.systemCpu, values: [47.5], times: [1], durations: [1000]};
-    const current = {key: 'cpu:port:7442', label: 'yolomux.py (web) CPU %', processCpu: true, currentProcessCpu: true, linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current, values: [32], times: [1], durations: [1000]};
+    const current = {key: 'cpu:port:7442', label: 'yomux.py (web) CPU %', processCpu: true, currentProcessCpu: true, linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current, values: [32], times: [1], durations: [1000]};
     result = {
       colors: [debugGraphSeriesDisplayColor(system), debugGraphSeriesDisplayColor(current)],
       lines: [debugGraphPolylineHtml(system, 100, {}, false), debugGraphPolylineHtml(current, 100, {}, false)],
@@ -1067,7 +1076,7 @@ test('CPU reserves red dotted for System and violet solid for yolomux.py under t
   assert.match(context.result.lines[1], /--js-debug-series-color: var\(--js-debug-agent-token-violet\)/);
   assert.match(context.result.lines[1], /js-debug-line--current-process/);
   assert.match(context.result.lines[0], /<title>system avg CPU %<\/title>/);
-  assert.match(context.result.lines[1], /<title>yolomux\.py \(web\) CPU %<\/title>/);
+  assert.match(context.result.lines[1], /<title>yomux\.py \(web\) CPU %<\/title>/);
   assert.match(context.result.legends[0], /--js-debug-series-color: var\(--js-debug-agent-token-rose\)/);
   assert.match(context.result.legends[0], /js-debug-line--pattern-dot/);
   assert.match(context.result.legends[1], /--js-debug-series-color: var\(--js-debug-agent-token-violet\)/);
@@ -1798,11 +1807,14 @@ test('Go memory diagnostics render stacked runtime classes and ranked sampled al
 });
 
 test('System memory renders only the range top five cumulative binary RSS series', () => {
-  const processSeries = slice(
-    source,
-    'const jsDebugGraphHostProcessVisualAssignments = Object.freeze({',
-    '\nfunction normalizedDebugGraphServiceLoadMode(',
-  );
+  const processSeries = [
+    sourceFunction('debugDisplayProductLabel', 'applyJsDebugStatsSamplePush'),
+    slice(
+      source,
+      'const jsDebugGraphHostProcessVisualAssignments = Object.freeze({',
+      '\nfunction normalizedDebugGraphServiceLoadMode(',
+    ),
+  ].join('\n');
   const context = {
     result: null,
     Map,
@@ -1837,11 +1849,14 @@ test('System memory renders only the range top five cumulative binary RSS series
 });
 
 test('CPU renders only the range top four grouped binary areas with distinct stable colors', () => {
-  const processSeries = slice(
-    source,
-    'const jsDebugGraphHostProcessVisualAssignments = Object.freeze({',
-    '\nfunction normalizedDebugGraphServiceLoadMode(',
-  );
+  const processSeries = [
+    sourceFunction('debugDisplayProductLabel', 'applyJsDebugStatsSamplePush'),
+    slice(
+      source,
+      'const jsDebugGraphHostProcessVisualAssignments = Object.freeze({',
+      '\nfunction normalizedDebugGraphServiceLoadMode(',
+    ),
+  ].join('\n');
   const entries = Array.from({length: 6}, (_unused, index) => [
     index === 5 ? 'python' : `binary-${index}`,
     {label: index === 5 ? 'python' : `binary-${index}`, totalPercent: index === 5 ? 40 : 10 + index, samples: 1},
@@ -1983,11 +1998,14 @@ test('both themes render CPU and System memory with solid areas and block area k
 });
 
 test('host CPU and memory labels retain separate Go process instances', () => {
-  const processSeries = slice(
-    source,
-    'const jsDebugGraphHostProcessVisualAssignments = Object.freeze({',
-    '\nfunction normalizedDebugGraphServiceLoadMode(',
-  );
+  const processSeries = [
+    sourceFunction('debugDisplayProductLabel', 'applyJsDebugStatsSamplePush'),
+    slice(
+      source,
+      'const jsDebugGraphHostProcessVisualAssignments = Object.freeze({',
+      '\nfunction normalizedDebugGraphServiceLoadMode(',
+    ),
+  ].join('\n');
   const context = {
     result: null, Map, Set, Number, String,
     jsDebugGraphAgentTokenPatternCount: 7,
@@ -2015,9 +2033,31 @@ test('host CPU and memory labels retain separate Go process instances', () => {
     };
   `, context);
   assert.deepEqual(JSON.parse(JSON.stringify(context.result)), {
-    cpu: ['yomux-go (PID 303)', 'yolomux-go (PID 202)', 'yolomux-go (PID 101)'],
-    memory: ['yomux-go (PID 303)', 'yolomux-go (PID 202)', 'yolomux-go (PID 101)'],
+    cpu: ['yomux-go (PID 303)', 'yomux-go (PID 202)', 'yomux-go (PID 101)'],
+    memory: ['yomux-go (PID 303)', 'yomux-go (PID 202)', 'yomux-go (PID 101)'],
   });
+});
+
+test('status publication repaints Pane Tabs and Tabber through one display owner', () => {
+  const boot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+  const activity = fs.readFileSync('static_src/js/yomux/35_agent_window_activity.js', 'utf8');
+  const painted = [];
+  const context = {
+    sessions: ['yo7111'], tabberViewSessions: new Map(), tabberItemId: '__tabber__',
+    clientPerfStart() {}, clientPerfEnd() {}, updateDocumentTitle() {},
+    renderAutoApproveButtons() {}, trackSessionStateChanges() {}, syncTerminalAttentionHighlights() {},
+    updateTopbarActivityStatus() {}, updateSessionStateClasses() {}, refreshPaneTabSessionPopovers() {},
+    syncSessionTabLeadingActivityChrome() {painted.push('pane');},
+    itemInLayout: () => true, refreshTabberPanels() {painted.push('tabber');},
+    scheduleAgentWindowActivityAnimationSync() {},
+  };
+  for (const [text, name] of [[activity, 'refreshAgentWindowActivityDisplays'], [boot, 'renderAutoApproveStatusSurfaces']]) {
+    const start = text.indexOf(`function ${name}(`);
+    const end = text.indexOf('\nfunction ', start + 1);
+    vm.runInNewContext(text.slice(start, name === 'renderAutoApproveStatusSurfaces' ? text.indexOf('\nlet deferredSealedAutoApprovePayload', start) : end), context);
+  }
+  context.renderAutoApproveStatusSurfaces({changedSessions: ['yo7111'], sessionsChanged: false});
+  assert.deepEqual(painted, ['pane', 'tabber'], 'the accepted status snapshot repaints both surfaces before returning');
 });
 
 test('revision-only status publication refreshes mounted debug details', () => {
@@ -2192,7 +2232,7 @@ test('Agents detail replaces unversioned Go activity fallback rows with the revi
   assert.equal(context.result.rows[0].agent.state, 'run');
 });
 
-test('Agents detail keeps a concrete Go activity state over a newer unavailable stats row', () => {
+test('Agents detail admits a newer unavailable backend row over earlier working activity', () => {
   const detailStart = source.indexOf('function debugGraphLiveAgentWindowRows()');
   const detailEnd = source.indexOf('\nfunction debugGraphChartHtml(', detailStart);
   const detailSource = source.slice(detailStart, detailEnd);
@@ -2220,8 +2260,12 @@ test('Agents detail keeps a concrete Go activity state over a newer unavailable 
   };
   vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowRows();`, context);
   assert.equal(context.result.rows.length, 1);
-  assert.equal(context.result.rows[0].agent.state, 'working');
-  assert.equal(context.result.rows[0].revision, 0);
+  assert.equal(context.result.rows[0].agent.state, 'unavailable');
+  assert.equal(context.result.rows[0].revision, 12);
+  context.autoApproveStates.get('yo7222').agent_window_snapshot_revision = 13;
+  vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowRows();`, context);
+  assert.equal(context.result.rows[0].agent.state, 'working', 'older stats evidence cannot replace a newer admitted state');
+  assert.equal(context.result.sessionRevisions.get('yo7222'), 13, 'rejecting an older row also preserves its session revision');
 });
 
 test('Agents detail retires fallback rows when the revisioned Go roster becomes empty', () => {
@@ -2245,8 +2289,11 @@ test('Agents detail retires fallback rows when the revisioned Go roster becomes 
     agentWindowIndex: agent => agent?.window_index === null || agent?.window_index === undefined ? null : Number(agent.window_index),
     result: null,
   };
-  vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowRows();`, context);
-  assert.equal(context.result.rows.length, 0);
+  for (const revision of [0, 12, 13, 14]) {
+    context.autoApproveStates.get('yo7222').agent_window_snapshot_revision = revision;
+    vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowRows();`, context);
+    assert.equal(context.result.rows.length, revision > 13 ? 1 : 0, `roster revision 13 may retire only rows at or before its own revision, current=${revision}`);
+  }
 });
 
 test('Agents detail reports typed stats-owner unavailability instead of fabricated zero windows', () => {

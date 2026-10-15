@@ -3506,16 +3506,18 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
 /* Tabber (Finder pane 3rd mode) rows reuse the .file-tree-row DOM; only the level-0 session label shape,
    the window/process detail, and the active-window emphasis are tabber-specific. */
 .file-tree-row.tabber-row {
-  --tabber-path-color: var(--text);
   --tabber-detail-color: var(--muted);
   --tabber-agent-icon-size: calc(var(--file-explorer-font-size) + 2px);
+}
+.tabber-new-chat-menu {
+  margin-inline-end: auto;
 }
 .tabber-toolbar .tabber-new-chat {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-6);
-  margin-inline-end: auto;
+  margin-inline-end: 0;
   min-block-size: var(--compact-control-height);
   padding: 0 var(--space-10);
   border: 1px solid transparent;
@@ -3527,6 +3529,9 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   white-space: nowrap;
   cursor: pointer;
   transition: filter var(--motion-interaction-fast), box-shadow var(--motion-interaction-fast), transform var(--motion-interaction-fast);
+}
+.tabber-toolbar .tabber-new-chat::before {
+  display: none;
 }
 .tabber-toolbar .tabber-new-chat:hover {
   filter: brightness(1.08);
@@ -3634,94 +3639,14 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   text-overflow: ellipsis;
   color: var(--muted);
 }
-.file-tree-row.tabber-row[data-tabber-type="normal"] .agent-icon {
+.file-tree-row.tabber-normal-row .agent-icon {
   flex: 0 0 auto;
   inline-size: var(--tabber-agent-icon-size);
   block-size: var(--tabber-agent-icon-size);
 }
-.file-tree-row.tabber-row[data-tabber-type="session"] > .file-tree-name {
-  display: inline-flex;
-  align-items: center;
-  min-width: 0;
-  max-inline-size: 100%;
-}
-.file-tree-row.tabber-row .tabber-session-tab {
-  flex: 1 1 auto;
-  inline-size: 100%;
-  max-inline-size: 100%;
-}
-.file-tree-row.tabber-row .tabber-session-tab .session-agent-activity-marker .agent-window-activity {
-  --agent-window-icon-size: var(--tabber-agent-icon-size);
-  --agent-window-activity-inline-size: var(--agent-window-icon-size);
-  --agent-window-activity-block-size: var(--agent-window-icon-size);
-}
-.file-tree-row.tabber-row.selected .tabber-session-tab {
-  box-shadow: var(--active-control-focus-shadow-compact);
-}
-.file-tree-row.tabber-row .tabber-window-token {
-  display: inline-flex;
-  min-width: 0;
-}
-.file-tree-row.tabber-row .tabber-window-button {
-  max-width: 100%;
-}
-/* pid is printed as a muted suffix AFTER the window button so the button icon stays identical to the
-   Info Bar / YO!info window button. */
-.file-tree-row.tabber-row .tabber-window-pid {
-  flex: 0 0 auto;
-  color: var(--subwindow-pid-color);
-  font: var(--ui-font-size-xs)/1 var(--mono-font);
-  white-space: nowrap;
-}
-.file-tree-row.tabber-row .tabber-window-button .tmux-window-name-label {
-  justify-content: flex-start;
-}
-.file-tree-row.tabber-row .tabber-window-label {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-3);
-  vertical-align: middle;
-}
-.file-tree-row.tabber-row .tabber-window-label .agent-window-activity {
-  --agent-window-icon-size: var(--tabber-agent-icon-size);
-  --agent-window-activity-inline-size: var(--agent-window-icon-size);
-  --agent-window-activity-block-size: var(--agent-window-icon-size);
-  margin-inline-start: 0;
-  margin-inline-end: var(--space-1);
-}
-.file-tree-row.tabber-row .tabber-window-label .agent-icon {
-  flex: 0 0 auto;
-  margin: 0;
-  padding: 0;
-  vertical-align: middle;
-}
-.file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
-  color: var(--tabber-level0-color);
-}
-.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected) > .file-tree-name {
-  color: var(--tabber-level1-color);
-  font-weight: 700;
-}
-.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
-  color: var(--tabber-level1-color);
-}
-.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected).tabber-active-window > .file-tree-name,
-.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected).tabber-active-window > .file-tree-icon:not(.ui-disclosure-triangle) {
-  color: var(--tabber-level1-color);
-}
-.file-tree-row.tabber-row[data-tabber-type="repo"]:not(.selected) > .file-tree-name,
-.file-tree-row.tabber-row[data-tabber-type="repo"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
-  color: var(--tabber-path-color);
-}
 .file-tree-row.tabber-row[data-tabber-type="tab"]:not(.selected) > .file-tree-name,
 .file-tree-row.tabber-row[data-tabber-type="tab"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-level0-color);
-}
-.file-tree-row.tabber-row[data-tabber-type="loading"]:not(.selected) > .file-tree-name,
-.file-tree-row.tabber-row[data-tabber-type="loading"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
-  color: var(--tabber-detail-color);
-  font-style: italic;
 }
 .file-tree-row:is(.tabber-active-window, .tabber-active-tab):not(.selected) .file-tree-name {
   font-weight: 800;
@@ -3747,17 +3672,9 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   font-size: var(--ui-font-size-2xs);
   color: var(--muted);
 }
-.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected):not(.current-file)[data-recency] > .file-tree-date {
-  color: var(--subwindow-recency-color);
-}
-.file-tree-row.tabber-row.tabber-status-long .file-tree-date {
-  display: block;
-  flex: 0 1 auto;
-  inline-size: auto;
-  max-inline-size: min(24ch, 48%);
-  min-inline-size: 0;
-  justify-content: flex-start;
-  overflow: hidden;
-  text-align: start;
-  text-overflow: ellipsis;
+
+.tabber-toolbar .file-explorer-sort-select {
+  flex: 0 0 auto;
+  width: auto;
+  max-width: none;
 }

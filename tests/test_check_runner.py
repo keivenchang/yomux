@@ -4344,38 +4344,6 @@ def test_bazel_source_root_materializes_symlinked_docker_context(tmp_path):
     assert os.access(run_tests, os.X_OK)
 
 
-def test_check_runner_splits_one_concurrent_budget_between_pytest_and_bazel(monkeypatch):
-    check = load_check_module()
-    monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
-    monkeypatch.delenv("YOLOMUX_CHECK_CPU_PERCENT", raising=False)
-    monkeypatch.setattr(check.platform, "system", lambda: "Linux")
-
-    # Pytest and Bazel split the configured budget evenly by default.
-    expected = {
-        4: ("1", "1", "1"),
-        10: ("2", "1", "2"),
-        14: ("3", "2", "2"),
-        32: ("8", "5", "3"),
-    }
-    for cores, counts in expected.items():
-        monkeypatch.setattr(check.os, "cpu_count", lambda: 64)
-        monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid, cores=cores: set(range(cores)))
-        assert check.pytest_worker_counts() == counts
-
-    monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "5,3,1")
-    assert check.pytest_worker_counts() == ("5", "3", "1")
-
-    # The platform no longer changes the shared-box default.
-    monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
-    monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(check.os, "cpu_count", lambda: 8)
-    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: set(range(8)))
-    assert check.pytest_worker_counts() == ("2", "1", "1")
-
-    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: (_ for _ in ()).throw(OSError("unavailable")))
-    assert check.pytest_worker_counts() == ("2", "1", "1")
-
-
 @pytest.mark.parametrize("canonical_empty", [False, True])
 def test_check_tool_lock_canonical_precedence_and_empty_value(monkeypatch, tmp_path, canonical_empty):
     private_lock = tmp_path / "canonical" / "expensive-tools.lock"

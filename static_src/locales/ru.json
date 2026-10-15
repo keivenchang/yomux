@@ -2630,5 +2630,11 @@
   "pref.section.sizes": "Размеры",
   "contextmenu.copyText": "Копировать текст",
   "contextmenu.copyWithStyle": "Копировать со стилем",
-  "status.copiedStyledText": "Скопировано со стилем"
+  "status.copiedStyledText": "Скопировано со стилем",
+  "menu.tmux.kill.window": "Завершить {window} в сеансе tmux",
+  "menu.tmux.kill.session.windows": "Завершить весь сеанс tmux ({count} окна)",
+  "status.tmux.windowKill.confirm": "Завершить {window} в сеансе tmux '{session}'?",
+  "status.tmux.windowKill.pending": "Завершение {window} в сеансе tmux '{session}'",
+  "status.tmux.windowKill.failed": "Не удалось завершить {window} в сеансе tmux '{session}'",
+  "status.tmux.windowKill.success": "{window} завершен в сеансе tmux '{session}'"
 }

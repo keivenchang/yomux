@@ -6,6 +6,7 @@ package work
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -205,5 +206,147 @@ func TestCloseCancelsAnonymousTask(t *testing.T) {
 	}
 	if got := <-result; got.Err != context.Canceled {
 		t.Fatalf("result: %v", got.Err)
+	}
+}
+
+func TestSchedulerCancellationBeforeAdmission(t *testing.T) {
+	scheduler := New(1, 1)
+	defer scheduler.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := scheduler.Submit(ctx, "cancelled", func(context.Context) (any, error) {
+		t.Error("cancelled task was admitted")
+		return nil, nil
+	})
+	if !errors.Is(err, context.Canceled) || result != nil {
+		t.Fatalf("admission = (%v, %v), want nil and context.Canceled", result, err)
+	}
+}
+
+func TestSchedulerCancelledQueuedTaskNeverRuns(t *testing.T) {
+	scheduler := New(1, 1)
+	defer scheduler.Close()
+	started, release := make(chan struct{}), make(chan struct{})
+	running, err := scheduler.Submit(context.Background(), "held", func(context.Context) (any, error) {
+		close(started)
+		<-release
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	ran := make(chan struct{}, 1)
+	queued, err := scheduler.Submit(context.Background(), "cancelled", func(context.Context) (any, error) {
+		ran <- struct{}{}
+		return nil, nil
+	})
+	if err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	if !scheduler.Cancel("cancelled") {
+		close(release)
+		t.Fatal("queued job lost cancellation ownership")
+	}
+	close(release)
+	for _, result := range []<-chan Result{running, queued} {
+		select {
+		case got := <-result:
+			if result == queued && !errors.Is(got.Err, context.Canceled) {
+				t.Errorf("queued result = %v, want context.Canceled", got.Err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("accepted job did not complete")
+		}
+	}
+	select {
+	case <-ran:
+		t.Fatal("cancelled queued task ran")
+	default:
+	}
+}
+
+func TestSchedulerPanicCompletesAndWorkerContinues(t *testing.T) {
+	scheduler := New(1, 1)
+	defer scheduler.Close()
+	panicked, err := scheduler.Submit(context.Background(), "same", func(context.Context) (any, error) {
+		panic("fixture panic")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-panicked:
+		if result.Err == nil || !strings.Contains(result.Err.Error(), "fixture panic") {
+			t.Fatalf("panic result = %#v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("panic did not complete job")
+	}
+	continued, err := scheduler.Submit(context.Background(), "same", func(context.Context) (any, error) { return "continued", nil })
+	if err != nil {
+		t.Fatalf("completion did not retire job ID: %v", err)
+	}
+	select {
+	case result := <-continued:
+		if result.Err != nil || result.Value != "continued" {
+			t.Fatalf("replacement result = %#v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker did not survive panic")
+	}
+}
+
+func TestContextMutexCancelledWaitDoesNotTakeOwnership(t *testing.T) {
+	var mutex ContextMutex
+	mutex.Lock()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() { done <- mutex.LockContext(ctx, nil) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("wait result = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled lock wait did not return")
+	}
+	mutex.Unlock()
+	if err := mutex.LockContext(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	mutex.Unlock()
+}
+
+func TestContextMutexShutdownWaitDoesNotTakeOwnership(t *testing.T) {
+	var mutex ContextMutex
+	mutex.Lock()
+	abort := make(chan struct{})
+	close(abort)
+	done := make(chan error, 1)
+	go func() { done <- mutex.LockContext(context.Background(), abort) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("shutdown lock wait succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown lock wait did not return")
+	}
+	mutex.Unlock()
+}
+
+func TestSchedulerClosedAdmissionHasStableError(t *testing.T) {
+	scheduler := New(1, 1)
+	if !scheduler.CloseWithTimeout(time.Second) {
+		t.Fatal("idle scheduler did not close")
+	}
+	for range 100 {
+		result, err := scheduler.Submit(context.Background(), "closed", nil)
+		if !errors.Is(err, ErrClosed) || result != nil {
+			t.Fatalf("closed admission = (%v, %v), want nil and ErrClosed", result, err)
+		}
 	}
 }

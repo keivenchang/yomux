@@ -2540,5 +2540,11 @@
   "pref.section.sizes": "크기",
   "contextmenu.copyText": "텍스트 복사",
   "contextmenu.copyWithStyle": "스타일과 함께 복사",
-  "status.copiedStyledText": "스타일과 함께 복사했습니다"
+  "status.copiedStyledText": "스타일과 함께 복사했습니다",
+  "menu.tmux.kill.window": "tmux 세션에서 {window} 종료",
+  "menu.tmux.kill.session.windows": "tmux 세션 전체 종료(창 {count}개)",
+  "status.tmux.windowKill.confirm": "tmux 세션 '{session}'에서 {window}을(를) 종료할까요?",
+  "status.tmux.windowKill.pending": "tmux 세션 '{session}'에서 {window} 종료 중",
+  "status.tmux.windowKill.failed": "tmux 세션 '{session}'에서 {window}을(를) 종료하지 못했습니다",
+  "status.tmux.windowKill.success": "tmux 세션 '{session}'에서 {window} 종료됨"
 }

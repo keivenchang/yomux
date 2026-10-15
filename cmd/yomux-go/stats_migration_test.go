@@ -81,7 +81,7 @@ func TestPricingCatalogHTTPServesPythonFixtureAndRefreshes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &server{pricing: catalog}
+	s := &server{pricing: catalog, pricingRefreshRun: func(context.Context) error { return nil }}
 	record := httptest.NewRecorder()
 	s.pricingCatalog(record, httptest.NewRequest(http.MethodGet, "/api/pricing-catalog", nil))
 	if record.Code != http.StatusOK || !bytes.Contains(record.Body.Bytes(), []byte(`"catalog_revision":7`)) || bytes.Contains(record.Body.Bytes(), []byte(`"model-a"`)) || !bytes.Contains(record.Body.Bytes(), []byte(`"sources":[]`)) {
@@ -104,7 +104,7 @@ func TestPricingCatalogHTTPRetainsRefreshFailureForExistingJSStatusPoll(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &server{pricing: catalog}
+	s := &server{pricing: catalog, pricingRefreshRun: func(context.Context) error { return fmt.Errorf("read pricing catalog: fixture failure") }}
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
@@ -1020,23 +1020,28 @@ func TestStatsStreamHonorsSinceGenerationWithoutResendingSnapshot(t *testing.T) 
 	defer writer.Close()
 	generation := service.State().CacheGeneration
 	streamCtx, cancel := context.WithCancel(ctx)
-	recorder := httptest.NewRecorder()
+	defer cancel()
+	recorder := newSSETestRecorder()
 	done := make(chan struct{})
 	go func() {
 		s := &server{statsPath: path, statsService: service, statsNow: func() time.Time { return now }}
 		s.statsStream(recorder, httptest.NewRequest(http.MethodGet, "/api/stats-stream?range_seconds=300&resolution=1&client_id=not-modified&since_generation="+strconv.FormatInt(generation, 10), nil).WithContext(streamCtx))
 		close(done)
 	}()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-recorder.ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stats stream did not publish ready")
+	}
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("not-modified stream did not stop")
 	}
-	frames := parseSSEFrames(t, recorder.Body.String())
+	frames := parseSSEFrames(t, recorder.bodyString())
 	if len(frames) < 2 || frames[0].event != "ack" || frames[1].event != "ready" {
-		t.Fatalf("not-modified stream frames=%+v body=%s", frames, recorder.Body.String())
+		t.Fatalf("not-modified stream frames=%+v body=%s", frames, recorder.bodyString())
 	}
 	if frames[0].data["not_modified"] != true || frames[0].data["chunk_count"] != float64(1) {
 		t.Fatalf("not-modified ack=%#v", frames[0].data)
@@ -1060,21 +1065,25 @@ func TestStatsStreamAckIncludesRequestedResolution(t *testing.T) {
 	server := &server{statsPath: path, statsService: service, statsNow: func() time.Time { return now }}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	recorder := httptest.NewRecorder()
+	recorder := newSSETestRecorder()
 	done := make(chan struct{})
 	go func() {
 		server.statsStream(recorder, httptest.NewRequest(http.MethodGet, "/api/stats-stream?range_seconds=900&resolution=AUTO&client_id=test&since_generation=0", nil).WithContext(ctx))
 		close(done)
 	}()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-recorder.ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stats stream did not publish ready")
+	}
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("stats stream did not stop")
 	}
-	if !bytes.Contains(recorder.Body.Bytes(), []byte(`"requested_resolution":"AUTO"`)) {
-		t.Fatalf("ack=%s", recorder.Body.String())
+	if !strings.Contains(recorder.bodyString(), `"requested_resolution":"AUTO"`) {
+		t.Fatalf("ack=%s", recorder.bodyString())
 	}
 }
 
@@ -1501,13 +1510,17 @@ func TestStatsStreamSnapshotMatchesBrowserWireContract(t *testing.T) {
 	s := &server{statsPath: path, statsService: service, statsNow: func() time.Time { return nowTime }}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	recorder := httptest.NewRecorder()
+	recorder := newSSETestRecorder()
 	done := make(chan struct{})
 	go func() {
 		s.statsStream(recorder, httptest.NewRequest(http.MethodGet, "/api/stats-stream?range_seconds=300&resolution=AUTO&client_id=wire-test", nil).WithContext(ctx))
 		close(done)
 	}()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-recorder.ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stats stream did not publish ready")
+	}
 	cancel()
 	select {
 	case <-done:
@@ -1515,7 +1528,7 @@ func TestStatsStreamSnapshotMatchesBrowserWireContract(t *testing.T) {
 		t.Fatal("stats stream did not stop")
 	}
 
-	frames := parseSSEFrames(t, recorder.Body.String())
+	frames := parseSSEFrames(t, recorder.bodyString())
 	var snapshot map[string]any
 	for _, frame := range frames {
 		if frame.event == "snapshot" {
@@ -1524,7 +1537,7 @@ func TestStatsStreamSnapshotMatchesBrowserWireContract(t *testing.T) {
 		}
 	}
 	if snapshot == nil {
-		t.Fatalf("snapshot frame missing: %s", recorder.Body.String())
+		t.Fatalf("snapshot frame missing: %s", recorder.bodyString())
 	}
 	if got, want := statsMapKeys(snapshot), []string{"buckets", "cache_generation", "cost_report", "generated_at", "no_data", "protocol_version", "range_seconds", "requested_resolution", "resolution_seconds", "rightmost_open", "source_generation", "window_end", "window_start"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("snapshot keys = %v, want %v", got, want)
@@ -1590,7 +1603,7 @@ func TestStatsStreamInitialFramesMatchPythonWireFixture(t *testing.T) {
 	service := publishedStatsService(t, writer, []stats.ProductKey{{RangeSeconds: 300, ResolutionSeconds: 10}}, now)
 	defer writer.Close()
 	server := &server{statsPath: path, statsService: service, statsNow: func() time.Time { return now }, statsHeartbeat: time.Hour}
-	recorder := &sseTestRecorder{header: make(http.Header), ready: make(chan struct{}), changed: make(chan string, 1)}
+	recorder := newSSETestRecorder()
 	streamCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
@@ -2046,7 +2059,7 @@ func TestStatsHTTPAndSSEInitialRawEnvelopeMatchesPython(t *testing.T) {
 		t.Fatalf("snapshot response = status %d headers %#v body=%s", snapshot.Code, snapshot.Header(), snapshot.Body.String())
 	}
 
-	recorder := &sseTestRecorder{header: make(http.Header), ready: make(chan struct{}), changed: make(chan string, 1)}
+	recorder := newSSETestRecorder()
 	streamCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
@@ -2574,7 +2587,7 @@ func TestStatsStreamUsesReadyRevisionForFirstDelta(t *testing.T) {
 	s := &server{statsPath: path, statsService: service, statsNow: func() time.Time { return now }, statsHeartbeat: time.Second}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	recorder := &sseTestRecorder{header: make(http.Header), ready: make(chan struct{}), changed: make(chan string, 1)}
+	recorder := newSSETestRecorder()
 	done := make(chan struct{})
 	go func() {
 		s.statsStream(recorder, httptest.NewRequest(http.MethodGet, "/api/stats-stream?range_seconds=300&resolution=10&client_id=revision-test", nil).WithContext(ctx))
@@ -2671,7 +2684,7 @@ func TestStatsStreamConcurrentClientsReceiveOnePublication(t *testing.T) {
 	for index := 0; index < clientCount; index++ {
 		streamContext, cancel := context.WithCancel(ctx)
 		cancels = append(cancels, cancel)
-		recorder := &sseTestRecorder{header: make(http.Header), ready: make(chan struct{}), changed: make(chan string, 1)}
+		recorder := newSSETestRecorder()
 		recorders = append(recorders, recorder)
 		done := make(chan struct{})
 		dones = append(dones, done)
@@ -2956,7 +2969,7 @@ func TestStatsStreamEmitsRepairWhenDeltaBaseIsEvicted(t *testing.T) {
 	}
 	s := &server{statsPath: path, statsService: service, statsNow: func() time.Time { return now }, statsHeartbeat: 10 * time.Millisecond}
 	streamCtx, cancel := context.WithCancel(ctx)
-	recorder := &sseTestRecorder{header: make(http.Header), ready: make(chan struct{}), changed: make(chan string, 1)}
+	recorder := newSSETestRecorder()
 	done := make(chan struct{})
 	go func() {
 		s.statsStream(recorder, httptest.NewRequest(http.MethodGet, "/api/stats-stream?range_seconds=300&resolution=1&client_id=repair-test", nil).WithContext(streamCtx))
@@ -3044,6 +3057,10 @@ type sseTestRecorder struct {
 	ready     chan struct{}
 	changed   chan string
 	readyOnce sync.Once
+}
+
+func newSSETestRecorder() *sseTestRecorder {
+	return &sseTestRecorder{header: make(http.Header), ready: make(chan struct{}), changed: make(chan string, 1)}
 }
 
 func (r *sseTestRecorder) Header() http.Header    { return r.header }

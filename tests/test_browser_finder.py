@@ -6799,3 +6799,78 @@ def test_finder_panel_paints_initial_path_under_push_without_sync(browser, tmp_p
     row_paths = set(metrics["rows"])
     assert "/home/test/alpha" in row_paths, metrics
     assert "/home/test/readme.txt" in row_paths, metrics
+
+
+@pytest.mark.parametrize("warm", [False, True])
+def test_sync_finder_keeps_pending_leaf_when_root_watch_push_publishes(browser, tmp_path, warm):
+    root = '/home/test'
+    load_live_runtime_boot_fixture(
+        browser, tmp_path, '?sessions=files,1&layout=left&tabs=left:files',
+        settings={'file_explorer': {'root_mode': 'fixed'}},
+        transcript_sessions={'1': {'current_path': root}},
+        fs_entries={root: [{'name': 'a', 'kind': 'dir'}],
+                    f'{root}/a': [{'name': 'deep', 'kind': 'dir'}],
+                    f'{root}/a/deep': [{'name': 'old.txt', 'kind': 'file'}]},
+    )
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof syncFileExplorerRootToPlan === 'function' && liveDirectoryRows('/home/test/a', null).length > 0"
+    ))
+    browser.execute_script("""
+      const root = '/home/test';
+      const state = {originalFetch: globalThis.fetch, originalSet: fileTreeRenderOwners.set, owners: [], done: false};
+      fileTreeRenderOwners.set = function(container, owner) {
+        state.owners.push({parent:container.dataset.parent || '', connected:container.isConnected,
+          previous:this.get(container)?.epoch, next:owner.epoch, stack:new Error().stack});
+        return state.originalSet.call(this, container, owner);
+      };
+      globalThis.fetch = (url, options) => {
+        const parsed = new URL(String(url), location.href);
+        if (parsed.pathname === '/api/fs/fast/list' && parsed.searchParams.get('path') === `${root}/a/deep`) {
+          return new Promise(resolve => {state.release = () => resolve(new Response(
+            JSON.stringify({path:`${root}/a/deep`,entries:[{name:'late.txt',kind:'file'}]}),
+            {status:200,headers:{'Content-Type':'application/json'}}));});
+        }
+        return state.originalFetch(url, options);
+      };
+      if (arguments[0]) {
+        for (const [path, entries] of [[root,[{name:'a',kind:'dir'}]],[`${root}/a`,[{name:'deep',kind:'dir'}]],[`${root}/a/deep`,[{name:'old.txt',kind:'file'}]]]) {
+          setFileExplorerFsResourceValue('list', path, entries);
+          recordDirectorySignature(path, entries);
+        }
+      };
+
+      fileExplorerRootMode = 'sync';
+      setFileExplorerVisibleSyncTarget('1', root);
+      window.__syncPushOwner = state;
+      state.promise = syncFileExplorerRootToPlan({session:'1',root,expandPaths:[`${root}/a/deep`],affectedDirs:[root,`${root}/a`,`${root}/a/deep`]}, '1', {force:true})
+        .then(result => {state.result = result; state.done = true;}, error => {state.error=String(error);state.done=true;});
+    """, warm)
+    try:
+        WebDriverWait(browser, 8).until(lambda driver: driver.execute_script('return !!window.__syncPushOwner.release'))
+        pushed = browser.execute_async_script("""
+          const done=arguments[arguments.length-1];
+          refreshFileExplorerFromPush({token:'sync-owner-root-push',directories:[{path:'/home/test',ok:true,data:{entries:[{name:'a',kind:'dir'}]}}]})
+            .then(()=>done(true),error=>done({error:String(error)}));
+        """)
+        assert pushed is True, pushed
+        browser.execute_script('window.__syncPushOwner.release()')
+        WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+            "return window.__syncPushOwner.done && !!document.querySelector('.panel.file-explorer-panel .file-tree-row[data-path=\"/home/test/a/deep/late.txt\"]')"
+        ))
+        result = browser.execute_script("""
+          const state=window.__syncPushOwner;
+          return {result:state.result,error:state.error || null,owners:state.owners,
+            visible:!!document.querySelector('.panel.file-explorer-panel .file-tree-row[data-path="/home/test/a/deep/late.txt"]'),
+            expanded:[...fileExplorerExpanded],inFlight:fileExplorerSyncState.inFlightSignature};
+        """)
+        assert result['error'] is None and result['result'] is True and result['visible'], result
+        assert not result['inFlight'], result
+    finally:
+        browser.execute_async_script("""
+          const done=arguments[arguments.length-1];
+          const state=window.__syncPushOwner;
+          if(!state){done();return;}
+          state.release?.();
+          const restore=()=>{globalThis.fetch=state.originalFetch;fileTreeRenderOwners.set=state.originalSet;delete window.__syncPushOwner;done();};
+          state.promise.then(restore,restore);
+        """)

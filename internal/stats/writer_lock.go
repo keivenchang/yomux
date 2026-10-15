@@ -114,10 +114,6 @@ func writerReadOnlyURI(path string) string {
 	return "file:" + filepath.ToSlash(abs) + "?mode=ro&_busy_timeout=5000"
 }
 
-func publishWriterFence(path string) error {
-	return publishWriterFenceVersion(path, SchemaVersion, writerProtocol)
-}
-
 func publishWriterFenceVersion(path string, version int64, protocol int) error {
 	fence := writerFence{ApplicationID: ApplicationID, DatabaseFilename: filepath.Base(path), SchemaVersion: version, MinimumWriterProtocol: int64(protocol), MinimumWriterBuild: writerBuild}
 	data, err := json.Marshal(fence)

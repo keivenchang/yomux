@@ -1893,11 +1893,6 @@ type browserObservationEnvelope struct {
 	Observations     []json.RawMessage `json:"observations"`
 }
 
-func jsonEOF(decoder *json.Decoder) bool {
-	var extra any
-	return decoder.Decode(&extra) == io.EOF
-}
-
 func trailingJSONReason(body []byte, offset int64) string {
 	index := int(offset)
 	if index < 0 {
@@ -2435,10 +2430,11 @@ func (s *server) statsStream(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, statsHTTPErrorEnvelope(r, http.StatusBadRequest, failure))
 		return
 	}
-	frameWriter, ok := newJSONSSEWriter(w)
+	frameWriter, ok := newJSONSSEWriter(w, r.Context())
 	if !ok {
 		return
 	}
+	defer frameWriter.close()
 	streamWriter := &statsSSEWriter{stream: frameWriter, startedAt: time.Now()}
 	s.statsDemand.Add(1)
 	defer s.statsDemand.Add(-1)
@@ -2643,13 +2639,7 @@ func (s *server) pricingCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.pricingRefreshMu.Lock()
-	refreshState := map[string]any{
-		"status": "idle", "failure_count": 0,
-		"next_refresh_at": float64(time.Now().Add(24 * time.Hour).Unix()),
-	}
-	for key, value := range s.pricingRefreshState {
-		refreshState[key] = value
-	}
+	refreshState := s.pricingStateLocked()
 	if s.pricingRefreshing {
 		refreshState["status"] = "running"
 	}
@@ -2666,48 +2656,12 @@ func (s *server) pricingCatalogRefresh(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "pricing catalog unavailable"})
 		return
 	}
-	s.pricingRefreshMu.Lock()
-	if s.pricingRefreshing {
-		state := map[string]any{"ok": true, "coalesced": true}
-		for key, value := range s.pricingRefreshState {
-			state[key] = value
-		}
-		s.pricingRefreshMu.Unlock()
-		jsonResponse(w, http.StatusAccepted, state)
+	state, accepted := s.startPricingRefresh("manual")
+	if !accepted {
+		jsonResponse(w, http.StatusServiceUnavailable, state)
 		return
 	}
-	s.pricingRefreshEpoch++
-	state := map[string]any{
-		"status":     "running",
-		"started_at": time.Now().UnixNano() / 1e9,
-		"reason":     "manual",
-		"key":        "pricing-refresh",
-		"epoch":      s.pricingRefreshEpoch,
-		"ticket":     fmt.Sprintf("pricing-refresh-%d", s.pricingRefreshEpoch),
-	}
-	s.pricingRefreshState = state
-	s.pricingRefreshing = true
-	response := map[string]any{"ok": true, "coalesced": false}
-	for key, value := range state {
-		response[key] = value
-	}
-	s.pricingRefreshMu.Unlock()
-	go func() {
-		err := s.pricing.Refresh()
-		if err == nil && s.statsWriter != nil {
-			_, err = s.statsWriter.InvalidatePricingCatalog(context.Background(), float64(time.Now().UnixNano())/1e9)
-		}
-		s.pricingRefreshMu.Lock()
-		s.pricingRefreshing = false
-		if err != nil {
-			s.pricingRefreshState["status"] = "failed"
-			s.pricingRefreshState["error"] = err.Error()
-		} else {
-			s.pricingRefreshState["status"] = "done"
-		}
-		s.pricingRefreshMu.Unlock()
-	}()
-	jsonResponse(w, http.StatusAccepted, response)
+	jsonResponse(w, http.StatusAccepted, state)
 }
 
 func (s *server) statsRetry(w http.ResponseWriter, r *http.Request) {

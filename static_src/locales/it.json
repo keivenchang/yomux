@@ -2585,5 +2585,11 @@
   "pref.section.sizes": "Dimensioni",
   "contextmenu.copyText": "Copia testo",
   "contextmenu.copyWithStyle": "Copia con stile",
-  "status.copiedStyledText": "Copiato con stile"
+  "status.copiedStyledText": "Copiato con stile",
+  "menu.tmux.kill.window": "Termina {window} nella sessione tmux",
+  "menu.tmux.kill.session.windows": "Termina l’intera sessione tmux ({count} finestre)",
+  "status.tmux.windowKill.confirm": "Terminare {window} nella sessione tmux '{session}'?",
+  "status.tmux.windowKill.pending": "Chiusura di {window} nella sessione tmux '{session}'",
+  "status.tmux.windowKill.failed": "Impossibile terminare {window} nella sessione tmux '{session}'",
+  "status.tmux.windowKill.success": "{window} terminato nella sessione tmux '{session}'"
 }

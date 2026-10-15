@@ -219,8 +219,6 @@ const fileExplorerIndexedDirsStorageKey = 'yomux.fileExplorer.indexedDirs.v1';
 const fileExplorerIndexedDirsMigratedKey = 'yomux.fileExplorer.indexedDirs.migrated.v1';  // C11 #3
 const fileExplorerModeStorageKey = 'yomux.fileExplorerMode.v1';
 const fileExplorerOpenIntentStorageKey = 'yomux.fileExplorerOpen.v1';
-const fileExplorerTabberCollapsedStorageKey = 'yomux.fileExplorer.tabberCollapsed.v1';
-const fileExplorerTabberExpandedStorageKey = 'yomux.fileExplorer.tabberExpanded.v1';
 const fileExplorerTabberLookbackHoursStorageKey = 'yomux.fileExplorer.tabberLookbackHours.v1';
 const tabberModeStorageKey = 'yomux.tabber.mode.v1';
 const tabberSidebarPreferenceStorageKey = 'yomux.tabber.sidebarVisible.v1';
@@ -658,10 +656,6 @@ const LEGACY_PREFERENCE_SECTION_IDS_BY_ENGLISH_TITLE = Object.freeze({
 let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
 let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
 const changesFolderAutoCollapsed = new Set();
-// Tabber session rows start expanded while each sub-window's directory branch starts collapsed.
-// Persist both explicit choices, so a refresh cannot undo a user's disclosure click.
-const fileExplorerTabberCollapsed = readStoredSet(fileExplorerTabberCollapsedStorageKey);
-const fileExplorerTabberExpanded = readStoredSet(fileExplorerTabberExpandedStorageKey);
 // Tabber activity ledger snapshot (GET /api/activity): {activity: {sessionKey|session:window: ActivityRecord}}.
 // Drives per-row recency timestamps + most-recent-first sort. Refreshed only while the Tabber is open.
 let tabberActivityPayload = {activity: {}, agents: []};
@@ -2334,6 +2328,7 @@ let openAppMenuPinned = false;
 let openAppMenuOpenedAt = 0;
 let openAppMenuReturnFocus = null;
 const fileExplorerSyncState = {
+  publication: null,
   inFlightSignature: '',
   appliedPlanKey: '',
   generation: 0,

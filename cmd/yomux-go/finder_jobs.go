@@ -219,7 +219,9 @@ func (s *server) enqueueFinderJSONWithScheduler(w http.ResponseWriter, ctx conte
 		case <-timer.C:
 		}
 	}
-	go s.finishFinderJSONOperation(id, requestID, result, cancel)
+	if !s.startFinderCompletion(w, id, cancel, func() { s.finishFinderJSONOperation(id, requestID, result, cancel) }) {
+		return
+	}
 	record := s.operationRecord(id)
 	if record == nil {
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "filesystem operation receipt was lost", "error_code": "service_busy"})
@@ -269,7 +271,9 @@ func (s *server) enqueueFinderDelete(w http.ResponseWriter, ctx context.Context,
 		jsonResponse(w, http.StatusServiceUnavailable, failure)
 		return
 	}
-	go s.finishFinderDeleteOperation(id, requestID, path, result, jobContext, cancel)
+	if !s.startFinderCompletion(w, id, cancel, func() { s.finishFinderDeleteOperation(id, requestID, path, result, jobContext, cancel) }) {
+		return
+	}
 	record := s.operationRecord(id)
 	if record == nil {
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "filesystem operation receipt was lost", "error_code": "service_busy"})
@@ -381,7 +385,9 @@ func (s *server) enqueueFinderList(w http.ResponseWriter, ctx context.Context, p
 		}
 		_, _ = s.terminalizeOperation(id, terminal, status)
 	case <-timer.C:
-		go s.finishFinderJSONOperation(id, requestID, result, cancel)
+		if !s.startFinderCompletion(w, id, cancel, func() { s.finishFinderJSONOperation(id, requestID, result, cancel) }) {
+			return
+		}
 	}
 	record := s.operationRecord(id)
 	if record == nil {
@@ -389,6 +395,18 @@ func (s *server) enqueueFinderList(w http.ResponseWriter, ctx context.Context, p
 		return
 	}
 	jsonResponse(w, http.StatusAccepted, record.Receipt)
+}
+
+// Receipt delivery remains owned after task workers exit and before journal leases are released.
+func (s *server) startFinderCompletion(w http.ResponseWriter, id string, cancel context.CancelFunc, finish func()) bool {
+	if s.startBackgroundWork(finish) {
+		return true
+	}
+	cancel()
+	failure := finderJobFailure(work.ErrClosed)
+	_, _ = s.terminalizeOperation(id, failure, http.StatusServiceUnavailable)
+	jsonResponse(w, http.StatusServiceUnavailable, failure)
+	return false
 }
 
 func (s *server) finishFinderJSONOperation(id, requestID string, result <-chan work.Result, cancel context.CancelFunc) {
@@ -453,10 +471,14 @@ func (s *server) runFinderStreamProduct(ctx context.Context, task func(context.C
 	if scheduler == nil {
 		scheduler = s.finderJobs
 	}
-	return s.runFinderProductWithScheduler(ctx, scheduler, finderJobDeadline, task)
+	return s.runFinderProductWithSchedulerAndCancelWait(ctx, scheduler, finderJobDeadline, task, true)
 }
 
 func (s *server) runFinderProductWithScheduler(ctx context.Context, scheduler *work.Scheduler, deadline time.Duration, task func(context.Context) (finderProduct, *finder.Error)) (finderProduct, *finder.Error) {
+	return s.runFinderProductWithSchedulerAndCancelWait(ctx, scheduler, deadline, task, false)
+}
+
+func (s *server) runFinderProductWithSchedulerAndCancelWait(ctx context.Context, scheduler *work.Scheduler, deadline time.Duration, task func(context.Context) (finderProduct, *finder.Error), waitForCancellation bool) (finderProduct, *finder.Error) {
 	jobContext, cancel := newFinderJobContext(ctx, deadline)
 	defer cancel()
 	if scheduler == nil {
@@ -476,6 +498,11 @@ func (s *server) runFinderProductWithScheduler(ctx context.Context, scheduler *w
 	select {
 	case completed = <-result:
 	case <-jobContext.Done():
+		if waitForCancellation {
+			// Stream tasks may still be writing to the request's ResponseWriter. Do not
+			// return from the handler until the cancelled task has stopped using it.
+			<-result
+		}
 		return finderProduct{}, finderJobContextError(jobContext.Err())
 	}
 	if completed.Err != nil {

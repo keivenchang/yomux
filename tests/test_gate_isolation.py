@@ -4290,7 +4290,7 @@ def test_gate_root_retirement_stops_spawn_owner_before_adopter_reaper_and_root_r
     ledger.record_registry(adopter_client.registry)
 
     try:
-        assert owner_client.registry.ensure_started(), json.dumps(owner_client.registry.status(), sort_keys=True)
+        gate_harness_module.assert_fixture_local_service_started(owner_client.registry)
         owner_process = owner_client.registry.process
         assert owner_process is not None
         owner_pid = owner_process.pid
@@ -4423,7 +4423,7 @@ def test_fixture_app_cleanup_retires_adopted_statusd_from_its_private_service_ro
 
     owner_process = None
     try:
-        assert owner_client.registry.ensure_started(), json.dumps(owner_client.registry.status(), sort_keys=True)
+        gate_harness_module.assert_fixture_local_service_started(owner_client.registry)
         owner_process = owner_client.registry.process
         assert owner_process is not None
         assert adopter_client.registry.ensure_started()

@@ -159,6 +159,11 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   if (!entries) return;
   if (root !== normalizeDirectoryPath(currentFileExplorerRoot())
       || (fileExplorerRootMode === 'sync' && syncGeneration !== fileExplorerSyncState.generation)) return;
+  const publication = activeFileExplorerSyncPublication(root);
+  if (publication) {
+    await publication.publish(new Map(options.entriesByDir || []).set(root, entries));
+    return;
+  }
   renderTreeChildren(treeEl, root, entries, 0, {
     entriesByDir: options.entriesByDir,
     view: 'finder',

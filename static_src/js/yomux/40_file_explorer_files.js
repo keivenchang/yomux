@@ -2693,6 +2693,7 @@ function cancelPendingFileExplorerActiveSync(options = {}) {
   fileWorkspaceState.invalidateInteraction({invalidateOpen: options.invalidateOpen !== false});
   fileExplorerSyncState.generation += 1;
   fileExplorerSyncState.inFlightSignature = '';
+  fileExplorerSyncState.publication = null;
   resetFileExplorerAppliedSyncPlan();
 }
 
@@ -2746,6 +2747,11 @@ function cachedFileExplorerSyncListings(directories = []) {
     entriesByDir.set(normalizeDirectoryPath(directory), entries);
   }
   return entriesByDir;
+}
+
+function activeFileExplorerSyncPublication(root) {
+  const publication = fileExplorerSyncState.publication;
+  return publication && publication.root === normalizeDirectoryPath(root) && publication.isCurrent() ? publication : null;
 }
 
 function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, options = {}) {
@@ -2820,14 +2826,20 @@ function* renderCachedFileExplorerSyncPlanSteps(plan, renderPaths, entriesByDir,
   for (const tree of containers) {
     if (tree === fileExplorerTree || tree.closest?.('.panel.file-explorer-panel')) {
       if (options.isCurrent && !options.isCurrent()) return false;
-      yield* renderTreeChildrenSteps(tree, root, rootEntries, 0, renderOptions);
+      if ((yield* renderTreeChildrenSteps(tree, root, rootEntries, 0, renderOptions)) === false) {
+        if (!options.isCurrent || options.isCurrent()) resetFileExplorerAppliedSyncPlan();
+        return false;
+      }
     }
   }
   if (options.isCurrent && !options.isCurrent()) return false;
   if (!(renderOptions.reconcileDirectories instanceof Set)) updateFileExplorerCurrentFileHighlight({yieldToInput: true});
   if (options.afterSlice) options.afterSlice();
   else if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions, {containers});
-  if (!options.renderTransaction.completed) resetFileExplorerAppliedSyncPlan();
+  if (!options.renderTransaction.completed) {
+    if (!options.isCurrent || options.isCurrent()) resetFileExplorerAppliedSyncPlan();
+    return false;
+  }
   return true;
 }
 
@@ -2955,11 +2967,15 @@ function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature, opti
         const currentDirectories = fileExplorerSyncListingDirectories(plan, currentRenderPaths);
         const completeEntriesByDir = cachedFileExplorerSyncListings(currentDirectories) || entriesByDir;
         const context = options.refreshContext?.();
-        await renderCachedFileExplorerSyncPlan(plan, currentRenderPaths, completeEntriesByDir, {
-          preserveState: true, yieldToInput: true, isCurrent,
-          payloadContext: context, sessionHighlightSets: context?.sessionHighlightSets,
-          refreshContext: options.refreshContext, renderTransaction: options.renderTransaction,
-        });
+        const publication = activeFileExplorerSyncPublication(plan.root);
+        const rendered = publication
+          ? await publication.publish(completeEntriesByDir)
+          : await renderCachedFileExplorerSyncPlan(plan, currentRenderPaths, completeEntriesByDir, {
+            preserveState: true, yieldToInput: true, isCurrent,
+            payloadContext: context, sessionHighlightSets: context?.sessionHighlightSets,
+            refreshContext: options.refreshContext, renderTransaction: options.renderTransaction,
+          });
+        if (!rendered) return;
       }
       if (!isCurrent()) return;
       await settleFileExplorerDirectoryFailures(failedDirectories, (directory, failedGeneration) => (
@@ -2994,7 +3010,15 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
   let publicationPromise = null;
   let publicationStart = null;
   let publicationError = null;
-  try {
+  let publicationOwner = null;
+  let publicationQueue = null;
+  let publicationCompleted = true;
+  let retainPublication = false;
+  const publicationIsCurrent = () => fileExplorerSyncState.generation === generation
+    && fileExplorerSyncPlanTargetStillCurrent(plan, options)
+    && (fileExplorerSyncState.inFlightSignature === signature
+      || fileExplorerSyncTargetKey(plan.session, plan.root) === fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot));
+  const runPlan = async () => {
     let changed = false;
     const previousTargetKey = fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot);
     const nextTargetKey = fileExplorerSyncTargetKey(plan.session, plan.root);
@@ -3019,15 +3043,44 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
       }
       return rowContext;
     };
+    const normalizedRoot = normalizeDirectoryPath(plan.root);
+    const fetchedListings = new Map();
     const renderListings = (entriesByDir, renderOptions) => {
-      const context = refreshContext();
-      return renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, {
-        ...renderOptions, payloadContext: context, qualificationContext,
-        sessionHighlightSets: context.sessionHighlightSets,
-        yieldToInput: true, isCurrent, refreshContext, renderTransaction,
-        onPrepared: () => { if (!selectionOwner) selectionOwner = createFileExplorerSyncSelectionOwner(); },
-      });
+      if (entriesByDir !== fetchedListings) {
+        for (const [directory, entries] of entriesByDir) fetchedListings.set(directory, entries);
+      }
+      const previous = publicationQueue;
+      publicationQueue = (async () => {
+        try {
+          if (previous) await previous;
+          if (!publicationIsCurrent()) { publicationCompleted = false; return false; }
+          const context = refreshContext();
+          const completed = await renderCachedFileExplorerSyncPlan(plan, renderPaths, new Map(fetchedListings), {
+            ...renderOptions, payloadContext: context, qualificationContext,
+            sessionHighlightSets: context.sessionHighlightSets,
+            yieldToInput: true, isCurrent: publicationIsCurrent, refreshContext, renderTransaction,
+            onPrepared: () => { if (!selectionOwner) selectionOwner = createFileExplorerSyncSelectionOwner(); },
+          });
+          publicationCompleted = publicationCompleted && completed === true;
+          return completed;
+        } catch (error) {
+          publicationCompleted = false;
+          if (publicationIsCurrent()) resetFileExplorerAppliedSyncPlan();
+          throw error;
+        }
+      })();
+      return publicationQueue;
     };
+    // Watch updates and admitted listings publish through the same operation owner.
+    publicationOwner = {root: normalizedRoot, isCurrent: () => publicationCompleted && publicationIsCurrent(), publish(entriesByDir) {
+      const listingDirectories = new Set(entriesByDir.keys());
+      const reconcileDirectories = new Set(listingDirectories);
+      for (const directory of listingDirectories) {
+        for (const ancestor of ancestorPathsUnderRoot(normalizedRoot, directory)) reconcileDirectories.add(ancestor);
+      }
+      return renderListings(entriesByDir, {preserveState: true, listingDirectories, reconcileDirectories});
+    }};
+    fileExplorerSyncState.publication = publicationOwner;
     const listingDirectories = fileExplorerSyncListingDirectories(plan, renderPaths);
     const cachedListings = cachedFileExplorerSyncListings(listingDirectories);
     if (cachedListings) {
@@ -3036,16 +3089,14 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
       restoreFileExplorerSyncCursorState(plan.session, plan.root, {scrollOwner, selectionOwner});
       setFileExplorerVisibleSyncTarget(plan.session, plan.root);
       rememberFileExplorerSyncExpandedState(plan.session, plan.root);
-      if (renderTransaction.completed) markFileExplorerSyncPlanApplied(plan);
       scheduleFileTreeMetadataRefresh({highlightsOnly: true});
       scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature, {selectionOwner, refreshContext, renderTransaction});
       return changed;
     }
-    const normalizedRoot = normalizeDirectoryPath(plan.root);
     const rootEntries = await fetchDirectory(normalizedRoot, {force: true, user: options.force === true});
     if (!isCurrent()) return false;
     if (!Array.isArray(rootEntries)) return false;
-    const fetchedListings = new Map([[normalizedRoot, rootEntries]]);
+    fetchedListings.set(normalizedRoot, rootEntries);
     const firstPaint = normalizedRoot !== currentFileExplorerRoot()
       || ![fileExplorerTree, ...Array.from(document.querySelectorAll('.file-explorer-panel .file-explorer-tree-panel'))]
         .filter(Boolean)
@@ -3060,7 +3111,6 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     restoreFileExplorerSyncCursorState(plan.session, plan.root, {scrollOwner, selectionOwner});
     setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     rememberFileExplorerSyncExpandedState(plan.session, plan.root);
-    if (renderTransaction.completed) markFileExplorerSyncPlanApplied(plan);
     scheduleFileTreeMetadataRefresh({highlightsOnly: true});
 
     const pendingDirectories = new Set();
@@ -3128,7 +3178,18 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
       && (!failure.owner || failure.owner.generation === generation)
     ));
     return changed;
+  };
+  try {
+    const changed = await runPlan();
+    let pending;
+    do { pending = publicationQueue; await pending; } while (pending !== publicationQueue);
+    const completed = changed && publicationCompleted && renderTransaction.completed && isCurrent();
+    if (completed) markFileExplorerSyncPlanApplied(plan);
+    else if (isCurrent()) resetFileExplorerAppliedSyncPlan();
+    retainPublication = completed;
+    return completed;
   } finally {
+    if (!retainPublication && fileExplorerSyncState.publication === publicationOwner) fileExplorerSyncState.publication = null;
     if (fileExplorerSyncState.generation === generation && fileExplorerSyncState.inFlightSignature === signature) {
       fileExplorerSyncState.inFlightSignature = '';
     }
@@ -3885,14 +3946,6 @@ function* sortedFileTreeEntrySteps(entries, sortMode, options = {}) {
 }
 
 function fileTreeEntryComparator(sortMode, options = {}) {
-  if (options.tabberWindowOrder === true) {
-    return (left, right) => {
-      const leftIndex = Number(left?.tabber?.windowIndex);
-      const rightIndex = Number(right?.tabber?.windowIndex);
-      if (Number.isFinite(leftIndex) && Number.isFinite(rightIndex) && leftIndex !== rightIndex) return leftIndex - rightIndex;
-      return FILE_TREE_NAME_COLLATOR.compare(String(left?.sortName || left?.name || ''), String(right?.sortName || right?.name || ''));
-    };
-  }
   const mode = ['az', 'za', 'newest', 'oldest'].includes(sortMode) ? sortMode : 'az';
   const direction = mode === 'za' ? -1 : 1;
   // Differ only. A deleted file is a real diff result and stays a visible child, but a run of them
@@ -4459,7 +4512,7 @@ const TREE_ROW_MANAGED_CLASSES = Object.freeze([
   'indexed-directory', 'index-excluded-entry', 'indexed-descendant-directory', 'is-symlink',
   'symlink-broken', 'new-entry', 'current-file', 'current-directory', 'repo-non-main',
   'file-tree-row--changed-ancestor', 'tabber-row', 'tabber-normal-row', 'tabber-active-window',
-  'tabber-active-session', 'tabber-active-normal', 'tabber-status-long',
+  'tabber-active-normal',
 ]);
 
 function patchTreeRow(row, model) {
@@ -4543,9 +4596,7 @@ function fileTreeRowViewModel(state) {
 
 function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
-  // Tabber rows are heterogeneous (session/window/pane/repo/file), so the file-specific git/popover/index
-  // logic below does not apply. Render them via the shared column filler (updateFileTreeRowContents) +
-  // .file-tree-row DOM, with all display values precomputed in the entry as data — B3's mode:'tabber'.
+  // Tabber precomputes window and utility labels; Finder-specific Git and index logic does not apply.
   if (options.mode === 'tabber') return updateTabberRow(row, fullPath, entry, depth, options);
   const rowState = buildFileTreeRowState(fullPath, entry, depth, options);
   patchTreeRow(row, fileTreeRowViewModel(rowState));
@@ -4585,7 +4636,7 @@ async function drainFileTreeRenderStepsWithInput(steps, options = {}) {
 }
 
 function renderTreeChildren(container, parentPath, entries, depth, options = {}) {
-  const renderOptions = {...options, renderTransaction: {epoch: ++fileTreeRenderEpoch, completed: true}};
+  const renderOptions = {...options, renderTransaction: options.renderTransaction || {epoch: ++fileTreeRenderEpoch, completed: true}};
   const steps = renderTreeChildrenSteps(container, parentPath, entries, depth, renderOptions);
   return options.yieldToInput ? drainFileTreeRenderStepsWithInput(steps, options) : drainFileTreeRenderSteps(steps);
 }
@@ -4637,8 +4688,7 @@ function* renderTreeChildrenSteps(container, parentPath, entries, depth, options
     renderOptions.deferSessionFilesDiff = true;
   }
   const entriesByDir = renderOptions.entriesByDir instanceof Map ? renderOptions.entriesByDir : null;
-  const tabberWindowOrder = renderOptions.mode === 'tabber' && entries.length > 0 && entries.every(entry => entry?.tabber?.type === 'window');
-  let visible = yield* sortedFileTreeEntrySteps(entries, renderOptions.treeSortMode, {...renderOptions, tabberWindowOrder, deletedLast: renderOptions.differMode === true});
+  let visible = yield* sortedFileTreeEntrySteps(entries, renderOptions.treeSortMode, {...renderOptions, deletedLast: renderOptions.differMode === true});
   if (renderOptions.preserveDisplayedOrder === true) {
     // Retain each branch's surviving siblings; new rows follow them in the latest sort order.
     const remaining = new Map(visible.map(entry => [childPath(parentPath, entry.name), entry]));
@@ -4731,7 +4781,7 @@ function* renderTreeChildrenSteps(container, parentPath, entries, depth, options
       !existingChildContainer || !(renderOptions.reconcileDirectories instanceof Set)
       || renderOptions.reconcileDirectories.has(normalizedFullPath)
     )) {
-      yield* renderTreeChildrenSteps(childContainer, fullPath, childEntries, depth + 1, {...renderOptions, renderTransaction: transaction, isCurrent});
+      if ((yield* renderTreeChildrenSteps(childContainer, fullPath, childEntries, depth + 1, {...renderOptions, renderTransaction: transaction, isCurrent})) === false) transaction.completed = false;
     }
   }
   // Explicit expansion/collapse can add or remove a wrapper while this iterator yields.
@@ -4758,7 +4808,7 @@ function* renderTreeChildrenSteps(container, parentPath, entries, depth, options
     yield;
     node = fileTreeNodeAfterYield(container, nextNode);
   }
-  return true;
+  return transaction.completed;
 }
 
 function zipFileDownloadUrl(path) {
@@ -6504,8 +6554,10 @@ async function toggleTabberNormalPane(item, activationRevision = null) {
 }
 
 function advancedTabberLayoutSlots(active = visualActivePaneItem(), sourceSlots = layoutSlots) {
-  const entries = buildTabberTree().entries.filter(entry => entry.tabber?.type === 'session');
-  const recency = new Map(entries.map(entry => [entry.tabber.session, Number(entry.mtime || 0)]));
+  const recency = new Map();
+  for (const row of buildTabberNormalRows()) {
+    if (row.tabber?.type === 'normal') recency.set(row.tabber.session, Math.max(recency.get(row.tabber.session) || 0, Number(row.mtime || 0)));
+  }
   const roster = [...new Set([...tabberOrderedSessions(), ...sessions])]
     .filter(session => isTmuxSession(session) && !tabberViewDescriptorForSession(session) && !session.startsWith('__yomux_view_'))
     .sort((a, b) => (recency.get(b) ?? tabberRecency(b)) - (recency.get(a) ?? tabberRecency(a)));
@@ -6580,9 +6632,8 @@ function defaultNormalTabberLayoutSlots() {
 
 function tabberMostRecentSession() {
   if (!tabberNormalPointerPreviewState.activityReady) return '';
-  const tree = buildTabberTree();
-  const ordered = sortedFileTreeEntries(tree.entries, 'newest', {includeHidden: true});
-  const mostRecent = ordered.find(entry => entry?.tabber?.type === 'session' && Number(entry.mtime || 0) > 0);
+  const ordered = sortedFileTreeEntries(buildTabberNormalRows(), 'newest', {includeHidden: true});
+  const mostRecent = ordered.find(entry => entry?.tabber?.type === 'normal' && Number(entry.mtime || 0) > 0);
   return mostRecent?.tabber?.session || '';
 }
 
@@ -6616,35 +6667,8 @@ function claimPendingDefaultTabberSelection() {
   return true;
 }
 
-function tabberPad(value) {
-  return String(value).padStart(5, '0');
-}
-
 function tabberPathToken(value) {
-  return String(value).replace(/[^A-Za-z0-9._-]/g, '_');
-}
-
-function persistTabberCollapsed() {
-  storageSet(fileExplorerTabberCollapsedStorageKey, JSON.stringify(Array.from(fileExplorerTabberCollapsed).sort()));
-  storageSet(fileExplorerTabberExpandedStorageKey, JSON.stringify(Array.from(fileExplorerTabberExpanded).sort()));
-}
-
-function tabberPathDefaultsCollapsed(fullPath) {
-  return /^\/s_[^/]+\/w_/.test(String(fullPath || ''));
-}
-
-function tabberCollapsedPathsForTree(entries, entriesByDir) {
-  const collapsed = new Set(fileExplorerTabberCollapsed);
-  const walk = (list, parentPath) => {
-    for (const entry of list || []) {
-      if (entry.kind !== 'dir') continue;
-      const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
-      if (tabberPathDefaultsCollapsed(fullPath) && !fileExplorerTabberExpanded.has(fullPath)) collapsed.add(fullPath);
-      walk(entriesByDir.get(normalizeDirectoryPath(fullPath)), fullPath);
-    }
-  };
-  walk(entries, '/');
-  return collapsed;
+  return readableParamComponent(value);
 }
 
 // Recency for a ledger key (session "6" or session:window "6:1") is derived by the backend once as active_recency_ts.
@@ -6822,18 +6846,21 @@ async function fetchTabberActivity(options = {}) {
   const visible = options.visible !== undefined ? Boolean(options.visible) : tabberActivityVisibleConsumer();
   if (!visible && options.allowHidden !== true) return false;
   if (tabberActivityState.request) return tabberActivityState.request;
+  const requestHours = normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours);
+  const rangeIsCurrent = () => requestHours === normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours);
   const requestGeneration = ++tabberActivityState.requestGeneration;
   const request = (async () => {
+    let adoptedStatus = 0;
     try {
       const params = new URLSearchParams();
-      params.set('hours', String(normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours)));
+      params.set('hours', String(requestHours));
       params.set('visible', visible ? '1' : '0');
       // Tabber is the machine-wide tmux view. Python's activity API only includes
       // that roster when the caller opts into the global scope; keep the Go and
       // Python backends on the same one-session-per-row contract.
       params.set('scope', 'all');
       const payload = await apiFetchJson(`/api/activity?${params.toString()}`, {cache: 'no-store'});
-      const applied = applyTabberActivityPayload(payload, requestGeneration);
+      const applied = rangeIsCurrent() && applyTabberActivityPayload(payload, requestGeneration);
       // Go owns live agent status in the activity product.  Keep the shared
       // auto-status model in step with every accepted activity refresh, not
       // only the initial stats-only boot and explicit status repair path; the
@@ -6843,15 +6870,7 @@ async function fetchTabberActivity(options = {}) {
           && typeof goAgentStatusUsesActivityFallback === 'function'
           && goAgentStatusUsesActivityFallback()
           && typeof adoptTabberActivityAsAutoStatusFallback === 'function') {
-        const adopted = adoptTabberActivityAsAutoStatusFallback();
-        if (adopted > 0) {
-          // The activity request's finally block owns the Tabber tree refresh.
-          // Repaint only the status-bearing pane chrome here so this repair
-          // does not trigger Tabber's lazy session-files reads a second time.
-          if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
-          if (typeof renderAutoApproveButtons === 'function') renderAutoApproveButtons();
-          if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
-        }
+        adoptedStatus = adoptTabberActivityAsAutoStatusFallback();
       }
     } catch (_) {
       // The activity product is optional for topology. Python's session-metadata path still owns
@@ -6859,14 +6878,14 @@ async function fetchTabberActivity(options = {}) {
       // when activity collection is temporarily unavailable.
       try {
         const metadata = await apiFetchJson('/api/session-metadata', {cache: 'no-store'});
-        applyTabberActivityPayload({...metadata, activity: {}}, requestGeneration);
+        if (rangeIsCurrent()) applyTabberActivityPayload({...metadata, activity: {}}, requestGeneration);
       } catch (_) {
         // Older Go/compatibility servers may expose the lighter roster through /api/tmux even
         // when their full metadata build is unavailable.  It carries the same authoritative
         // session_order, so preserve one Tabber row per live session instead of clearing the tree.
         try {
           const roster = await apiFetchJson('/api/tmux', {cache: 'no-store'});
-          applyTabberActivityPayload({...roster, activity: {}}, requestGeneration);
+          if (rangeIsCurrent()) applyTabberActivityPayload({...roster, activity: {}}, requestGeneration);
         } catch (_) {
           // Keep the last snapshot; the interval retries without a render-triggered request loop.
         }
@@ -6877,7 +6896,9 @@ async function fetchTabberActivity(options = {}) {
         tabberActivityState.request = null;
       }
     }
-    if (itemInLayout(tabberItemId)) refreshTabberPanels();
+    if (!rangeIsCurrent()) return fetchTabberActivity(options);
+    if (adoptedStatus > 0) refreshAgentWindowActivityDisplays();
+    else if (itemInLayout(tabberItemId)) refreshTabberPanels();
     return true;
   })();
   tabberActivityState.request = request;
@@ -6902,7 +6923,6 @@ function setTabberSessionFileLookbackHours(hours, options = {}) {
   const previous = tabberSessionFileLookbackHours;
   tabberSessionFileLookbackHours = writeStoredTabberLookbackHours(hours);
   if (tabberSessionFileLookbackHours !== previous) {
-    clearTabberSessionFilesStates();
     if (options.refresh !== false) {
       fetchTabberActivity();
       if (itemInLayout(tabberItemId)) refreshTabberPanels();
@@ -6911,95 +6931,10 @@ function setTabberSessionFileLookbackHours(hours, options = {}) {
   return tabberSessionFileLookbackHours;
 }
 
-function tabberSessionFilesStateKey(session, hours = tabberSessionFileLookbackHours) {
-  const boundedHours = normalizeSessionFileLookbackHours(hours);
-  return `${String(session || '')}\u0000${boundedHours}`;
-}
-
-// Touched-path cache, keyed by session plus lookback (lazily fetched; never disturbs the Differ target).
-const tabberSessionFilesStates = new Map();
 const tabberTreeSelectedPaths = new Set();
 let tabberTreeSelectionLead = '';
 
-function tabberSessionFilesState(session, hours = tabberSessionFileLookbackHours) {
-  const boundedHours = normalizeSessionFileLookbackHours(hours);
-  const key = tabberSessionFilesStateKey(session, boundedHours);
-  let state = tabberSessionFilesStates.get(key);
-  if (!state) {
-    state = {session: String(session || ''), hours: boundedHours, files: [], loaded: false, loading: false};
-    tabberSessionFilesStates.set(key, state);
-  }
-  return state;
-}
-
-function clearTabberSessionFilesStates() {
-  tabberSessionFilesStates.clear();
-}
-
-async function fetchTabberSessionFiles(session, options = {}) {
-  if (!session) return;
-  const hours = normalizeSessionFileLookbackHours(options.hours ?? tabberSessionFileLookbackHours);
-  const state = tabberSessionFilesState(session, hours);
-  if (!options.force && (state.loaded || state.loading)) return;
-  state.loading = true;
-  if (itemInLayout(tabberItemId)) refreshTabberPanels();
-  try {
-    const payload = await apiFetchJson(`/api/session-files?session=${encodeURIComponent(session)}&hours=${encodeURIComponent(String(hours))}`, {cache: 'no-store'});
-    state.files = Array.isArray(payload?.files) ? payload.files : [];
-    state.loaded = true;
-  } catch (_) {
-    state.files = [];
-    state.loaded = true;
-  } finally {
-    state.loading = false;
-  }
-  if (itemInLayout(tabberItemId)) refreshTabberPanels();
-}
-
-async function fetchTabberSessionFilesBatch(sessions, options = {}) {
-  const hours = normalizeSessionFileLookbackHours(options.hours ?? tabberSessionFileLookbackHours);
-  const targets = [];
-  const seen = new Set();
-  for (const rawSession of sessions || []) {
-    const session = String(rawSession || '').trim();
-    if (!session || seen.has(session)) continue;
-    seen.add(session);
-    const state = tabberSessionFilesState(session, hours);
-    if (!options.force && (state.loaded || state.loading)) continue;
-    targets.push(session);
-  }
-  if (!targets.length) return;
-  for (const session of targets) {
-    const state = tabberSessionFilesState(session, hours);
-    state.loading = true;
-  }
-  if (itemInLayout(tabberItemId)) refreshTabberPanels();
-  try {
-    const params = new URLSearchParams();
-    for (const session of targets) params.append('session', session);
-    params.set('hours', String(hours));
-    const payload = await apiFetchJson(`/api/session-files-batch?${params.toString()}`, {cache: 'no-store'});
-    const payloads = payload?.sessions && typeof payload.sessions === 'object' ? payload.sessions : {};
-    for (const session of targets) {
-      const state = tabberSessionFilesState(session, hours);
-      const sessionPayload = payloads[session] || {};
-      state.files = Array.isArray(sessionPayload.files) ? sessionPayload.files : [];
-      state.loaded = true;
-    }
-  } catch (_) {
-    for (const session of targets) {
-      const state = tabberSessionFilesState(session, hours);
-      state.files = [];
-      state.loaded = true;
-    }
-  } finally {
-    for (const session of targets) tabberSessionFilesState(session, hours).loading = false;
-  }
-  if (itemInLayout(tabberItemId)) refreshTabberPanels();
-}
-
-// Tabber level 0: one row for every live tmux session in session_order. Pane metadata enriches
-// the row with windows, but a session must remain visible while that metadata is unavailable.
+// The authoritative tmux roster remains visible before window metadata arrives.
 function tabberOrderedSessions() {
   const order = Array.isArray(transcriptMetadataState.payload.session_order) ? transcriptMetadataState.payload.session_order : [];
   const all = transcriptMetadataState.payload.sessions && typeof transcriptMetadataState.payload.sessions === 'object' ? Object.keys(transcriptMetadataState.payload.sessions) : [];
@@ -7024,34 +6959,6 @@ function tabberWindowIsAgent(name) {
   return typeof agentWindowKind === 'function' ? Boolean(agentWindowKind(key)) : key === 'claude' || key === 'codex' || key === 'opencode';
 }
 
-function tabberAgentSessions() {
-  const sessions = [];
-  for (const session of tabberOrderedSessions()) {
-    const info = transcriptMetadataState.payload.sessions?.[session];
-    if (tmuxWindowRecords(info?.panes).some(record => tabberWindowIsAgent(record.name))) sessions.push(session);
-  }
-  return sessions;
-}
-
-function ensureTabberSessionFilesFetches() {
-  // Agent-window paths now come from the cached /api/activity agent_windows payload.
-  // The session-files fetchers remain for the modified-files UI and focused tests.
-  if (!tabberActivityState.loaded && !tabberActivityState.request) fetchTabberActivity();
-}
-
-function tabberRepoEntriesForAgentWindow(agent, session, windowIndex) {
-  const pathEntries = agentWindowPathEntries(agent);
-  return pathEntries
-    .map((item, pathPos) => {
-      const git = item.git && typeof item.git === 'object' ? item.git : agentWindowPrimaryGit(agent);
-      const branchText = git?.branch ? shortBranch(git.branch) : '';
-      return {
-        name: `r_${tabberPad(pathPos)}`, kind: 'file', mtime: item.mtime, sortName: item.path,
-        tabber: {type: 'repo', session, windowIndex, repoRoot: item.path, label: item.path, icon: '📁', branchText},
-      };
-    });
-}
-
 function tmuxWindowAgentStatus(session, record, info = null) {
   const status = agentWindowStatusForRecord(session, record, info);
   const statusKind = agentWindowKind(status?.kind);
@@ -7065,37 +6972,18 @@ function tmuxWindowCanonicalLabel(session, record, fallback = '', info = null) {
   return agentWindowCanonicalLabel(record?.indexText ?? record?.index, agentKey, fallback);
 }
 
-function buildTabberTree() {
+function buildTabberNormalRows() {
+  const rows = [];
   const advanced = tabberIsAdvanced();
-  const entriesByDir = new Map();
-  const topEntries = [];
-  // A split layout can show any number of active tabs. Keep that shared layout truth
-  // separate from the one focused session used only for keyboard/tree selection.
   const visibleItems = new Set(activePaneItems());
   const focusedItem = visualActivePaneItem();
-  tabberOrderedSessions().forEach(session => {
+  const nowSeconds = fileTreeRecencyNowMs() / 1000;
+  for (const session of tabberOrderedSessions()) {
     const info = transcriptMetadataState.payload.sessions?.[session] || {};
-    const sessionName = `s_${tabberPathToken(session)}`;
-    const sessionPath = `/${sessionName}`;
-    const git = advanced ? sessionWorkSummary(session, info).git : null;
-    const branch = git?.branch ? shortBranch(git.branch) : '';
-    const fallbackSessionRecency = tabberRecency(session);
-    const sessionWork = advanced ? sessionWorkDescription(session, info, 0) : '';
-    const sessionNameLabel = sessionLabel(session) || session;
-    const sessionDisplay = sessionWork ? `${sessionNameLabel}  ${sessionWork}` : sessionNameLabel;
-    const nowSeconds = fileTreeRecencyNowMs() / 1000;
-    const sessionEntry = {
-      name: sessionName, kind: 'dir', mtime: 0, sortName: sessionDisplay,
-      tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '●', branchText: branch, active: visibleItems.has(session)},
-    };
-    topEntries.push(sessionEntry);
-    const windowEntries = tmuxWindowRecords(info.panes).map(record => {
-      const windowName = `w_${tabberPathToken(record.index)}`;
-      const windowPath = `${sessionPath}/${windowName}`;
+    const windows = tmuxWindowRecords(info.panes).map(record => {
       const {status: agentStatus, agentKey} = tmuxWindowAgentStatus(session, record, info);
       const isAgent = Boolean(agentKey) || tabberWindowIsAgent(record.name);
       const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
-      const repoEntries = advanced && isAgent && agentStatus ? tabberRepoEntriesForAgentWindow(agentStatus, session, record.index) : [];
       const windowMtime = tabberWindowRecency({session, windowIndex: record.index, record, isAgent, agentKey, agentActivity, agentStatus}, nowSeconds);
       const active = tmuxWindowRecordIsActive(session, record);
       const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
@@ -7108,29 +6996,71 @@ function buildTabberTree() {
       // status look idle even though the backend had classified the pane as working.
       const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session);
       const dateDisplay = tabberWindowDateDisplay(windowMtime, agentStatusForDisplay, nowSeconds);
-      if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);
       return {
-        name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
+        name: tabberWindowPath(session, record.index).slice(1), kind: 'file', mtime: windowMtime,
         sortName: label,
         tabber: {type: 'window', session, windowIndex: record.index, windowId: record.windowId, label, pid: record.pid, icon: '', active, current: focusedItem === session && active, agentKey, agentStatus: agentStatusForIcon, activityIconHtml, dateText: dateDisplay.text, dateHtml: dateDisplay.html},
       };
     });
-    entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
-    const maxChild = windowEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
-    sessionEntry.mtime = Math.max(maxChild, windowEntries.length ? 0 : fallbackSessionRecency);
-    sessionEntry.tabber.current = focusedItem === session && !windowEntries.some(entry => entry.tabber?.current === true);
-  });
-  // Non-tmux utility rows follow the sessions. Normal omits Differ, Chat, and Agent; Advanced exposes
-  // Chat and Agent as rows and keeps Differ in its file-surface controls.
+    if (!windows.length) {
+      rows.push({
+        name: tabberSessionPath(session).slice(1), kind: 'file', mtime: tabberRecency(session), sortName: sessionLabel(session) || session,
+        tabber: {type: 'normal', session, label: sessionLabel(session) || session, normalPaneItem: session,
+          active: visibleItems.has(session), current: focusedItem === session,
+          normalNameHtml: tabberNormalRowNameHtml(session, '', '')},
+      });
+      continue;
+    }
+    const windowRecencies = windows.map(window => Number(window?.mtime || 0));
+    const hasDistinctWindowActivity = windowRecencies.every(timestamp => Number.isFinite(timestamp) && timestamp > 0)
+      && new Set(windowRecencies).size === windowRecencies.length;
+    const normalSortMtime = windows.length > 1 && !hasDistinctWindowActivity
+      ? Math.max(...windowRecencies)
+      : null;
+    for (const window of windows) {
+      const windowData = window?.tabber || {};
+      if (windowData.type !== 'window') continue;
+      const sessionName = sessionLabel(session) || session;
+      const icon = tabberRowActivityHtml(windowData);
+      const description = tabberWindowDescription(session, windowData.windowIndex);
+      const visibleSession = windows.length === 1 ? sessionName : `${sessionName} `;
+      const windowIdentity = windows.length > 1 ? String(windowData.label || '') : '';
+      const path = tabberWindowPath(session, windowData.windowIndex);
+      const windowView = windows.length > 1;
+      const viewItem = windowView ? tabberViewSessionForWindow(session, windowData.windowId) : '';
+      const visiblePaneItems = activePaneItems();
+      const normalPaneItem = viewItem && visiblePaneItems.includes(viewItem) ? viewItem : (windowView
+        ? windowData.active === true && visiblePaneItems.includes(session) ? session : viewItem
+        : session);
+      rows.push({
+        ...window,
+        name: path.slice(1),
+        kind: 'file',
+        sortName: `${visibleSession} ${windowIdentity} ${description}`,
+        tabber: {
+          ...windowData,
+          type: 'normal',
+          ...(normalSortMtime === null ? {} : {normalSortMtime}),
+          normalSuppressMtimeDate: normalSortMtime !== null && !windowData.dateText && !windowData.dateHtml && !window.mtime,
+          normalPaneItem,
+          normalWindowView: windowView,
+          label: `${visibleSession} ${description}`.trim(),
+          normalNameHtml: tabberNormalRowNameHtml(session, icon, description, windowIdentity),
+        },
+      });
+    }
+  }
   for (const item of allTabItems()) {
-    if (isTmuxSession(item) || item === tabberItemId || (tabberIsAdvanced() && isFileExplorerItem(item))) continue;
+    if (isTmuxSession(item) || item === tabberItemId || (advanced && isFileExplorerItem(item))) continue;
     if (!advanced && [differItemId, chatItemId, yoagentItemId].includes(item)) continue;
-    topEntries.push({
-      name: tabberTabPath(item).slice(1), kind: 'file', mtime: 0, sortName: itemLabel(item),
-      tabber: {type: 'tab', item, label: itemLabel(item), icon: '◷', active: visibleItems.has(item), current: focusedItem === item},
+    const label = itemLabel(item);
+    rows.push({
+      name: tabberTabPath(item).slice(1), kind: 'file', mtime: 0, sortName: label,
+      tabber: {type: 'tab', item, label, icon: '◷', active: visibleItems.has(item), current: focusedItem === item,
+        normalNameHtml: `<span class="tabber-normal-primary">${esc(label)}</span><span class="tabber-normal-description">&nbsp;</span>`},
     });
   }
-  return {entries: topEntries, entriesByDir};
+  return rows;
 }
 
 function tabberSortMode() {
@@ -7139,11 +7069,9 @@ function tabberSortMode() {
 
 function renderTabberTree(groupsEl, options = {}) {
   if (!groupsEl) return;
-  ensureTabberSessionFilesFetches();
-  const tree = buildTabberTree();
-  const {entries, entriesByDir} = tree;
-  const collapsedSet = tabberCollapsedPathsForTree(entries, entriesByDir);
-  if (!entries.length) {
+  if (!tabberActivityState.loaded && !tabberActivityState.request) fetchTabberActivity();
+  const rows = buildTabberNormalRows();
+  if (!rows.length) {
     groupsEl.innerHTML = `<div class="changes-empty">${esc(t('tabber.empty'))}</div>`;
     return;
   }
@@ -7158,10 +7086,9 @@ function renderTabberTree(groupsEl, options = {}) {
   }
   const advanced = tabberIsAdvanced();
   groupsEl.dataset.tabberMode = advanced ? 'advanced' : 'normal';
-  const rows = advanced ? entries : buildTabberNormalRows(tree);
   const preserveDisplayedOrder = options.preserveDisplayedOrder === true
     || (options.reorder !== true && groupsEl.closest('.file-explorer-panel')?.__tabberPointerInside === true);
-  const signature = advanced ? null : JSON.stringify([tabberSortMode(), preserveDisplayedOrder, rows.map(entry => {
+  const signature = JSON.stringify([tabberSortMode(), preserveDisplayedOrder, rows.map(entry => {
     const model = tabberTreeRowViewModel(null, `/${entry.name}`, entry, 0, {view: 'tabber'});
     return [model.path, model.kind, model.icon, model.label, model.paddingLeft, model.dataset, model.content, entry.mtime, entry.tabber?.normalSortMtime];
   })]);
@@ -7178,11 +7105,10 @@ function renderTabberTree(groupsEl, options = {}) {
   }
   renderTreeChildren(container, '/', rows, 0, {
     mode: 'tabber',
-    collapsedSet: advanced ? collapsedSet : new Set(),
-    entriesByDir: advanced ? entriesByDir : new Map(),
+    collapsedSet: new Set(),
+    entriesByDir: new Map(),
     treeSortMode: tabberSortMode(),
     preserveDisplayedOrder,
-    preserveSessionChrome: options.preserveSessionChrome === true,
     tabberNormalOrder: !advanced,
     view: 'tabber',
     includeHidden: true,
@@ -7217,101 +7143,23 @@ async function renameTabberDescription(session, windowIndex, windowId, descripti
   }
 }
 
-function buildTabberNormalRows(tree = buildTabberTree()) {
-  const rows = [];
-  for (const entry of tree.entries) {
-    const data = entry?.tabber || {};
-    if (data.type === 'session') {
-      const windows = tree.entriesByDir.get(normalizeDirectoryPath(`/${entry.name}`)) || [];
-      if (!windows.length) {
-        const sessionName = sessionLabel(data.session) || data.session;
-        rows.push({
-          ...entry,
-          name: entry.name,
-          kind: 'file',
-          tabber: {
-            ...data,
-            type: 'normal',
-            normalPaneItem: data.session,
-            normalNameHtml: tabberNormalRowNameHtml(data.session, '', ''),
-          },
-        });
-        continue;
-      }
-      const windowRecencies = windows.map(window => Number(window?.mtime || 0));
-      const hasDistinctWindowActivity = windowRecencies.every(timestamp => Number.isFinite(timestamp) && timestamp > 0)
-        && new Set(windowRecencies).size === windowRecencies.length;
-      const normalSortMtime = windows.length > 1 && !hasDistinctWindowActivity
-        ? Math.max(...windowRecencies)
-        : null;
-      for (const window of windows) {
-        const windowData = window?.tabber || {};
-        if (windowData.type !== 'window') continue;
-        const sessionName = sessionLabel(data.session) || data.session;
-        const icon = windowData.agentKey
-          ? agentWindowActivityIconHtmlForStatus(windowData.agentStatus, windowData.agentKey, data.session, {statusBeforeAgent: true})
-            || agentIcon(windowData.agentKey, {label: agentLabel(windowData.agentKey)})
-          : '';
-        const description = tabberWindowDescription(data.session, windowData.windowIndex);
-        const visibleSession = windows.length === 1 ? sessionName : `${sessionName} `;
-        const windowIdentity = windows.length > 1 ? String(windowData.label || '') : '';
-        const path = tabberWindowPath(data.session, windowData.windowIndex);
-        const windowView = windows.length > 1;
-        const viewItem = windowView ? tabberViewSessionForWindow(data.session, windowData.windowId) : '';
-        const visiblePaneItems = activePaneItems();
-        const normalPaneItem = viewItem && visiblePaneItems.includes(viewItem) ? viewItem : (windowView
-          ? windowData.active === true && visiblePaneItems.includes(data.session) ? data.session : viewItem
-          : data.session);
-        rows.push({
-          ...window,
-          name: path.slice(1),
-          kind: 'file',
-          sortName: `${visibleSession} ${windowIdentity} ${description}`,
-          tabber: {
-            ...windowData,
-            type: 'normal',
-            ...(normalSortMtime === null ? {} : {normalSortMtime}),
-            normalSuppressMtimeDate: normalSortMtime !== null && !windowData.dateText && !windowData.dateHtml && !window.mtime,
-            normalPaneItem,
-            normalWindowView: windowView,
-            label: `${visibleSession} ${description}`.trim(),
-            normalNameHtml: tabberNormalRowNameHtml(data.session, icon, description, windowIdentity),
-          },
-        });
-      }
-      continue;
-    }
-    if (data.type === 'tab') rows.push({...entry, kind: 'file', tabber: {
-      ...data, normalNameHtml: `<span class="tabber-normal-primary">${esc(data.label)}</span><span class="tabber-normal-description">&nbsp;</span>`,
-    }});
-  }
-  return rows;
-}
-
 function tabberNormalRowNameHtml(session, leadingHtml, description, windowIdentity = '') {
   const title = tmuxPaneTabHtml(session, null, '', false, {
     leadingHtml, showState: false, showBadges: false, showDetail: false,
     windowIdentityHtml: windowIdentity ? `<span class="tabber-normal-window-identity">${esc(windowIdentity)}</span>` : '',
   });
-  return `<span class="tabber-normal-primary">${stripTitleAttrs(title)}</span><span class="tabber-normal-description">${description ? esc(description) : '&nbsp;'}</span>`;
+  return tabberRowNameHtml(stripTitleAttrs(title), description);
 }
 
-function tabberSessionPopoverRefreshIsUnsafe() {
-  const selector = [
-    '.tabber-session-tab.popover-open',
-    '.tabber-session-tab[data-popover-hover-state="pending"]',
-    '.tabber-session-tab[data-popover-hover-state="open"]',
-    '.tabber-session-tab[data-popover-hover-state="closing"]',
-  ].join(', ');
-  for (const tab of document.querySelectorAll(selector)) {
-    const popover = tab.querySelector?.(':scope > .session-popover') || tab.__yomuxDetachedPopover;
-    if (typeof popoverLifecycleActive === 'function' && typeof popoverStillActive === 'function') {
-      if (popoverLifecycleActive(tab, popover) || popoverStillActive(tab, popover)) return true;
-    } else {
-      return true;
-    }
-  }
-  return false;
+function tabberRowNameHtml(titleHtml, description) {
+  return `<span class="tabber-normal-primary">${titleHtml}</span><span class="tabber-normal-description">${description ? esc(description) : '&nbsp;'}</span>`;
+}
+
+function tabberRowActivityHtml(data) {
+  return data.agentKey
+    ? agentWindowActivityIconHtmlForStatus(data.agentStatus, data.agentKey, data.session, {statusBeforeAgent: true})
+      || agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})
+    : '';
 }
 
 function scheduleDeferredTabberRefresh(options = {}) {
@@ -7326,12 +7174,7 @@ function scheduleDeferredTabberRefresh(options = {}) {
 
 function refreshTabberPanels(options = {}) {
   const perf = clientPerfStart('tabberFullRefresh');
-  const preserveSessionChrome = tabberSessionPopoverRefreshIsUnsafe();
-  if (preserveSessionChrome) {
-    scheduleDeferredTabberRefresh(options);
-    options = {...options, preserveDisplayedOrder: options.reorder !== true, preserveSessionChrome: true};
-  }
-  if (!preserveSessionChrome && tabberRefreshDeferredTimer) {
+  if (tabberRefreshDeferredTimer) {
     clearTimeout(tabberRefreshDeferredTimer);
     tabberRefreshDeferredTimer = null;
   }
@@ -7346,12 +7189,6 @@ function refreshTabberPanels(options = {}) {
     if (groups) {
       panels += 1;
       renderTabberTree(groups, options);
-      if (preserveSessionChrome && options.reorder === true) {
-        for (const tab of panel.querySelectorAll('.tabber-session-tab.popover-open')) {
-          const popover = paneTabPopoverForAnchor(tab);
-          if (popover) positionPaneTabPopover(tab, popover);
-        }
-      }
     }
   }
   clientPerfEnd(perf, {nodes: panels});
@@ -7360,63 +7197,6 @@ function refreshTabberPanels(options = {}) {
 function refreshTabberPanelsForFocusChange() {
   if (!itemInLayout(tabberItemId)) return;
   scheduleTabberTreeLayoutStateSync();
-}
-
-function tabberWindowLabelHtml(label, iconHtml, options = {}) {
-  const text = String(label || '');
-  const nameText = text;
-  const pidText = tmuxWindowPidText(options.pid);
-  return `<span class="tabber-window-label">${stripTitleAttrs(iconHtml)}<span class="tabber-window-text">${esc(nameText)}</span>${pidText ? `<span class="tabber-window-pid"> ${esc(pidText)}</span>` : ''}</span>`;
-}
-
-function tabberWindowButtonHtml(data, label) {
-  const visibleName = String(label || '').trim();
-  if (!visibleName) return '';
-  if (typeof tmuxWindowButtonHtml !== 'function') {
-    const iconHtml = ['claude', 'codex', 'opencode'].includes(data?.agentKey) ? (data.activityIconHtml || agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})) : '';
-    return tabberWindowLabelHtml(visibleName, iconHtml, {active: data?.active === true, pid: data?.pid});
-  }
-  const windowIndex = data?.windowIndex !== null && data?.windowIndex !== undefined ? String(data.windowIndex) : visibleName;
-  // Keep the button itself identical to the Info Bar / YO!info window button: status glyph + agent
-  // symbol + "<index>:<name>", no pid baked into the label. The pid is printed as a separate suffix after
-  // the button so the icon matches everywhere it appears.
-  const buttonHtml = tmuxWindowButtonHtml({
-    tag: 'span',
-    classes: ['tabber-window-button'],
-    session: data?.session,
-    visibleName,
-    numberLabel: windowIndex,
-    showNumberLabel: false,
-    active: data?.active === true,
-    agentStatus: data?.agentStatus || null,
-    agentKey: data?.agentKey,
-    attrs: ['data-tabber-window-button="shared"'],
-    ariaPressed: false,
-  });
-  const pidText = tmuxWindowPidText(data?.pid);
-  const pidHtml = pidText ? `<span class="tabber-window-pid"> ${esc(pidText)}</span>` : '';
-  return `<span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${stripTitleAttrs(buttonHtml)}${pidHtml}</span>`;
-}
-
-function tabberSessionChromeHtml(data) {
-  const classes = ['tabber-session-tab', 'session-popover-host'];
-  const session = String(data.session || '').trim();
-  const info = transcriptMetadataState.payload.sessions?.[session] || {};
-  const state = sessionState(session, info);
-  const auto = autoApproveStates.get(session)?.enabled === true;
-  const agentKind = sessionAgentKind(session);
-  return tmuxPaneTabTokenHtml(session, {
-    tag: 'span',
-    classes,
-    active: data.active === true,
-    info,
-    state,
-    auto,
-    detail: data.description || '',
-    attrs: ['data-tabber-session-chrome="shared"', 'draggable="true"'],
-    stripContentTitles: true,
-    afterHtml: sessionPopoverHtml(session, info, agentKind, auto, state),
-  });
 }
 
 function tabberDragPreviewRows(row) {
@@ -7471,38 +7251,10 @@ function tabberNativeDragImageForRow(row) {
   return preview;
 }
 
-function bindTabberSessionChrome(row, session) {
-  const tab = row?.querySelector?.('.tabber-session-tab');
-  if (!tab) return null;
-  const info = transcriptMetadataState.payload.sessions?.[session] || {};
-  applySessionStateClasses(tab, sessionState(session, info));
-  return bindScopedOnce(tab, 'tabber-session-chrome', scope => {
-  tab.dataset.paneTab = session;
-  bindPaneTabPopover(tab, session);
-  bindPaneTabNativeDragSource(tab, session, () => slotForItem(session), {
-    ignore: event => Boolean(event.target.closest?.('[data-auto-session], [data-pane-tab-close], button, input, textarea, select, a')),
-    dragImage: () => tabberNativeDragImageForRow(row),
-  });
-  scope.ownEvent('pointerdown', tab, 'pointerdown', event => {
-    const autoTarget = event.target.closest?.('[data-auto-session]');
-    if (!autoTarget) return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (session === currentSessionActionTarget()) setFocusedPanelItem(session);
-  });
-  bindActionDispatcher(tab, {
-    'pane-tab-auto-approve': async (_event, autoTarget) => {
-      await toggleAutoApprove(autoTarget.dataset.autoSession);
-      if (session === currentSessionActionTarget()) focusPanel(session);
-    },
-  });
-  });
-}
-
 function tabberRowDragItem(row) {
   if (!tabberIsAdvanced()) return '';
   const type = row?.dataset?.tabberType || '';
-  if (type === 'session') return row.dataset.tabberSession || '';
+  if (type === 'normal') return row.dataset.tabberSession || '';
   if (type === 'tab') return row.dataset.tabberItem || '';
   return '';
 }
@@ -7526,20 +7278,15 @@ function bindTabberRowDragSource(row) {
 // Shared-pipeline row updater for Tabber nodes (same .file-tree-row DOM + updateFileTreeRowContents).
 function tabberTreeRowViewModel(row, fullPath, entry, depth, options = {}) {
   const data = entry.tabber || {};
-  const expandable = entry.kind === 'dir';
-  const collapsedSet = options.collapsedSet instanceof Set ? options.collapsedSet : fileExplorerTabberCollapsed;
-  const expanded = expandable && !collapsedSet.has(fullPath);
+  const expandable = false;
+  const expanded = false;
   const selected = tabberTreeSelectedPaths.has(fullPath);
   const current = data.current === true;
   const normalPaneItem = data.normalPaneItem || (data.type === 'tab' ? data.item : '');
-  const agentState = String(data.agentStatus?.state || STATE_KEY.idle);
   const icon = expandable ? disclosureTriangleGlyph(expanded) : (data.icon || '');
   const rawLabel = data.label || entry.name;
   const label = compactHomePath(rawLabel);
   const description = data.description ? compactHomePath(data.description) : '';
-  const renderData = (label !== rawLabel || description !== (data.description || ''))
-    ? {...data, label, description}
-    : data;
   const titleParts = [
     label,
     description && description !== label ? description : '',
@@ -7547,16 +7294,8 @@ function tabberTreeRowViewModel(row, fullPath, entry, depth, options = {}) {
     data.repoRoot && data.repoRoot !== rawLabel ? compactHomePath(data.repoRoot) : '',
   ].filter(Boolean);
   const titleText = titleParts.join('\n');
-  const nameHtml = data.type === 'normal' || (!tabberIsAdvanced() && data.type === 'tab')
-    ? data.normalNameHtml
-    : data.type === 'session'
-    ? tabberSessionChromeHtml(renderData)
-    : data.type === 'window'
-      ? tabberWindowButtonHtml(renderData, label)
-    : data.type === 'loading'
-      ? `<span class="tabber-loading-label">${esc(data.label || stripTrailingEllipsisText(t('common.loading')))}</span>${movingEllipsisHtml('tabber-loading-dots')}`
-    : '';
-  const paneTab = data.type === 'session' ? (data.session || '') : (data.type === 'tab' ? (data.item || '') : '');
+  const nameHtml = data.normalNameHtml || '';
+  const paneTab = data.type === 'normal' ? (data.session || '') : (data.type === 'tab' ? (data.item || '') : '');
   return TreeRowViewModel({
     path: fullPath,
     kind: entry.kind,
@@ -7565,7 +7304,7 @@ function tabberTreeRowViewModel(row, fullPath, entry, depth, options = {}) {
     selected,
     expandable,
     expanded,
-    current: current || (data.type === 'session' && data.active === true),
+    current,
     draggable: tabberIsAdvanced() && Boolean(paneTab && isLayoutItem(paneTab) && !isFileExplorerItem(paneTab)),
     icon,
     label,
@@ -7573,8 +7312,7 @@ function tabberTreeRowViewModel(row, fullPath, entry, depth, options = {}) {
       iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
       disclosureExpanded: expandable ? expanded : undefined,
       nameHtml,
-      preserveNameHtml: options.preserveSessionChrome === true && data.type === 'session' && Boolean(row?.querySelector('.tabber-session-tab')),
-      dateText: data.type === 'session' ? '' : (data.normalSuppressMtimeDate === true ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry, {view: 'tabber'}) : ''))),
+      dateText: (data.normalSuppressMtimeDate === true ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry, {view: 'tabber'}) : ''))),
       dateHtml: data.dateHtml || '',
     },
     recencyEntry: entry,
@@ -7596,11 +7334,9 @@ function tabberTreeRowViewModel(row, fullPath, entry, depth, options = {}) {
       expanded,
       [CLS.collapsed]: expandable && !expanded,
       'tabber-row': true,
-      'tabber-normal-row': !tabberIsAdvanced() && (data.type === 'normal' || data.type === 'tab'),
-      'tabber-active-window': data.type === 'window' && data.active === true,
-      'tabber-active-session': data.type === 'session' && data.active === true,
+      'tabber-normal-row': true,
+      'tabber-active-window': data.type === 'normal' && data.active === true,
       'tabber-active-normal': data.type === 'normal' && Boolean(normalPaneItem) && activePaneItems().includes(normalPaneItem),
-      'tabber-status-long': data.type === 'window' && (agentWindowIsWorkingState(agentState) || agentWindowIsAttentionState(agentState)),
       'current-file': current && entry.kind !== 'dir',
       'current-directory': current && entry.kind === 'dir',
     },
@@ -7611,85 +7347,11 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   const data = entry.tabber || {};
   const model = tabberTreeRowViewModel(row, fullPath, entry, depth, options);
   patchTreeRow(row, model);
-  if (model.content.preserveNameHtml === true) {
-    // Patch the generated chrome inside its retained anchor, keeping the detached popover alive.
-    const tab = row.querySelector('.tabber-session-tab');
-    const template = document.createElement('template');
-    template.innerHTML = model.content.nameHtml;
-    const core = tab.querySelector(':scope > .pane-tab-core');
-    const nextCore = template.content.querySelector('.pane-tab-core');
-    if (core && nextCore) setInnerHtmlIfChanged(core, nextCore.innerHTML);
-    tab.classList.toggle('active', data.active === true);
-    setAttributeIfChanged(tab, 'data-tmux-pane-tab-state', data.active === true ? 'active' : 'inactive');
-  }
   row.removeAttribute('title');
-  if (data.type === 'session' && data.session) bindTabberSessionChrome(row, data.session);
   if (tabberRowIsTabDragSource(row)) bindTabberRowDragSource(row);
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
   clearFileTreeRowHandlers(row);
   return fullPath;
-}
-
-function tabberPathIsExpanded(fullPath) {
-  const defaultsCollapsed = tabberPathDefaultsCollapsed(fullPath);
-  return !fileExplorerTabberCollapsed.has(fullPath) && (!defaultsCollapsed || fileExplorerTabberExpanded.has(fullPath));
-}
-
-function setTabberPathExpanded(fullPath, expanded) {
-  if (!fullPath) return false;
-  const defaultsCollapsed = tabberPathDefaultsCollapsed(fullPath);
-  const nextExpanded = expanded === true;
-  if (tabberPathIsExpanded(fullPath) === nextExpanded) return false;
-  if (nextExpanded) {
-    fileExplorerTabberCollapsed.delete(fullPath);
-    if (defaultsCollapsed) fileExplorerTabberExpanded.add(fullPath);
-  } else {
-    fileExplorerTabberExpanded.delete(fullPath);
-    fileExplorerTabberCollapsed.add(fullPath);
-  }
-  persistTabberCollapsed();
-  return true;
-}
-
-function toggleTabberCollapsed(fullPath) {
-  return setTabberPathExpanded(fullPath, !tabberPathIsExpanded(fullPath));
-}
-
-function expandTabberPath(fullPath) {
-  return setTabberPathExpanded(fullPath, true);
-}
-
-// Expand/collapse ALL Tabber nodes (the toolbar Expand all / Collapse all). Collapse-all records every
-// current dir node path; expand-all clears the collapsed set.
-function setAllTabberCollapsed(collapsed) {
-  if (!collapsed) {
-    fileExplorerTabberCollapsed.clear();
-    fileExplorerTabberExpanded.clear();
-    const {entries, entriesByDir} = buildTabberTree();
-    const walk = (list, parent) => {
-      for (const entry of list || []) {
-        if (entry.kind !== 'dir') continue;
-        const path = parent === '/' ? `/${entry.name}` : `${parent}/${entry.name}`;
-        fileExplorerTabberExpanded.add(path);
-        walk(entriesByDir.get(normalizeDirectoryPath(path)), path);
-      }
-    };
-    walk(entries, '/');
-  } else {
-    fileExplorerTabberExpanded.clear();
-    const {entries, entriesByDir} = buildTabberTree();
-    const walk = (list, parent) => {
-      for (const entry of list || []) {
-        if (entry.kind !== 'dir') continue;
-        const path = parent === '/' ? `/${entry.name}` : `${parent}/${entry.name}`;
-        fileExplorerTabberCollapsed.add(path);
-        walk(entriesByDir.get(normalizeDirectoryPath(path)), path);
-      }
-    };
-    walk(entries, '/');
-  }
-  persistTabberCollapsed();
-  refreshTabberPanels({reorder: true});
 }
 
 async function openTabberActivityOverview() {
@@ -7756,15 +7418,7 @@ function openTabberSession(session, options = {}) {
   const target = String(session || '').trim();
   if (!target) return false;
   if (!tabberIsAdvanced()) { void toggleTabberNormalPane(target); return true; }
-  const sessionPath = tabberSessionPath(target);
-  const expanded = sessionPath && expandTabberPath(sessionPath);
   selectSession(target, {userInitiated: true});
-  if (expanded && options.refresh !== false) {
-    // Opening a session must focus xterm before rebuilding the unrelated Tabber tree.
-    scheduleTabSwitchPhaseTwo(tabSwitchHighlightGeneration, () => {
-      if (itemIsActivePaneTab(target)) refreshTabberPanels();
-    });
-  }
   return true;
 }
 
@@ -7777,8 +7431,7 @@ async function activateNormalTabberRow(row, session, windowIndex) {
   let item = type === 'tab' ? row.dataset.tabberItem || '' : row.dataset.tabberPaneItem || '';
   if (type === 'normal' && row.dataset.tabberNormalWindowView === 'true' && windowIndex !== null) {
     const pending = tabberNormalPointerPreviewState.pendingWindowActivation;
-    const entry = buildTabberTree().entriesByDir.get(normalizeDirectoryPath(`/${tabberSessionPath(session).slice(1)}`))
-      ?.find(candidate => Number(candidate?.tabber?.windowIndex) === windowIndex);
+    const entry = buildTabberNormalRows().find(candidate => candidate.tabber?.session === session && Number(candidate.tabber.windowIndex) === windowIndex);
     const data = {...(entry?.tabber || {}), windowId: row.dataset.tabberWindowId || entry?.tabber?.windowId || tabberViewSessions.get(item)?.windowId || ''};
     const intentKey = `${String(session || '').trim()}\u001f${String(data.windowId || '')}`;
     const knownItem = item || tabberViewSessionForWindow(session, data.windowId);
@@ -7831,20 +7484,11 @@ async function activateNormalTabberRow(row, session, windowIndex) {
   return Boolean(item);
 }
 
-// Delegated activation for Tabber rows. Clicking the disclosure icon toggles a node; clicking the row body
-// acts: session -> open the session's tab; window -> open the tab + switch the tmux sub-window; repo root ->
-// point the Finder at it + open the tab + switch the window.
+// Both modes activate the same flat window rows.
 function handleTabberRowActivate(row, event) {
-  const fullPath = row.dataset.path;
   const type = row.dataset.tabberType;
   const session = row.dataset.tabberSession || '';
   const windowIndex = row.dataset.tabberWindow !== undefined ? tmuxWindowNumber(row.dataset.tabberWindow) : null;
-  const onDisclosure = Boolean(event?.target?.closest?.('.file-tree-icon'));
-  if (row.dataset.kind === 'dir' && fullPath && onDisclosure) {
-    toggleTabberCollapsed(fullPath);
-    refreshTabberPanels({reorder: true});
-    return;
-  }
   if (!tabberIsAdvanced() && (type === 'normal' || type === 'tab')) {
     void activateNormalTabberRow(row, session, windowIndex);
     return;
@@ -7857,20 +7501,9 @@ function handleTabberRowActivate(row, event) {
   };
   if (type === 'tab' && row.dataset.tabberItem) {
     selectSession(row.dataset.tabberItem, {userInitiated: true});
-  } else if (type === 'session' && session) {
-    openTabberSession(session);
-  } else if ((type === 'window' || type === 'normal') && session) {
+  } else if (type === 'normal' && session) {
     if (windowIndex !== null) switchWindow();
     selectSession(session, {userInitiated: true});
-  } else if (type === 'repo' && row.dataset.tabberRepoRoot) {
-    switchWindow();
-    if (typeof openFileSurface === 'function') openFileSurface(finderItemId);
-    else if (typeof openFileExplorerPane === 'function') openFileExplorerPane(finderItemId);
-    openFileExplorerManualRoot(row.dataset.tabberRepoRoot);
-    if (session) selectSession(session, {userInitiated: true});
-  } else if (row.dataset.kind === 'dir' && fullPath) {
-    toggleTabberCollapsed(fullPath);
-    refreshTabberPanels({reorder: true});
   }
 }
 
@@ -7887,12 +7520,6 @@ const tabberTreeInteractionController = createSharedTreeInteractionController({
   syncCurrentSelection(currentId) {
     tabberTreeSelectedPaths.clear();
     if (currentId) tabberTreeSelectedPaths.add(currentId);
-  },
-  isExpanded: row => row?.getAttribute?.('aria-expanded') === 'true',
-  setExpanded(row, expanded) {
-    const fullPath = row?.dataset?.path || '';
-    if (!fullPath || row?.dataset?.kind !== 'dir') return;
-    if (setTabberPathExpanded(fullPath, expanded)) refreshTabberPanels({reorder: true});
   },
   activateRow(row, event) {
     handleTabberRowActivate(row, event);
@@ -7937,7 +7564,6 @@ function syncTabberTreeLayoutState(panel = document, options = {}) {
     const session = row.dataset.tabberSession || '';
     const item = row.dataset.tabberItem || '';
     const paneItem = row.dataset.tabberPaneItem || (type === 'tab' ? item : '');
-    const activeSession = type === 'session' && visibleItems.has(session);
     const activeNormal = type === 'normal' && Boolean(paneItem) && visibleItems.has(paneItem);
     const activeTab = type === 'tab' && visibleItems.has(item);
     const current = !tabberIsAdvanced() && paneItem
@@ -7945,11 +7571,9 @@ function syncTabberTreeLayoutState(panel = document, options = {}) {
       : Boolean(currentPath && row.dataset.path === currentPath);
     row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
     row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
-    row.classList.toggle('tabber-active-session', activeSession);
     row.classList.toggle('tabber-active-normal', activeNormal);
     row.classList.toggle('tabber-active-tab', activeTab);
-    row.querySelector?.('.tabber-session-tab')?.classList?.toggle(CLS.active, activeSession);
-    setAttributeIfChanged(row, 'aria-current', current || activeSession || activeNormal || activeTab ? 'true' : null);
+    setAttributeIfChanged(row, 'aria-current', current ? 'true' : null);
   }
   const synced = syncTabberTreeActiveSelection(panel, options);
   clientPerfEnd(perf, {rows: rows.length});
@@ -8027,19 +7651,29 @@ function bindTabberPanel(panel) {
     pointerActivatedPath = '';
     restoreTabberNormalPointerPreview();
   });
+  scope.ownEvent('keydown', panel, 'keydown', event => {
+    const newChat = event.target.closest?.('[data-tabber-new-chat]');
+    if (newChat && panel.contains(newChat) && event.key === 'ArrowDown') {
+      event.preventDefault();
+      newChat.click();
+    }
+  });
   scope.ownEvent('click', panel, 'click', event => {
     if (!itemInLayout(tabberItemId)) return;
     const newChat = event.target.closest?.('[data-tabber-new-chat]');
     if (newChat && panel.contains(newChat)) {
       event.preventDefault();
-      const wrapper = document.querySelector('.app-menu[data-app-menu="file"]');
-      if (wrapper) openAppMenu(wrapper, {
+      const wrapper = newChat.closest('.tabber-new-chat-menu');
+      const popover = wrapper?.querySelector(':scope > .tabber-new-chat-popover');
+      if (wrapper && popover) {
+        popover.replaceChildren(...newTmuxSessionItems().filter(Boolean).map(createAppMenuItem));
+        openAppMenu(wrapper, {
         focusFirst: true,
         pinned: true,
-        // Opening the shared menu may refresh this panel before Escape returns focus.
-        returnFocus: () => Array.from(document.querySelectorAll('[data-tabber-new-chat]')).find(appMenuFocusTargetIsAvailable)
-          || document.querySelector('#topbarTabberToggle'),
-      });
+          returnFocus: () => Array.from(document.querySelectorAll('[data-tabber-new-chat]')).find(appMenuFocusTargetIsAvailable)
+            || document.querySelector('#topbarTabberToggle'),
+        });
+      }
       return;
     }
     const search = event.target.closest?.('[data-tabber-search]');
@@ -8088,7 +7722,7 @@ function bindTabberPanel(panel) {
       event.preventDefault();
       event.stopPropagation();
       tabInteractionControllerForApp().showActions({
-        anchor: tabRow.querySelector?.('.tabber-session-tab') || tabRow,
+        anchor: tabRow,
         item: tabItem,
         sourceSlot: () => slotForItem(tabItem),
         descriptionWindow: tabRow.dataset.tabberWindow === undefined ? null : Number(tabRow.dataset.tabberWindow),
@@ -8096,12 +7730,7 @@ function bindTabberPanel(panel) {
       }, event);
       return;
     }
-    const row = event.target.closest?.('.file-tree-row[data-tabber-type="repo"]');
-    const abs = row?.dataset.tabberRepoRoot;
-    if (!row || !panel.contains(row) || !abs) return;
-    event.preventDefault();
-    event.stopPropagation();
-    showFileTreeContextMenu(row, abs, {name: basenameOf(abs), kind: 'dir'}, event.clientX, event.clientY, {surface: 'tabber'});
+
   });
   });
 }

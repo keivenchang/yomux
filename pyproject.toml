@@ -11,7 +11,7 @@ build-backend = "setuptools.build_meta"
 name = "yomux"
 description = "Browser tools for watching, driving, and summarizing tmux sessions."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "PolyForm-Noncommercial-1.0.0" }
 authors = [{ name = "Keiven Chang" }]
 dynamic = ["version"]

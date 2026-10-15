@@ -63,6 +63,7 @@ function sourceFunction(name, nextName) {
 // constants, the shared metric-envelope cell renderer, the provenance/coverage/transition helpers,
 // the roster adapter and renderer, the schema guard, and the rehomed per-row diagnostics.
 const RENDER_SOURCE = [
+  slice(source, 'function debugDisplayProductLabel(', '\nfunction applyJsDebugStatsSamplePush('),
   slice(source, 'const DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS', '\n// NO staleness threshold lives here any more'),
   // One contiguous slice, where there used to be two with the retired per-cell renderer wedged
   // between them: the constants, the cell renderers, the roster, and the schema guard the roster
@@ -825,7 +826,7 @@ test('the Daemons System region mounts runtime-owner occupancy with a Go process
   assert.match(chart, /data-js-debug-daemons-graph/);
   assert.match(chart, /data-js-debug-daemons-chart-note/);
   assert.match(chart, /goroutines and SQLite cgo work/);
-  assert.match(chart, /yolomux-go process CPU as a comparison line/);
+  assert.match(chart, /yomux-go process CPU as a comparison line/);
 });
 
 test('a running daemon whose transport failed is an issue with its typed reason, not "down"', () => {
@@ -2081,13 +2082,14 @@ test('a Go monolith displays CPU/RSS on YOmux web when the child shares its PID'
   vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}`, context);
   const go = localServices();
   go.inventory = ['yolomux-go'];
-  go.services = [serviceRow('yolomux-go', {parent_id: 'web', pid: WEB_SERVER.pid, label: 'YO!stats Go backend'})];
+  go.services = [serviceRow('yolomux-go', {parent_id: 'web', pid: WEB_SERVER.pid, label: 'yolomux-go'})];
   const payload = payloadFor(go, {server: {...WEB_SERVER, pid: WEB_SERVER.pid}});
   context.fixture = payload;
   vm.runInContext('result = {rows: debugSystemRosterRows(fixture), html: debugSystemRosterHtml(fixture, {nowSeconds: 1902, expanded: new Set()})};', context);
   const {rows, html} = context.result;
   const web = rows.find(row => row.id === 'web');
   const child = rows.find(row => row.id === 'yolomux-go');
+  assert.equal(child.label, 'yomux-go');
   assert.equal(web.metrics.cpu_now_percent.state, 'measured');
   assert.equal(web.metrics.rss_bytes.state, 'measured');
   assert.equal(child.metrics.cpu_now_percent.reason_code, 'resource_metrics_owned_by_parent_web');
@@ -2098,6 +2100,9 @@ test('a Go monolith displays CPU/RSS on YOmux web when the child shares its PID'
   assert.equal(context.result.rssBytes, 88 * 1024 * 1024, context.result);
   assert.match(html, /data-subsystem-id="web"[\s\S]*data-subsystem-metric="cpu_now_percent"[^>]*>3%/);
   assert.match(html, /data-subsystem-id="yolomux-go"[\s\S]*data-metric-reason="resource_metrics_owned_by_parent_web">—/);
+  const visibleText = html.replace(/<[^>]*>/g, '');
+  const legacyLabelIndex = html.toLowerCase().indexOf('yolomux');
+  assert.doesNotMatch(visibleText, /yolomux/i, `the rendered roster text uses the current product name: ${html.slice(Math.max(0, legacyLabelIndex - 180), legacyLabelIndex + 180)}`);
 });
 
 test('the summary CPU number is labelled a population sum and carries no single-process budget', () => {

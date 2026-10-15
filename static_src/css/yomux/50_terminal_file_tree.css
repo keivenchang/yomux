@@ -2976,8 +2976,7 @@ button.info-tree-tab-token.active:focus-visible {
   min-width: 0;
   flex-wrap: wrap;
 }
-.info-tree-ai-value.tmux-window-bar,
-.file-tree-row.tabber-row .tabber-window-token {
+.info-tree-ai-value.tmux-window-bar {
   flex: 0 1 auto;
   max-width: 100%;
   margin-inline-start: 0;

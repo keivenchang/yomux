@@ -1089,3 +1089,35 @@ func TestAuditPartialDFPreservesMountBytes(t *testing.T) {
 		t.Fatal("mount identities collapsed")
 	}
 }
+
+func TestDarwinAvailableMemoryRejectsUnavailableObservations(t *testing.T) {
+	valid := "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 1.\nPages inactive: 2.\nPages speculative: 3.\n"
+	for _, tc := range []struct {
+		name, text string
+		exit       int
+		failure    error
+		want       uint64
+		invalid    bool
+	}{
+		{name: "command failure", failure: errors.New("command failed"), invalid: true},
+		{name: "exit failure", text: valid, exit: 1, invalid: true},
+		{name: "empty", invalid: true},
+		{name: "malformed", text: "bad output", invalid: true},
+		{name: "missing counter", text: strings.ReplaceAll(valid, "Pages free: 1.\n", ""), invalid: true},
+		{name: "invalid counter", text: strings.ReplaceAll(valid, "1.", "oops"), invalid: true},
+		{name: "overflow", text: strings.ReplaceAll(valid, "1.", "18446744073709551615."), invalid: true},
+		{name: "duplicate", text: valid + "Pages free: 1.\n", invalid: true},
+		{name: "observed Mac page size", text: valid, want: 6 * 16384},
+		{name: "zero available", text: strings.NewReplacer("1.", "0.", "2.", "0.", "3.", "0.").Replace(valid)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &DarwinHostSources{run: func(context.Context, []string) (CommandOutput, error) {
+				return CommandOutput{Stdout: []byte(tc.text), ExitCode: tc.exit}, tc.failure
+			}}
+			got, err := darwinAvailableMemory(s, context.Background(), 1<<30)
+			if (err != nil) != tc.invalid || got != tc.want {
+				t.Fatalf("available=%d err=%v", got, err)
+			}
+		})
+	}
+}

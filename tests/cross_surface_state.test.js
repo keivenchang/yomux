@@ -58,7 +58,7 @@ async function runCrossSurfaceStateSuite() {
     const anchor = new TestElement('', 'div');
     anchor.className = 'pane-tab popover-open';
     const current = new TestElement('', 'div');
-    current.className = 'tabber-session-tab popover-open';
+    current.className = 'pane-tab popover-open';
     const popup = new TestElement('', 'div');
     popup.className = 'session-popover popover-open';
     anchor.__yomuxDetachedPopover = popup;
@@ -3273,24 +3273,6 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(popoverLeft + popoverForPosition.getBoundingClientRect().width <= 1200);
     assert.ok(Number.parseInt(popoverForPosition.style.width, 10) > panelForPopover.getBoundingClientRect().width);
     assert.ok(Number.parseInt(popoverForPosition.style.width, 10) <= panelForPopover.getBoundingClientRect().width + 64);
-    const tabberPaneForPopover = {
-      getBoundingClientRect() {
-        return {left: 80, right: 780, top: 0, bottom: 500, width: 700, height: 500};
-      },
-    };
-    const tabberPopover = new TestElement('tabber-pane-popover');
-    tabberPopover.rect = {left: 0, right: 520, top: 0, bottom: 300, width: 520, height: 300};
-    const tabberTab = new TestElement('tabber-session-tab');
-    tabberTab.classList.add('tabber-session-tab');
-    tabberTab.getBoundingClientRect = () => ({left: 132, right: 372, top: 40, bottom: 68, width: 240, height: 28});
-    tabberTab.closest = selector => {
-      assert.equal(selector, '.file-explorer-panel, .file-explorer-changes-panel');
-      return tabberPaneForPopover;
-    };
-    api.positionPaneTabPopover(tabberTab, tabberPopover);
-    assert.equal(tabberPopover.style.left, '80px', 'Tabber session popovers align to the owning pane instead of the indented tree row');
-    assert.equal(tabberPopover.style.width, '520px', 'Tabber session popovers use the same measured content width as pane tabs');
-    assert.equal(tabberPopover.style.maxWidth, '520px', 'Tabber session popovers keep the shared viewport-capped content width');
     filePopover = new TestElement('file-popover');
     filePopover.classList.add('file-popover');
     filePopover.rect = {left: 0, right: 340, top: 0, bottom: 220, width: 340, height: 220};

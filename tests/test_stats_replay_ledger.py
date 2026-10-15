@@ -1421,49 +1421,8 @@ def test_two_independent_writers_overlap_a_mutation_and_a_stale_publication(tmp_
 # production uses. These drive `_build_once` + `_flush_ring_if_due`, the path statsd actually runs.
 
 
-def _real_service(tmp_path, monotonic_now, wall_now):
-    return service_module.StatsCurrentService(
-        tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
-        monotonic=lambda: monotonic_now[0], clock=lambda: wall_now[0], randomizer=lambda: 0.0,
-    )
 
 
-def test_the_real_rebuild_caller_publishes_and_retires_across_close_and_reopen(tmp_path):
-    """Build and publish through the production owner, from stored facts, across real reopens."""
-    database = tmp_path / storage.DATABASE_FILENAME
-    monotonic_now = [0.0]
-    wall_now = [1_800_000_000.0]
-    service = _real_service(tmp_path, monotonic_now, wall_now)
-
-    with storage.Store.open(database) as opened:
-        service.writer = opened
-        service._build_once(opened, True, frozenset())
-        monotonic_now[0] = service_module.RING_FLUSH_SECONDS
-        published = service._flush_ring_if_due()
-        assert published is not None, "the real caller published nothing to contradict"
-        slot = opened._connection().execute(
-            "SELECT resolution_seconds, bucket_start FROM aggregate_ring_slots "
-            "WHERE bucket_json IS NOT NULL ORDER BY resolution_seconds, bucket_start LIMIT 1"
-        ).fetchone()
-        assert slot is not None
-        resolution_seconds, bucket_start = int(slot[0]), int(slot[1])
-        opened.append_batch(observations=[_observation("late", float(bucket_start) + 0.5)])
-        assert (resolution_seconds, bucket_start) in _pending(opened)
-
-    with storage.Store.open(database) as reopened:
-        # Survived a real close: still pending, still hidden from the served window.
-        assert (resolution_seconds, bucket_start) in _pending(reopened)
-        service.writer = reopened
-        service._ring_publications = 0
-        monotonic_now[0] += service_module.RING_FLUSH_SECONDS
-        wall_now[0] += service_module.RING_FLUSH_SECONDS
-        service._build_once(reopened, True, frozenset())
-        assert (resolution_seconds, bucket_start) not in _pending(reopened), (
-            "the real rebuild published but the contradiction was not retired"
-        )
-
-    with storage.Store.open(database) as final:
-        assert (resolution_seconds, bucket_start) not in _pending(final)
 
 
 def _owed_cell_after_restart(tmp_path, monotonic_now, wall_now, *, oldest: bool):

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/keivenchang/yomux/internal/productenv"
-	"github.com/keivenchang/yomux/internal/stats"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -83,26 +82,11 @@ func syntheticStatsRoot() (string, error) {
 	return filepath.Clean(absRoot), nil
 }
 
-func syntheticStatsDatabasePath() (string, error) {
-	root, err := syntheticStatsRoot()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(root, "yostats.sqlite3"), nil
-}
-
 // syntheticHostInputsEnabled covers the complete host-observation boundary,
 // including the separate in-process Daemons process sampler. A fixture that
 // opts into synthetic host facts must not leave one collector on live /proc.
 func syntheticHostInputsEnabled(syntheticStats bool) bool {
 	return syntheticStats || productenv.Value("STATS_SYNTHETIC_HOST") == "1"
-}
-
-func selectHostSources(synthetic bool, production, fixture func() stats.HostSources) stats.HostSources {
-	if synthetic {
-		return fixture()
-	}
-	return production()
 }
 
 // prepareSyntheticStatsInputs recreates a small, fixed-shape collector input

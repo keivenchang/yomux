@@ -2720,5 +2720,11 @@
   "pref.section.sizes": "الأحجام",
   "contextmenu.copyText": "نسخ النص",
   "contextmenu.copyWithStyle": "نسخ مع التنسيق",
-  "status.copiedStyledText": "تم النسخ مع التنسيق"
+  "status.copiedStyledText": "تم النسخ مع التنسيق",
+  "menu.tmux.kill.window": "إنهاء {window} في جلسة tmux",
+  "menu.tmux.kill.session.windows": "إنهاء جلسة tmux بالكامل ({count} نوافذ)",
+  "status.tmux.windowKill.confirm": "هل تريد إنهاء {window} في جلسة tmux ‏'{session}'؟",
+  "status.tmux.windowKill.pending": "جارٍ إنهاء {window} في جلسة tmux ‏'{session}'",
+  "status.tmux.windowKill.failed": "تعذر إنهاء {window} في جلسة tmux ‏'{session}'",
+  "status.tmux.windowKill.success": "تم إنهاء {window} في جلسة tmux ‏'{session}'"
 }

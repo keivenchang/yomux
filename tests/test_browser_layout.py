@@ -1196,6 +1196,8 @@ def test_yostats_popout_is_live_minimized_and_restored(browser, tmp_path):
                 && Math.abs(gridRect.width - window.innerWidth) < 1
                 && Math.abs(gridRect.height - window.innerHeight) < 1),
               hasMinimizeControl: Boolean(document.querySelector('[data-pane-minimize]')),
+              hasPopoutControl: Boolean(document.querySelector('[data-pane-popout]')),
+              hasViewportDiagnostics: Boolean(document.querySelector('#viewportDiagnostics')),
               buttonDisabled: button.disabled,
               sliderDisabled: slider.disabled,
               sliderValue: slider.value,
@@ -1208,6 +1210,8 @@ def test_yostats_popout_is_live_minimized_and_restored(browser, tmp_path):
     assert popup_controls["visibleAppRootChildren"] == ["grid"], popup_controls
     assert popup_controls["gridCoversWindow"] is True, popup_controls
     assert popup_controls["hasMinimizeControl"] is False, popup_controls
+    assert popup_controls["hasPopoutControl"] is False, popup_controls
+    assert popup_controls["hasViewportDiagnostics"] is False, popup_controls
     assert popup_controls["buttonDisabled"] is False, popup_controls
     assert popup_controls["sliderDisabled"] is False, popup_controls
     assert int(popup_controls["sliderMax"]) > 0, popup_controls
@@ -2489,6 +2493,8 @@ def test_current_stats_cpu_stacks_host_binaries_and_daemons_load_shows_yolomux_c
             const goProcessLine = daemonCard?.querySelector('[data-js-debug-series="cpu:yolomux-go"]');
             const systemLegend = card?.querySelector('[data-js-debug-legend="systemCpu"] .js-debug-legend-line .js-debug-line');
             const goProcessLegend = daemonCard?.querySelector('[data-js-debug-legend="cpu:yolomux-go"] .js-debug-legend-line .js-debug-line');
+            const goProcessLegendText = daemonCard?.querySelector('[data-js-debug-legend="cpu:yolomux-go"]')?.textContent.trim() || '';
+            const daemonNote = daemonCard?.querySelector('[data-js-debug-daemons-chart-note]')?.textContent.trim() || '';
             const legendOrder = [...(card?.querySelectorAll('[data-js-debug-legend]') || [])].map(node => node.dataset.jsDebugLegend);
             const linePaintOrder = [...(card?.querySelectorAll('.js-debug-line-chart [data-js-debug-series]') || [])].map(node => node.dataset.jsDebugSeries);
             const cpuCardLegendOrder = [...(card?.querySelectorAll('[data-js-debug-legend]') || [])].map(node => node.dataset.jsDebugLegend);
@@ -2515,6 +2521,7 @@ def test_current_stats_cpu_stacks_host_binaries_and_daemons_load_shows_yolomux_c
               systemLineWidth: systemLine ? getComputedStyle(systemLine).strokeWidth : '',
               processCpuOnCpuCard: Boolean(processCpuLine),
               goProcessLineOnDaemonCard: Boolean(goProcessLine), daemonCardPresent: Boolean(daemonCard), daemonLegendOrder, daemonGroupSeries: daemonData?.groupSeries?.map(series => series.key) || [], daemonComputedSeries, cpuCardLegendOrder,
+              goProcessLegendText, daemonNote,
               legendOrder, linePaintOrder, systemPattern: systemLine?.dataset.jsDebugLinePattern, goProcessPattern: goProcessLine?.dataset.jsDebugLinePattern,
             };
         """
@@ -2530,6 +2537,8 @@ def test_current_stats_cpu_stacks_host_binaries_and_daemons_load_shows_yolomux_c
     assert result["systemLegendWidth"] == "1.5px", result
     assert result["goProcessLineOnDaemonCard"] is True, {"daemonCardPresent": result["daemonCardPresent"], "daemonGroupSeries": result["daemonGroupSeries"], "daemonComputedSeries": result["daemonComputedSeries"], "daemonLegendOrder": result["daemonLegendOrder"], "cpuCardLegendOrder": result["cpuCardLegendOrder"]}
     assert float(result["goProcessLegendWidth"].removesuffix("px")) > 0, result
+    assert "yomux-go" in result["goProcessLegendText"].lower() and "yolomux" not in result["goProcessLegendText"].lower(), result
+    assert "yolomux" not in result["daemonNote"].lower(), result
     assert "cpu:yolomux-go" in result["daemonLegendOrder"], result
     assert result["processCpuOnCpuCard"] is False, result
     assert result["systemPattern"] == "dot" and result["goProcessPattern"] == "dot", result
@@ -4603,7 +4612,7 @@ def test_working_status_ball_is_filled_green_with_a_border_and_no_glow(browser, 
       <section class="glow-pixel-fixture">
         <div id="tabber-glow-row" class="file-tree-row tabber-row" data-tabber-type="session" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
-            <span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host active" data-tabber-session-chrome="shared">
+            <span class="tmux-pane-tab-token tmux-pane-tab-token-action active">
               <span class="pane-tab-core">
                 <span class="session-agent-activity-marker">{_working_agent_glyph_html("codex", "tabber-glow")}</span>
                 <span class="session-button-prefix">8001</span>
@@ -5029,9 +5038,9 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
             <span class="session-button-prefix">8002b</span>
           </span>
         </button>
-        <div id="tabber-session-row" class="file-tree-row tabber-row selected" data-tabber-type="session" style="--file-explorer-font-size: 18px;">
+        <div id="tabber-session-row" class="file-tree-row tabber-row tabber-normal-row selected" data-tabber-type="normal" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
-            <span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host active" data-tabber-session-chrome="shared">
+            <span class="tmux-pane-tab-token tmux-pane-tab-token-action active">
               <span class="pane-tab-core">
                 <span class="session-yolo-marker">YO</span>
                 <span class="session-agent-activity-marker">{_agent_status_glyph_html("codex", "working", "tabber-session-working")}</span>
@@ -5175,100 +5184,6 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
     assert len(transforms) == 1, metrics
 
 
-def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(browser, tmp_path):
-    page = tmp_path / "tabber-parent-child-status-ball-parity.html"
-    load_static_html_fixture(
-        browser,
-        page.parent,
-        page.name,
-        page_html(f"""
-      <section class="tabber-ball-parity-fixture">
-        <div id="tabber-session-row" class="file-tree-row tabber-row selected" data-tabber-type="session" style="--file-explorer-font-size: 16px;">
-          <span class="file-tree-name">
-            <span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host active" data-tabber-session-chrome="shared">
-              <span class="pane-tab-core">
-                <span class="session-yolo-marker">YO</span>
-                <span class="session-agent-activity-marker">{_working_agent_glyph_html("codex", "tabber-session-working")}</span>
-                <span class="session-button-prefix">8001</span>
-              </span>
-            </span>
-          </span>
-        </div>
-        <div id="tabber-window-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 22px;">
-          <span class="file-tree-name">
-            {_tabber_window_button_html("codex", "0:codex", _working_agent_glyph_html("codex", "tabber-window-working", subwindow=True))}
-          </span>
-        </div>
-      </section>
-    """, extra_css="""
-      body { margin: 0; padding: 32px; background: #202633; color: #e8eef8; font: 18px sans-serif; }
-      .tabber-ball-parity-fixture { display: grid; justify-items: start; gap: 16px; }
-      .file-tree-row.tabber-row { width: 620px; padding: 5px 8px; background: #2c3340; overflow: visible; }
-      .file-tree-name,
-      .tabber-session-tab,
-      .tabber-window-token,
-      .agent-window-activity { overflow: visible; }
-    """),
-    )
-    metrics = browser.execute_script(
-        """
-        const read = id => {
-          const icon = document.getElementById(id);
-          const dot = document.getElementById(id + '-dot');
-          const wrap = dot.closest('.agent-window-activity');
-          if (id === 'tabber-window-working') dot.classList.add('agent-window-status-dot--subwindow-pulse');
-          for (const animation of dot.getAnimations()) {
-            const timing = animation.effect?.getTiming?.() || {};
-            const duration = Number(timing.duration) || 0;
-            if (duration > 0) {
-              animation.pause();
-              animation.currentTime = duration * 0.5;
-            }
-          }
-          void dot.offsetWidth;
-          const iconStyle = getComputedStyle(icon);
-          const wrapStyle = getComputedStyle(wrap);
-          const dotStyle = getComputedStyle(dot);
-          const beforeStyle = getComputedStyle(dot, '::before');
-          const dotRect = dot.getBoundingClientRect();
-          return {
-            iconSize: iconStyle.width,
-            agentWindowIconSize: wrapStyle.getPropertyValue('--agent-window-icon-size').trim(),
-            agentStatusBallSize: wrapStyle.getPropertyValue('--agent-status-ball-size').trim(),
-            dotFontSize: dotStyle.fontSize,
-            dotFontStretch: dotStyle.fontStretch,
-            animationName: dotStyle.animationName,
-            beforeAnimationName: beforeStyle.animationName,
-            animationDuration: dotStyle.animationDuration,
-            animationDelay: dotStyle.animationDelay,
-            animationTimingFunction: dotStyle.animationTimingFunction,
-            opacity: dotStyle.opacity,
-            transform: dotStyle.transform,
-            width: dotRect.width,
-            height: dotRect.height,
-          };
-        };
-        return {
-          parent: read('tabber-session-working'),
-          child: read('tabber-window-working'),
-          reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
-        };
-        """
-    )
-    assert metrics["parent"]["iconSize"] != metrics["child"]["iconSize"], metrics
-    assert metrics["parent"]["agentStatusBallSize"] == "14px", metrics
-    assert metrics["parent"]["dotFontSize"] == "14px", metrics
-    assert metrics["child"]["agentStatusBallSize"] == "14px", metrics
-    assert metrics["child"]["dotFontSize"] == "14px", metrics
-    assert abs(metrics["child"]["width"] - (metrics["parent"]["width"] * 0.66)) <= 0.5, metrics
-    assert abs(metrics["child"]["height"] - (metrics["parent"]["height"] * 0.66)) <= 0.5, metrics
-    for side in ("parent", "child"):
-        assert metrics[side]["dotFontStretch"] in {"normal", "100%"}, metrics
-    assert metrics["parent"]["animationName"] == "agent-status-opacity-pulse", metrics
-    assert metrics["child"]["animationName"] == "agent-status-opacity-pulse", metrics
-    assert metrics["child"]["beforeAnimationName"] == "none", metrics
-    assert metrics["parent"]["opacity"] == metrics["child"]["opacity"] == "1", metrics
-    assert metrics["parent"]["transform"] == metrics["child"]["transform"], metrics
 
 
 def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(browser, tmp_path):
@@ -8648,7 +8563,7 @@ def test_touch_pane_tab_close_uses_a_large_hit_target(browser, tmp_path):
     assert metrics["clicks"] == 1, metrics
 
 
-def test_touch_pane_minimize_uses_a_large_one_tap_hit_target(browser, tmp_path):
+def test_touch_pane_minimize_matches_neighbor_geometry_and_accepts_one_tap(browser, tmp_path):
     page = tmp_path / "touch-pane-minimize.html"
     with trusted_touch_emulation(browser, user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"):
         browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True})
@@ -8659,15 +8574,18 @@ def test_touch_pane_minimize_uses_a_large_one_tap_hit_target(browser, tmp_path):
             page_html("""
           <div class="yomux-dockview"><div class="dockview-pane-header-actions"><div class="tabs">
             <button id="touch-minimize" class="tab pane-minimize pc-window-control pc-minimize" type="button" data-pane-minimize="__finder__"></button>
+            <button id="touch-neighbor" class="tab pane-expand pc-window-control pc-zoom" type="button"></button>
           </div></div></div>
         """, extra_css="body { margin: 0; padding: 12px; display: block; height: auto; min-height: 0; }"),
         )
         browser.execute_script("document.body.classList.add('app-topbar-touch-compact');")
         trusted_touch_tap(browser, '#touch-minimize')
         metrics = browser.execute_script(
-            "const control = document.getElementById('touch-minimize'); const style = getComputedStyle(control); return {width: control.getBoundingClientRect().width, height: control.getBoundingClientRect().height, touchAction: style.touchAction};"
+            "const control = document.getElementById('touch-minimize'); const style = getComputedStyle(control); const neighbor = document.getElementById('touch-neighbor').getBoundingClientRect(); return {width: control.getBoundingClientRect().width, height: control.getBoundingClientRect().height, neighborWidth: neighbor.width, neighborHeight: neighbor.height, touchAction: style.touchAction};"
         )
-    assert metrics["width"] >= 36 and metrics["height"] >= 36, metrics
+    assert metrics["width"] > 0 and metrics["height"] > 0, metrics
+    assert abs(metrics["width"] - metrics["neighborWidth"]) <= 1, metrics
+    assert abs(metrics["height"] - metrics["neighborHeight"]) <= 1, metrics
     assert metrics["touchAction"] == "manipulation", metrics
 
 
@@ -8691,7 +8609,7 @@ def test_touch_pane_minimize_dispatches_the_real_layout_action(browser, tmp_path
             )
         )
         before = browser.execute_script(
-            "return {source: slotForItem('1'), target: slotForItem('2'), width: document.querySelector(arguments[0]).getBoundingClientRect().width};",
+            "const button = document.querySelector(arguments[0]); const rect = button.getBoundingClientRect(); const neighbors = Array.from(button.parentElement.querySelectorAll('.tab')).filter(node => node !== button && node.getBoundingClientRect().width > 0 && getComputedStyle(node).visibility !== 'hidden').map(node => ({width:node.getBoundingClientRect().width,height:node.getBoundingClientRect().height})); return {source: slotForItem('1'), target: slotForItem('2'), width: rect.width, height: rect.height, neighbors};",
             selector,
         )
         trusted_touch_tap(browser, selector)
@@ -8704,7 +8622,10 @@ def test_touch_pane_minimize_dispatches_the_real_layout_action(browser, tmp_path
             "return {source: slotForItem('1'), target: slotForItem('2'), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')};"
         )
     assert before["source"] == "left" and before["target"] == "left", before
-    assert before["width"] >= 36, before
+    assert before["width"] > 0 and before["height"] > 0, before
+    assert any(abs(before["width"] - neighbor["width"]) <= 1
+               and abs(before["height"] - neighbor["height"]) <= 1
+               for neighbor in before["neighbors"]), before
     assert after == {"source": None, "target": "left", "errors": [], "rejections": []}, after
 
 
@@ -9758,7 +9679,7 @@ def test_yoagent_auxiliary_details_are_subdued_in_dark_and_light(browser, tmp_pa
             assert wcag_contrast_ratio(metrics["previewColor"], "rgb(255, 255, 255)") >= 7.0, metrics
 
 
-def test_subwindow_pid_and_recency_use_shared_subtle_color_in_each_theme(browser, tmp_path):
+def test_tabber_window_identity_and_recency_use_shared_muted_color_in_each_theme(browser, tmp_path):
     for theme_class in ("theme-dark", "theme-light"):
         page = tmp_path / f"subwindow-metadata-{theme_class}.html"
         load_static_html_fixture(
@@ -9769,7 +9690,8 @@ def test_subwindow_pid_and_recency_use_shared_subtle_color_in_each_theme(browser
                 f"""
                 <script>document.body.className = {json.dumps(theme_class)};</script>
                 <span id="info-pid" class="info-tree-ai-pid">(pid=2345)</span><span id="info-recency" class="info-tree-ai-recency info-tree-trailing-meta">3.1 hrs ago</span>
-                <div class="file-tree-row tabber-row" data-tabber-type="window" data-recency="recent"><span class="tabber-window-pid" id="tabber-pid"> (pid=2345)</span><span class="file-tree-date" id="tabber-recency">3.1 hrs ago</span></div>
+                <div class="file-tree-row tabber-row"><span class="tabber-normal-window-identity" id="tabber-pid">0:codex</span><span class="file-tree-date" id="tabber-recency">3.1 hrs ago</span></div>
+                <span id="tabber-muted" style="color: var(--muted)">muted</span>
                 """,
                 extra_css="body { margin: 0; padding: 20px; background: var(--bg); }",
             ),
@@ -9777,13 +9699,12 @@ def test_subwindow_pid_and_recency_use_shared_subtle_color_in_each_theme(browser
         metrics = browser.execute_script(
             """
             const color = id => getComputedStyle(document.getElementById(id)).color;
-            return {infoPid: color('info-pid'), infoRecency: color('info-recency'), tabberPid: color('tabber-pid'), tabberRecency: color('tabber-recency')};
+            return {infoPid: color('info-pid'), infoRecency: color('info-recency'), tabberPid: color('tabber-pid'), tabberRecency: color('tabber-recency'), tabberMuted: color('tabber-muted')};
             """
         )
-        if theme_class == "theme-dark":
-            assert set(metrics.values()) == {"rgb(102, 112, 133)"}, metrics
-        else:
-            assert set(metrics.values()) == {"rgb(158, 168, 183)"}, metrics
+        info_muted = "rgb(102, 112, 133)" if theme_class == "theme-dark" else "rgb(158, 168, 183)"
+        assert metrics["infoPid"] == metrics["infoRecency"] == info_muted, metrics
+        assert metrics["tabberPid"] == metrics["tabberRecency"] == metrics["tabberMuted"], metrics
 
 
 def test_in_page_notification_titles_omit_external_yolomux_context(browser, tmp_path):
@@ -10552,229 +10473,91 @@ def test_yoinfo_leaf_fields_put_linear_then_pr_before_repository_metadata(browse
     assert order == ["linear", "pr", "path", "branch"], order
 
 
-@pytest.mark.parametrize(
-    ("label", "theme_class", "pane_width", "window_width"),
-    (
-        ("dark-narrow", "theme-dark", 300, 700),
-        ("light-wide", "theme-light", 1200, 1400),
-    ),
-)
-def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_path, label, theme_class, pane_width, window_width):
-    # Static fixture variants are independent, so make failures and scheduling independent too.
-    for _ in range(1):
-        browser.set_window_size(window_width, 720)
-        page = tmp_path / f"tabber-session-row-{label}.html"
-        load_static_html_fixture(
-            browser,
-            page.parent,
-            page.name,
-            page_html(
-                f"""
-                <script>document.body.className = {json.dumps(theme_class)};</script>
-                <section class="fixture-tabber-panel file-explorer-changes-panel">
-                  <div class="file-tree" role="tree">
-                    <div class="file-tree-row tabber-row kind-dir expanded tabber-active-session" data-tabber-type="session" data-tabber-session="1" role="treeitem" aria-expanded="true" aria-selected="false" aria-current="true" style="padding-left: 8px;">
-                      <span class="file-tree-icon tabber-icon ui-disclosure-triangle" data-disclosure-expanded="true">›</span>
-                      <span class="file-tree-name"><span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host active" data-tabber-session-chrome="shared"><span class="pane-tab-core"><span class="session-yolo-marker inactive">YO</span><span class="session-button-prefix"><span class="session-button-number">8801</span></span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">tabber session tab styling keeps the date column visible for a deliberately long work description</span></span></span></span></span>
-                      <span class="file-tree-agent" hidden></span>
-                      <span class="file-tree-diff" hidden></span>
-                      <span class="file-tree-dir-count" hidden></span>
-                      <span class="file-tree-git-status" hidden></span>
-                      <span class="file-tree-date">2m ago</span>
-                    </div>
-                    <div class="file-tree-row tabber-row kind-file" data-tabber-type="window" data-tabber-session="1" role="treeitem" aria-selected="false" style="padding-left: 27px;">
-                      <span class="file-tree-icon tabber-icon"></span>
-                      <span class="file-tree-name"><span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info"><span class="tab tmux-window-button tabber-window-button" data-tabber-window-button="shared"><span class="tmux-window-name-label"><span class="tmux-window-name-text">0:bash</span></span></span></span></span>
-                      <span class="file-tree-agent" hidden></span>
-                      <span class="file-tree-diff" hidden></span>
-                      <span class="file-tree-dir-count" hidden></span>
-                      <span class="file-tree-git-status" hidden></span>
-                      <span class="file-tree-date">2m ago</span>
-                    </div>
-                    <div class="file-tree-row tabber-row kind-dir expanded tabber-active-session" data-tabber-type="session" data-tabber-session="2" role="treeitem" aria-expanded="true" aria-selected="false" style="padding-left: 8px;">
-                      <span class="file-tree-icon tabber-icon ui-disclosure-triangle" data-disclosure-expanded="true">›</span>
-                      <span class="file-tree-name"><span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host active" data-tabber-session-chrome="shared"><span class="pane-tab-core"><span class="session-yolo-marker inactive">YO</span><span class="session-button-prefix"><span class="session-button-number">2</span></span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">main</span></span></span></span></span>
-                      <span class="file-tree-agent" hidden></span>
-                      <span class="file-tree-diff" hidden></span>
-                      <span class="file-tree-dir-count" hidden></span>
-                      <span class="file-tree-git-status" hidden></span>
-                      <span class="file-tree-date">15m ago</span>
-                    </div>
-                    <div class="file-tree-row tabber-row kind-file" data-tabber-type="window" data-tabber-session="2" role="treeitem" aria-selected="false" style="padding-left: 27px;">
-                      <span class="file-tree-icon tabber-icon"></span>
-                      <span class="file-tree-name"><span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info"><span class="tab tmux-window-button tabber-window-button" data-tabber-window-button="shared"><span class="tmux-window-name-label"><span class="tmux-window-name-text">0:bash</span></span></span></span></span>
-                      <span class="file-tree-agent" hidden></span>
-                      <span class="file-tree-diff" hidden></span>
-                      <span class="file-tree-dir-count" hidden></span>
-                      <span class="file-tree-git-status" hidden></span>
-                      <span class="file-tree-date">15m ago</span>
-                    </div>
-                  </div>
-                </section>
-                <span id="info-window-token" class="info-tree-ai-value tmux-window-bar"><span class="tab tmux-window-button">0:bash</span></span>
-                """,
-                extra_css=f"""
-                  body {{ margin: 0; padding: 16px; background: var(--bg); color: var(--text); }}
-                  .fixture-tabber-panel {{ width: {pane_width}px; border: 1px solid var(--border); }}
-                """,
-            ),
-        )
-        metrics = browser.execute_script(
-            """
-            const {rect: rectFor} = window.__yomuxTestHelpers;
-            const resolvedColor = (scope, value) => {
-              const probe = document.createElement('span');
-              probe.style.position = 'absolute';
-              probe.style.pointerEvents = 'none';
-              probe.style.background = value;
-              (scope || document.body).appendChild(probe);
-              const color = getComputedStyle(probe).backgroundColor;
-              probe.remove();
-              return color;
-            };
-            const resolvedRadius = (scope, value) => {
-              const probe = document.createElement('span');
-              probe.style.position = 'absolute';
-              probe.style.pointerEvents = 'none';
-              probe.style.borderRadius = value;
-              (scope || document.body).appendChild(probe);
-              const radius = getComputedStyle(probe).borderTopLeftRadius;
-              probe.remove();
-              return radius;
-            };
-            const rowMetrics = row => {
-              const tab = row?.querySelector('.tabber-session-tab');
-              const name = row?.querySelector('.session-button-prefix');
-              const description = row?.querySelector('.tab-inline-detail');
-              const icon = row?.querySelector(':scope > .file-tree-icon');
-              const date = row?.querySelector(':scope > .file-tree-date');
-              const style = tab ? getComputedStyle(tab) : null;
-              const descriptionStyle = description ? getComputedStyle(description) : null;
-              return {
-                row: rectFor(row),
-                tab: rectFor(tab),
-                name: rectFor(name),
-                description: rectFor(description),
-                icon: rectFor(icon),
-                date: rectFor(date),
-                tabClass: tab?.className || '',
-                rowClass: row?.className || '',
-                ariaCurrent: row?.getAttribute('aria-current') || '',
-                ariaExpanded: row?.getAttribute('aria-expanded') || '',
-                iconText: icon?.textContent || '',
-                dateText: (date?.textContent || '').trim(),
-                dateDisplay: date ? getComputedStyle(date).display : '',
-                dateWidth: date ? date.getBoundingClientRect().width : 0,
-                tabBg: style?.backgroundColor || '',
-                tabColor: style?.color || '',
-                descriptionColor: descriptionStyle?.color || '',
-                tabHeight: style?.height || '',
-                tabTopRadius: style?.borderTopLeftRadius || '',
-                tabBottomRadius: style?.borderBottomLeftRadius || '',
-                tabBorderTop: style?.borderTopColor || '',
-                expectedActiveBg: tab ? resolvedColor(tab.parentElement, 'var(--pane-tab-active-bg)') : '',
-                expectedInactiveBg: tab ? resolvedColor(tab.parentElement, 'var(--pane-inactive-tab-bg)') : '',
-                descriptionScrollWidth: description?.scrollWidth || 0,
-                descriptionClientWidth: description?.clientWidth || 0,
-              };
-            };
-            const sessionRows = Array.from(document.querySelectorAll('.file-tree-row[data-tabber-type="session"]'));
-            const windowRows = Array.from(document.querySelectorAll('.file-tree-row[data-tabber-type="window"]'));
-            const activeRow = sessionRows.find(row => row.dataset.tabberSession === '1');
-            const inactiveRow = sessionRows.find(row => row.dataset.tabberSession === '2');
-            const activeWindowRow = windowRows.find(row => row.dataset.tabberSession === '1');
-            const tabberWindowToken = activeWindowRow?.querySelector('.tabber-window-token');
-            const infoWindowToken = document.getElementById('info-window-token');
-            const tokenAlignment = node => {
-              const style = node ? getComputedStyle(node) : null;
-              return style ? {
-                flex: style.flex,
-                maxWidth: style.maxWidth,
-                marginInlineStart: style.marginInlineStart,
-                justifyContent: style.justifyContent,
-                overflow: style.overflow,
-                verticalAlign: style.verticalAlign,
-              } : null;
-            };
-            const activeWindowText = activeWindowRow?.querySelector('.tmux-window-name-text');
-            const windowIcons = windowRows.map(row => (row.querySelector('.file-tree-icon')?.textContent || '').trim());
-            const nonSessionWithSessionTab = Array.from(document.querySelectorAll('.file-tree-row:not([data-tabber-type="session"]) .tabber-session-tab')).length;
-            return {
-              active: rowMetrics(activeRow),
-              inactive: rowMetrics(inactiveRow),
-              activeWindow: rectFor(activeWindowRow),
-              tabberWindowAlignment: tokenAlignment(tabberWindowToken),
-              infoWindowAlignment: tokenAlignment(infoWindowToken),
-              activeWindowTextColor: activeWindowText ? getComputedStyle(activeWindowText).color : '',
-              expectedText: resolvedColor(document.body, 'var(--text)'),
-              expectedWindowButtonText: resolvedColor(document.body, 'var(--pane-ctl-fg, var(--pc-control-fg))'),
-              expectedActiveText: resolvedColor(document.body, 'var(--pane-tab-active-text)'),
-              expectedInactiveText: resolvedColor(document.body, 'var(--pane-tab-text)'),
-              expectedInactiveBorder: resolvedColor(document.body, 'var(--pane-inactive-tab-border)'),
-              expectedTopRadius: resolvedRadius(document.body, 'var(--pane-tab-top-radius)'),
-              windowIcons,
-              nonSessionWithSessionTab,
-              sessionCount: sessionRows.length,
-              windowCount: windowRows.length,
-              bodyClass: document.body.className,
-            };
-            """
-        )
-        assert metrics["sessionCount"] >= 2, (label, metrics)
-        assert metrics["windowCount"] >= 2, (label, metrics)
-        assert metrics["windowIcons"] == ["", ""], (label, metrics)
-        assert metrics["nonSessionWithSessionTab"] == 0, (label, metrics)
-        assert "tabber-active-session" in metrics["active"]["rowClass"], (label, metrics)
-        assert "active" in metrics["active"]["tabClass"], (label, metrics)
-        assert "tmux-pane-tab-token" in metrics["active"]["tabClass"], (label, metrics)
-        assert "tmux-pane-tab-token-action" in metrics["active"]["tabClass"], (label, metrics)
-        assert metrics["active"]["ariaCurrent"] == "true", (label, metrics)
-        assert metrics["active"]["ariaExpanded"] == "true", (label, metrics)
-        assert metrics["active"]["iconText"] == "›", (label, metrics)
-        assert "tabber-active-session" in metrics["inactive"]["rowClass"], (label, metrics)
-        assert "active" in metrics["inactive"]["tabClass"], (label, metrics)
-        assert "tmux-pane-tab-token" in metrics["inactive"]["tabClass"], (label, metrics)
-        assert "tmux-pane-tab-token-action" in metrics["inactive"]["tabClass"], (label, metrics)
-        assert metrics["inactive"]["ariaCurrent"] == "", (label, metrics)
-        assert metrics["active"]["tabBg"] == metrics["active"]["expectedActiveBg"], (label, metrics)
-        assert metrics["inactive"]["tabBg"] == metrics["inactive"]["expectedActiveBg"], (label, metrics)
-        assert metrics["active"]["tabBg"] != metrics["active"]["tabColor"], (label, metrics)
-        assert metrics["inactive"]["tabBg"] != metrics["inactive"]["tabColor"], (label, metrics)
-        if theme_class == "theme-light":
-            assert metrics["active"]["tabColor"] == metrics["expectedActiveText"], (label, metrics)
-            assert metrics["active"]["descriptionColor"] == metrics["active"]["tabColor"], (label, metrics)
-            assert metrics["inactive"]["tabColor"] == metrics["expectedActiveText"], (label, metrics)
-            assert metrics["inactive"]["descriptionColor"] == metrics["inactive"]["tabColor"], (label, metrics)
-        assert metrics["activeWindowTextColor"] == metrics["expectedWindowButtonText"], (label, metrics)
-        assert metrics["tabberWindowAlignment"] == metrics["infoWindowAlignment"] == {
-            "flex": "0 1 auto",
-            "maxWidth": "100%",
-            "marginInlineStart": "0px",
-            "justifyContent": "flex-start",
-            "overflow": "visible",
-            "verticalAlign": "middle",
-        }, (label, metrics)
-        assert metrics["active"]["tab"]["height"] >= 16, (label, metrics)
-        assert metrics["active"]["tabTopRadius"] == metrics["expectedTopRadius"], (label, metrics)
-        assert metrics["active"]["tabBottomRadius"] == "0px", (label, metrics)
-        assert metrics["inactive"]["tabTopRadius"] == metrics["expectedTopRadius"], (label, metrics)
-        assert metrics["inactive"]["tabBottomRadius"] == "0px", (label, metrics)
-        assert metrics["active"]["dateDisplay"] != "none", (label, metrics)
-        assert metrics["active"]["dateWidth"] > 0, (label, metrics)
-        assert metrics["active"]["dateText"], (label, metrics)
-        assert abs(metrics["active"]["tab"]["width"] - metrics["inactive"]["tab"]["width"]) <= 1, (label, metrics)
-        assert metrics["active"]["icon"]["right"] <= metrics["active"]["tab"]["left"] + 1, (label, metrics)
-        assert metrics["active"]["tab"]["right"] <= metrics["active"]["date"]["left"] + 1, (label, metrics)
-        assert metrics["active"]["name"]["left"] >= metrics["active"]["tab"]["left"] - 1, (label, metrics)
-        assert metrics["active"]["description"]["right"] <= metrics["active"]["tab"]["right"] + 1, (label, metrics)
-        if label == "light-wide":
-            assert metrics["active"]["descriptionScrollWidth"] <= metrics["active"]["descriptionClientWidth"] + 1, (label, metrics)
-        else:
-            assert metrics["active"]["descriptionScrollWidth"] > metrics["active"]["descriptionClientWidth"], (label, metrics)
-        assert metrics["activeWindow"]["top"] >= metrics["active"]["row"]["bottom"] - 1, (label, metrics)
-        screenshot = browser_screenshot_rgb(browser)
-        assert screenshot.size[0] >= window_width - 20, (label, screenshot.size)
-        assert screenshot.getbbox() is not None, label
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_tabber_modes_share_flat_rows_and_keep_header_toolbar_controls(browser, tmp_path, theme):
+    browser.set_window_size(1400, 900)
+    load_live_runtime_boot_fixture(browser, tmp_path,
+        "?sessions=__tabber__,1&layout=row@34(left,right)&tabs=left:__tabber__;right:1",
+        sessions=["1"], settings={"general": {"default_tabber_mode": "normal"}},
+        transcript_sessions={"1": {
+            "panes": [{"window": "0", "window_name": "codex", "command": "codex", "window_active": True},
+                {"window": "1", "window_name": "bash", "command": "bash", "window_active": False}],
+            "window_metadata": [{"window_index": 0, "description": "First conversation"},
+                {"window_index": 1, "description": "Second conversation"}],
+        }})
+    browser.execute_script("""
+      document.body.classList.toggle('theme-light', arguments[0] === 'light');
+      document.body.classList.toggle('theme-dark', arguments[0] === 'dark');
+      setFileExplorerTreeDateMode('relative', 'tabber');
+      tabberActivityPayload.activity = {'1:0':{last_user_input_ts:Date.now()/1000-120}, '1:1':{last_user_input_ts:Date.now()/1000-180}};
+      refreshTabberPanels();
+    """, theme)
+    snapshots = []
+    for mode in ("normal", "advanced", "normal"):
+        if mode != "normal" or snapshots:
+            click_visible_selector(browser, "[data-tabber-advanced]")
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return tabberMode === arguments[0]", mode))
+        browser.execute_async_script("const done = arguments[0]; dockviewActivateUserTerminalTab(tabberItemId); requestAnimationFrame(() => requestAnimationFrame(() => done(true))); ")
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return itemIsActivePaneTab(tabberItemId)"))
+        browser.execute_async_script("""
+          const done = arguments[0];
+          tabberActivityPayload.activity = {'1:0': {last_user_input_ts: Date.now() / 1000 - 120},
+            '1:1': {last_user_input_ts: Date.now() / 1000 - 180}};
+          setFileExplorerTreeDateMode('relative', 'tabber');
+          refreshTabberPanels();
+          requestAnimationFrame(() => requestAnimationFrame(() => done(true)));
+        """)
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+            "return Boolean(document.getElementById(panelDomId(tabberItemId)) || panelNodes.get(tabberItemId))"
+        ))
+        metrics = browser.execute_script("""
+          const visible = element => !!element && element.getClientRects().length > 0 && getComputedStyle(element).display !== 'none';
+          const panel = document.getElementById(panelDomId(tabberItemId)) || panelNodes.get(tabberItemId);
+          const header = [...document.querySelectorAll('.dv-tabs-and-actions-container')]
+            .find(element => element.querySelector('[data-tabber-advanced]'));
+          const tab = header.querySelector('.dockview-pane-tab[data-pane-tab="__tabber__"]');
+          const rows = [...panel.querySelectorAll('.file-tree-row[data-tabber-window]')].filter(row => row.dataset.tabberWindow !== '');
+          const sort = panel.querySelector('[data-file-explorer-tree-sort]');
+          const sortOptions = sort ? [...sort.options].map(option => option.value) : [];
+          let sortFits = null;
+          if (sort) {
+            const style = getComputedStyle(sort), canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d'); context.font = style.font;
+            const widest = Math.max(...[...sort.options].map(option => context.measureText(option.text).width));
+            sortFits = sort.clientWidth >= widest + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) + 16;
+          }
+          return {tabVisible:visible(tab), advancedVisible:visible(header.querySelector('[data-tabber-advanced]')),
+            minimizeVisible:visible(header.querySelector('[data-pane-minimize]')),
+            lookback:visible(panel.querySelector('[data-tabber-lookback]')), sort:visible(sort), sortFits,
+            sortOptions, selectedSort:sort?.value || null,
+            dates:visible(panel.querySelector('[data-file-explorer-tree-dates]')),
+            expandAll:panel.querySelectorAll('[data-file-tree-expand-all], [data-file-tree-collapse-all]').length,
+            rows:rows.map(row => {
+              const primary = row.querySelector('.tabber-normal-primary'), description = row.querySelector('.tabber-normal-description');
+              const date = row.querySelector('.file-tree-date');
+              const nameRect = primary.getBoundingClientRect(), dateRect = date.getBoundingClientRect(), descriptionRect = description.getBoundingClientRect();
+              const style = getComputedStyle(row);
+              return {window:row.dataset.tabberWindow, title:primary.textContent.trim(), description:description.textContent.trim(), date:date.textContent,
+                display:style.display, radius:style.borderRadius, color:style.color,
+                dateAligned:Math.abs(nameRect.top-dateRect.top) <= 3,
+                descriptionBelow:descriptionRect.top >= Math.max(nameRect.bottom,dateRect.bottom),
+                dateFits:dateRect.right <= row.getBoundingClientRect().right + 1};
+            })};
+        """)
+        assert metrics["tabVisible"] == (mode == "advanced"), metrics
+        assert metrics["advancedVisible"] and metrics["minimizeVisible"], metrics
+        assert metrics["lookback"] == metrics["sort"] == metrics["dates"] == (mode == "advanced"), metrics
+        assert metrics["expandAll"] == 0, metrics
+        if mode == "advanced":
+            assert metrics["sortFits"], metrics
+            assert metrics["sortOptions"] == ["newest", "az", "za", "oldest"], metrics
+            assert metrics["selectedSort"] == "newest", metrics
+        assert len(metrics["rows"]) == 2, metrics
+        for row in metrics["rows"]:
+            assert row["display"] == "grid" and row["radius"] != "0px", metrics
+            assert row["descriptionBelow"] and row["dateFits"], metrics
+        snapshots.append(metrics["rows"])
+    assert snapshots[0] == snapshots[1] == snapshots[2], snapshots
 
 
 def test_normal_tabber_activity_date_shares_name_row_and_description_sits_below(browser, tmp_path):
@@ -10836,109 +10619,51 @@ def test_tabber_advanced_toggle_saves_the_preference(browser, tmp_path):
 
 
 def test_tabber_activity_counts_are_hidden_only_in_normal_mode(browser, tmp_path):
+    names = ["1", "2", "3", "4", "5"]
+    transcript_sessions = {name: {"panes": [{"window": "0", "window_id": f"@{index + 1}",
+        "pane": f"%{index + 1}", "window_name": "codex", "command": "codex",
+        "window_active": True, "pid": 100 + index}]} for index, name in enumerate(names)}
+    auto_approve_payload = {"session_order": names, "topology_generation": 1,
+        "agent_window_snapshot_revision": 1, "agent_window_status_fresh": True,
+        "sessions": {name: {"enabled": False, "agent_window_status_fresh": True,
+            "agent_windows": [{"kind": "codex", "state": "working" if index == 0 else "idle",
+                "window": 0, "window_index": 0, "pane_target": f"%{index + 1}",
+                "current": True, "window_active": True, "pid": 100 + index}]}
+            for index, name in enumerate(names)}}
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,
-        sessions=["1"],
+        sessions=names,
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
         settings={"general": {"default_tabber_mode": "advanced"}},
     )
     WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof setTabberMode === 'function'"))
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+        "const counts = globalActivityCounts(); return counts.running === 1 && counts.idle === 4 && counts.total === 5"
+    ))
     browser.execute_script("""
-      const activity = document.querySelector('#topbarActivity');
-      activity.hidden = false;
-      activity.innerHTML = '<span class="topbar-activity-count topbar-activity-working active">1</span><span class="topbar-activity-idle">4 idle</span>';
+      updateTopbarActivityStatus();
       setTabberMode('normal', {refresh: false});
+      updateTopbarActivityStatus();
     """)
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+        "return document.body.classList.contains('tabber-mode-normal') && getComputedStyle(document.querySelector('#topbarActivity')).display === 'none'"
+    ))
     assert browser.execute_script("return getComputedStyle(document.querySelector('#topbarActivity')).display") == "none"
     assert browser.execute_script("return document.querySelector('#topbarActivity').textContent.includes('4 idle')") is True
 
-    browser.execute_script("setTabberMode('advanced', {refresh: false})")
+    browser.execute_script("setTabberMode('advanced', {refresh: false}); updateTopbarActivityStatus();")
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+        "return !document.body.classList.contains('tabber-mode-normal') && getComputedStyle(document.querySelector('#topbarActivity')).display !== 'none'"
+    ))
     assert browser.execute_script("return getComputedStyle(document.querySelector('#topbarActivity')).display") != "none"
     assert browser.execute_script("return document.querySelector('#topbarActivity').textContent.includes('4 idle')") is True
 
 
-def test_tabber_session_tab_popover_uses_normal_tab_surface(browser, tmp_path):
-    page = tmp_path / "tabber-session-popover-surface.html"
-    load_static_html_fixture(
-        browser,
-        page.parent,
-        page.name,
-        page_html(
-            """
-            <script>document.body.className = 'theme-dark';</script>
-            <section class="fixture-tabs">
-              <button id="normal-tab" type="button" class="pane-tab session-popover-host popover-open" style="--pane-tab-popover-left: 24px; --pane-tab-popover-top: 80px;">
-                <span class="pane-tab-core"><span class="session-button-name">8001</span></span>
-                <div id="normal-popover" class="session-popover" role="tooltip"><div class="popover-title">Normal</div></div>
-              </button>
-            </section>
-            <section class="fixture-tabber-panel file-explorer-changes-panel">
-              <div class="file-tree" role="tree">
-                <div class="file-tree-row tabber-row kind-dir expanded" data-tabber-type="session" data-tabber-session="8001" role="treeitem" aria-expanded="true" style="padding-left: 8px;">
-                  <span class="file-tree-icon tabber-icon ui-disclosure-triangle" data-disclosure-expanded="true">›</span>
-                  <span class="file-tree-name">
-                    <span id="tabber-tab" class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host popover-open" data-tabber-session-chrome="shared" style="--pane-tab-popover-left: 24px; --pane-tab-popover-top: 180px;">
-                      <span class="pane-tab-core"><span class="session-button-name">8001</span></span>
-                      <div id="tabber-popover" class="session-popover" role="tooltip"><div class="popover-title">Tabber</div></div>
-                    </span>
-                  </span>
-                  <span class="file-tree-date">now</span>
-                </div>
-              </div>
-            </section>
-            """,
-            extra_css="""
-              body { margin: 0; padding: 24px; display: block; min-height: 480px; background: var(--bg); color: var(--text); }
-              .fixture-tabs { margin-bottom: 56px; }
-              .fixture-tabber-panel { width: 420px; }
-            """,
-        ),
-    )
-    metrics = browser.execute_script(
-        """
-        const read = id => {
-          const popover = document.getElementById(id);
-          const style = getComputedStyle(popover);
-          const rect = popover.getBoundingClientRect();
-          return {
-            position: style.position,
-            visibility: style.visibility,
-            opacity: style.opacity,
-            pointerEvents: style.pointerEvents,
-            zIndex: style.zIndex,
-            width: Math.round(rect.width),
-            maxWidth: style.maxWidth,
-            maxHeight: style.maxHeight,
-            boxShadow: style.boxShadow,
-            borderRadius: style.borderTopLeftRadius,
-            transform: style.transform,
-          };
-        };
-        return {
-          normal: read('normal-popover'),
-          tabber: read('tabber-popover'),
-          tabberOpen: document.getElementById('tabber-tab').classList.contains('popover-open'),
-          normalOpen: document.getElementById('normal-tab').classList.contains('popover-open'),
-        };
-        """
-    )
-    assert metrics["normalOpen"] is True
-    assert metrics["tabberOpen"] is True
-    assert metrics["normal"]["position"] == "fixed", metrics
-    assert metrics["tabber"]["position"] == metrics["normal"]["position"], metrics
-    assert metrics["tabber"]["visibility"] == metrics["normal"]["visibility"] == "visible", metrics
-    assert metrics["tabber"]["opacity"] == metrics["normal"]["opacity"] == "1", metrics
-    assert metrics["tabber"]["pointerEvents"] == metrics["normal"]["pointerEvents"] == "auto", metrics
-    assert metrics["tabber"]["zIndex"] == metrics["normal"]["zIndex"], metrics
-    assert metrics["tabber"]["width"] == metrics["normal"]["width"], metrics
-    assert metrics["tabber"]["maxWidth"] == metrics["normal"]["maxWidth"], metrics
-    assert metrics["tabber"]["maxHeight"] == metrics["normal"]["maxHeight"], metrics
-    assert metrics["tabber"]["boxShadow"] == metrics["normal"]["boxShadow"], metrics
-    assert metrics["tabber"]["borderRadius"] == metrics["normal"]["borderRadius"], metrics
-    assert metrics["tabber"]["transform"] == metrics["normal"]["transform"], metrics
 
 
-def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_path):
+def test_tabber_flat_rows_keep_full_labels_off_native_titles(browser, tmp_path):
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -10984,23 +10709,12 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
         const visibleChromeTitles = rows.flatMap(row => Array.from(row.querySelectorAll('[title]'))
           .filter(node => !node.closest('.session-popover'))
           .map(node => node.outerHTML.slice(0, 220)));
-        const sessionTab = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
-        const customPopover = paneTabPopoverForAnchor(sessionTab);
-        positionPaneTabPopover(sessionTab, customPopover);
-        sessionTab.classList.add('popover-open');
-        customPopover.classList.add('popover-open');
-        const panelRect = sessionTab.closest('.panel').getBoundingClientRect();
-        const popoverRect = customPopover.getBoundingClientRect();
         return {
           rowCount: rows.length,
           rowTitles: rows.map(row => row.getAttribute('title') || ''),
           dataTitles: rows.map(row => row.dataset.tabberTitle || ''),
           visibleChromeTitles,
-          sessionTabHasTitle: sessionTab?.hasAttribute('title') || false,
-          customPopoverPresent: !!customPopover,
-          customPopoverRole: customPopover?.getAttribute('role') || '',
-          customPopoverDetached: customPopover?.parentElement === appOverlayRootElement(),
-          customPopoverCrossesPane: popoverRect.right > panelRect.right + 1,
+          rowHasTitle: rows.some(row => row.hasAttribute('title')),
         };
         """
     )
@@ -11008,18 +10722,14 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     assert all(title == "" for title in metrics["rowTitles"]), metrics
     assert any(title for title in metrics["dataTitles"]), metrics
     assert metrics["visibleChromeTitles"] == [], metrics
-    assert metrics["sessionTabHasTitle"] is False, metrics
-    assert metrics["customPopoverPresent"] is True, metrics
-    assert metrics["customPopoverRole"] == "tooltip", metrics
-    assert metrics["customPopoverDetached"] is True, metrics
-    assert metrics["customPopoverCrossesPane"] is True, metrics
+    assert metrics["rowHasTitle"] is False, metrics
     browser.execute_script("renderAutoApproveButtons();")
     live_sync_metrics = browser.execute_script(
         """
         const visibleChromeTitles = Array.from(document.querySelectorAll('.file-tree-row[data-tabber-type] [title]'))
           .filter(node => !node.closest('.session-popover'))
           .map(node => node.outerHTML.slice(0, 220));
-        const tabberYoloControls = Array.from(document.querySelectorAll('.tabber-session-tab [data-yolo-session]')).map(node => ({
+        const tabberYoloControls = Array.from(document.querySelectorAll('.file-tree-row[data-tabber-type] [data-yolo-session]')).map(node => ({
           title: node.getAttribute('title') || '',
           ariaLabel: node.getAttribute('aria-label') || '',
           pressed: node.getAttribute('aria-pressed') || '',
@@ -11029,72 +10739,8 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     )
     assert live_sync_metrics["visibleChromeTitles"] == [], live_sync_metrics
     assert live_sync_metrics["tabberYoloControls"] == [], live_sync_metrics
-    browser.execute_script(
-        """
-        popoverHideDelayMs = 120;
-        window.__tabberSessionTabBeforeRefresh = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
-        window.__tabberPopoverBeforeRefresh = paneTabPopoverForAnchor(window.__tabberSessionTabBeforeRefresh);
-        window.__tabberSessionTabBeforeRefresh.classList.add('popover-open');
-        window.__tabberSessionTabBeforeRefresh.dataset.popoverHoverState = 'open';
-        window.__tabberPopoverBeforeRefresh.classList.add('popover-open');
-        refreshTabberPanels();
-        """
-    )
-    browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        setTimeout(done, 260);
-        """
-    )
-    hover_metrics = browser.execute_script(
-        """
-        const tab = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
-        const visiblePopovers = [tab?.__yomuxDetachedPopover].filter(popover => {
-          const style = getComputedStyle(popover);
-          const rect = popover.getBoundingClientRect();
-          return style.visibility === 'visible' && Number.parseFloat(style.opacity) > 0.9 && rect.width > 100 && rect.height > 40;
-        });
-        const visibleChromeTitles = Array.from(document.querySelectorAll('.file-tree-row[data-tabber-type] [title]'))
-          .filter(node => !node.closest('.session-popover'))
-          .map(node => node.outerHTML.slice(0, 220));
-        return {
-          sameTab: tab === window.__tabberSessionTabBeforeRefresh,
-          samePopover: visiblePopovers[0] === window.__tabberPopoverBeforeRefresh,
-          visiblePopoverCount: visiblePopovers.length,
-          hoverState: tab?.dataset?.popoverHoverState || '',
-          tabOpen: tab?.classList?.contains('popover-open') || false,
-          visibleChromeTitles,
-        };
-        """
-    )
-    assert hover_metrics["sameTab"] is True, hover_metrics
-    assert hover_metrics["samePopover"] is True, hover_metrics
-    assert hover_metrics["visiblePopoverCount"] == 1, hover_metrics
-    assert hover_metrics["hoverState"] == "open", hover_metrics
-    assert hover_metrics["tabOpen"] is True, hover_metrics
-    assert hover_metrics["visibleChromeTitles"] == [], hover_metrics
-    cleanup_metrics = browser.execute_script(
-        """
-        const oldTab = window.__tabberSessionTabBeforeRefresh;
-        const oldPopover = window.__tabberPopoverBeforeRefresh;
-        const detachedPopoverCountBefore = appOverlayRootElement().querySelectorAll('.pane-tab-detached-popover').length;
-        oldTab.classList.remove('popover-open');
-        oldPopover.classList.remove('popover-open');
-        delete oldTab.dataset.popoverHoverState;
-        refreshTabberPanels();
-        const nextTab = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
-        const nextPopover = paneTabPopoverForAnchor(nextTab);
-        return {
-          oldPopoverConnected: oldPopover.isConnected,
-          nextPopoverDetached: nextPopover?.parentElement === appOverlayRootElement(),
-          detachedPopoverCountBefore,
-          detachedPopoverCount: appOverlayRootElement().querySelectorAll('.pane-tab-detached-popover').length,
-        };
-        """
-    )
-    assert cleanup_metrics["oldPopoverConnected"] is False, cleanup_metrics
-    assert cleanup_metrics["nextPopoverDetached"] is True, cleanup_metrics
-    assert cleanup_metrics["detachedPopoverCount"] == cleanup_metrics["detachedPopoverCountBefore"], cleanup_metrics
+    browser.execute_script("refreshTabberPanels();")
+    assert browser.execute_script("return document.querySelectorAll('.file-tree-row[data-tabber-type]').length >= 2")
 
 
 def test_tabber_native_drag_image_snapshots_offscreen_cloned_rows(browser, tmp_path):
@@ -11116,12 +10762,12 @@ def test_tabber_native_drag_image_snapshots_offscreen_cloned_rows(browser, tmp_p
     browser.execute_async_script("const done = arguments[0]; setTabberMode('advanced'); requestAnimationFrame(() => requestAnimationFrame(() => done(true))); ")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return typeof tabberNativeDragImageForRow === 'function' && document.querySelector('.file-tree-row[data-tabber-type=\"session\"] .tabber-session-tab') !== null"
+            "return typeof tabberNativeDragImageForRow === 'function' && document.querySelector('.file-tree-row[data-tabber-window=\"0\"]') !== null"
         )
     )
     start = browser.execute_script(
         """
-        const tab = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
+        const tab = document.querySelector('.file-tree-row[data-tabber-window="0"]');
         const rect = tab.getBoundingClientRect();
         const target = document.querySelector('#panel-1 .terminal')?.getBoundingClientRect();
         return {
@@ -11142,7 +10788,7 @@ def test_tabber_native_drag_image_snapshots_offscreen_cloned_rows(browser, tmp_p
         document.addEventListener('dragstart', window.__tabberNativeDragHandler, true);
         DataTransfer.prototype.setDragImage = function(image, x, y) {
           if (image?.classList?.contains('tabber-drag-image')) {
-            const root = image.querySelector('.file-tree-row[data-tabber-type="session"]');
+            const root = image.querySelector('.file-tree-row[data-tabber-window="0"]');
             const name = root?.querySelector('.file-tree-name');
             if (name) {
               const marker = document.createElement('span');
@@ -11174,7 +10820,7 @@ def test_tabber_native_drag_image_snapshots_offscreen_cloned_rows(browser, tmp_p
             };
             """
         )
-        assert native["trusted"] and native["called"] and native["rowCount"] >= 2, native
+        assert native["trusted"] and native["called"] and native["rowCount"] >= 1, native
         assert native["cloneOffscreen"] is True, native
         assert native["contentVisibility"] == "visible", native
         assert native["markerRect"] and native["markerRect"]["width"] == 32 and native["markerRect"]["height"] == 16, native
@@ -18801,7 +18447,6 @@ def test_tabber_activity_hover_retains_native_row_target(browser, tmp_path, mode
             "command": "bash", "window_active": True}]} for name in ["1", "2"]})
     browser.execute_script("""
       setTabberMode(arguments[0]);
-      fileExplorerTabberCollapsed.clear();
       tabberActivityPayload = {...tabberActivityPayload, activity: {
         '1:0': {active_recency_ts: Date.now()/1000 - 120},
         '2:0': {active_recency_ts: Date.now()/1000 - 3600}}};
@@ -18888,70 +18533,50 @@ def test_tabber_hover_updates_agent_status_and_description(browser, tmp_path, mo
             "window_name":"codex", "command":"codex", "window_active":True, "pid":123}]},
             "2":{"panes":[{"window":"0", "window_name":"bash", "command":"bash", "window_active":True}]}})
     browser.execute_script("""
-      setTabberMode(arguments[0]); fileExplorerTabberCollapsed.clear(); refreshTabberPanels();
+      setTabberMode(arguments[0]); refreshTabberPanels();
       window.__statusRow = document.querySelector('#panel-__tabber__ .file-tree-row[data-tabber-window="0"]');
       window.__statusRowTop = window.__statusRow.getBoundingClientRect().top;
       window.__statusFixture = state => {
         const revision = Math.max(agentWindowSnapshotRevision(tabberActivityPayload), ...Array.from(autoApproveStates.values(),agentWindowSnapshotRevision)) + 1;
         const agent = {session:'1', window:0, window_index:0, pane:'%1', pane_target:'%1', kind:'codex', state,
-          pid:123, current:true, window_active:true, attention_signature:'hover-status', attention_key:'hover-status'};
-        autoApproveStates.set('1', {agent_windows:[agent], agent_window_status_fresh:true, agent_window_snapshot_revision:revision});
-        tabberActivityPayload = {...tabberActivityPayload, agent_windows:{'1':[agent]}, agent_window_status_fresh:true, agent_window_snapshot_revision:revision};
-        refreshAgentWindowActivityDisplays(['1']);
+          pid:123, current:true, window_active:true, attention_signature:'hover-status', attention_key:'hover-status',
+          working_stopped_ts:state===STATE_KEY.idle ? Date.now()/1000 : 0};
+        handleClientPushEventNow('auto_approve_changed', {data:{
+          topology_generation:tmuxTopologyGeneration, session_order:['1','2'],
+          agent_window_snapshot_revision:revision, agent_window_status_fresh:true,
+          sessions:{'1':{agent_windows:[agent], agent_window_status_fresh:true}, '2':{agent_windows:[]}},
+        }});
       };
     """, mode)
     fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", "#panel-__tabber__ .file-tree-row[data-tabber-window='0']")).perform()
-    if mode == "advanced":
-        fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", "#panel-__tabber__ .tabber-session-tab")).perform()
-        browser.execute_script("""
-          window.__retainedSessionAnchor = document.querySelector('#panel-__tabber__ .tabber-session-tab');
-          window.__retainedSessionPopover = paneTabPopoverForAnchor(window.__retainedSessionAnchor);
-          positionPaneTabPopover(window.__retainedSessionAnchor, window.__retainedSessionPopover);
-          window.__retainedSessionAnchor.classList.add('popover-open');
-          window.__retainedSessionAnchor.dataset.popoverHoverState = 'open';
-          window.__retainedSessionPopover.classList.add('popover-open');
-          const info = transcriptMetadataState.payload.sessions['1'];
-          delete info.work_graph;
-          info.current_path = '/fixture/updated-project';
-          info.selected_pane = {...info.selected_pane,current_path:'/fixture/updated-project'};
-          for (const pane of info.panes) pane.current_path = '/fixture/updated-project';
-        """)
-    browser.execute_script("window.__statusFixture(STATE_KEY.working)")
-    assert browser.execute_script("return !!window.__statusRow.querySelector('.status-indicator--working')")
-    browser.execute_script("window.__statusFixture(STATE_KEY.needsInput)")
-    assert browser.execute_script("return !!window.__statusRow.querySelector('.status-indicator--attention')")
-    if mode == "advanced":
+    for state, tone in (("working", "working"), ("needs-input", "attention"), ("idle", "cooldown"), ("working", "working"), ("unavailable", None)):
         metrics = browser.execute_script("""
-          const tab = document.querySelector('#panel-__tabber__ .tabber-session-tab');
-          const description = buildTabberTree().entries.find(entry=>entry.tabber?.session==='1').tabber.description;
-          return {sameAnchor:tab === window.__retainedSessionAnchor, samePopover:paneTabPopoverForAnchor(tab) === window.__retainedSessionPopover,
-            classes:tab.className, attention:!!tab.querySelector('.status-indicator--attention'),
-            detail:tab.querySelector('.tab-inline-detail')?.textContent, description,
-            popoverText:window.__retainedSessionPopover.textContent};
-        """)
-        assert metrics['sameAnchor'] and metrics['samePopover'] and metrics['attention'], metrics
-        assert 'needs-attention' in metrics['classes'], metrics
-        assert metrics['detail'] == metrics['description'], metrics
-        assert 'updated-project' in metrics['description'] and 'updated-project' in metrics['popoverText'], metrics
+          const requestsBefore = window.__bootFetches.length;
+          window.__statusFixture(arguments[0]);
+          const marker = node => ['working','attention','cooldown'].find(tone => node?.querySelector('.status-indicator--'+tone)) || null;
+          const paneTab = document.querySelector('.pane-tab[data-pane-tab="1"]');
+          return {tabber:marker(window.__statusRow), pane:marker(paneTab), hidden:!!paneTab?.hidden,
+            canonical:sessionAgentWindowStatusModel('1').agents[0]?.state,
+            newRequests:window.__bootFetches.slice(requestsBefore).map(request=>request.path)};
+        """, state)
+        assert metrics["tabber"] == tone, metrics
+        assert metrics["canonical"] == state, metrics
+        assert not any(path in ("/api/activity", "/api/auto-approve", "/api/session-files", "/api/session-metadata") for path in metrics["newRequests"]), metrics
+        if mode == "advanced":
+            assert metrics["pane"] == tone, metrics
+        else:
+            assert metrics["hidden"], metrics
 
     assert browser.execute_script("return window.__statusRow === document.querySelector('#panel-__tabber__ .file-tree-row[data-tabber-window=\"0\"]') && window.__statusRow.getBoundingClientRect().top === window.__statusRowTop")
     if mode == "advanced":
         browser.execute_script("setFileExplorerViewSetting('tabber','treeSortMode','za')")
-        assert browser.execute_script("return [...document.querySelectorAll('#panel-__tabber__ .file-tree > .file-tree-row[data-tabber-type=session]')].map(row=>row.dataset.tabberSession)") == ["2", "1"]
-        assert browser.execute_script("return document.querySelector('#panel-__tabber__ .tabber-session-tab[data-pane-tab=\"1\"]') === window.__retainedSessionAnchor && paneTabPopoverForAnchor(window.__retainedSessionAnchor) === window.__retainedSessionPopover")
-        assert browser.execute_script("""
-          const popover = window.__retainedSessionPopover, anchor = window.__retainedSessionAnchor;
-          const before = popover.getBoundingClientRect().top;
-          positionPaneTabPopover(anchor, popover);
-          return Math.abs(popover.getBoundingClientRect().top - before) <= 1;
-        """)
+        assert browser.execute_script("return window.__statusRow.isConnected && window.__statusRow.dataset.tabberWindow === '0'")
 
-    if mode == "normal":
-        browser.execute_script("""
-          transcriptMetadataState.payload.sessions['1'].window_metadata = [{window_index:0,description:'Updated during hover'}];
-          refreshTabberPanels();
-        """)
-        assert browser.execute_script("return window.__statusRow.querySelector('.tabber-normal-description').textContent") == "Updated during hover"
+    browser.execute_script("""
+      transcriptMetadataState.payload.sessions['1'].window_metadata = [{window_index:0,description:'Updated during hover'}];
+      refreshTabberPanels();
+    """)
+    assert browser.execute_script("return window.__statusRow.querySelector('.tabber-normal-description').textContent") == "Updated during hover"
 
 
 def test_tabber_native_date_choices_survive_url_reload_after_migration(browser, tmp_path):

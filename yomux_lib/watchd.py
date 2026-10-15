@@ -31,7 +31,7 @@ from .filesystem.exclusions import path_exclusion_verdict
 from .background_scheduler import pid_is_alive
 from .host_identity import process_start_identity
 from .infra import common
-from .local_services.rpc import safe_socket_path
+from .watchd_client import default_socket_path
 from .local_services.command_router import CommonDaemonActions
 from .local_services.command_router import LocalServiceCommandRouter
 from .local_services.runtime import LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
@@ -87,10 +87,6 @@ WATCHD_NATIVE_BUILD_QUIESCE_SECONDS = 1.0
 WATCHD_NATIVE_BUILD_HANDOFF_SECONDS = 0.05
 WATCHD_NATIVE_BUILD_RETRY_SECONDS = 0.25
 WATCHD_OPERATION_ERRORS = (OSError, RuntimeError, ValueError, filesystem.FilesystemError)
-
-
-def default_socket_path() -> Path:
-    return safe_socket_path(common.RUNTIME_DIR / "services" / "watchd.sock", prefix="yolomux-watchd")
 
 
 def compact_watch_paths(paths: tuple[str, ...] | list[str]) -> tuple[str, ...]:

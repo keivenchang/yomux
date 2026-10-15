@@ -10,7 +10,7 @@ Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPM
 
 ## Requirements
 
-* Python 3.10+ is currently required by Go's shared HTML renderer, contributor tooling, and the deprecated Python fallback. Removing Python requires replacing these dependencies.
+* Python 3.11+ is currently required by Go's shared HTML renderer, contributor tooling, and the deprecated Python fallback. Removing Python requires replacing these dependencies.
 
 * tmux
 
@@ -34,7 +34,7 @@ tmux new-session -A -s project1     # optional: create one if you do not already
 # Legacy backend: ./boot.sh --deprecated-python 9998
 ```
 
-`make setup` checks for Python 3.10+ before doing any build work, then pip automatically installs every runtime dependency, including the native `watchfiles` filesystem-event backend. On an externally managed system Python (PEP 668), create and activate a virtualenv first (`python3 -m venv .venv && . .venv/bin/activate`), then `make setup`. Setup generates the ignored `static/yomux.js` and `static/yomux.css` bundles from `static_src/`; they are recreated when missing or stale. The old `/static/yolomux.js` and `/static/yolomux.css` URLs remain aliases during the transition. The runtime serves the tracked xterm files under `static/vendor/`, so npm is not needed to start YOmux. Contributors can run `make xterm` to install the pinned upstream packages and verify that their bytes still match the tracked files. The Python wheel does not currently package these static assets.
+`make setup` checks for Python 3.11+ before doing any build work, then pip automatically installs every runtime dependency, including the native `watchfiles` filesystem-event backend. On an externally managed system Python (PEP 668), create and activate a virtualenv first (`python3 -m venv .venv && . .venv/bin/activate`), then `make setup`. Setup generates the ignored `static/yomux.js` and `static/yomux.css` bundles from `static_src/`; they are recreated when missing or stale. The old `/static/yolomux.js` and `/static/yolomux.css` URLs remain aliases during the transition. The runtime serves the tracked xterm files under `static/vendor/`, so npm is not needed to start YOmux. Contributors can run `make xterm` to install the pinned upstream packages and verify that their bytes still match the tracked files. The Python wheel does not currently package these static assets.
 
 ### Go backend
 

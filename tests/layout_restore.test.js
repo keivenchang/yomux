@@ -2343,7 +2343,7 @@ async function runLayoutRestoreSuite() {
     const reconnectEnd = source.indexOf('function resyncVisibleTerminalRemoteSizes(', reconnectStart);
     assert.ok(reconnectStart > 0 && reconnectEnd > reconnectStart, 'could not locate reconnect resync body');
     const reconnectBody = source.slice(reconnectStart, reconnectEnd);
-    assert.ok(reconnectBody.includes('refreshAll({forceMetadata: false});'), 'reconnect resync uses ordinary metadata convergence');
+    assert.ok(reconnectBody.includes('refreshAll({forceMetadata: false, settleTerminalResize: false});'), 'reconnect resync uses ordinary metadata convergence without the manual-refresh settle claim');
     assert.equal(reconnectBody.includes('refreshAll();'), false, 'reconnect resync cannot invoke the forced metadata path');
     assert.ok(source.includes('transcriptMetadataState.loading = true;'), 'metadata refreshes expose a loading state');
     assert.ok(source.includes('infoMetadataLoadingHtml()'), 'YO!info renders an explicit repo-metadata loading state');
@@ -3936,6 +3936,44 @@ async function runLayoutRestoreSuite() {
     assert.ok(/'debug-mobile': \(\) => debugMobileCaptureTextForClipboard\(\)/.test(panelSource), 'the generic copy route keeps the raw JSON owner');
     assert.ok(/closest\('\[data-copy-feedback-key\]'\)/.test(panelSource), 'all debug copy buttons share one delegated handler');
   });
+
+  for (const input of ['touch', 'wheel', 'keyboard', 'scrollbar']) {
+    test(`embedded Preview ${input} cancels its inner restore before geometry moves`, () => {
+      const frames = [];
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+      });
+      const preview = new TestElement('embedded-owner-preview');
+      api.renderEditorPreviewPane(preview, '/repo/input-owner.html', '<p>Input owner</p>');
+      const frame = preview.querySelector('.file-editor-html-preview');
+      const inner = new TestElement('embedded-owner-scroller');
+      const listeners = new Map();
+      frame.contentDocument = {scrollingElement: inner, documentElement: inner,
+        addEventListener(type, listener) {
+          if (!listeners.has(type)) listeners.set(type, []);
+          listeners.get(type).push(listener);
+        },
+      };
+      frame.listeners.get('load')[0]();
+      frames.length = 0;
+      api.restoreElementScrollPositionForTest(inner, 400, 0);
+      let top = inner.scrollTop;
+      let writes = 0;
+      Object.defineProperty(inner, 'scrollTop', {get() { return top; }, set(value) { writes += 1; top = value; }});
+      const send = (type, event) => listeners.get(type).forEach(listener => listener({target: inner, ...event, type}));
+      if (input === 'touch') {
+        send('touchstart', {touches: [{identifier: 8, clientX: 20, clientY: 30}]});
+        send('touchmove', {touches: [{identifier: 8, clientX: 20, clientY: 42}]});
+      } else if (input === 'wheel') send('wheel', {deltaY: 12});
+      else if (input === 'keyboard') send('keydown', {key: 'PageDown'});
+      else send('pointerdown', {pointerId: 8});
+      assert.ok(api.previewScrollUserOwnershipGenerationForTest(preview) > 0, 'input claims the wrapper');
+      assert.ok(api.previewScrollUserOwnershipGenerationForTest(inner) > 0, 'input also claims the actual scroller');
+      frames.splice(0).forEach(callback => callback());
+      assert.equal(writes, 0, 'the pending restore retires before issuing a stale write');
+      assert.equal(top, 400, 'no geometry change was needed to cancel restoration');
+    });
+  }
 
   test('deferred Preview restore yields when native scroll takes ownership', () => {
     const frames = [];

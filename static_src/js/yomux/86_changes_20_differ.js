@@ -425,11 +425,11 @@ function fileExplorerTreeSortSelectHtml(extraClass = '', view = 'finder') {
   const classes = ['file-explorer-sort-select', extraClass].filter(Boolean).join(' ');
   const surface = normalizeFileExplorerView(view);
   const mode = fileExplorerTreeSortModeForView(surface);
+  const sortOptions = surface === 'tabber'
+    ? [['newest', t('common.sort.recent')], ['az', t('finder.sort.az')], ['za', t('finder.sort.za')], ['oldest', t('finder.sort.oldest')]]
+    : [['az', t('finder.sort.az')], ['za', t('finder.sort.za')], ['newest', t('common.sort.recent')], ['oldest', t('finder.sort.oldest')]];
   return `<select class="${esc(classes)}" data-file-explorer-tree-sort data-file-explorer-view="${esc(surface)}" title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
-              <option value="az"${mode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
-              <option value="za"${mode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
-              <option value="newest"${mode === 'newest' ? ' selected' : ''}>${esc(t('common.sort.recent'))}</option>
-              <option value="oldest"${mode === 'oldest' ? ' selected' : ''}>${esc(t('finder.sort.oldest'))}</option>
+              ${sortOptions.map(([value, label]) => `<option value="${value}"${mode === value ? ' selected' : ''}>${esc(label)}</option>`).join('')}
             </select>`;
 }
 
@@ -476,14 +476,17 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   if (view === 'tabber') {
     return `
       <div class="changes-toolbar tabber-toolbar">
-        <button type="button" class="tabber-new-chat" data-tabber-new-chat aria-label="New Chat">
+        <div class="app-menu tabber-new-chat-menu" data-app-menu="tabber-new-chat">
+        <button type="button" class="app-menu-button tabber-new-chat" data-tabber-new-chat aria-label="New Chat" aria-haspopup="menu" aria-expanded="false">
           <svg class="tabber-new-chat-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M13.5 5.5H6.75A2.75 2.75 0 0 0 4 8.25v9A2.75 2.75 0 0 0 6.75 20h9a2.75 2.75 0 0 0 2.75-2.75V10.5"/><path d="m11 13 8.25-8.25a2.12 2.12 0 0 1 3 3L14 16l-4 1z"/></svg>
           <span>New Chat</span>
         </button>
+        <div class="app-menu-popover tabber-new-chat-popover" role="menu" aria-label="New Chat"></div>
+        </div>
         <button type="button" class="tabber-search" data-tabber-search aria-label="${esc(t('common.search'))}" title="${esc(t('topbar.search.aria'))}">
           <svg class="tabber-search-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.75" cy="10.75" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>
         </button>
-        ${tabberIsAdvanced() ? `${tabberLookbackControlHtml()}${fileExplorerTreeSortSelectHtml('changes-sort-select-compact', 'tabber')}${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'tabber')}${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}` : ''}
+        ${tabberIsAdvanced() ? `${tabberLookbackControlHtml()}${fileExplorerTreeSortSelectHtml('changes-sort-select-compact', 'tabber')}${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'tabber')}` : ''}
       </div>
       <div class="changes-groups" data-tabber-mode="${tabberIsAdvanced() ? 'advanced' : 'normal'}"></div>`;
   }

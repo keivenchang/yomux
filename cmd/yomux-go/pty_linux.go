@@ -11,7 +11,7 @@ import (
 )
 
 func openPTY(rows, cols int) (*ptyPair, error) {
-	masterFD, err := syscall.Open("/dev/ptmx", syscall.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
+	masterFD, err := syscall.Open("/dev/ptmx", syscall.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -44,9 +44,11 @@ func openPTY(rows, cols int) (*ptyPair, error) {
 
 func (p *ptyPair) resizeDimensions(rows, cols int) error {
 	size := winsize{rows: uint16(rows), cols: uint16(cols)}
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, p.master.Fd(), uintptr(0x5414), uintptr(unsafe.Pointer(&size)))
-	if errno != 0 {
-		return errno
-	}
-	return nil
+	return p.withMasterDescriptor(func(fd uintptr) error {
+		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(0x5414), uintptr(unsafe.Pointer(&size)))
+		if errno != 0 {
+			return errno
+		}
+		return nil
+	})
 }

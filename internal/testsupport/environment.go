@@ -33,7 +33,10 @@ func SyntheticEnvironment(overrides ...string) []string {
 		}
 	}
 	privateRoot := productenv.Value("PRIVATE_TEST_ENV_ROOT")
-	privateDefaults := make([]string, 0, 4)
+	privateDefaults := make([]string, 0, 5)
+	if _, overridden := overrideKeys["YOMUX_TEST_DISABLE_PRICING_REFRESH"]; !overridden {
+		privateDefaults = append(privateDefaults, "YOMUX_TEST_DISABLE_PRICING_REFRESH=1")
+	}
 	if privateRoot != "" {
 		if _, overridden := overrideKeys["HOME"]; !overridden {
 			privateDefaults = append(privateDefaults, "HOME="+filepath.Join(privateRoot, privateTestDirectories["HOME"]))

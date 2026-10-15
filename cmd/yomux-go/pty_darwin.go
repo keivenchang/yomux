@@ -13,7 +13,7 @@ import (
 )
 
 func openPTY(rows, cols int) (*ptyPair, error) {
-	masterFD, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
+	masterFD, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -53,5 +53,7 @@ func openPTY(rows, cols int) (*ptyPair, error) {
 }
 func (p *ptyPair) resizeDimensions(rows, cols int) error {
 	size := winsize{rows: uint16(rows), cols: uint16(cols)}
-	return unix.IoctlSetWinsize(int(p.master.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Row: size.rows, Col: size.cols})
+	return p.withMasterDescriptor(func(fd uintptr) error {
+		return unix.IoctlSetWinsize(int(fd), unix.TIOCSWINSZ, &unix.Winsize{Row: size.rows, Col: size.cols})
+	})
 }

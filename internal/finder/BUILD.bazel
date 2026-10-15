@@ -19,6 +19,7 @@ go_library(
     deps = [
         "//internal/cache:cache_lib",
         "//internal/productenv:productenv_lib",
+        "//internal/work:work_lib",
         "@com_github_mattn_go_sqlite3//:go_default_library",
         "@org_golang_x_sys//unix",
         "@org_golang_x_text//cases",
@@ -28,6 +29,7 @@ go_library(
 
 go_test_pair(
     name = "finder",
+    timeout = "moderate",
     srcs = glob(["*_test.go"]),
     data = [
         "//:static_src/js/yomux/10_core_utils.js",

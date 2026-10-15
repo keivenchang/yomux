@@ -1509,6 +1509,140 @@ def test_registry_final_identity_probe_accepts_late_valid_and_fails_only_a_reuse
     assert transient_starts == [True]
 
 
+@pytest.mark.parametrize("complete", [False, True])
+def test_pending_startup_reentry_retains_the_exact_child_and_record(tmp_path, monkeypatch, complete):
+    response = {"ok": False}
+    registry, starts, calls, failures = _identity_probe_registry(
+        tmp_path, monkeypatch, leader_pid=44400, identities=["ps:spawned"], status_response=response,
+    )
+    assert registry.ensure_started() is False
+    child, ownership = registry.process, registry.spawn_ownership
+    record = registry._read_record()
+    assert record["startup_pending"] is True
+    assert "protocol_version" not in record and "started_at" not in record
+    assert record["pid"] == child.pid
+    assert record["spawn_generation"] == ownership.generation_marker
+    after_backoff = registry.next_start_at + 1
+    registry.clock = lambda: after_backoff
+    if complete:
+        response.update(ok=True, version=1, service="fixture", pid=44400, process_start_identity="ps:spawned", started_at=42)
+    assert registry.ensure_started() is complete
+    assert registry.process is child and registry.spawn_ownership.generation_marker == ownership.generation_marker
+    assert starts == [True] and failures == []
+    assert calls == [("status", 0.2), ("status", 0.2)]
+    if complete:
+        ready = registry._read_record()
+        assert "startup_pending" not in ready
+        assert ready["protocol_version"] == 1 and ready["started_at"] == 42
+        assert ready["supervisor"] == record["supervisor"]
+    else:
+        assert registry._read_record() == record
+
+
+def test_pending_startup_record_fences_a_separate_registry(tmp_path, monkeypatch):
+    first, first_starts, _, _ = _identity_probe_registry(
+        tmp_path, monkeypatch, leader_pid=44400, identities=["ps:first"], status_response={"ok": False},
+    )
+    second, second_starts, _, _ = _identity_probe_registry(
+        tmp_path, monkeypatch, leader_pid=44401, identities=["ps:second"], status_response={"ok": False},
+    )
+    identities = {44400: "ps:first", 44401: "ps:second", os.getpid(): first.host_identity.process_start_identity}
+    monkeypatch.setattr(registry_mod, "process_start_identity", identities.get)
+    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: pid in identities)
+    monkeypatch.setattr(registry_mod, "process_state", lambda pid: "S")
+    assert first.ensure_started() is False
+    pending = first._read_record()
+    assert second.ensure_started() is False
+    assert first_starts == [True] and second_starts == []
+    assert second._read_record() == pending
+
+
+@pytest.mark.parametrize("method", ["ensure_started", "complete_pending_startup"])
+def test_pending_startup_child_exit_is_reported_once_without_replacement(tmp_path, monkeypatch, method):
+    registry, starts, _, failures = _identity_probe_registry(
+        tmp_path, monkeypatch, leader_pid=44400, identities=["ps:spawned"], status_response={"ok": False},
+    )
+    assert registry.ensure_started() is False
+    monkeypatch.setattr(registry.process, "poll", lambda: 7)
+    if method == "ensure_started":
+        after_backoff = registry.next_start_at + 1
+        registry.clock = lambda: after_backoff
+        assert registry.ensure_started() is False
+    else:
+        assert registry.complete_pending_startup(
+            expected_process=registry.process, expected_ownership=registry.spawn_ownership,
+        ) is False
+    assert len(failures) == 1
+    assert starts == [True]
+    assert registry._child_ownership.startup_pending is False
+
+
+@pytest.mark.parametrize("confirmed_dead", [False, True])
+@pytest.mark.parametrize("write_error", [False, True])
+def test_pending_startup_publication_failure_retires_through_the_fenced_owner(tmp_path, monkeypatch, confirmed_dead, write_error):
+    registry, starts, _, failures = _identity_probe_registry(
+        tmp_path, monkeypatch, leader_pid=44400, identities=["ps:spawned"], status_response={"ok": False},
+    )
+    retirements = []
+    def failed_write(record):
+        if write_error:
+            raise OSError("injected pending publication failure")
+        return False
+
+    monkeypatch.setattr(registry, "_write_record", failed_write)
+
+    def terminate(record, pid, *, claim_state):
+        retirements.append((record, pid, claim_state))
+        return SimpleNamespace(confirmed_dead=confirmed_dead, as_dict=lambda: {"confirmed_dead": confirmed_dead})
+
+    monkeypatch.setattr(registry, "_terminate_recorded_generation", terminate)
+    assert registry.ensure_started() is False
+    assert starts == [True] and len(failures) == 1
+    assert len(retirements) == 1
+    record, pid, claim_state = retirements[0]
+    assert record["startup_pending"] is True and record["pid"] == pid == 44400
+    assert record["process_start_identity"] == "ps:spawned"
+    assert record["spawn_generation"]
+    assert claim_state == "launcher_owned_pending_startup"
+    assert registry._terminal_failure is True
+    assert ("retirement unconfirmed" in failures[0]) is (not confirmed_dead)
+    assert registry.ensure_started() is False
+    assert starts == [True] and len(failures) == 1
+
+
+def test_pending_completion_obeys_backoff_seal_and_captured_owner(tmp_path, monkeypatch):
+    registry, starts, calls, failures = _identity_probe_registry(
+        tmp_path, monkeypatch, leader_pid=44400, identities=["ps:spawned"], status_response={"ok": False},
+    )
+    assert registry.ensure_started() is False
+    child, ownership = registry.process, registry.spawn_ownership
+    assert registry.ensure_started() is False
+    assert calls == [("status", 0.2)]
+    assert registry.complete_pending_startup(expected_process=object(), expected_ownership=ownership) is False
+    assert registry.complete_pending_startup(expected_process=child, expected_ownership=None) is False
+    registry._starts_sealed.set()
+    assert registry.complete_pending_startup(expected_process=child, expected_ownership=ownership) is False
+    assert calls == [("status", 0.2)] and starts == [True] and failures == []
+
+
+@pytest.mark.parametrize("remove_record_directory", [False, True])
+def test_pending_completion_never_recreates_a_removed_service_directory(tmp_path, monkeypatch, remove_record_directory):
+    registry, starts, calls, failures = _identity_probe_registry(
+        tmp_path, monkeypatch, leader_pid=44400, identities=["ps:spawned"], status_response={"ok": False},
+    )
+    assert registry.ensure_started() is False
+    child, ownership = registry.process, registry.spawn_ownership
+    directory = registry.record_path.parent if remove_record_directory else registry.lock_path.parent
+    rmtree_within(directory, tmp_path)
+    after_backoff = registry.next_start_at + 1
+    registry.clock = lambda: after_backoff
+    assert registry.ensure_started() is False
+    assert registry.complete_pending_startup(expected_process=child, expected_ownership=ownership) is False
+    assert not directory.exists()
+    assert starts == [True] and calls == [("status", 0.2)] and failures == []
+    assert "refusing to resurrect" in registry._failure_reason
+
+
 @pytest.mark.parametrize(
     ("status_response", "reason"),
     [
@@ -1545,7 +1679,9 @@ def test_registry_final_status_requires_response_identity_and_does_not_substitut
 
     assert registry.ensure_started() is False
     assert calls == [("status", 0.2)]
-    assert registry._read_record() == {}
+    assert registry._read_record()["startup_pending"] is True
+    assert "protocol_version" not in registry._read_record()
+    assert "started_at" not in registry._read_record()
     assert failures == []
     assert registry.failure_response()["terminal"] is False
     assert starts == [True]
@@ -1813,7 +1949,7 @@ def test_fixture_batchd_pin_reports_owned_pending_child_before_rollback(tmp_path
     assert "fixture-secret-do-not-display" not in diagnostic
     assert ("[redacted]" if "api_key" in stderr else stderr) in diagnostic
     assert starts == [True] and failures == []
-    assert calls.count(("status", 0.2)) == 1
+    assert calls.count(("status", 0.2)) == 2
 
 
 def test_registry_recovers_a_lost_status_on_the_next_attempt_with_a_real_record(tmp_path, monkeypatch):
@@ -1896,14 +2032,14 @@ def test_registry_publication_validator_accepts_a_proven_status(tmp_path, status
 
 
 def test_registry_writes_the_service_record_through_exactly_one_validator(tmp_path):
-    """Divergent copies of this write are the defect; keep one publication owner."""
+    """Observed-ready validation and captured pending identity share one durable CAS writer."""
     source = (REPO_ROOT / "yomux_lib" / "local_services" / "registry.py").read_text(encoding="utf-8")
     call_lines = [
         line.strip()
         for line in source.splitlines()
         if "_write_record(" in line and "def _write_record" not in line
     ]
-    assert call_lines == ["self._write_record(record)"]
+    assert call_lines == ["self._write_record(record)", "published = self._write_record(pending)"]
     assert source.count("def _publish_record(") == 1
 
 
@@ -2206,6 +2342,8 @@ def test_registry_reclaims_service_left_by_a_dead_web_launcher(tmp_path, monkeyp
     spawned = []
 
     class FakeProcess:
+        pid = 5252
+
         def poll(self):
             return None
 
@@ -2236,11 +2374,13 @@ def test_registry_reclaims_service_left_by_a_dead_web_launcher(tmp_path, monkeyp
             alive[stale_pid] = False
             return {"ok": True}
         if spawned:
-            return {"ok": True, "version": 21, "pid": replacement_pid, "started_at": 1}
+            return {"ok": True, "version": 21, "pid": replacement_pid, "process_start_identity": f"proc:{replacement_pid + 1000}", "started_at": 1}
         if stale_version > 21:
             return {"ok": False, "error_code": "upgrade_required", "version": stale_version, "pid": stale_pid}
         return {"ok": True, "version": stale_version, "pid": stale_pid}
 
+    monkeypatch.setattr(registry_mod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(registry_mod.os, "getsid", lambda pid: pid)
     monkeypatch.setattr(registry, "_request", fake_request)
     monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: alive.get(pid, False))
     monkeypatch.setattr(
@@ -2666,7 +2806,24 @@ def test_registry_two_private_roots_never_cross_talk(tmp_path, monkeypatch):
     registry_a = _publication_registry(root_a, clock=clock_a, spawned=spawned_a)
     registry_b = _publication_registry(root_b, clock=clock_b, spawned=spawned_b)
 
-    def _fake_request_after_spawn(spawned):
+    # A successful owned startup must model the same PID/session/birth proof
+    # as Popen, not the old no-PID stand-in used by lost-publication tests.
+    monkeypatch.setattr(registry_mod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(registry_mod.os, "getsid", lambda pid: pid)
+    monkeypatch.setattr(registry_mod, "process_start_identity", lambda pid: f"proc:{pid + 1000}")
+    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: True)
+    monkeypatch.setattr(registry_mod, "process_state", lambda pid: "S")
+
+    def spawned_child(pid, spawned):
+        child = _NeverExitingProcess()
+        child.pid = pid
+        spawned.append(True)
+        return child
+
+    monkeypatch.setattr(registry_a, "popen", lambda *args, **kwargs: spawned_child(45100, spawned_a))
+    monkeypatch.setattr(registry_b, "popen", lambda *args, **kwargs: spawned_child(45101, spawned_b))
+
+    def _fake_request_after_spawn(spawned, pid):
         # Ping/status only succeed once this registry's own popen has actually
         # run, so ensure_started must take the real bounded-startup path
         # (spawn, then observe healthy) instead of short-circuiting on an
@@ -2674,12 +2831,12 @@ def test_registry_two_private_roots_never_cross_talk(tmp_path, monkeypatch):
         def fake_request(_method, payload=None, timeout=0.2, protocol_version=None):
             if not spawned:
                 return {}
-            return {"ok": True, "version": 1, "pid": os.getpid(), "started_at": 1.0}
+            return {"ok": True, "version": 1, "pid": pid, "process_start_identity": f"proc:{pid + 1000}", "started_at": 1.0}
 
         return fake_request
 
-    monkeypatch.setattr(registry_a, "_request", _fake_request_after_spawn(spawned_a))
-    monkeypatch.setattr(registry_b, "_request", _fake_request_after_spawn(spawned_b))
+    monkeypatch.setattr(registry_a, "_request", _fake_request_after_spawn(spawned_a, 45100))
+    monkeypatch.setattr(registry_b, "_request", _fake_request_after_spawn(spawned_b, 45101))
 
     assert registry_a.ensure_started() is True
     snapshot_a_before = _directory_snapshot(root_a)

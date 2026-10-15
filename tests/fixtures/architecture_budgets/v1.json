@@ -1438,7 +1438,7 @@
       "writer": "static_src/js/yomux/20_layout_state.js"
     },
     {
-      "count": 2,
+      "count": 1,
       "name": "sessions",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/40_file_explorer_files.js"

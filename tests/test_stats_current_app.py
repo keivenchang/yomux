@@ -91,15 +91,6 @@ def test_agent_status_adapter_records_statusd_failure_as_unavailable():
     assert facts.unavailable_spans[0].reason == "statusd-unavailable"
 
 
-def test_agent_status_adapter_records_statusd_failure_as_unavailable(monkeypatch):
-    webapp = object.__new__(app_module.TmuxWebtermApp)
-    webapp.sessions = ["1"]
-    webapp.status_snapshot_payload = lambda: None
-    facts = webapp.collect_current_stats_agent_status(attempt("agent_status", 10))
-    assert facts.observations == ()
-    assert len(facts.unavailable_spans) == 1
-    assert facts.unavailable_spans[0].source_id == "statusd"
-    assert facts.unavailable_spans[0].reason == "statusd-unavailable"
 
 
 def test_agent_status_collector_waits_out_its_initial_statusd_refresh(monkeypatch):

@@ -53,7 +53,7 @@ function paneFrameControlsHtml(session, options = {}) {
     && !urlFlagEnabled('pane_popout')
     && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
   const includeExpand = controlOptions.expand !== false;
-  const includePopout = controlOptions.popout === true;
+  const includePopout = controlOptions.popout === true && !urlFlagEnabled('pane_popout');
   if (includeActions) {
     add({className: 'pane-actions', dataset: {paneActions: session}, title: t('common.sessionActions'), label: t('common.sessionActions'), html: '<span class="pane-actions-dots" aria-hidden="true">...</span>'});
   }
@@ -68,7 +68,7 @@ function paneFrameControlsHtml(session, options = {}) {
     add({className: 'pane-expand', platformKind: 'zoom', dataset: {paneExpand: session}, title: t('pane.expand'), label: t('pane.expand'), hidden: !canPaneExpand(session)});
   }
   if (includeMinimize) {
-    add({className: 'pane-minimize', platformKind: 'minimize', dataset: {paneMinimize: session}, title: t('pane.minimize'), label: t('pane.minimize'), hidden: !tabLayoutManipulationAllowed()});
+    add({className: 'pane-minimize', platformKind: 'minimize', dataset: {paneMinimize: session}, title: t('pane.minimize'), label: t('pane.minimize'), hidden: !tabLayoutManipulationAllowed() && session !== tabberItemId});
   }
   if (controlOptions.close) {
     const closeLabel = controlOptions.closeLabel || t('pane.closeTab');

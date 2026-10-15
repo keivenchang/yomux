@@ -2540,5 +2540,11 @@
   "pref.section.sizes": "大小",
   "contextmenu.copyText": "複製文字",
   "contextmenu.copyWithStyle": "複製含樣式",
-  "status.copiedStyledText": "已複製含樣式"
+  "status.copiedStyledText": "已複製含樣式",
+  "menu.tmux.kill.window": "結束 tmux 工作階段中的 {window}",
+  "menu.tmux.kill.session.windows": "結束整個 tmux 工作階段（{count} 個視窗）",
+  "status.tmux.windowKill.confirm": "要結束 tmux 工作階段「{session}」中的 {window} 嗎？",
+  "status.tmux.windowKill.pending": "正在結束 tmux 工作階段「{session}」中的 {window}",
+  "status.tmux.windowKill.failed": "無法結束 tmux 工作階段「{session}」中的 {window}",
+  "status.tmux.windowKill.success": "已結束 tmux 工作階段「{session}」中的 {window}"
 }

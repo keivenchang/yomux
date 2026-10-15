@@ -78,7 +78,7 @@ type server struct {
 	finder                              *finder.Service
 	searchIndex                         *finder.SearchIndexWorkerClient
 	indexSettingsMu                     sync.RWMutex
-	indexSettingsUpdateMu               sync.Mutex
+	indexSettingsUpdateMu               work.ContextMutex
 	indexSettings                       finderIndexSettings
 	indexActiveSettings                 finderIndexSettings
 	indexApplicationEpoch               uint64
@@ -122,18 +122,38 @@ type server struct {
 	pricing                             *stats.PricingCatalog
 	pricingRefreshMu                    sync.Mutex
 	pricingRefreshing                   bool
+	pricingTrailingReason               string
 	pricingRefreshState                 map[string]any
 	pricingRefreshEpoch                 uint64
+	pricingRefreshRun                   func(context.Context) error
+	pricingInvalidate                   func(context.Context) error
+	pricingNextRefresh                  time.Time
+	pricingNextInvalidation             time.Time
+	pricingFailures                     int
+	pricingInvalidationFailures         int
+	pricingWake                         chan struct{}
+	pricingPeriodic                     bool
 	yolo                                *goYoloStore
 
 	gitMetadataSnapshotFn func(string) (goGitSnapshot, bool)
+	terminalWriteTimeout  time.Duration
 	ignoreSizeMu          sync.Mutex
 	ignoreSizeChecked     bool
 	ignoreSizeSupported   bool
 	sessionPlanGeneration atomic.Int64
 	logRing               *goLogRing
 	rootLease             *os.File
+	requestMu             sync.Mutex
+	requestClosed         bool
+	requestCancels        map[*http.Request]context.CancelFunc
+	requestWorkers        sync.WaitGroup
+	tmuxPointContext      context.Context
+	tmuxPointCancel       context.CancelFunc
+	serverCancel          context.CancelFunc
 	shutdownOnce          sync.Once
+	backgroundWorkMu      sync.Mutex
+	backgroundWorkClosed  bool
+	backgroundWork        sync.WaitGroup
 	shutdownClean         bool
 	startedAt             time.Time
 	healthLedgerMu        sync.Mutex
@@ -373,7 +393,8 @@ func (l *goLogRing) payload() map[string]any {
 
 type wsConn struct {
 	net.Conn
-	writeMu sync.Mutex
+	writeMu      sync.Mutex
+	writeTimeout time.Duration
 }
 
 type winsize struct{ rows, cols, x, y uint16 }
@@ -414,10 +435,38 @@ func clampDimension(value, minimum, maximum, fallback int) int {
 
 func (p *ptyPair) close() { _ = p.master.Close(); _ = p.slave.Close() }
 
+// Fd puts pollable descriptors back into blocking mode. Control preserves close/deadline cancellation.
+func (p *ptyPair) withMasterDescriptor(action func(uintptr) error) error {
+	raw, err := p.master.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var actionErr error
+	if err := raw.Control(func(fd uintptr) { actionErr = action(fd) }); err != nil {
+		return err
+	}
+	return actionErr
+}
+
+const terminalWriteTimeout = 5 * time.Second
+
 func (c *wsConn) frame(opcode byte, payload []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	return writeFrame(c.Conn, opcode, payload)
+	timeout := c.writeTimeout
+	if timeout <= 0 {
+		timeout = terminalWriteTimeout
+	}
+	if err := c.Conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		_ = c.Conn.Close()
+		return err
+	}
+	defer c.Conn.SetWriteDeadline(time.Time{})
+	err := writeFrame(c.Conn, opcode, payload)
+	if err != nil {
+		_ = c.Conn.Close()
+	}
+	return err
 }
 
 func (s *server) registerFilesystemRoutes(mux *http.ServeMux) {
@@ -461,6 +510,7 @@ func (s *server) registerSessionRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/create-session", s.protected(http.HandlerFunc(s.createSession)))
 	mux.Handle("/api/rename-session", s.protected(http.HandlerFunc(s.renameSession)))
 	mux.Handle("/api/kill-session", s.protected(http.HandlerFunc(s.killSession)))
+	mux.Handle("/api/kill-window", s.protected(http.HandlerFunc(s.killWindow)))
 }
 
 // explicitCollectorPaths is deliberately fail-closed. Collector inputs are
@@ -584,6 +634,12 @@ func main() {
 	// unconditional unavailable envelope. A launch without an explicit reason
 	// remains partial rather than being guessed as demand-driven.
 	operationState{operationsPath: filepath.Join(*configDir, "go-operations.json"), operationsJournal: filepath.Join(*configDir, "go-operations.jsonl")}}
+
+	pricingLease, err := s.initializePricingCache()
+	if err != nil {
+		fatal("pricing state is already owned or unavailable: " + err.Error())
+	}
+	defer func() { runtime.KeepAlive(pricingLease) }()
 
 	healthEpoch := fmt.Sprintf("pid:%d:start:%d", os.Getpid(), s.startedAt.UnixNano())
 	healthHistoryPath := filepath.Join(stateDir, "go-backend-health", fmt.Sprintf("%d.json", *port))
@@ -721,7 +777,6 @@ func main() {
 	mux.HandleFunc("/static/", s.static)
 	addr := fmt.Sprintf("%s:%d", *host, *port)
 	httpServer := &http.Server{Addr: addr, Handler: s.logging(mux), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 120 * time.Second}
-	go s.reaper()
 	var listener net.Listener
 	if *listenFD >= 0 {
 		listenerFile := os.NewFile(uintptr(*listenFD), "yolomux-listener")
@@ -767,7 +822,8 @@ func main() {
 	defer signal.Stop(shutdownSignal)
 	shutdownContext, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
-	go s.reconcileFinderIndexes(shutdownContext)
+	s.serverCancel = stopSignals
+	s.startBackgroundWork(func() { s.reconcileFinderIndexes(shutdownContext) })
 	if err := os.MkdirAll(*configDir, 0o700); err != nil {
 		_ = listener.Close()
 		s.shutdown()
@@ -857,6 +913,7 @@ func main() {
 		fatal("stats lifecycle setup failed: " + err.Error())
 	}
 	defer statsLifecycle.Stop()
+	s.startPricingLifecycle()
 	collectorsDisabled := productenv.Value("STATS_DISABLE_COLLECTORS") == "1"
 	s.syntheticHostInputs = productenv.Value("STATS_SYNTHETIC_HOST") == "1"
 	if s.syntheticHostInputs {
@@ -1002,16 +1059,18 @@ func main() {
 			shutdownSignalName = received.String()
 		default:
 		}
-		s.shutdown()
-		shutdownClean = s.shutdownCompletedCleanly() && shutdownSignalName != ""
+		s.stopRequestAdmission()
 		gracefulContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		shutdownErr := httpServer.Shutdown(gracefulContext)
 		if shutdownErr != nil {
-			shutdownClean = false
 			_ = httpServer.Close()
 		}
 		cancel()
+		s.shutdown()
+		shutdownClean = shutdownErr == nil && s.shutdownCompletedCleanly() && shutdownSignalName != ""
 	case err := <-serveErr:
+		// Serve can exit while accepted connections still own blocked response writes.
+		_ = httpServer.Close()
 		if err != nil && err != http.ErrServerClosed {
 			s.shutdown()
 			fatal(err.Error())
@@ -1197,6 +1256,9 @@ type loggingResponseWriter struct {
 	representationReadyAt time.Time
 }
 
+// Preserve transport controls through the accounting wrapper without bypassing writes.
+func (w *loggingResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *loggingResponseWriter) WriteHeader(status int) {
 	if w.status != 0 {
 		return
@@ -1250,6 +1312,12 @@ func (w *loggingResponseWriter) ReadFrom(reader io.Reader) (int64, error) {
 
 func (s *server) logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		finishRequest, admitted := s.beginRequest(r)
+		if !admitted {
+			http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		defer finishRequest()
 		start := time.Now()
 		finishHealth := s.ensureGoHealthLedger(start).begin(goHealthRequestExcluded(r.URL.Path))
 		logged := &loggingResponseWriter{ResponseWriter: w}
@@ -1587,11 +1655,12 @@ func (s *server) fsGitHistoryStatsStream(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	stream, ok := newJSONSSEWriter(w)
+	stream, ok := newJSONSSEWriter(w, r.Context())
 	if !ok {
 		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusInternalServerError, Code: "streaming_unavailable", MessageKey: "common.requestFailed", Path: path, Message: "streaming unavailable"})
 		return
 	}
+	defer stream.close()
 	writeSSE := stream.write
 	startPayload := map[string]any{"path": path}
 	if len(batchSizes) > 0 {
@@ -1609,6 +1678,9 @@ func (s *server) fsGitHistoryStatsStream(w http.ResponseWriter, r *http.Request)
 	var nextCursor string
 	_, finderErr := s.runFinderStreamProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
 		emit := func(payload map[string]any) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			commits, _ := payload["commits"].([]map[string]any)
 			emitted += len(commits)
 			return writeSSE("chunk", payload)
@@ -1628,6 +1700,9 @@ func (s *server) fsGitHistoryStatsStream(w http.ResponseWriter, r *http.Request)
 		}
 		return finderProduct{}, finderErr
 	})
+	if r.Context().Err() != nil {
+		return
+	}
 	if finderErr != nil {
 		if r.Context().Err() == nil {
 			_ = writeSSE("error", finderErr.Payload())
@@ -1826,23 +1901,32 @@ func (s *server) fsSearch(w http.ResponseWriter, r *http.Request) {
 	cursor := r.URL.Query().Get("cursor")
 	searchOptions := s.finderSearchOptions(root, cursor, indexedOnly)
 	if r.URL.Path == "/api/fs/search-stream" {
-		stream, ok := newJSONSSEWriter(w)
+		stream, ok := newJSONSSEWriter(w, r.Context())
 		if !ok {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "streaming unavailable", "error_code": "streaming_unavailable"})
 			return
 		}
+		defer stream.close()
 		writeFinderSSE := stream.write
 		if err := writeFinderSSE("start", map[string]any{"root": root, "query": r.URL.Query().Get("query"), "limit": limit}); err != nil {
 			return
 		}
 		product, finderErr := s.runFinderStreamProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
 			payload, err := s.finder.SearchStreamWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, queryTrue(r.URL.Query().Get("direct_only")), queryTrue(r.URL.Query().Get("minimal")), searchOptions, func(files []map[string]any, coverage map[string]any) error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				return writeFinderSSE("chunk", map[string]any{"files": files, "coverage": coverage})
 			})
 			return finderProduct{data: payload}, err
 		})
+		if r.Context().Err() != nil {
+			return
+		}
 		if finderErr != nil {
-			_ = writeFinderSSE("error", finderErr.Payload())
+			if r.Context().Err() == nil {
+				_ = writeFinderSSE("error", finderErr.Payload())
+			}
 			return
 		}
 		_ = writeFinderSSE("done", map[string]any{"files": product.data["count"], "coverage": product.data["progressive_coverage"], "summary": product.data, "terminal": true})
@@ -2639,18 +2723,17 @@ func (s *server) syncFinderWatchCapability() {
 	s.capabilities.Set("finder.watch.v1", entry)
 }
 
-func finderErrorPayload(errorValue finder.Error) map[string]any { return errorValue.Payload() }
-
 func (s *server) clientEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	sseWriter, ok := newJSONSSEWriter(w)
+	sseWriter, ok := newJSONSSEWriter(w, r.Context())
 	if !ok {
 		http.Error(w, "streaming unavailable", http.StatusInternalServerError)
 		return
 	}
+	defer sseWriter.close()
 	writeSSE := func(event string, payload any) {
 		_ = sseWriter.write(event, payload)
 	}
@@ -2724,6 +2807,8 @@ func (s *server) clientEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-sseWriter.done:
 			return
 		case event, ok := <-stream:
 			if !ok {
@@ -2810,25 +2895,6 @@ func normalizeClientID(value string) string {
 		}
 	}
 	return result.String()
-}
-
-func (b *eventBroker) nextEvent(ch chan clientEvent) (clientEvent, bool) {
-	event, ok := <-ch
-	if !ok {
-		return clientEvent{}, false
-	}
-	b.mu.Lock()
-	if latest, exists := b.pending[ch][event.Resource]; exists {
-		event = latest
-	}
-	delete(b.pending[ch], event.Resource)
-	if len(b.repair[ch]) > 0 {
-		event.RepairResources = mapKeys(b.repair[ch])
-		sort.Strings(event.RepairResources)
-		b.repair[ch] = map[string]bool{}
-	}
-	b.mu.Unlock()
-	return event, true
 }
 
 func (b *eventBroker) decorateEvent(ch chan clientEvent, event clientEvent) clientEvent {
@@ -3661,14 +3727,6 @@ func childProcessLabel(entry procEntry) string {
 	return strings.Fields(command)[0]
 }
 
-func (s *server) goLocalServicesPayload(now time.Time) map[string]any {
-	metricsFn := s.processMetricsFn
-	if metricsFn == nil {
-		metricsFn = s.readGoProcessMetrics
-	}
-	return s.goLocalServicesPayloadFromMetrics(now, metricsFn(now))
-}
-
 func (s *server) goLocalServicesPayloadFromMetrics(now time.Time, process goProcessMetrics) map[string]any {
 	startedAt := process.StartedAt
 	if startedAt.IsZero() {
@@ -4082,7 +4140,16 @@ func (s *server) tmux(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	sessions, rosterErr := s.tmuxSessionRoster()
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	var sessions []string
+	var topology goTmuxTopology
+	var rosterErr error
+	if session == "" {
+		topology, rosterErr = s.tmuxTopologySnapshot()
+		sessions = topology.sessions
+	} else {
+		sessions, rosterErr = s.tmuxSessionRoster()
+	}
 	if rosterErr != nil {
 		cached, known := s.cachedTmuxSessionRoster()
 		if !known {
@@ -4093,20 +4160,21 @@ func (s *server) tmux(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sessions = cached
+		if session == "" {
+			topology, _ = s.cachedTmuxTopologySnapshot()
+			sessions = topology.sessions
+		}
 	}
 	// With no session query this is the small, machine-wide roster used by old
 	// clients.  Include the explicit order/scope keys so it is also a valid
 	// topology response for Tabber: one live tmux session owns one top-level tab.
-	session := strings.TrimSpace(r.URL.Query().Get("session"))
 	if session == "" {
-		topology, topologyErr := s.tmuxTopologyFromRoster(s.cachedTmuxSessionRosterSnapshot(), rosterErr)
-		sessions = topology.sessions
 		payload := map[string]any{
 			"sessions": sessions, "session_order": sessions, "session_scope": "all", "backend": "go",
 			"topology_generation": topology.generation, "renames": topology.renames, "errors": []string{},
 		}
-		if topologyErr != nil {
-			payload["errors"] = []string{topologyErr.Error()}
+		if rosterErr != nil {
+			payload["errors"] = []string{rosterErr.Error()}
 		}
 		jsonResponse(w, http.StatusOK, payload)
 		return
@@ -4220,22 +4288,6 @@ func (s *server) tmuxWindow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"session": session, "window": window, "ok": true})
-}
-
-func goIntValue(value any) (int, bool) {
-	switch number := value.(type) {
-	case int:
-		return number, true
-	case int64:
-		return int(number), true
-	case float64:
-		return int(number), number == float64(int(number))
-	case string:
-		parsed, err := strconv.Atoi(strings.TrimSpace(number))
-		return parsed, err == nil
-	default:
-		return 0, false
-	}
 }
 
 func (s *server) activity(w http.ResponseWriter, r *http.Request) {
@@ -4589,8 +4641,6 @@ func (s *server) settings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	s.indexSettingsUpdateMu.Lock()
-	defer s.indexSettingsUpdateMu.Unlock()
 	var body string
 	if r.Method == http.MethodPost {
 		user, _ := r.Context().Value(authContextKey{}).(authUser)
@@ -4611,6 +4661,14 @@ func (s *server) settings(w http.ResponseWriter, r *http.Request) {
 		body = string(encoded)
 	}
 
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := s.indexSettingsUpdateMu.LockContext(ctx, nil); err != nil {
+		jsonResponse(w, http.StatusServiceUnavailable, typedError("settings unavailable", "common.requestFailed", true))
+		return
+	}
+	defer s.indexSettingsUpdateMu.Unlock()
+
 	script := `import json,sys
 from yomux_lib.workspace.settings import save_settings, settings_payload
 if sys.argv[1] == "POST":
@@ -4624,7 +4682,7 @@ print(json.dumps(result, separators=(",", ":"), ensure_ascii=False), end="")`
 	if r.Method == http.MethodPost {
 		args = append(args, body)
 	}
-	command := exec.CommandContext(r.Context(), args[0], args[1:]...)
+	command := exec.CommandContext(ctx, args[0], args[1:]...)
 	command.Dir = s.root
 	command.Env = pythonBridgeEnvironment(s.root, s.config)
 	output, err := command.Output()
@@ -4654,7 +4712,7 @@ print(json.dumps(result, separators=(",", ":"), ensure_ascii=False), end="")`
 		})
 		return
 	}
-	if err := s.applyFinderIndexSettings(r.Context(), payload); err != nil {
+	if err := s.applyFinderIndexSettings(ctx, payload); err != nil {
 		payload["index_synchronization_error"] = err.Error()
 	}
 	payload["index_settings_status"] = s.finderIndexSettingsStatus()
@@ -4732,6 +4790,81 @@ func (s *server) killSession(w http.ResponseWriter, r *http.Request) {
 	}
 	topology := s.refreshTmuxMetadataAfterMutationLocked()
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "session": name, "sessions": topology.sessions, "topology_generation": topology.generation})
+}
+
+func (s *server) killWindow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	windowID := strings.TrimSpace(r.URL.Query().Get("window_id"))
+	if session == "" || len(windowID) < 2 || windowID[0] != '@' {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "session and a valid window_id are required"})
+		return
+	}
+	for _, character := range windowID[1:] {
+		if character < '0' || character > '9' {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "window_id must use the tmux @<number> format"})
+			return
+		}
+	}
+
+	s.tmuxRosterFetchMu.Lock()
+	defer s.tmuxRosterFetchMu.Unlock()
+	commandContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	target := s.exactTarget(session)
+	if err := s.tmuxCommandContext(commandContext, "has-session", "-t", target).Run(); err != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "unknown session", "session": session})
+		return
+	}
+	output, err := s.tmuxCommandContext(commandContext, "list-windows", "-t", target, "-F", "#{window_id}").Output()
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "could not read tmux session windows", "session": session})
+		return
+	}
+	windowIDs := strings.Fields(string(output))
+	targetExists := false
+	for _, currentID := range windowIDs {
+		if currentID == windowID {
+			targetExists = true
+			break
+		}
+	}
+	if !targetExists {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "unknown tmux window", "session": session, "window_id": windowID})
+		return
+	}
+	if len(windowIDs) < 2 {
+		jsonResponse(w, http.StatusConflict, map[string]any{"error": "refusing to kill the last window in a tmux session", "session": session, "window_id": windowID})
+		return
+	}
+	if err := s.tmuxCommandContext(
+		commandContext,
+		"if-shell", "-F", "-t", target, "#{>=:#{session_windows},2}", "kill-window -t "+windowID, "",
+	).Run(); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "session": session, "window_id": windowID})
+		return
+	}
+	remainingOutput, err := s.tmuxCommandContext(commandContext, "list-windows", "-t", target, "-F", "#{window_id}").Output()
+	if err != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "unknown session", "session": session})
+		return
+	}
+	remaining := strings.Fields(string(remainingOutput))
+	for _, currentID := range remaining {
+		if currentID == windowID {
+			jsonResponse(w, http.StatusConflict, map[string]any{"error": "tmux window could not be killed without removing the session", "session": session, "window_id": windowID})
+			return
+		}
+	}
+	topology := s.refreshTmuxMetadataAfterMutationLocked()
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"ok": true, "session": session, "window_id": windowID,
+		"windows_remaining": len(remaining),
+		"sessions":          topology.sessions, "topology_generation": topology.generation,
+	})
 }
 
 func (s *server) renameSession(w http.ResponseWriter, r *http.Request) {
@@ -4970,7 +5103,29 @@ func (s *server) static(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) tmuxCommand(args ...string) *exec.Cmd {
-	return s.tmuxCommandContext(context.Background(), args...)
+	return s.tmuxPointCommand(nil, args...)
+}
+
+// Point probes are bounded; the long-lived attach process uses tmuxCommandContext directly.
+func (s *server) tmuxPointCommand(ctx context.Context, args ...string) *exec.Cmd {
+	if ctx == nil {
+		s.requestMu.Lock()
+		if s.tmuxPointContext == nil {
+			s.tmuxPointContext, s.tmuxPointCancel = context.WithCancel(context.Background())
+			if s.requestClosed {
+				s.tmuxPointCancel()
+			}
+		}
+		ctx = s.tmuxPointContext
+		s.requestMu.Unlock()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	command := s.tmuxCommandContext(ctx, args...)
+	if command.Cancel != nil {
+		interrupt := command.Cancel
+		command.Cancel = func() error { defer cancel(); return interrupt() }
+	}
+	return command
 }
 
 func (s *server) tmuxCommandContext(ctx context.Context, args ...string) *exec.Cmd {
@@ -4982,7 +5137,14 @@ func (s *server) tmuxCommandContext(ctx context.Context, args ...string) *exec.C
 
 func (s *server) exactTarget(session string) string { return "=" + session + ":" }
 
-func (s *server) supportsIgnoreSize() bool {
+func (s *server) supportsIgnoreSize(contexts ...context.Context) bool {
+	var ctx context.Context
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
 	s.ignoreSizeMu.Lock()
 	defer s.ignoreSizeMu.Unlock()
 	if s.ignoreSizeChecked {
@@ -4993,24 +5155,35 @@ func (s *server) supportsIgnoreSize() bool {
 	// actual flag against a deliberately nonexistent target, matching the Python
 	// backend: supported versions reject the target, while older versions reject
 	// the option or flag itself.
-	out, _ := s.tmuxCommand(
+	probe := s.tmuxPointCommand(ctx,
 		"attach-session", "-f", "ignore-size", "-t", "__yolomux_ignore_size_capability_probe__",
-	).CombinedOutput()
+	)
+	out, _ := probe.CombinedOutput()
+	if probe.ProcessState == nil || !probe.ProcessState.Exited() {
+		return false
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
 	text := strings.ToLower(string(out))
 	s.ignoreSizeSupported = !strings.Contains(text, "unknown option") && !strings.Contains(text, "unknown flag")
 	s.ignoreSizeChecked = true
 	return s.ignoreSizeSupported
 }
 
-func (s *server) configureTmuxSession(session string) {
+func (s *server) configureTmuxSession(session string, contexts ...context.Context) {
+	var ctx context.Context
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
 	target := s.exactTarget(session)
 	for _, args := range [][]string{{"set-option", "-s", "set-clipboard", "on"}, {"set-option", "-t", target, "window-size", "largest"}, {"set-option", "-wg", "aggressive-resize", "on"}} {
-		_ = s.tmuxCommand(args...).Run()
+		_ = s.tmuxPointCommand(ctx, args...).Run()
 	}
 }
 
 func (s *server) claimResizeAuthority(ctx context.Context, session, activeClient string, cols, rows int) {
-	if activeClient == "" || !s.supportsIgnoreSize() {
+	if activeClient == "" || !s.supportsIgnoreSize(ctx) {
 		return
 	}
 	target := s.exactTarget(session)
@@ -5096,7 +5269,7 @@ func (s *server) startTerminalControls(conn *wsConn, session, tty string, resize
 			var controlErr error
 			if currentResize && len(resize) > 0 {
 				controlErr = s.resizeTerminalNative(commandCtx, session, tty, currentCols, currentRows, resize[0], currentClaim)
-			} else if currentClaim && tty != "" && s.supportsIgnoreSize() {
+			} else if currentClaim && tty != "" && s.supportsIgnoreSize(commandCtx) {
 				s.claimResizeAuthority(commandCtx, session, tty, currentCols, currentRows)
 			} else {
 				_ = s.tmuxCommandContext(commandCtx, "refresh-client", "-t", s.exactTarget(session)).Run()
@@ -5142,7 +5315,7 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := r.URL.Query().Get("session")
-	if session == "" || s.tmuxCommand("has-session", "-t", session).Run() != nil {
+	if session == "" || s.tmuxPointCommand(r.Context(), "has-session", "-t", session).Run() != nil {
 		http.Error(w, "unknown session: "+session, http.StatusNotFound)
 		return
 	}
@@ -5166,17 +5339,33 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	transportClosed := make(chan struct{})
+	stopClose := context.AfterFunc(r.Context(), func() { _ = conn.Close(); close(transportClosed) })
+	defer func() {
+		if !stopClose() {
+			<-transportClosed
+		}
+	}()
 	accept := sha1.Sum([]byte(key + wsGUID))
 	fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", base64.StdEncoding.EncodeToString(accept[:]))
 	if err := rw.Flush(); err != nil {
 		conn.Close()
 		return
 	}
-	s.bridge(&wsConn{Conn: conn}, session, readonly, clientID)
+	s.bridge(&wsConn{Conn: conn}, session, readonly, clientID, r.Context())
 }
 
-func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID string) {
+func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID string, contexts ...context.Context) {
+	parent := context.Background()
+	if len(contexts) > 0 {
+		parent = contexts[0]
+	}
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
 	defer conn.Close()
+	if conn.writeTimeout <= 0 {
+		conn.writeTimeout = s.terminalWriteTimeout
+	}
 	rows, cols := 36, 120
 	reader := bufio.NewReader(conn)
 	_ = conn.SetReadDeadline(time.Now().Add(750 * time.Millisecond))
@@ -5223,18 +5412,28 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 		return
 	}
 	defer pty.close()
-	s.configureTmuxSession(session)
+	cancelledPTY := make(chan struct{})
+	stopPTY := context.AfterFunc(ctx, func() { _ = conn.Close(); pty.close(); close(cancelledPTY) })
+	defer func() {
+		if !stopPTY() {
+			<-cancelledPTY
+		}
+	}()
+	if ctx.Err() != nil {
+		return
+	}
+	s.configureTmuxSession(session, ctx)
 	args := []string{"attach-session", "-t", session}
-	if s.supportsIgnoreSize() {
+	if s.supportsIgnoreSize(ctx) {
 		args = []string{"attach-session", "-f", "ignore-size", "-t", s.exactTarget(session)}
 	}
 	if readonly {
 		args = []string{"attach-session", "-r", "-t", s.exactTarget(session)}
-		if s.supportsIgnoreSize() {
+		if s.supportsIgnoreSize(ctx) {
 			args = []string{"attach-session", "-r", "-f", "ignore-size", "-t", s.exactTarget(session)}
 		}
 	}
-	cmd := s.tmuxCommand(args...)
+	cmd := s.tmuxCommandContext(ctx, args...)
 	cmd.SysProcAttr = terminalProcessAttributes()
 	cmd.Env = append(cmd.Env, "TERM=xterm-256color")
 	cmd.Stdin = pty.slave
@@ -5270,7 +5469,10 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 	})
 	pty.requestControl = requestControl
 	defer stopControls()
+	outputDone := make(chan struct{})
+	defer func() { _ = conn.Close(); _ = pty.master.Close(); <-outputDone }()
 	go func() {
+		defer close(outputDone)
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := pty.master.Read(buf)
@@ -5284,7 +5486,7 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 	}()
 	requestControl(cols, rows, 0)
 	for _, payload := range pending {
-		s.handleMessage(pty.master, pty, cmd, conn, session, clientID, payload, !readonly)
+		s.handleMessage(pty.master, pty, cmd, conn, session, clientID, payload, !readonly, ctx)
 	}
 	for {
 		opcode, payload, err := readFrame(reader)
@@ -5301,11 +5503,18 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 		if opcode != 1 && opcode != 2 {
 			continue
 		}
-		s.handleMessage(pty.master, pty, cmd, conn, session, clientID, payload, !readonly)
+		s.handleMessage(pty.master, pty, cmd, conn, session, clientID, payload, !readonly, ctx)
 	}
 }
 
-func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd, conn *wsConn, session, clientID string, payload []byte, writable bool) {
+func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd, conn *wsConn, session, clientID string, payload []byte, writable bool, contexts ...context.Context) {
+	var ctx context.Context
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
 	var msg struct {
 		Type       string `json:"type"`
 		Data       string `json:"data"`
@@ -5320,7 +5529,7 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 	}
 	if json.Unmarshal(payload, &msg) != nil {
 		if writable {
-			_, _ = stdin.Write(payload)
+			s.writeTerminalInput(stdin, conn, payload)
 		}
 		return
 	}
@@ -5329,7 +5538,7 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 	}
 	switch msg.Type {
 	case "input":
-		_, _ = io.WriteString(stdin, msg.Data)
+		s.writeTerminalInput(stdin, conn, []byte(msg.Data))
 	case "resize":
 		if msg.Foreground != nil && !*msg.Foreground {
 			return
@@ -5343,33 +5552,43 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 		if (msg.Direction == "up" || msg.Direction == "down") && msg.Lines > 0 {
 			lines := clampDimension(msg.Lines, 1, 80, 1)
 			if msg.Direction == "up" {
-				_ = s.tmuxCommand("copy-mode", "-e", "-t", s.exactTarget(session)).Run()
+				_ = s.tmuxPointCommand(ctx, "copy-mode", "-e", "-t", s.exactTarget(session)).Run()
 			}
 			key := "scroll-down"
 			if msg.Direction == "up" {
 				key = "scroll-up"
 			}
-			_ = s.tmuxCommand("send-keys", "-X", "-N", strconv.Itoa(lines), key, "-t", s.exactTarget(session)).Run()
+			_ = s.tmuxPointCommand(ctx, "send-keys", "-X", "-N", strconv.Itoa(lines), key, "-t", s.exactTarget(session)).Run()
 		}
 	case "refresh":
 		pty.requestControl(0, 0, msg.Txn)
 	}
 }
 
-func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
-
-func (s *server) reaper() {
-	for {
-		time.Sleep(10 * time.Second)
-		s.mu.Lock()
-		for cmd := range s.children {
-			if cmd.ProcessState != nil {
-				delete(s.children, cmd)
+// Raw and JSON input share one bounded PTY write so a disconnected peer cannot strand the bridge.
+func (s *server) writeTerminalInput(stdin io.Writer, conn *wsConn, payload []byte) {
+	timeout := s.terminalWriteTimeout
+	if timeout <= 0 {
+		timeout = terminalWriteTimeout
+	}
+	if writer, ok := stdin.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		if err := writer.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+			if conn != nil {
+				_ = conn.Close()
 			}
+			return
 		}
-		s.mu.Unlock()
+		defer writer.SetWriteDeadline(time.Time{})
+	}
+	n, err := stdin.Write(payload)
+	if err != nil || n != len(payload) {
+		if conn != nil {
+			_ = conn.Close()
+		}
 	}
 }
+
+func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 
 func jsonResponse(w http.ResponseWriter, status int, value any) {
 	b, _ := json.Marshal(value)

@@ -106,6 +106,8 @@ func (w *linuxNativeWatcher) Close() {
 		close(w.closed)
 		_, _ = syscall.Write(w.wakeWrite, []byte{1})
 		<-w.done
+		w.mu.Lock()
+		defer w.mu.Unlock()
 		_ = syscall.Close(w.fd)
 		_ = syscall.Close(w.wakeRead)
 		_ = syscall.Close(w.wakeWrite)
@@ -123,6 +125,11 @@ func (w *linuxNativeWatcher) SetRoots(ctx context.Context, roots []string) nativ
 func (w *linuxNativeWatcher) SetScopes(ctx context.Context, scopes map[string]bool, force bool) nativeWatchStatus {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	select {
+	case <-w.closed:
+		return nativeWatchStatus{degraded: true, reason: "native-watcher-closed"}
+	default:
+	}
 	if w.scopes == nil {
 		w.scopes = map[string]bool{}
 		w.coverage = map[string]bool{}
@@ -153,6 +160,13 @@ func (w *linuxNativeWatcher) SetScopes(ctx context.Context, scopes map[string]bo
 			continue
 		}
 		rootFailed := false
+		select {
+		case <-w.closed:
+			status.degraded = true
+			status.reason = "registration-cancelled"
+			return status
+		default:
+		}
 		if ctx != nil {
 			select {
 			case <-ctx.Done():
@@ -187,6 +201,11 @@ func (w *linuxNativeWatcher) SetScopes(ctx context.Context, scopes map[string]bo
 				status.degraded = true
 				status.reason = "native-entry-capacity-exceeded"
 				return errStopNativeWalk
+			}
+			select {
+			case <-w.closed:
+				return context.Canceled
+			default:
 			}
 			if ctx != nil {
 				select {
@@ -405,6 +424,11 @@ func (w *linuxNativeWatcher) addDirectoryTree(ctx context.Context, root, watchRo
 		}
 		if visitedEntries > maxNativeWatchEntries {
 			return errStopNativeWalk
+		}
+		select {
+		case <-w.closed:
+			return context.Canceled
+		default:
 		}
 		if ctx != nil {
 			select {

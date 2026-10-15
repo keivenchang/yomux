@@ -505,10 +505,64 @@ def compare(expected: dict[str, Any], actual: dict[str, Any]) -> Comparison:
     return Comparison(tuple(violations), tuple(stale), tuple(warnings))
 
 
+def duplicate_python_definitions(tree: ast.AST) -> tuple[str, ...]:
+    """Reject shadowed definitions, allowing property accessor chains and separate scopes."""
+
+    findings: list[str] = []
+    definitions = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+    def scope(node: ast.AST, prefix: str) -> None:
+        seen: dict[str, ast.AST] = {}
+        accessors: dict[str, set[str]] = {}
+
+        def visit(child: ast.AST) -> None:
+            if isinstance(child, definitions):
+                previous = seen.get(child.name)
+                kind = None
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for decorator in child.decorator_list:
+                        if isinstance(decorator, ast.Name) and decorator.id == "property":
+                            kind = "property"
+                        elif (isinstance(decorator, ast.Attribute) and isinstance(decorator.value, ast.Name)
+                              and decorator.value.id == child.name and decorator.attr in {"getter", "setter", "deleter"}):
+                            kind = decorator.attr
+                chain = accessors.get(child.name)
+                valid_accessor = kind in {"getter", "setter", "deleter"} and chain is not None and kind not in chain
+                if previous is not None and not valid_accessor:
+                    findings.append(f"{prefix}{child.name}:{child.lineno}: shadows line {previous.lineno}")
+                if kind in {"getter", "setter", "deleter"} and chain is not None:
+                    chain.add(kind)
+                elif kind == "property":
+                    accessors[child.name] = {"property"}
+                else:
+                    accessors.pop(child.name, None)
+                seen[child.name] = child
+                scope(child, f"{prefix}{child.name}.")
+            elif not isinstance(child, ast.Lambda):
+                for nested in ast.iter_child_nodes(child):
+                    visit(nested)
+
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    scope(tree, "")
+    return tuple(findings)
+
+
+def _duplicate_python_definition_violations(root: Path) -> tuple[str, ...]:
+    paths = sorted({*root.glob("*.py"), *(root / "yomux_lib").rglob("*.py"),
+                    *(root / "tools").rglob("*.py"), *(root / "tests").rglob("*.py")})
+    return tuple(
+        f"duplicate_python_definition: {path.relative_to(root)}:{finding}"
+        for path in paths
+        for finding in duplicate_python_definitions(ast.parse(path.read_text(encoding="utf-8")))
+    )
+
+
 def evaluate(root: Path, manifest: Path) -> Comparison:
     expected = json.loads(manifest.read_text(encoding="utf-8"))
     result = compare(expected, capture(root))
-    return Comparison(result.violations + _retired_share_surface_violations(root), result.stale, result.warnings)
+    return Comparison(result.violations + _retired_share_surface_violations(root) + _duplicate_python_definition_violations(root), result.stale, result.warnings)
 
 
 def write_current_manifest(manifest: Path, current: dict[str, Any]) -> None:

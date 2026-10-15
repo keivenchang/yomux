@@ -759,6 +759,15 @@ def _wait_for_scenario_records(log: Path, scenario: str, timeout: float) -> list
     return [record for record in records if record.get("scenario") == scenario]
 
 
+def _client_output_diagnostics(directory: Path) -> str:
+    diagnostics = ""
+    for name in ("client.stdout", "client.stderr"):
+        path = directory / name
+        if path.exists():
+            diagnostics += f"\n{name}:\n{path.read_text(encoding='utf-8', errors='replace')}"
+    return diagnostics
+
+
 def _wait_for_request(log: Path, client: str, scenario: AgentScenario, timeout: float) -> list[dict]:
     deadline = time.monotonic() + timeout
     records = _request_records(log)
@@ -767,11 +776,7 @@ def _wait_for_request(log: Path, client: str, scenario: AgentScenario, timeout: 
         time.sleep(0.1)
         records = _request_records(log)
     matching = [record for record in records if record.get("scenario") == expected]
-    diagnostics = ""
-    for name in ("client.stdout", "client.stderr"):
-        path = log.parent / name
-        if path.exists():
-            diagnostics += f"\n{name}:\n{path.read_text(encoding='utf-8', errors='replace')}"
+    diagnostics = _client_output_diagnostics(log.parent)
     assert matching, f"{client}/{scenario.name}: real client did not reach configured fake-provider scenario; log={log}; records={records}{diagnostics}"
     return matching
 
@@ -785,7 +790,10 @@ def _wait_for_provider_start(event_log: Path, scenario: AgentScenario, timeout: 
         ):
             return
         time.sleep(0.1)
-    raise AssertionError(f"provider did not start {scenario.name} request: {event_log}")
+    raise AssertionError(
+        f"provider did not start {scenario.name} request: {event_log}; events={_event_records(event_log)}"
+        f"{_client_output_diagnostics(event_log.parent)}"
+    )
 
 
 def _assert_scenario_paths(records: list[dict], scenario: AgentScenario) -> None:

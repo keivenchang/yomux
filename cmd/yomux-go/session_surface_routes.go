@@ -841,11 +841,12 @@ func (s *server) contextStream(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"session": session, "error": "transcript read failed"})
 		return
 	}
-	stream, ok := newJSONSSEWriter(w)
+	stream, ok := newJSONSSEWriter(w, r.Context())
 	if !ok {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "streaming unavailable"})
 		return
 	}
+	defer stream.close()
 	writeSSE := func(event string, value any) bool {
 		return stream.write(event, value) == nil
 	}
@@ -1021,11 +1022,6 @@ func transcriptQueryLimit(w http.ResponseWriter, r *http.Request, name string, d
 		value = maximum
 	}
 	return value, true
-}
-
-func (s *server) sessionTranscript(session string) (string, map[string]any) {
-	path, agent, _ := s.sessionTranscriptForRequest(session, "", "")
-	return path, agent
 }
 
 func (s *server) sessionTranscriptForRequest(session, requestedPane, requestedWindow string) (string, map[string]any, string) {

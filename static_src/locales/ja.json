@@ -2540,5 +2540,11 @@
   "pref.section.sizes": "サイズ",
   "contextmenu.copyText": "テキストをコピー",
   "contextmenu.copyWithStyle": "スタイル付きでコピー",
-  "status.copiedStyledText": "スタイル付きでコピーしました"
+  "status.copiedStyledText": "スタイル付きでコピーしました",
+  "menu.tmux.kill.window": "tmux セッション内の {window} を終了",
+  "menu.tmux.kill.session.windows": "tmux セッション全体を終了（ウィンドウ数: {count}）",
+  "status.tmux.windowKill.confirm": "tmux セッション「{session}」内の {window} を終了しますか？",
+  "status.tmux.windowKill.pending": "tmux セッション「{session}」内の {window} を終了しています",
+  "status.tmux.windowKill.failed": "tmux セッション「{session}」内の {window} を終了できませんでした",
+  "status.tmux.windowKill.success": "tmux セッション「{session}」内の {window} を終了しました"
 }

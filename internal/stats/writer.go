@@ -74,6 +74,9 @@ type Writer struct {
 	lifecycle               *Lifecycle
 	validateCurrentFamilies bool
 	mutationMu              sync.Mutex
+	closeOnce               sync.Once
+	closeErr                error
+	closed                  atomic.Bool
 	sourceGeneration        atomic.Int64
 	dataVersion             int64
 	dataVersionReady        bool
@@ -104,7 +107,7 @@ type MigrationStatus struct {
 // MigrationStatus reads the completed current-database reconciliation without
 // opening a second connection or exposing migration internals to callers.
 func (w *Writer) MigrationStatus(ctx context.Context) (MigrationStatus, error) {
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return MigrationStatus{}, errors.New("nil YO!stats writer")
 	}
 	var detailsJSON string
@@ -396,7 +399,7 @@ func (w *Writer) readDataVersionLocked(ctx context.Context, detect bool) error {
 }
 
 func (w *Writer) readDataVersionLockedAt(ctx context.Context, detect bool, now float64) error {
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return errors.New("nil YO!stats writer")
 	}
 	if math.IsNaN(now) || math.IsInf(now, 0) || now < 0 {
@@ -657,7 +660,7 @@ func (w *Writer) CorruptRecoveryName() string {
 // index; HTTP request paths must not open SQLite. A cache that has not been
 // loaded successfully fails closed.
 func (w *Writer) ProductFresh(resolution int, start, end int64) bool {
-	if w == nil || resolution <= 0 || end <= start {
+	if w == nil || w.closed.Load() || resolution <= 0 || end <= start {
 		return false
 	}
 	w.pendingMu.RLock()
@@ -695,7 +698,7 @@ func (w *Writer) setPendingCacheUnavailable() {
 }
 
 func (w *Writer) refreshPendingCache(ctx context.Context) error {
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return errors.New("nil YO!stats writer")
 	}
 	rows, err := w.db.QueryContext(ctx, "SELECT resolution_seconds,bucket_start,source_generation FROM ring_invalidations WHERE applied_at IS NULL")
@@ -741,23 +744,24 @@ func (w *Writer) Close() error {
 	if w == nil || w.db == nil {
 		return nil
 	}
-	db := w.db
-	lease := w.lease
-	w.db = nil
-	w.lease = nil
-	err := db.Close()
-	leaseErr := lease.close()
-	if err != nil {
-		return err
-	}
-	return leaseErr
+	w.closeOnce.Do(func() {
+		// Drain the current mutation before releasing its writer lease. Keep the
+		// handles immutable: concurrent readers can safely receive sql.ErrDBClosed
+		// from database/sql instead of racing a pointer reset or dereferencing nil.
+		w.mutationMu.Lock()
+		defer w.mutationMu.Unlock()
+		w.closed.Store(true)
+		w.setPendingCacheUnavailable()
+		w.closeErr = errors.Join(w.db.Close(), w.lease.close())
+	})
+	return w.closeErr
 }
 
 // statsDatabaseIdentity returns the current file incarnation for the database
 // owned by this writer. It deliberately uses only device/inode identity so
 // ordinary database writes do not invalidate external collector cursors.
 func (w *Writer) statsDatabaseIdentity() (string, error) {
-	if w == nil || w.lease == nil || w.lease.path == "" {
+	if w == nil || w.closed.Load() || w.lease == nil || w.lease.path == "" {
 		return "", errors.New("YO!stats database identity is unavailable")
 	}
 	info, err := os.Stat(w.lease.path)
@@ -790,7 +794,7 @@ func (w *Writer) AppendWithCheckpointsAndRetire(ctx context.Context, batch Appen
 
 func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, checkpoints []Checkpoint, retirement *CheckpointRetirement, replacement []UsageAtom) (AppendResult, error) {
 	var result AppendResult
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return result, errors.New("nil YO!stats writer")
 	}
 	// The generation read below is compared with the value committed in the
@@ -1173,7 +1177,7 @@ func appendUsageAtoms(ctx context.Context, tx *sql.Tx, atoms []UsageAtom, skippe
 // contain pruned facts.
 func (w *Writer) Prune(ctx context.Context, now float64) (PruneResult, error) {
 	var result PruneResult
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return result, errors.New("nil YO!stats writer")
 	}
 	w.mutationMu.Lock()
@@ -1275,7 +1279,7 @@ func (w *Writer) Prune(ctx context.Context, now float64) (PruneResult, error) {
 // owner. A missing, malformed, or invalid sidecar deliberately reads as zero:
 // retention is then due after a restart rather than silently skipped.
 func (w *Writer) LastPrunedAt() float64 {
-	if w == nil || w.lease == nil {
+	if w == nil || w.closed.Load() || w.lease == nil {
 		return 0
 	}
 	data, err := os.ReadFile(filepath.Join(filepath.Dir(w.lease.path), pruneStateFile))
@@ -1292,7 +1296,7 @@ func (w *Writer) LastPrunedAt() float64 {
 }
 
 func (w *Writer) recordPrunedAt(timestamp float64) error {
-	if w == nil || w.lease == nil {
+	if w == nil || w.closed.Load() || w.lease == nil {
 		return errors.New("nil YO!stats writer")
 	}
 	return atomicSidecarWrite(filepath.Join(filepath.Dir(w.lease.path), pruneStateFile), map[string]any{"last_pruned_at": timestamp})
@@ -1302,7 +1306,7 @@ func (w *Writer) recordPrunedAt(timestamp float64) error {
 // schedule, this marker is part of schema_meta and therefore remains atomic
 // with the successful VACUUM transaction.
 func (w *Writer) LastVacuumedAt(ctx context.Context) (float64, error) {
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return 0, errors.New("nil YO!stats writer")
 	}
 	var timestamp float64
@@ -1315,7 +1319,7 @@ func (w *Writer) LastVacuumedAt(ctx context.Context) (float64, error) {
 // ReclaimableRatio measures free-list and in-page slack. It is queried only by
 // the maintenance scheduler when a rewrite is due, never on HTTP paths.
 func (w *Writer) ReclaimableRatio(ctx context.Context) (float64, error) {
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return 0, errors.New("nil YO!stats writer")
 	}
 	var pageSize, pageCount, freelist int64
@@ -1343,7 +1347,7 @@ func (w *Writer) ReclaimableRatio(ctx context.Context) (float64, error) {
 }
 
 func (w *Writer) reclaimableRatioAtLastVacuum() float64 {
-	if w == nil || w.lease == nil {
+	if w == nil || w.closed.Load() || w.lease == nil {
 		return 0
 	}
 	data, err := os.ReadFile(filepath.Join(filepath.Dir(w.lease.path), vacuumBaseFile))
@@ -1365,7 +1369,7 @@ func (w *Writer) reclaimableRatioAtLastVacuum() float64 {
 }
 
 func (w *Writer) recordVacuumBaseline(timestamp, ratio float64) error {
-	if w == nil || w.lease == nil {
+	if w == nil || w.closed.Load() || w.lease == nil {
 		return errors.New("nil YO!stats writer")
 	}
 	return atomicSidecarWrite(filepath.Join(filepath.Dir(w.lease.path), vacuumBaseFile), map[string]any{"last_vacuumed_at": timestamp, "reclaimable_ratio": ratio})
