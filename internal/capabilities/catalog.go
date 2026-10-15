@@ -218,6 +218,7 @@ var routePolicies = []RoutePolicy{
 	{"*", "/api/create-session-plan", "admin", "session.create.v1", false},
 	{"*", "/api/create-session", "admin", "session.create.v1", false},
 	{"*", "/api/kill-session", "admin", "session.kill.v1", false},
+	{"*", "/api/kill-window", "admin", "session.kill.v1", false},
 	{"*", "/api/rename-session", "admin", "session.rename.v1", false},
 	{"*", "/api/session-metadata", "readonly", "core.bootstrap.v1", false},
 	{"*", "/api/transcripts", "readonly", "core.bootstrap.v1", false},

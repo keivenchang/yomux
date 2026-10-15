@@ -2422,7 +2422,7 @@ function viewportDiagnosticsText(snapshot = viewportDiagnosticsSnapshot()) {
 }
 
 function renderViewportDiagnostics() {
-  if (!debugModeExplicitUrlEnabled) return false;
+  if (!debugModeExplicitUrlEnabled || urlFlagEnabled('pane_popout')) return false;
   let node = viewportDiagnosticsState.node;
   if (!node?.isConnected) {
     node = document.createElement('output');
@@ -4804,16 +4804,25 @@ function previewScrollTraceElementForTarget(target) {
 
 function previewScrollTraceRecordForTarget(target) {
   const element = previewScrollTraceElementForTarget(target);
-  return element ? {element, traceElement: element, details: {}} : null;
+  if (!element) return null;
+  const panel = element.closest?.('.file-editor-panel');
+  return {element, traceElement: element, details: {}, isOwnedScroll: () => (
+    panel && element === fileEditorPanelPreviewPane(panel) && fileEditorReflectedScrollMatches(panel, 'preview')
+  )};
 }
 
 function previewScrollTraceRecordsMatch(left, right) {
   return Boolean(left && right && left.element === right.element && left.traceElement === right.traceElement);
 }
 
-function claimPreviewScrollRecord(record) {
-  const generation = claimPreviewScrollUserOwnership(record?.element);
-  if (record?.traceElement && record.traceElement !== record.element) claimPreviewScrollUserOwnership(record.traceElement);
+function claimPreviewScrollRecord(record, event = null) {
+  const claim = element => {
+    if (!event) return claimPreviewScrollUserOwnership(element);
+    claimElementScrollInputEvent(element, event);
+    return previewScrollUserOwnershipGeneration(element);
+  };
+  const generation = claim(record?.element);
+  if (record?.traceElement && record.traceElement !== record.element) claim(record.traceElement);
   return generation;
 }
 
@@ -4859,6 +4868,17 @@ function recordPreviewScrollInputTrace(element, phase, event = null, details = {
 function bindPreviewScrollOwnershipCapture(ownerDocument, recordForTarget) {
   if (!ownerDocument?.addEventListener || previewScrollCaptureDocuments.has(ownerDocument)) return false;
   previewScrollCaptureDocuments.add(ownerDocument);
+  for (const type of ['wheel', 'keydown', 'pointerdown', 'pointerup', 'pointercancel']) {
+    ownerDocument.addEventListener(type, event => {
+      const record = recordForTarget(event.target);
+      if (type === 'wheel' && !event.deltaX && !event.deltaY) return;
+      if (type === 'keydown' && (!['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)
+          || (event.key === ' ' && event.target?.closest?.('summary')))) return;
+      // Native scrollbar pointers target the scroller itself; content clicks can toggle layout.
+      if (type === 'pointerdown' && event.target !== (record?.traceElement || record?.element)) return;
+      claimPreviewScrollRecord(record, event);
+    }, {capture: true, passive: true});
+  }
   ownerDocument.addEventListener('touchstart', event => {
     const record = recordForTarget(event.target);
     if (!record) return;
@@ -4913,6 +4933,10 @@ function bindPreviewScrollOwnershipCapture(ownerDocument, recordForTarget) {
   ownerDocument.addEventListener('scroll', event => {
     const resolved = recordForTarget(event.target);
     if (!resolved) return;
+    if (resolved.isOwnedScroll?.()) {
+      recordPreviewScrollRecord(resolved, 'owned-scroll', event);
+      return;
+    }
     const record = previewScrollTraceRecordsMatch(previewScrollTraceState.active, resolved)
       ? previewScrollTraceState.active
       : (previewScrollTraceRecordsMatch(previewScrollTraceState.last, resolved) ? previewScrollTraceState.last : resolved);
@@ -8043,8 +8067,27 @@ function appendTabActionCommands(menu, item, options = {}) {
       });
     }
     appendContextMenuSeparator(menu);
-    const killItem = tmuxSessionKillCommand(item);
-    appendContextMenuButton(menu, killItem.label, killItem.action, closeSessionContextMenu, {disabled: killItem.disabled, className: 'danger'});
+    if (options.descriptionWindow != null) {
+      const windows = tmuxWindowRecords(transcriptMetadataState.payload.sessions?.[item]?.panes);
+      const windowId = String(options.descriptionWindowId || '');
+      // Hover-deferred rows can outlive an index reuse; a supplied physical identity must win.
+      const windowRecord = windows.find(record => windowId
+        ? record.windowId === windowId
+        : record.index === Number(options.descriptionWindow));
+      if (windowRecord && windows.length > 1) {
+        const killWindow = tmuxWindowKillCommand(item, windowRecord);
+        appendContextMenuButton(menu, killWindow.label, killWindow.action, closeSessionContextMenu, {disabled: killWindow.disabled, className: 'danger'});
+        const label = localizedLabel('menu.tmux.kill.session.windows', 'Kill entire tmux session ({count} windows)', {count: windows.length});
+        const killSession = tmuxSessionKillCommand(item, {label});
+        appendContextMenuButton(menu, killSession.label, killSession.action, closeSessionContextMenu, {disabled: killSession.disabled, className: 'danger'});
+      } else if (windowRecord) {
+        const killSession = tmuxSessionKillCommand(item, {label: t('menu.tmux.kill')});
+        appendContextMenuButton(menu, killSession.label, killSession.action, closeSessionContextMenu, {disabled: killSession.disabled, className: 'danger'});
+      }
+    } else {
+      const killItem = tmuxSessionKillCommand(item);
+      appendContextMenuButton(menu, killItem.label, killItem.action, closeSessionContextMenu, {disabled: killItem.disabled, className: 'danger'});
+    }
   }
 }
 

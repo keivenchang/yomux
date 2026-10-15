@@ -88,6 +88,12 @@ func TestRouteCapabilityIsMethodAndOperationAware(t *testing.T) {
 	if got := Policy("POST", "/api/tmux-window").Role; got != "admin" {
 		t.Fatalf("tmux window selection role = %q, want admin", got)
 	}
+	if got := Policy("POST", "/api/kill-window").Role; got != "admin" {
+		t.Fatalf("tmux window kill role = %q, want admin", got)
+	}
+	if got := RouteCapability("POST", "/api/kill-window"); got != "session.kill.v1" {
+		t.Fatalf("tmux window kill capability = %q, want session.kill.v1", got)
+	}
 	catalog := New("go-test")
 	if !catalog.Available("finder.git.v1") || !catalog.Available("pane.tabber.v1") {
 		t.Fatal("implemented Finder and Tabber capabilities are not enabled")

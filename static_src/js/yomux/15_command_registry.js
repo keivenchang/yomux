@@ -45,6 +45,7 @@ const COMMAND_ROUTES = Object.freeze({
   'tabber-description-rename': commandRoute({id: 'tabber-description-rename', method: 'POST', path: '/api/tabber-description', contractClass: 'pending'}),
   'tabber-window-view': commandRoute({id: 'tabber-window-view', method: 'POST', path: '/api/tabber-view-session', contractClass: 'pending'}),
   'kill-session': commandRoute({id: 'kill-session', method: 'POST', path: '/api/kill-session', contractClass: 'pending'}),
+  'kill-window': commandRoute({id: 'kill-window', method: 'POST', path: '/api/kill-window', contractClass: 'pending'}),
   'settings-save': commandRoute({id: 'settings-save', method: 'POST', path: '/api/settings', contractClass: 'pending'}),
   'yoagent-cancel': commandRoute({id: 'yoagent-cancel', method: 'POST', path: '/api/yoagent/chat/*/cancel', contractClass: 'pending'}),
   'yoagent-reset': commandRoute({id: 'yoagent-reset', method: 'POST', path: '/api/yoagent/reset', contractClass: 'pending'}),

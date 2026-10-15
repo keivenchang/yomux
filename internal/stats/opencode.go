@@ -1492,7 +1492,7 @@ ORDER BY raw.rowid ASC`, afterRowID, highWaterRowID, pageSize+1)
 		if role != "assistant" {
 			continue
 		}
-		part, decodeErr := decodeOpenCodeStepFinish(row[1:9], sessionID)
+		part, decodeErr := decodeOpenCodeStepFinishObjects(row[1:9], sessionID, partData, messageData)
 		if decodeErr != nil {
 			addOpenCodePageError(&page, selection.RootSessionID)
 			continue
@@ -1849,6 +1849,20 @@ func decodeOpenCodeStepFinish(row []any, requestedSession string) (OpenCodeStepF
 	if len(row) != 8 {
 		return OpenCodeStepFinishPart{}, fmt.Errorf("expected 8 columns, got %d", len(row))
 	}
+	var part, message map[string]any
+	if err := decodeOpenCodeObject(row[5], &part); err != nil {
+		return OpenCodeStepFinishPart{}, fmt.Errorf("malformed part JSON: %w", err)
+	}
+	if err := decodeOpenCodeObject(row[6], &message); err != nil {
+		return OpenCodeStepFinishPart{}, fmt.Errorf("malformed message JSON: %w", err)
+	}
+	return decodeOpenCodeStepFinishObjects(row, requestedSession, part, message)
+}
+
+func decodeOpenCodeStepFinishObjects(row []any, requestedSession string, part, message map[string]any) (OpenCodeStepFinishPart, error) {
+	if len(row) != 8 {
+		return OpenCodeStepFinishPart{}, fmt.Errorf("expected 8 columns, got %d", len(row))
+	}
 	partID, ok1 := openCodeString(row[0])
 	messageID, ok2 := openCodeString(row[1])
 	sessionID, ok3 := openCodeString(row[2])
@@ -1863,13 +1877,7 @@ func decodeOpenCodeStepFinish(row []any, requestedSession string) (OpenCodeStepF
 	if err != nil || completed < 0 {
 		return OpenCodeStepFinishPart{}, fmt.Errorf("invalid time_updated")
 	}
-	var part, message, model map[string]any
-	if err := decodeOpenCodeObject(row[5], &part); err != nil {
-		return OpenCodeStepFinishPart{}, fmt.Errorf("malformed part JSON: %w", err)
-	}
-	if err := decodeOpenCodeObject(row[6], &message); err != nil {
-		return OpenCodeStepFinishPart{}, fmt.Errorf("malformed message JSON: %w", err)
-	}
+	var model map[string]any
 	if err := decodeOpenCodeOptionalObject(row[7], &model); err != nil {
 		return OpenCodeStepFinishPart{}, fmt.Errorf("malformed session model JSON: %w", err)
 	}

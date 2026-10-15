@@ -196,7 +196,9 @@ func (s *server) finderIndexFileSnapshot() ([32]byte, float64, error) {
 }
 
 func (s *server) reloadFinderIndexSettings(ctx context.Context, onlyChanged bool) error {
-	s.indexSettingsUpdateMu.Lock()
+	if err := s.indexSettingsUpdateMu.LockContext(ctx, nil); err != nil {
+		return err
+	}
 	defer s.indexSettingsUpdateMu.Unlock()
 	digest, digestErr := s.finderIndexFileDigest()
 	if onlyChanged && digestErr == nil && digest == s.indexSettingsFileDigest {

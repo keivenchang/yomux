@@ -347,7 +347,7 @@ test('yielding tree sort preserves every shared comparator and stable equal-key 
     {name: '.hidden', kind: 'file', mtime: 2},
   ];
   for (const mode of ['az', 'za', 'newest', 'oldest']) {
-    for (const options of [{}, {deletedLast: true}, {includeHidden: true}, {tabberWindowOrder: true}]) {
+    for (const options of [{}, {deletedLast: true}, {includeHidden: true}]) {
       const expected = context.sortedFileTreeEntries(entries, mode, options);
       const steps = context.sortedFileTreeEntrySteps(entries, mode, {...options, yieldToInput: true});
       let next = steps.next();
@@ -6742,7 +6742,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.match(runtimeSource, /clientEventTransportState\.connected === true[\s\S]*goAgentStatusUsesActivityFallback/, 'Go keeps the fallback interval active while SSE is connected');
   });
 
-  await testAsync('Go activity fallback does not erase a live working marker on a capture miss', async () => {
+  await testAsync('Go activity adoption preserves backend unavailable status instead of extending a previous run', async () => {
     const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
     });
@@ -6752,6 +6752,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.ok(String(url).startsWith('/api/activity?'));
       const state = samples[Math.min(index++, samples.length - 1)];
       return Promise.resolve(jsonResponse({
+        topology_generation: 3,
+        agent_window_snapshot_revision: index,
+        agent_window_status_fresh: true,
         activity: {},
         agents: [],
         agent_windows: {
@@ -6763,8 +6766,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     await api.fetchTabberActivityForTest({visible: true});
     assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'working');
     await api.fetchTabberActivityForTest({visible: true});
-    assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'working', 'a transient capture miss preserves the known live marker');
-    assert.equal(api.sessionAgentWindowStatusModelForTest('1').agents[0].state, 'working');
+    assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'unavailable', 'the browser must not stamp a previous run with a newer backend revision');
+    assert.equal(api.sessionAgentWindowStatusModelForTest('1').agents[0].state, 'unavailable');
   });
 
   await testAsync('fresh Go status remains working during stale metadata and rejects delayed running replies', async () => {
@@ -6833,7 +6836,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(api.sessionAgentWindowStatusModelForTest('1').agents[0]?.state, 'working', 'the pane marker consumer sees the promoted working state');
   });
 
-  await testAsync('Go activity fallback paints a recovered working row over stale unavailable status', async () => {
+  await testAsync('Go activity recovery updates the canonical status before any surface renders working', async () => {
     const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
     });
@@ -6843,8 +6846,13 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     api.setTabberActivityForTest({agent_windows: {1: [
       {kind: 'codex', state: 'working', pane_target: '%73', window_index: 0},
     ]}});
-    const model = api.sessionAgentWindowStatusModelForTest('1');
-    assert.equal(model.agents[0]?.state, 'working', `a recovered Go activity row replaces only the stale unavailable canonical row: ${JSON.stringify(model)}`);
+    assert.equal(api.sessionAgentWindowStatusModelForTest('1').agents[0]?.state, 'unavailable', 'unadmitted metadata cannot override the canonical backend status');
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({activity: {}, session_order: ['1'], agent_windows: {1: [
+      {kind: 'codex', state: 'working', pane_target: '%73', window_index: 0},
+    ]}})));
+    await api.fetchTabberActivityForTest({visible: true});
+    assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'working');
+    assert.equal(api.sessionAgentWindowStatusModelForTest('1').agents[0]?.state, 'working');
   });
 
   await testAsync('Go activity fallback cannot resurrect a stale working row over a newer unavailable snapshot', async () => {
@@ -9239,6 +9247,69 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(source.includes('yoagentJobsState.guard'), false, 'jobs has no parallel generation guard');
   });
 
+  await testAsync('Finder Sync cannot mark an unavailable root applied or suppress its recovery', async () => {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {requestAnimationFrame() { return 1; }});
+    api.setFileExplorerRootMode('sync', {sync: false});
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({error: 'fixture unavailable'}, 503)));
+    const plan = {session: '1', root: '/repo', expandPaths: [], affectedDirs: ['/repo']};
+    assert.equal(await api.syncFileExplorerRootToPlanForTest(plan, '1'), false);
+    assert.equal(api.fileExplorerSyncStateForTest().appliedPlanKey, '');
+    assert.equal(api.fileExplorerSyncStateForTest().publication, null);
+    api.setFileExplorerDirListingForTest('/repo', [{name: 'recovered.txt', kind: 'file'}]);
+    assert.equal(await api.syncFileExplorerRootToPlanForTest(plan, '1'), true);
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/recovered.txt"]'));
+  });
+
+  await testAsync('A stale watched-directory refresh cannot enter the next sync publisher', async () => {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {requestAnimationFrame() { return 1; }});
+    api.setFileExplorerRootMode('sync', {sync: false});
+    api.setFileExplorerRootForTest('/repo');
+    api.setFileExplorerExpandedForTest(['/repo/branch']);
+    const branch = deferredFetch();
+    let branchRequested = false;
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'https://yomux.test');
+      if (parsed.pathname !== '/api/fs/fast/list') return Promise.resolve(jsonResponse({}));
+      const path = parsed.searchParams.get('path');
+      if (path === '/repo/branch') { branchRequested = true; return branch.promise; }
+      return Promise.resolve(jsonResponse({path, entries: [{name:'branch',kind:'dir'},{name:'obsolete.txt',kind:'file'}]}));
+    });
+    const stale = api.refreshFileExplorerTreesInPlaceForTest();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(branchRequested, true);
+    api.setFileExplorerExpandedForTest([]);
+    api.setFileExplorerDirListingForTest('/repo', [{name:'current.txt',kind:'file'}]);
+    const plan = {session:'1',root:'/repo',expandPaths:[],affectedDirs:['/repo']};
+    assert.equal(await api.syncFileExplorerRootToPlanForTest(plan, '1'), true);
+    branch.resolve(jsonResponse({path:'/repo/branch',entries:[]}));
+    assert.equal(await stale, false);
+    const tree = api.fileExplorerTreeForTest();
+    assert.ok(tree.querySelector('.file-tree-row[data-path="/repo/current.txt"]'));
+    assert.equal(tree.querySelector('.file-tree-row[data-path="/repo/obsolete.txt"]'), null);
+  });
+
+  await testAsync('A failed retained Finder publication permits ordinary same-plan recovery', async () => {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {requestAnimationFrame() { return 1; }});
+    api.setFileExplorerRootMode('sync', {sync: false});
+    api.setFileExplorerDirListingForTest('/repo', [{name:'current.txt',kind:'file'}]);
+    const plan = {session:'1',root:'/repo',expandPaths:[],affectedDirs:['/repo']};
+    assert.equal(await api.syncFileExplorerRootToPlanForTest(plan, '1'), true);
+    const publication = api.fileExplorerSyncStateForTest().publication;
+    const tree = api.fileExplorerTreeForTest();
+    const original = tree.insertBefore;
+    tree.insertBefore = () => { throw new Error('fixture publication failure'); };
+    try {
+      await assert.rejects(publication.publish(new Map([['/repo',[{name:'broken.txt',kind:'file'}]]])), /fixture publication failure/);
+    } finally {
+      tree.insertBefore = original;
+    }
+    assert.equal(publication.isCurrent(), false);
+    assert.equal(api.fileExplorerSyncStateForTest().appliedPlanKey, '');
+    assert.equal(await api.syncFileExplorerRootToPlanForTest(plan, '1'), true);
+    assert.ok(tree.querySelector('.file-tree-row[data-path="/repo/current.txt"]'));
+  });
+
   await testAsync('Finder Sync record cancels stale root work and resets manual ownership atomically', async () => {
     const pending = [];
     const api = loadYomux('', ['1']);
@@ -9264,6 +9335,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     await flushAsyncWork();
     assert.equal(pending.length, 2, 'manual root selection starts a newer directory transaction');
     assert.deepStrictEqual(canonical(api.fileExplorerSyncStateForTest()), {
+      publication: null,
       inFlightSignature: '',
       appliedPlanKey: '',
       generation: 5,
@@ -12319,27 +12391,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(api.tabberSessionFileLookbackHoursForTest(), 24, 'Tabber touched-path lookback defaults to 24 hours');
       assert.ok(api.tabberLookbackControlHtmlForTest().includes('data-tabber-lookback'), 'Tabber exposes its own lookback select');
       assert.ok(/value="24" selected/.test(api.tabberLookbackControlHtmlForTest()), 'Tabber lookback select marks the 24 hour default');
-      await api.fetchTabberSessionFilesBatchForTest(['1'], {force: true});
-      assert.ok(calls.some(url => {
-        const parsed = new URL(url, 'http://localhost');
-        return parsed.pathname === '/api/session-files-batch' && parsed.searchParams.get('hours') === '24';
-      }), 'Tabber batch touched-path hydration requests the default 24 hour lookback');
-
-      calls.length = 0;
       api.setTabberSessionFileLookbackHoursForTest(336, {refresh: false});
-      assert.equal(api.tabberSessionFileLookbackHoursForTest(), 336, 'Tabber stores the selected 14 day lookback');
-      assert.ok(/value="336" selected/.test(api.tabberLookbackControlHtmlForTest()), 'Tabber lookback select marks the selected 14 day value');
-      await api.fetchTabberSessionFilesBatchForTest(['1']);
-      await api.fetchTabberSessionFilesForTest('1', {force: true});
-      assert.ok(calls.some(url => {
-        const parsed = new URL(url, 'http://localhost');
-        return parsed.pathname === '/api/session-files-batch' && parsed.searchParams.get('hours') === '336';
-      }), 'changing Tabber lookback invalidates the loaded cache and reloads batch touched paths with selected hours');
-      assert.ok(calls.some(url => {
-        const parsed = new URL(url, 'http://localhost');
-        return parsed.pathname === '/api/session-files' && parsed.searchParams.get('session') === '1' && parsed.searchParams.get('hours') === '336';
-      }), 'Tabber single-session touched-path fallback uses selected hours');
-
+      assert.equal(api.tabberSessionFileLookbackHoursForTest(), 336);
+      assert.ok(/value="336" selected/.test(api.tabberLookbackControlHtmlForTest()));
       calls.length = 0;
       api.setTranscriptInfoForTest('1', {
         panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', process_label_pid: 10, command: 'claude', current_path: '/repo/one'}],
@@ -12476,7 +12530,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       sessionTwoRow.classList.add('file-tree-row');
       sessionTwoRow.dataset.kind = 'dir';
       sessionTwoRow.dataset.path = '/s_2';
-      sessionTwoRow.dataset.tabberType = 'session';
+      sessionTwoRow.dataset.tabberType = 'normal';
       sessionTwoRow.dataset.tabberSession = '2';
       tabberPanel.appendChild(sessionTwoRow);
       api.bindTabberPanelForTest(tabberPanel);

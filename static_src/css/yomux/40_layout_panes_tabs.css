@@ -1607,14 +1607,7 @@ body.app-topbar-touch-compact .pane-tab-close {
   height: var(--pane-control-touch-target-size);
   touch-action: manipulation;
 }
-/* Keep the minimize action reliably tappable while preserving its compact minus glyph. */
 body.app-topbar-touch-compact .tabs .pane-minimize {
-  flex: 0 0 var(--pane-control-touch-target-size);
-  width: var(--pane-control-touch-target-size);
-  min-width: var(--pane-control-touch-target-size);
-  max-width: var(--pane-control-touch-target-size);
-  height: var(--pane-control-touch-target-size);
-  min-height: var(--pane-control-touch-target-size);
   touch-action: manipulation;
 }
 body.app-topbar-touch-compact .yomux-dockview .dv-tabs-and-actions-container,
@@ -1969,10 +1962,7 @@ body.app-topbar-touch-compact .yomux-dockview .dv-right-actions-container {
   --subwindow-status-glyph-fill: var(--pr-status-passing);
   color: transparent !important;
 }
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--attention {
-  --subwindow-status-glyph-fill: var(--subwindow-status-attention-fill);
-  color: transparent !important;
-}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--attention,
 .agent-window-activity--subwindow .agent-window-status-dot.status-indicator--blocked {
   --subwindow-status-glyph-fill: var(--subwindow-status-attention-fill);
   color: transparent !important;
@@ -2009,13 +1999,7 @@ body.app-topbar-touch-compact .yomux-dockview .dv-right-actions-container {
   clip-path: polygon(8% 0, 100% 50%, 8% 100%);
   transform: translate(-50%, -50%);
 }
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--attention::before {
-  box-sizing: border-box;
-  inline-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
-  block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
-  border-radius: max(1px, calc(var(--agent-status-ball-size) * 0.08));
-  background: var(--subwindow-status-glyph-fill, currentColor);
-}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--attention::before,
 .agent-window-activity--subwindow .agent-window-status-dot.status-indicator--blocked::before {
   box-sizing: border-box;
   inline-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
@@ -2284,4 +2268,9 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
 .panel.active-pane .panel-detail-row .session-button-name {
 
   color: var(--40-layout-panes-tabs-panel-fg-23);
+}
+
+/* Keep the home controls mounted when Normal hides its own pane tab. */
+body.tabber-mode-normal .yomux-dockview .dv-tab:has(> .dockview-pane-tab[data-pane-tab="__tabber__"]) {
+  display: none;
 }

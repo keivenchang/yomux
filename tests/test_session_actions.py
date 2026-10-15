@@ -248,6 +248,36 @@ def test_kill_session_calls_tmux_and_removes_session(monkeypatch, make_app):
     assert calls == [["kill-session", "-t", "=1:"], ["join-retirement", retirement_identity]]
 
 
+def test_kill_window_refuses_last_window_and_targets_exact_window_id(monkeypatch, make_app):
+    app = make_app(["1"])
+    calls = []
+    listed_windows = ["@10\n@11\n", "@10\n", "@10\n"]
+
+    def fake_tmux(args, timeout=5.0):
+        calls.append(args)
+        if args[0] == "list-windows":
+            return FakeTmuxResult(stdout=listed_windows.pop(0))
+        return FakeTmuxResult()
+
+    monkeypatch.setattr(app_module, "tmux", fake_tmux)
+    monkeypatch.setattr(app, "invalidate_status_topology_async", lambda: None)
+
+    killed, killed_status = app_module.kill_tmux_window(app, "1", "@11")
+    refused, refused_status = app_module.kill_tmux_window(app, "1", "@10")
+
+    assert killed_status == HTTPStatus.OK
+    assert killed["ok"] is True
+    assert killed["windows_remaining"] == 1
+    assert refused_status == HTTPStatus.CONFLICT
+    assert "last window" in refused["error"]
+    assert calls == [
+        ["list-windows", "-t", "=1:", "-F", "#{window_id}"],
+        ["if-shell", "-F", "-t", "=1:", "#{>=:#{session_windows},2}", "kill-window -t @11", ""],
+        ["list-windows", "-t", "=1:", "-F", "#{window_id}"],
+        ["list-windows", "-t", "=1:", "-F", "#{window_id}"],
+    ]
+
+
 def test_kill_session_refuses_success_when_an_exact_process_birth_survives(monkeypatch, make_app):
     app = make_app(["1"])
     retirement_identity = object()

@@ -580,11 +580,12 @@ func (s *server) sessionFilesStream(w http.ResponseWriter, r *http.Request) {
 	}
 	plan := newSessionFilesPlan(request)
 	descriptor, viewID := plan.descriptor, plan.viewID
-	stream, ok := newJSONSSEWriter(w)
+	stream, ok := newJSONSSEWriter(w, r.Context())
 	if !ok {
 		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusInternalServerError, Code: "streaming_unavailable", MessageKey: "common.requestFailed", Message: "streaming unavailable"})
 		return
 	}
+	defer stream.close()
 	writeEvent := stream.write
 	if err := writeEvent("start", map[string]any{"session": request.session, "from_ref": request.fromRef, "to_ref": request.toRef}); err != nil {
 		return

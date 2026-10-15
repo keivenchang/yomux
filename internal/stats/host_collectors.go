@@ -251,13 +251,6 @@ func BuildUnavailableFacts(family string, context HostFactContext, reason string
 	}}}
 }
 
-func validHostCadence(family string, cadence float64) bool {
-	if !finite(cadence) || cadence <= 0 {
-		return false
-	}
-	return family != ""
-}
-
 func singleHostFacts(family string, context HostFactContext, payload map[string]any) AppendBatch {
 	if !validFactContext(context) {
 		return AppendBatch{}
@@ -988,18 +981,6 @@ func boundedRead(read func(string) ([]byte, error), name string) ([]byte, error)
 		return nil, errors.New("host input exceeds bound")
 	}
 	return data, nil
-}
-func mibBytes(value float64) uint64 {
-	if !finite(value) || value <= 0 || value >= float64(^uint64(0))/(1024*1024) {
-		return 0
-	}
-	return uint64(value * 1024 * 1024)
-}
-func gpuLabel(index int, name string) string {
-	if name == "" {
-		return fmt.Sprintf("GPU %d", index)
-	}
-	return fmt.Sprintf("GPU %d (%s)", index, name)
 }
 func firstNumber(m map[string]any, keys ...string) (float64, bool) {
 	for _, key := range keys {

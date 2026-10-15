@@ -167,27 +167,27 @@ var (
 )
 
 type gitNamespace struct {
-	gitDir                *os.File
-	commonDir             *os.File
-	objects               *os.File
-	gitDirPath            string
-	commonPath            string
-	objectsPath           string
-	alternates            string
-	alternateID           descriptorIdentity
-	alternateSet          bool
-	layoutCache           *gitObjectLayoutCache
-	snapshotMu            sync.Mutex
-	snapshotRoot          string
-	snapshotWork          string
-	snapshotGit           string
-	snapshotCommon        string
-	snapshotObjects       string
-	objectSnapshotRelease func()
-	objectSnapshotCache   *darwinGitObjectSnapshotCache
-	snapshotErr           error
-	snapshotReady         bool
-	workTreePath          string
+	gitDir           *os.File
+	commonDir        *os.File
+	objects          *os.File
+	gitDirPath       string
+	commonPath       string
+	objectsPath      string
+	alternates       string
+	alternateID      descriptorIdentity
+	alternateSet     bool
+	layoutCache      *gitObjectLayoutCache
+	snapshotMu       sync.Mutex
+	snapshotRoot     string
+	snapshotWork     string
+	snapshotGit      string
+	snapshotCommon   string
+	snapshotObjects  string
+	snapshotReleases []func()
+	snapshotCache    *darwinGitSnapshotCache
+	snapshotErr      error
+	snapshotReady    bool
+	workTreePath     string
 }
 
 func (namespace *gitNamespace) identity() string {
@@ -225,9 +225,10 @@ func (namespace *gitNamespace) close() {
 	if namespace.snapshotRoot != "" {
 		removeDarwinSnapshot(namespace.snapshotRoot)
 	}
-	if namespace.objectSnapshotRelease != nil {
-		namespace.objectSnapshotRelease()
+	for _, release := range namespace.snapshotReleases {
+		release()
 	}
+	namespace.snapshotReleases = nil
 }
 
 func (namespace *gitNamespace) validateContext(ctx context.Context) error {

@@ -2540,5 +2540,11 @@
   "pref.section.sizes": "Grootte",
   "contextmenu.copyText": "Tekst kopiëren",
   "contextmenu.copyWithStyle": "Kopiëren met stijl",
-  "status.copiedStyledText": "Gekopieerd met stijl"
+  "status.copiedStyledText": "Gekopieerd met stijl",
+  "menu.tmux.kill.window": "{window} beëindigen in tmux-sessie",
+  "menu.tmux.kill.session.windows": "Volledige tmux-sessie beëindigen ({count} vensters)",
+  "status.tmux.windowKill.confirm": "{window} beëindigen in tmux-sessie '{session}'?",
+  "status.tmux.windowKill.pending": "{window} beëindigen in tmux-sessie '{session}'",
+  "status.tmux.windowKill.failed": "{window} beëindigen in tmux-sessie '{session}' is mislukt",
+  "status.tmux.windowKill.success": "{window} beëindigd in tmux-sessie '{session}'"
 }

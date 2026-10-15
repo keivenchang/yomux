@@ -2540,5 +2540,11 @@
   "pref.section.sizes": "Kích thước",
   "contextmenu.copyText": "Sao chép văn bản",
   "contextmenu.copyWithStyle": "Sao chép có kiểu",
-  "status.copiedStyledText": "Đã sao chép có kiểu"
+  "status.copiedStyledText": "Đã sao chép có kiểu",
+  "menu.tmux.kill.window": "Kết thúc {window} trong phiên tmux",
+  "menu.tmux.kill.session.windows": "Kết thúc toàn bộ phiên tmux ({count} cửa sổ)",
+  "status.tmux.windowKill.confirm": "Kết thúc {window} trong phiên tmux '{session}'?",
+  "status.tmux.windowKill.pending": "Đang kết thúc {window} trong phiên tmux '{session}'",
+  "status.tmux.windowKill.failed": "Không thể kết thúc {window} trong phiên tmux '{session}'",
+  "status.tmux.windowKill.success": "Đã kết thúc {window} trong phiên tmux '{session}'"
 }

@@ -110,7 +110,7 @@ func writeCheckpoints(ctx context.Context, tx *sql.Tx, checkpoints []Checkpoint)
 
 func (w *Writer) LoadCheckpoint(ctx context.Context, key string) (Checkpoint, bool, error) {
 	var c Checkpoint
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return c, false, errors.New("nil YO!stats writer")
 	}
 	err := w.db.QueryRowContext(ctx, `SELECT checkpoint_key,kind,source_id,revision,version,byte_offset,file_size,file_mtime_ns,device,inode,metadata,decoded_bytes,state,prefix,parsed_tail,pending_line,rebuild_buffer,rebuild_line FROM collector_checkpoints WHERE checkpoint_key=?`, key).Scan(
@@ -123,7 +123,7 @@ func (w *Writer) LoadCheckpoint(ctx context.Context, key string) (Checkpoint, bo
 }
 
 func (w *Writer) ListCheckpointMetadata(ctx context.Context, kind string) ([]CheckpointMetadata, error) {
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return nil, errors.New("nil YO!stats writer")
 	}
 	rows, err := w.db.QueryContext(ctx, `SELECT checkpoint_key,kind,source_id,revision,version,byte_offset,file_size,file_mtime_ns,device,inode,metadata,decoded_bytes FROM collector_checkpoints WHERE kind=? ORDER BY checkpoint_key`, kind)
@@ -146,7 +146,7 @@ func (w *Writer) ListCheckpointMetadata(ctx context.Context, kind string) ([]Che
 // participating in collector scheduling instead of copying every historical
 // checkpoint into memory on each cycle.
 func (w *Writer) ListCheckpointMetadataForKeys(ctx context.Context, kind string, keys []string) ([]CheckpointMetadata, error) {
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return nil, errors.New("nil YO!stats writer")
 	}
 	if len(keys) == 0 {
@@ -197,7 +197,7 @@ func (w *Writer) ListCheckpointMetadataForKeys(ctx context.Context, kind string,
 // source passes lightweight metadata classification and collector admission.
 func (w *Writer) LoadCheckpointComparisonSamples(ctx context.Context, key string) (CheckpointComparisonSamples, error) {
 	var samples CheckpointComparisonSamples
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return samples, errors.New("nil YO!stats writer")
 	}
 	err := w.db.QueryRowContext(ctx, `SELECT prefix,parsed_tail FROM collector_checkpoints WHERE checkpoint_key=?`, key).Scan(&samples.Prefix, &samples.ParsedTail)
@@ -292,7 +292,7 @@ func writeCheckpointRetirement(ctx context.Context, tx *sql.Tx, retirement *Chec
 // The writer lease and legacy cursor locks keep the backup pair consistent.
 // A failed migration leaves the original schema and every backup intact.
 func (w *Writer) EnsureCheckpoints(ctx context.Context, legacyPaths []string) error {
-	if w == nil || w.db == nil || w.lease == nil {
+	if w == nil || w.db == nil || w.closed.Load() || w.lease == nil {
 		return errors.New("nil YO!stats writer")
 	}
 	w.mutationMu.Lock()

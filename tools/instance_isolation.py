@@ -82,6 +82,7 @@ def synthetic_test_environment(overrides: Mapping[str, str] | None = None) -> di
         and key not in INHERITED_CREDENTIAL_ENV_KEYS
         and key not in {"HOME", "TMPDIR", "TMUX", "TMUX_PANE", "TMUX_TMPDIR", "PYTHONPATH", "PYTHONHOME", "PYTHONPYCACHEPREFIX"}
     }
+    environment["YOMUX_TEST_DISABLE_PRICING_REFRESH"] = "1"
     environment.update(overrides or {})
     return environment
 ROOTED_OVERRIDE_KEYS = (

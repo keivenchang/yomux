@@ -346,11 +346,91 @@ class ChildOwnershipState:
     """In-process ownership and reaping state for one service generation."""
 
     process: subprocess.Popen[Any] | None = None
+    startup_pending: bool = False
     spawn_ownership: SpawnProcessOwnership | None = None
     adopted_reaper_pid: int = 0
     adopted_reaper_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
     reaper_threads: set[threading.Thread] = field(default_factory=set, repr=False, compare=False)
     reaper_threads_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def _spawned_leader_identity_matches(self) -> bool:
+        """Prove the live pid we spawned is still that exact process, not a reused-pid imposter.
+
+        Reuses the spawn-ownership identity proof captured at spawn: the leader's start-identity.
+        A pid that is alive but now carries a DIFFERENT start-identity has been recycled to an
+        unrelated process, which is the imposter case; a missing or empty captured identity
+        cannot prove ownership and is treated as unproven.
+        """
+
+        ownership = self.spawn_ownership
+        if ownership is None:
+            return False
+        leader_pid = ownership.leader_pid
+        expected = dict(ownership.member_identities).get(leader_pid, "")
+        if not expected or not pid_is_alive(leader_pid):
+            return False
+        return process_start_identity(leader_pid) == expected
+
+    def _status_matches_spawned_leader(self, status: dict[str, Any], registry: LocalServiceRegistry) -> bool:
+        """Prove the identity carried IN the status response is the exact leader we spawned.
+
+        `_publish_record`/`_record_publication_refusal` prove a status is a VALID publishable
+        identity -- ok, this service and protocol, a usable pid and start-identity -- but not
+        that the pid it names is the process THIS generation spawned. Reuse the one spawn-ledger
+        identity (`spawn_ownership.member_identities` for the leader pid; the same source
+        `_spawned_leader_identity_matches` uses) so a healthy status answering for a DIFFERENT
+        process is never mistaken for our own late-but-valid child. No second RPC.
+        """
+
+        ownership = self.spawn_ownership
+        if ownership is None:
+            return False
+        leader_pid = ownership.leader_pid
+        expected = dict(ownership.member_identities).get(leader_pid, "")
+        if not expected:
+            return False
+        if int(status.get("pid") or 0) != leader_pid:
+            return False
+        record, refusal = registry._validated_status_identity(status, require_carried_identity=True)
+        if refusal:
+            return False
+        return recorded_start_identity(record) == expected
+
+    def _status_is_wrong_identity(self, status: dict[str, Any], registry: LocalServiceRegistry) -> bool:
+        """Classify a live-past-deadline child as carrying the WRONG identity (terminal).
+
+        Two terminal shapes: the pid we spawned is alive but now carries a different
+        start-identity -- a reused-pid imposter, so the OS-level proof fails -- or our leader is
+        alive and ours yet the status response is an otherwise-VALID healthy identity naming a
+        DIFFERENT process, a peer answering our socket. A not-ok or dropped status from our own
+        still-alive leader is transient not-ready, never this.
+        """
+
+        if not self._spawned_leader_identity_matches():
+            return True
+        record, refusal = registry._validated_status_identity(status, require_carried_identity=True)
+        if refusal in {"service_name_mismatch", "protocol_version_mismatch"}:
+            return True
+        if refusal:
+            return False
+        return not self._status_matches_spawned_leader(status, registry)
+
+    def _wrong_identity_reason(self, status: dict[str, Any], registry: LocalServiceRegistry) -> str:
+        """Name which wrong-identity shape declared this terminal startup episode."""
+
+        leader_pid = self.spawn_ownership.leader_pid if self.spawn_ownership is not None else 0
+        _record, refusal = registry._validated_status_identity(status, require_carried_identity=True)
+        if refusal in {"service_name_mismatch", "protocol_version_mismatch"}:
+            return f"{registry.spec.name} startup status identity mismatch: {refusal}"
+        if self._spawned_leader_identity_matches():
+            return (
+                f"{registry.spec.name} startup status identity mismatch: peer answered with "
+                f"pid {int(status.get('pid') or 0)}, not spawned leader {leader_pid}"
+            )
+        return (
+            f"{registry.spec.name} startup pid {leader_pid} "
+            "start-identity mismatch (reused-pid imposter)"
+        )
 
 
 class ProcessTableUnavailable(RuntimeError):
@@ -1891,6 +1971,8 @@ class LocalServiceRegistry:
     @process.setter
     def process(self, value: subprocess.Popen[Any] | None) -> None:
         self._child_ownership.process = value
+        if value is None:
+            self._child_ownership.startup_pending = False
 
     @property
     def spawn_ownership(self) -> SpawnProcessOwnership | None:
@@ -2084,20 +2166,24 @@ class LocalServiceRegistry:
                 merged[field_name] = existing[field_name]
         return merged
 
-    def _write_record(self, record: dict[str, Any]) -> bool:
-        """Publish the durable identity record as a compare-and-swap, never a blind write."""
-
+    def _refuse_removed_record_directory(self) -> bool:
+        # Taking the file lock creates its directory. Once this owner published,
+        # directory removal means teardown and must be fenced before any lock.
         if self._record_directory_confirmed and (
             self._lock_directory_is_absent or not self.record_path.parent.exists()
         ):
-            # Checked BEFORE the lock, because taking it is itself a mkdir and a
-            # chmod on the directory teardown removed. This exact owner already
-            # published here, so the directory being gone is a removal, not a
-            # first start.
             self._record_refusal_reason = redact_local_service_text(
                 f"{self.spec.name} service record directory was removed after this owner already "
                 "published into it; refusing to resurrect it"
             )
+            self._failure_reason = self._record_refusal_reason
+            return True
+        return False
+
+    def _write_record(self, record: dict[str, Any]) -> bool:
+        """Publish the durable identity record as a compare-and-swap, never a blind write."""
+
+        if self._refuse_removed_record_directory():
             return False
         with self._record_lock():
             existing = self._read_record()
@@ -2112,16 +2198,7 @@ class LocalServiceRegistry:
             return self._write_record_unlocked(record)
 
     def _write_record_unlocked(self, record: dict[str, Any]) -> bool:
-        if self._record_directory_confirmed and not self.record_path.parent.exists():
-            # This exact owner already proved it published here once; the
-            # directory disappearing since is a teardown/removal, not a
-            # first-start race. Refuse instead of `mkdir`-ing a fresh
-            # directory back into existence and writing a record no caller
-            # asked this owner to re-create.
-            self._record_refusal_reason = redact_local_service_text(
-                f"{self.spec.name} service record directory was removed after this owner already "
-                "published into it; refusing to resurrect it"
-            )
+        if self._refuse_removed_record_directory():
             return False
         self.record_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -2852,11 +2929,8 @@ class LocalServiceRegistry:
     def recently_healthy(self) -> bool:
         return self._health_probe_cache.is_recent(self.clock())
 
-    def _record_from_status(self, status: dict[str, Any]) -> dict[str, Any]:
-        pid = int(status.get("pid") or 0)
-        worker_pids = status.get("worker_pids")
-        start_identity = str(status.get("process_start_identity") or "")
-        record = {
+    def _record_for_process(self, pid: int, start_identity: str, worker_pids: Any) -> dict[str, Any]:
+        return {
             **self.host_identity.process_record_fields(pid=pid, start_identity=start_identity),
             "version": LOCAL_SERVICE_REGISTRY_VERSION,
             "service": self.spec.name,
@@ -2885,11 +2959,18 @@ class LocalServiceRegistry:
             "root_sharing": root_sharing_mode(private_root=self.managed_private_root),
             "claim_id": self.claim.claim_id if self.claim is not None else "",
             "worker_pids": [int(worker) for worker in worker_pids if isinstance(worker, int) and worker > 0] if isinstance(worker_pids, list) else [],
-            "protocol_version": int(status.get("version") or 0),
             "socket": str(self.socket_path),
-            "started_at": float(status.get("started_at") or wall_clock()),
             "updated_at": wall_clock(),
         }
+
+    def _record_from_status(self, status: dict[str, Any]) -> dict[str, Any]:
+        record = self._record_for_process(
+            int(status.get("pid") or 0),
+            str(status.get("process_start_identity") or ""),
+            status.get("worker_pids"),
+        )
+        record["protocol_version"] = int(status.get("version") or 0)
+        record["started_at"] = float(status.get("started_at") or wall_clock())
         source_epoch = status.get("source_epoch")
         if isinstance(source_epoch, str) and source_epoch:
             record["source_epoch"] = source_epoch[:160]
@@ -2964,7 +3045,8 @@ class LocalServiceRegistry:
     def _publish_record(self, status: dict[str, Any], *, require_carried_identity: bool = False) -> bool:
         """Publish the durable identity record, and only from a proven status.
 
-        This is the one place a service record is written.  0.7.0 published
+        This publishes observed-ready records; pending startup records carry only
+        captured spawn identity and never imply health. 0.7.0 published
         whatever `_record_from_status` produced straight after a successful
         ping, so a single dropped status RPC wrote a record carrying pid 0 --
         an `invalid_pid` identity no later start on the same host and boot
@@ -3483,6 +3565,12 @@ class LocalServiceRegistry:
     def ensure_started(self) -> bool:
         if not self.starts_allowed():
             return False
+        if self._child_ownership.startup_pending:
+            if self.clock() < self.next_start_at:
+                return False
+            return self.complete_pending_startup(
+                expected_process=self.process, expected_ownership=self.spawn_ownership,
+            )
         # Polling an exited child is the parent-side reap operation. Do it before
         # the healthy-cache shortcut so a quiet service cannot remain defunct.
         if self.process is not None and self.process.poll() is not None:
@@ -3518,17 +3606,7 @@ class LocalServiceRegistry:
                 return False
             if self.clock() < self.next_start_at:
                 return False
-            if self._record_directory_confirmed and (
-                self._lock_directory_is_absent or not self.record_path.parent.exists()
-            ):
-                # This exact owner already published here, so the directory
-                # disappearing since is a teardown, not a first start. Taking the
-                # lock would mkdir + chmod it back into existence.
-                self._record_refusal_reason = redact_local_service_text(
-                    f"{self.spec.name} service directory was removed after this owner published "
-                    "into it; refusing to recreate it for a start"
-                )
-                self._failure_reason = self._record_refusal_reason
+            if self._refuse_removed_record_directory():
                 return False
             with self._record_lock():
                 if self.healthy() and self._publish_record(self._request("status", timeout=0.2)):
@@ -3552,66 +3630,130 @@ class LocalServiceRegistry:
                     self._mark_failure(self._failure_reason or f"{self.spec.name} spawn failed")
                     return False
                 self.process = process
-                deadline = self.clock() + self.spec.start_timeout_seconds
-                while self.clock() < deadline:
-                    if self.healthy() and self._publish_record(self._request("status", timeout=0.2)):
-                        return self._accept_started_child(process)
-                    exit_code = process.poll()
-                    if exit_code is not None:
-                        break
-                    self.sleep(0.03)
-                exit_code = process.poll()
-                # W7 clause 4: ONE final identity-bearing startup probe -- a single `status`
-                # request, no `ping` first -- decides a child still alive past the deadline.
-                # The one status response is itself the identity used for protocol/identity/
-                # readiness validation, and classifies into exactly three outcomes:
-                #   late-valid     -- ok, this service and protocol, and the pid/start-identity
-                #                     it carries match the exact leader we spawned -> publish the
-                #                     record, accept, NO Error, and NO second generation.
-                #   wrong-identity -- otherwise-healthy but the WRONG pid/start-identity: a
-                #                     reused-pid imposter (our pid is alive but now carries a
-                #                     different start-identity) or a peer answering our socket
-                #                     with a valid status naming a process we did not spawn ->
-                #                     one terminal-episode Error, no respawn while backoff
-                #                     ownership forbids re-entry.
-                #   transient      -- not-ok or dropped while our own leader is still alive and
-                #                     ours -> hold THIS child for the caller's bounded retry,
-                #                     NO Error, no respawn.
-                # A child that exited (`exit_code is not None`), or a spawn that never captured
-                # ownership, keeps the terminal path below unchanged.
-                if exit_code is None and self.spawn_ownership is not None:
-                    status = self._request("status", timeout=0.2)
-                    if (
-                        self._spawned_leader_identity_matches()
-                        and self._status_matches_spawned_leader(status)
-                        and self._publish_record(status, require_carried_identity=True)
-                    ):
-                        return self._accept_started_child(process)
-                    if self._status_is_wrong_identity(status):
-                        self._mark_failure(
-                            self._wrong_identity_reason(status),
-                            exit_code=exit_code,
-                            exited_before_ready=True,
+                self._child_ownership.startup_pending = True
+                ownership = self.spawn_ownership
+                if ownership is not None:
+                    pending = self._record_for_process(
+                        ownership.leader_pid,
+                        dict(ownership.member_identities)[ownership.leader_pid],
+                        [],
+                    )
+                    pending["pgid"] = ownership.process_group
+                    pending["spawn_generation"] = ownership.generation_marker
+                    pending["startup_pending"] = True
+                    try:
+                        published = self._write_record(pending)
+                    except OSError as exc:
+                        self._record_refusal_reason = redact_local_service_text(
+                            f"{self.spec.name} pending startup record publication failed ({type(exc).__name__}: {exc})"
                         )
+                        published = False
+                    if not published:
+                        # No peer may replace an unfenced live generation. Retire only
+                        # the direct child whose spawn identity we still prove.
                         self._terminal_failure = True
+                        outcome = self._terminate_recorded_generation(
+                            pending, ownership.leader_pid, claim_state="launcher_owned_pending_startup",
+                        )
+                        self._process_diagnostic = {**self._process_diagnostic, "termination": outcome.as_dict()}
+                        reason = self._record_refusal_reason or "pending startup publication failed"
+                        if outcome.confirmed_dead:
+                            process.poll()
+                            self.process = None
+                        else:
+                            reason += "; owned pending generation retirement unconfirmed"
+                        self._mark_failure(reason)
                         return False
-                    self.next_start_at = self.clock() + LOCAL_SERVICE_BACKOFF_SECONDS
-                    return False
-                # A child that answered ping but never published a provable
-                # identity failed for that reason, not for the generic
-                # "did not become ready" one; keep the real cause.
-                reason = self._record_refusal_reason or self._spawn_failure_reason(exit_code)
+                return self._complete_pending_startup_locked()
+        return False
+
+    def complete_pending_startup(
+        self, *, expected_process: subprocess.Popen[Any] | None, expected_ownership: SpawnProcessOwnership | None,
+    ) -> bool:
+        """Finish this owner's retained generation without ever spawning a replacement."""
+
+        with self.lock:
+            if (
+                not self.starts_allowed() or self._terminal_failure or not self._child_ownership.startup_pending
+                or expected_process is None or expected_ownership is None
+                or self.process is not expected_process or self.spawn_ownership != expected_ownership
+            ):
+                return False
+            if self._refuse_removed_record_directory():
+                return False
+            with self._record_lock():
+                return self._complete_pending_startup_locked()
+
+    def _complete_pending_startup_locked(self) -> bool:
+        process = self.process
+        if process is None:
+            return False
+        deadline = self.clock() + self.spec.start_timeout_seconds
+        while self.clock() < deadline:
+            if self.healthy():
+                status = self._request("status", timeout=0.2)
+                if (self._child_ownership._spawned_leader_identity_matches()
+                    and self._child_ownership._status_matches_spawned_leader(status, self)
+                    and self._publish_record(status, require_carried_identity=True)):
+                    return self._accept_started_child(process)
+            exit_code = process.poll()
+            if exit_code is not None:
+                break
+            self.sleep(0.03)
+        exit_code = process.poll()
+        # W7 clause 4: ONE final identity-bearing startup probe -- a single `status`
+        # request, no `ping` first -- decides a child still alive past the deadline.
+        # The one status response is itself the identity used for protocol/identity/
+        # readiness validation, and classifies into exactly three outcomes:
+        #   late-valid     -- ok, this service and protocol, and the pid/start-identity
+        #                     it carries match the exact leader we spawned -> publish the
+        #                     record, accept, NO Error, and NO second generation.
+        #   wrong-identity -- otherwise-healthy but the WRONG pid/start-identity: a
+        #                     reused-pid imposter (our pid is alive but now carries a
+        #                     different start-identity) or a peer answering our socket
+        #                     with a valid status naming a process we did not spawn ->
+        #                     one terminal-episode Error, no respawn while backoff
+        #                     ownership forbids re-entry.
+        #   transient      -- not-ok or dropped while our own leader is still alive and
+        #                     ours -> hold THIS child for the caller's bounded retry,
+        #                     NO Error, no respawn.
+        # A child that exited (`exit_code is not None`), or a spawn that never captured
+        # ownership, keeps the terminal path below unchanged.
+        if exit_code is None and self.spawn_ownership is not None:
+            status = self._request("status", timeout=0.2)
+            if (
+                self._child_ownership._spawned_leader_identity_matches()
+                and self._child_ownership._status_matches_spawned_leader(status, self)
+                and self._publish_record(status, require_carried_identity=True)
+            ):
+                return self._accept_started_child(process)
+            if self._child_ownership._status_is_wrong_identity(status, self):
                 self._mark_failure(
-                    reason,
+                    self._child_ownership._wrong_identity_reason(status, self),
                     exit_code=exit_code,
-                    exited_before_ready=exit_code is not None,
+                    exited_before_ready=True,
                 )
+                self._terminal_failure = True
+                return False
+            self.next_start_at = self.clock() + LOCAL_SERVICE_BACKOFF_SECONDS
+            return False
+        # A child that answered ping but never published a provable
+        # identity failed for that reason, not for the generic
+        # "did not become ready" one; keep the real cause.
+        reason = self._record_refusal_reason or self._spawn_failure_reason(exit_code)
+        self._child_ownership.startup_pending = False
+        self._mark_failure(
+            reason,
+            exit_code=exit_code,
+            exited_before_ready=exit_code is not None,
+        )
         return False
 
     def _accept_started_child(self, process: subprocess.Popen[Any]) -> bool:
         """Record one proven-healthy startup and clear every failure latch. One owner."""
 
         self._startup_failure.reset()
+        self._child_ownership.startup_pending = False
         self.refresh_spawn_ownership()
         ownership = self.spawn_ownership
         if ownership is not None:
@@ -3666,85 +3808,6 @@ class LocalServiceRegistry:
                 "failure_reason": str(exc),
                 "age_seconds": 0.0,
             }])
-
-    def _spawned_leader_identity_matches(self) -> bool:
-        """Prove the live pid we spawned is still that exact process, not a reused-pid imposter.
-
-        Reuses the spawn-ownership identity proof captured at spawn: the leader's start-identity.
-        A pid that is alive but now carries a DIFFERENT start-identity has been recycled to an
-        unrelated process, which is the imposter case; a missing or empty captured identity
-        cannot prove ownership and is treated as unproven.
-        """
-
-        ownership = self.spawn_ownership
-        if ownership is None:
-            return False
-        leader_pid = ownership.leader_pid
-        expected = dict(ownership.member_identities).get(leader_pid, "")
-        if not expected or not pid_is_alive(leader_pid):
-            return False
-        return process_start_identity(leader_pid) == expected
-
-    def _status_matches_spawned_leader(self, status: dict[str, Any]) -> bool:
-        """Prove the identity carried IN the status response is the exact leader we spawned.
-
-        `_publish_record`/`_record_publication_refusal` prove a status is a VALID publishable
-        identity -- ok, this service and protocol, a usable pid and start-identity -- but not
-        that the pid it names is the process THIS generation spawned. Reuse the one spawn-ledger
-        identity (`spawn_ownership.member_identities` for the leader pid; the same source
-        `_spawned_leader_identity_matches` uses) so a healthy status answering for a DIFFERENT
-        process is never mistaken for our own late-but-valid child. No second RPC.
-        """
-
-        ownership = self.spawn_ownership
-        if ownership is None:
-            return False
-        leader_pid = ownership.leader_pid
-        expected = dict(ownership.member_identities).get(leader_pid, "")
-        if not expected:
-            return False
-        if int(status.get("pid") or 0) != leader_pid:
-            return False
-        record, refusal = self._validated_status_identity(status, require_carried_identity=True)
-        if refusal:
-            return False
-        return recorded_start_identity(record) == expected
-
-    def _status_is_wrong_identity(self, status: dict[str, Any]) -> bool:
-        """Classify a live-past-deadline child as carrying the WRONG identity (terminal).
-
-        Two terminal shapes: the pid we spawned is alive but now carries a different
-        start-identity -- a reused-pid imposter, so the OS-level proof fails -- or our leader is
-        alive and ours yet the status response is an otherwise-VALID healthy identity naming a
-        DIFFERENT process, a peer answering our socket. A not-ok or dropped status from our own
-        still-alive leader is transient not-ready, never this.
-        """
-
-        if not self._spawned_leader_identity_matches():
-            return True
-        record, refusal = self._validated_status_identity(status, require_carried_identity=True)
-        if refusal in {"service_name_mismatch", "protocol_version_mismatch"}:
-            return True
-        if refusal:
-            return False
-        return not self._status_matches_spawned_leader(status)
-
-    def _wrong_identity_reason(self, status: dict[str, Any]) -> str:
-        """Name which wrong-identity shape declared this terminal startup episode."""
-
-        leader_pid = self.spawn_ownership.leader_pid if self.spawn_ownership is not None else 0
-        _record, refusal = self._validated_status_identity(status, require_carried_identity=True)
-        if refusal in {"service_name_mismatch", "protocol_version_mismatch"}:
-            return f"{self.spec.name} startup status identity mismatch: {refusal}"
-        if self._spawned_leader_identity_matches():
-            return (
-                f"{self.spec.name} startup status identity mismatch: peer answered with "
-                f"pid {int(status.get('pid') or 0)}, not spawned leader {leader_pid}"
-            )
-        return (
-            f"{self.spec.name} startup pid {leader_pid} "
-            "start-identity mismatch (reused-pid imposter)"
-        )
 
     def acquire_lease(self, existing_lease_id: str = "") -> dict[str, Any]:
         if not self.ensure_started():

@@ -556,7 +556,6 @@
   --file-explorer-changes-surface: color-mix(in srgb, var(--panel2) 72%, var(--panel) 28%);
   --file-explorer-refresh-hover-surface: color-mix(in srgb, var(--panel2) 72%, transparent);
   --tabber-level0-color: var(--markdown-heading);
-  --tabber-level1-color: var(--code-function);
   --topbar-control-surface: var(--input-bg);
   --menu-button-text: var(--pane-tab-text);
   --menu-button-hover-text: var(--pane-tab-panel-head-text);
@@ -613,7 +612,7 @@
   --lt-code-control: var(--lt-code-keyword);
   --tab-line-height: 1;
   --pane-tab-width: 172px;
-  /* Pane tabs keep their 18px desktop / 36px touch minimize target, but do not inherit the
+  /* Pane tabs keep their 18px desktop / 36px touch close target, but do not inherit the
      wider generic toolbar end padding or inter-control gap. */
   --pane-tab-close-gap: var(--space-1);
   --pane-tab-inline-end-padding: var(--space-1);
@@ -1043,7 +1042,6 @@ body.theme-light {
   --file-explorer-changes-surface: color-mix(in srgb, var(--panel2) 76%, var(--panel) 24%);
   --file-explorer-refresh-hover-surface: var(--paint-overlay-slate-05);
   --tabber-level0-color: var(--text);
-  --tabber-level1-color: var(--text);
   --topbar-control-surface: var(--paint-overlay-slate-05);
   --menu-button-text: var(--text);
   --menu-button-hover-text: var(--pc-control-hover-fg);

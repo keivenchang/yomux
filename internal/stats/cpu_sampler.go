@@ -526,15 +526,6 @@ func processBinaries(snapshot CPUSnapshot) []string {
 	return result
 }
 
-func processKeys(snapshot CPUSnapshot) []string {
-	keys := make([]string, 0, len(snapshot.Processes))
-	for key := range snapshot.Processes {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
 func cloneCPUSnapshot(snapshot CPUSnapshot) *CPUSnapshot {
 	clone := snapshot
 	clone.Processes = make(map[string]CPUProcessCounters, len(snapshot.Processes))

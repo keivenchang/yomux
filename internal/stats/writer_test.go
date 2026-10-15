@@ -27,6 +27,47 @@ func writerBatch() AppendBatch {
 	}
 }
 
+func TestWriterConcurrentCloseAndReads(t *testing.T) {
+	ctx := context.Background()
+	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	errors := make(chan error, 16)
+	for index := 0; index < 16; index++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			if err := writer.Close(); err != nil {
+				errors <- err
+			}
+			for iteration := 0; iteration < 32; iteration++ {
+				_, _ = writer.MigrationStatus(ctx)
+				_, _ = writer.statsDatabaseIdentity()
+			}
+			if err := writer.Close(); err != nil {
+				errors <- err
+			}
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(errors)
+	for err := range errors {
+		t.Errorf("concurrent Close: %v", err)
+	}
+	if _, err := writer.AppendBatch(ctx, writerBatch()); err == nil {
+		t.Error("closed writer accepted an append")
+	}
+	if _, err := writer.statsDatabaseIdentity(); err == nil {
+		t.Error("closed writer exposed an active database identity")
+	}
+}
+
 func TestOpenWriterCreatesSchema8AndReadback(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
 	writer, err := OpenWriter(context.Background(), path)

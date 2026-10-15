@@ -26,57 +26,64 @@ const darwinGitSnapshotMaxEntries = 250_000
 const darwinGitSnapshotMaxBytes = 2 << 30
 const darwinGitConfigDataMaxBytes = 16 << 20
 const darwinGitSnapshotCloneWorkers = 8
-const darwinGitObjectSnapshotCacheEntries = 2
 
-type darwinGitObjectSnapshotKey struct {
+// Objects and loose refs share this capacity; two entries would thrash when a second repo opens.
+const darwinGitSnapshotCacheEntries = 16
+
+type darwinGitSnapshotKey struct {
 	device uint64
 	inode  uint64
 	digest [sha256.Size]byte
 }
 
-type darwinGitObjectSnapshot struct {
+type darwinGitSnapshot struct {
 	path     string
 	bytes    int64
 	users    int
 	lastUsed uint64
 }
 
-type darwinGitObjectSnapshotCache struct {
+type darwinGitSnapshotCache struct {
 	mu       sync.Mutex
-	entries  map[darwinGitObjectSnapshotKey]*darwinGitObjectSnapshot
+	entries  map[darwinGitSnapshotKey]*darwinGitSnapshot
+	inFlight map[darwinGitSnapshotKey]chan struct{}
 	sequence uint64
+	builds   uint64
 	bytes    int64
 	closed   bool
 }
 
-type darwinGitObjectSnapshotFingerprint struct {
+type darwinGitSnapshotFingerprint struct {
 	digest  [sha256.Size]byte
 	bytes   int64
 	entries int
 }
 
-func newDarwinGitObjectSnapshotCache() *darwinGitObjectSnapshotCache {
-	return &darwinGitObjectSnapshotCache{entries: make(map[darwinGitObjectSnapshotKey]*darwinGitObjectSnapshot)}
+func newDarwinGitSnapshotCache() *darwinGitSnapshotCache {
+	return &darwinGitSnapshotCache{
+		entries:  make(map[darwinGitSnapshotKey]*darwinGitSnapshot),
+		inFlight: make(map[darwinGitSnapshotKey]chan struct{}),
+	}
 }
 
-func (cache *darwinGitObjectSnapshotCache) acquire(ctx context.Context, source *os.File) (string, func(), bool, error) {
+func (cache *darwinGitSnapshotCache) acquire(ctx context.Context, source *os.File) (string, func(), bool, error) {
 	return cache.acquireWithLimits(ctx, source, nil, darwinGitSnapshotMaxEntries, newDarwinSnapshotBudget())
 }
 
-func (cache *darwinGitObjectSnapshotCache) acquireWithInventoryHook(ctx context.Context, source *os.File, afterInitialScan func()) (string, func(), bool, error) {
+func (cache *darwinGitSnapshotCache) acquireWithInventoryHook(ctx context.Context, source *os.File, afterInitialScan func()) (string, func(), bool, error) {
 	return cache.acquireWithLimits(ctx, source, afterInitialScan, darwinGitSnapshotMaxEntries, newDarwinSnapshotBudget())
 }
 
-func (cache *darwinGitObjectSnapshotCache) acquireWithEntryLimit(ctx context.Context, source *os.File, afterInitialScan func(), maxEntries int) (string, func(), bool, error) {
+func (cache *darwinGitSnapshotCache) acquireWithEntryLimit(ctx context.Context, source *os.File, afterInitialScan func(), maxEntries int) (string, func(), bool, error) {
 	return cache.acquireWithLimits(ctx, source, afterInitialScan, maxEntries, newDarwinSnapshotBudget())
 }
 
-func (cache *darwinGitObjectSnapshotCache) acquireWithLimits(ctx context.Context, source *os.File, afterInitialScan func(), maxEntries int, budget *darwinSnapshotBudget) (string, func(), bool, error) {
+func (cache *darwinGitSnapshotCache) acquireWithLimits(ctx context.Context, source *os.File, afterInitialScan func(), maxEntries int, budget *darwinSnapshotBudget) (string, func(), bool, error) {
 	info, err := source.Stat()
 	if err != nil {
 		return "", nil, false, err
 	}
-	fingerprint, err := fingerprintDarwinGitObjects(ctx, source)
+	fingerprint, err := fingerprintDarwinGitSnapshot(ctx, source)
 	if err != nil {
 		return "", nil, false, err
 	}
@@ -86,23 +93,53 @@ func (cache *darwinGitObjectSnapshotCache) acquireWithLimits(ctx context.Context
 	if fingerprint.entries > maxEntries {
 		return "", nil, false, errors.New("Git snapshot entry limit exceeded")
 	}
+	if afterInitialScan != nil {
+		afterInitialScan()
+	}
 	identity := identityFor(info)
-	key := darwinGitObjectSnapshotKey{device: identity.dev, inode: identity.ino, digest: fingerprint.digest}
-	cache.mu.Lock()
-	if cached := cache.entries[key]; cached != nil && !cache.closed {
-		cache.sequence++
-		cached.lastUsed = cache.sequence
-		cached.users++
-		cache.mu.Unlock()
-		if err := verifyDarwinGitObjectFingerprint(ctx, source, fingerprint, afterInitialScan); err != nil {
-			cache.release(key, cached)()
+	key := darwinGitSnapshotKey{device: identity.dev, inode: identity.ino, digest: fingerprint.digest}
+	// MAC QUALIFICATION REQUIRED: Repo Diff used to spend seconds here despite history-cache hits.
+	// Keep one builder per inventory and leased reuse for BOTH objects and refs. Changes require
+	// native Mac reuse/race tests and restarted-server latency evidence (docs/DEVELOPMENT.md).
+	for {
+		if err := ctx.Err(); err != nil {
 			return "", nil, false, err
 		}
-		return cached.path, cache.release(key, cached), true, nil
+		cache.mu.Lock()
+		if cached := cache.entries[key]; cached != nil && !cache.closed {
+			cache.sequence++
+			cached.lastUsed = cache.sequence
+			cached.users++
+			cache.mu.Unlock()
+			if err := verifyDarwinGitSnapshotFingerprint(ctx, source, fingerprint); err != nil {
+				cache.release(key, cached)()
+				return "", nil, false, err
+			}
+			budget.entries += fingerprint.entries
+			return cached.path, cache.release(key, cached), true, nil
+		}
+		if pending := cache.inFlight[key]; pending != nil {
+			cache.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return "", nil, false, ctx.Err()
+			case <-pending:
+				continue
+			}
+		}
+		done := make(chan struct{})
+		cache.inFlight[key] = done
+		cache.mu.Unlock()
+		defer func() {
+			cache.mu.Lock()
+			delete(cache.inFlight, key)
+			close(done)
+			cache.mu.Unlock()
+		}()
+		break
 	}
-	cache.mu.Unlock()
 
-	root, err := os.MkdirTemp("", "yomux-git-objects-")
+	root, err := os.MkdirTemp("", "yomux-git-cache-")
 	if err != nil {
 		return "", nil, false, err
 	}
@@ -112,6 +149,9 @@ func (cache *darwinGitObjectSnapshotCache) acquireWithLimits(ctx context.Context
 		removeRoot()
 		return "", nil, false, err
 	}
+	cache.mu.Lock()
+	cache.builds++
+	cache.mu.Unlock()
 	cloneErr := cloneDarwinTree(ctx, source, destination, budget, 0, darwinSnapshotTreeOptions{})
 	closeErr := destination.Close()
 	if cloneErr != nil || closeErr != nil {
@@ -121,7 +161,7 @@ func (cache *darwinGitObjectSnapshotCache) acquireWithLimits(ctx context.Context
 		}
 		return "", nil, false, closeErr
 	}
-	verified, err := fingerprintDarwinGitObjects(ctx, source)
+	verified, err := fingerprintDarwinGitSnapshot(ctx, source)
 	if err != nil || verified != fingerprint {
 		removeRoot()
 		if err != nil {
@@ -131,23 +171,15 @@ func (cache *darwinGitObjectSnapshotCache) acquireWithLimits(ctx context.Context
 	}
 
 	cache.mu.Lock()
-	if existing := cache.entries[key]; existing != nil && !cache.closed {
-		cache.sequence++
-		existing.lastUsed = cache.sequence
-		existing.users++
-		cache.mu.Unlock()
-		removeRoot()
-		return existing.path, cache.release(key, existing), true, nil
-	}
 	if cache.closed {
 		cache.mu.Unlock()
 		return root, removeRoot, false, nil
 	}
 	evicted := cache.evictFor(fingerprint.bytes)
 	release := removeRoot
-	if len(cache.entries) < darwinGitObjectSnapshotCacheEntries && cache.bytes+fingerprint.bytes <= darwinGitSnapshotMaxBytes {
+	if len(cache.entries) < darwinGitSnapshotCacheEntries && cache.bytes+fingerprint.bytes <= darwinGitSnapshotMaxBytes {
 		cache.sequence++
-		entry := &darwinGitObjectSnapshot{path: root, bytes: fingerprint.bytes, users: 1, lastUsed: cache.sequence}
+		entry := &darwinGitSnapshot{path: root, bytes: fingerprint.bytes, users: 1, lastUsed: cache.sequence}
 		cache.entries[key] = entry
 		cache.bytes += fingerprint.bytes
 		release = cache.release(key, entry)
@@ -159,11 +191,8 @@ func (cache *darwinGitObjectSnapshotCache) acquireWithLimits(ctx context.Context
 	return root, release, false, nil
 }
 
-func verifyDarwinGitObjectFingerprint(ctx context.Context, source *os.File, expected darwinGitObjectSnapshotFingerprint, afterInitialScan func()) error {
-	if afterInitialScan != nil {
-		afterInitialScan()
-	}
-	actual, err := fingerprintDarwinGitObjects(ctx, source)
+func verifyDarwinGitSnapshotFingerprint(ctx context.Context, source *os.File, expected darwinGitSnapshotFingerprint) error {
+	actual, err := fingerprintDarwinGitSnapshot(ctx, source)
 	if err != nil {
 		return err
 	}
@@ -173,11 +202,11 @@ func verifyDarwinGitObjectFingerprint(ctx context.Context, source *os.File, expe
 	return nil
 }
 
-func (cache *darwinGitObjectSnapshotCache) evictFor(bytes int64) []string {
+func (cache *darwinGitSnapshotCache) evictFor(bytes int64) []string {
 	var removed []string
-	for len(cache.entries) >= darwinGitObjectSnapshotCacheEntries || cache.bytes+bytes > darwinGitSnapshotMaxBytes {
-		var oldestKey darwinGitObjectSnapshotKey
-		var oldest *darwinGitObjectSnapshot
+	for len(cache.entries) >= darwinGitSnapshotCacheEntries || cache.bytes+bytes > darwinGitSnapshotMaxBytes {
+		var oldestKey darwinGitSnapshotKey
+		var oldest *darwinGitSnapshot
 		for key, entry := range cache.entries {
 			if entry.users == 0 && (oldest == nil || entry.lastUsed < oldest.lastUsed) {
 				oldestKey, oldest = key, entry
@@ -193,7 +222,7 @@ func (cache *darwinGitObjectSnapshotCache) evictFor(bytes int64) []string {
 	return removed
 }
 
-func (cache *darwinGitObjectSnapshotCache) release(key darwinGitObjectSnapshotKey, entry *darwinGitObjectSnapshot) func() {
+func (cache *darwinGitSnapshotCache) release(key darwinGitSnapshotKey, entry *darwinGitSnapshot) func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -215,7 +244,7 @@ func (cache *darwinGitObjectSnapshotCache) release(key darwinGitObjectSnapshotKe
 	}
 }
 
-func (cache *darwinGitObjectSnapshotCache) close() {
+func (cache *darwinGitSnapshotCache) close() {
 	cache.mu.Lock()
 	cache.closed = true
 	var paths []string
@@ -233,12 +262,12 @@ func (cache *darwinGitObjectSnapshotCache) close() {
 	}
 }
 
-func fingerprintDarwinGitObjects(ctx context.Context, source *os.File) (darwinGitObjectSnapshotFingerprint, error) {
+func fingerprintDarwinGitSnapshot(ctx context.Context, source *os.File) (darwinGitSnapshotFingerprint, error) {
 	hasher := sha256.New()
-	var result darwinGitObjectSnapshotFingerprint
+	var result darwinGitSnapshotFingerprint
 	entries := 0
 	if err := fingerprintDarwinTree(ctx, source, ".", 0, hasher, &result.bytes, &entries); err != nil {
-		return darwinGitObjectSnapshotFingerprint{}, err
+		return darwinGitSnapshotFingerprint{}, err
 	}
 	result.entries = entries
 	copy(result.digest[:], hasher.Sum(nil))
@@ -296,6 +325,13 @@ func fingerprintDarwinTree(ctx context.Context, source *os.File, relative string
 				return errors.New("Git snapshot byte count overflow")
 			}
 			*totalBytes += info.Size()
+			// Fingerprinting reads metadata, not contents. Two no-follow stats through the pinned
+			// parent retain the identity/ctime guard without opening every object twice per request.
+			after, err := lstatAt(reader, name)
+			if err != nil || !sameDarwinSnapshotStamp(info, after) {
+				return errChangedOnDisk
+			}
+			continue
 		}
 		child, err := openAt(reader, name, childFlags, 0)
 		if err != nil {
@@ -518,7 +554,7 @@ func (s *Service) openDarwinNamespaceAt(ctx context.Context, workTree *os.File, 
 		gitDir: gitDir, commonDir: commonDir, objects: objects,
 		gitDirPath: gitDirPath, commonPath: commonPath, objectsPath: objectPath,
 		alternates: filepath.Join(objectPath, "info", "alternates"), layoutCache: &s.gitObjectLayouts,
-		workTreePath: workTreePath, objectSnapshotCache: s.gitObjectSnapshots,
+		workTreePath: workTreePath, snapshotCache: s.gitSnapshots,
 	}
 	if err := namespace.readDarwinAlternates(ctx); err != nil {
 		namespace.close()
@@ -607,12 +643,41 @@ func (namespace *gitNamespace) prepareSnapshot(ctx context.Context, _ *os.File) 
 	}
 	budget := newDarwinSnapshotBudget()
 	copyTree := func(name string, source *os.File, options darwinSnapshotTreeOptions) error {
+		refsPath := ""
+		refsMissing := false
+		if namespace.snapshotCache != nil {
+			refs, refsErr := openAt(source, "refs", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+			if refsErr != nil && !errors.Is(refsErr, os.ErrNotExist) {
+				return refsErr
+			}
+			refsMissing = errors.Is(refsErr, os.ErrNotExist)
+			if refsErr == nil {
+				budget.entries++ // The cached subtree's root still counts toward the namespace limit.
+				cachedPath, release, _, cacheErr := namespace.snapshotCache.acquireWithLimits(ctx, refs, nil, darwinGitSnapshotMaxEntries-budget.entries, budget)
+				_ = refs.Close()
+				if cacheErr != nil {
+					return cacheErr
+				}
+				if cachedPath != "" {
+					refsPath = cachedPath
+					namespace.snapshotReleases = append(namespace.snapshotReleases, release)
+					options.skipRefs = true
+				}
+			}
+		}
 		destination, openErr := os.Open(filepath.Join(root, name))
 		if openErr != nil {
 			return openErr
 		}
 		copyErr := cloneDarwinTree(ctx, source, destination, budget, 0, options)
 		_ = destination.Close()
+		if copyErr == nil && refsPath != "" {
+			// Only link our immutable leased snapshot, never the live source refs directory.
+			copyErr = os.Symlink(refsPath, filepath.Join(root, name, "refs"))
+		} else if copyErr == nil && refsMissing {
+			// Git requires a refs directory even when every ref lives in packed-refs.
+			copyErr = os.Mkdir(filepath.Join(root, name, "refs"), 0o700)
+		}
 		return copyErr
 	}
 	gitInfo, gitErr := namespace.gitDir.Stat()
@@ -636,15 +701,15 @@ func (namespace *gitNamespace) prepareSnapshot(ctx context.Context, _ *os.File) 
 		namespace.snapshotCommon = filepath.Join(root, "common")
 	}
 	objectsPath := filepath.Join(namespace.snapshotCommon, "objects")
-	if namespace.objectSnapshotCache != nil {
-		cachedPath, release, _, cacheErr := namespace.objectSnapshotCache.acquireWithLimits(ctx, namespace.objects, nil, darwinGitSnapshotMaxEntries-budget.entries, budget)
+	if namespace.snapshotCache != nil {
+		cachedPath, release, _, cacheErr := namespace.snapshotCache.acquireWithLimits(ctx, namespace.objects, nil, darwinGitSnapshotMaxEntries-budget.entries, budget)
 		if cacheErr != nil {
 			namespace.snapshotErr = cacheErr
 			return cacheErr
 		}
 		if cachedPath != "" {
 			namespace.snapshotObjects = cachedPath
-			namespace.objectSnapshotRelease = release
+			namespace.snapshotReleases = append(namespace.snapshotReleases, release)
 		}
 	}
 	if namespace.snapshotObjects == "" {
@@ -1170,6 +1235,7 @@ func (budget *darwinSnapshotBudget) endClone() {
 type darwinSnapshotTreeOptions struct {
 	skipGitConfig             bool
 	skipObjects               bool
+	skipRefs                  bool
 	skipGitSharedWorktreeData bool
 	// Read-only diff and history commands never execute hooks or read reflogs.
 	skipNonDisplayMetadata bool
@@ -1198,7 +1264,7 @@ func cloneDarwinTree(ctx context.Context, source, destination *os.File, budget *
 			return ctx.Err()
 		default:
 		}
-		if (options.skipGitConfig && (entry.Name() == "config" || entry.Name() == "config.worktree")) || (options.skipObjects && entry.Name() == "objects") || (depth == 0 && options.skipGitSharedWorktreeData && (entry.Name() == "worktrees" || entry.Name() == "index")) || (depth == 0 && options.skipNonDisplayMetadata && (entry.Name() == "hooks" || entry.Name() == "logs")) {
+		if (options.skipGitConfig && (entry.Name() == "config" || entry.Name() == "config.worktree")) || (options.skipObjects && entry.Name() == "objects") || (depth == 0 && options.skipRefs && entry.Name() == "refs") || (depth == 0 && options.skipGitSharedWorktreeData && (entry.Name() == "worktrees" || entry.Name() == "index")) || (depth == 0 && options.skipNonDisplayMetadata && (entry.Name() == "hooks" || entry.Name() == "logs")) {
 			continue
 		}
 		budget.entries++

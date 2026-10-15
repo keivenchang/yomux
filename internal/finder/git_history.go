@@ -2072,16 +2072,6 @@ func splitGitCommitProduct(raw []byte) ([]byte, []byte, bool) {
 	return metadata, raw[separator+4:], true
 }
 
-func gitDiffTreeArgs(parent, commit, relative string, options ...string) []string {
-	args := append([]string{"diff-tree", "-r", "--no-commit-id"}, options...)
-	if parent == "" {
-		args = append(args, "--root", commit)
-	} else {
-		args = append(args, parent, commit)
-	}
-	return append(args, historyPathArgs(relative)...)
-}
-
 func parseGitRawNumstat(raw []byte, outputTruncated bool) ([]map[string]string, map[string]gitCommitCount, bool, error) {
 	if !outputTruncated && len(raw) > 0 && raw[len(raw)-1] != 0 {
 		return nil, nil, false, errors.New("malformed Git diff terminator")

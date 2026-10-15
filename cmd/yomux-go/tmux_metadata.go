@@ -248,6 +248,9 @@ func (s *server) metadataSnapshotWithBuiltAt() (map[string]any, uint64, bool, ti
 func (s *server) queueMetadataRefresh(force bool, sessions []string, identities map[string]string, rosterErr error, topologyGeneration uint64) uint64 {
 	s.metadataMu.Lock()
 	defer s.metadataMu.Unlock()
+	if s.backgroundWorkAdmissionClosed() {
+		return 0
+	}
 	latestTopology := uint64(0)
 	latestGeneration := uint64(0)
 	if s.metadataPayload != nil {
@@ -298,7 +301,14 @@ func (s *server) queueMetadataRefresh(force bool, sessions []string, identities 
 	s.metadataBuilding = true
 	s.metadataBuildingGeneration = generation
 	s.metadataBuildingTopologyGeneration = topologyGeneration
-	go s.buildMetadataRefresh(generation, sessions, identities, rosterErr, topologyGeneration)
+	if !s.startBackgroundWork(func() {
+		s.buildMetadataRefresh(generation, sessions, identities, rosterErr, topologyGeneration)
+	}) {
+		s.metadataBuilding = false
+		s.metadataBuildingGeneration = 0
+		s.metadataBuildingTopologyGeneration = 0
+		return 0
+	}
 	return generation
 }
 
@@ -350,8 +360,10 @@ func (s *server) buildMetadataRefresh(generation uint64, sessions []string, iden
 // session IDs together. If another route refreshed that cache first, reconcile
 // its identity here so a warm metadata payload cannot hide the newer roster.
 func (s *server) tmuxTopologySnapshot(forceFresh ...bool) (goTmuxTopology, error) {
+	s.tmuxRosterFetchMu.Lock()
+	defer s.tmuxRosterFetchMu.Unlock()
 	force := len(forceFresh) != 0 && forceFresh[0]
-	roster, err := s.tmuxSessionRosterSnapshot(force)
+	roster, err := s.tmuxSessionRosterSnapshotLocked(force)
 	return s.tmuxTopologyFromRoster(roster, err)
 }
 

@@ -1050,37 +1050,51 @@ def pin_fixture_batchd_scheduler(app: FixtureSchedulerApp) -> None:
     """
 
     if not app.job_client.start_for_scheduler():
-        registry = app.job_client.registry
-        status = registry.status()
-        child = registry.process
-        proof = registry.refresh_spawn_ownership_proof()
-        ownership = registry.spawn_ownership
-        # An absent published record says nothing about the child this owner just spawned.
-        # Capture that separate identity before fixture rollback retires it and its stderr.
-        startup = {
-            "child_pid": int(child.pid) if child is not None else 0,
-            "child_exit_code": child.poll() if child is not None else None,
-            "observed_child_start_identity": process_start_identity(child.pid) if child is not None else None,
-            "owned_leader_pid": ownership.leader_pid if ownership is not None else 0,
-            "owned_process_group": ownership.process_group if ownership is not None else 0,
-            "owned_session_id": ownership.session_id if ownership is not None else 0,
-            "recorded_member_identities": ownership.member_identities if ownership is not None else (),
-            "group_exists": proof.group_exists if proof is not None else None,
-            "proven_member_identities": proof.owned_member_identities if proof is not None else (),
-            "disproven_occupants": proof.disproven_occupants if proof is not None else (),
-            "start_timeout_seconds": registry.spec.start_timeout_seconds,
-            "next_start_at": registry.next_start_at,
-            "backoff_remaining_seconds": max(0.0, registry.next_start_at - registry.clock()),
-            "stderr_tail": registry._stderr_tail(),
-        }
-        raise AssertionError(
-            "fixture could not start local batchd scheduler lease: "
-            f"socket={registry.socket_path} "
-            f"service_dir={registry.service_dir} "
-            f"status={status.get('status') or status.get('error')} "
-            f"failure={status.get('failure_reason')} terminal={status.get('terminal_failure')} "
-            f"process={status.get('process_diagnostic')} startup={startup}"
-        )
+        assert_fixture_local_service_started(app.job_client.registry, started=False)
+        assert app.job_client.start_for_scheduler(), fixture_local_service_startup_diagnostic(app.job_client.registry)
+
+
+def assert_fixture_local_service_started(registry: LocalServiceRegistry, *, started: bool | None = None) -> None:
+    """Complete at most one retained child; fixture recovery never launches another generation."""
+
+    if started is None:
+        started = registry.ensure_started()
+    if not started:
+        child, ownership = registry.process, registry.spawn_ownership
+        started = registry.complete_pending_startup(expected_process=child, expected_ownership=ownership)
+    assert started, fixture_local_service_startup_diagnostic(registry)
+
+
+def fixture_local_service_startup_diagnostic(registry: LocalServiceRegistry) -> str:
+    status = registry.status()
+    child = registry.process
+    proof = registry.refresh_spawn_ownership_proof()
+    ownership = registry.spawn_ownership
+    # An absent published record says nothing about the child this owner just spawned.
+    # Capture that separate identity before fixture rollback retires it and its stderr.
+    startup = {
+        "child_pid": int(child.pid) if child is not None else 0,
+        "child_exit_code": child.poll() if child is not None else None,
+        "observed_child_start_identity": process_start_identity(child.pid) if child is not None else None,
+        "owned_leader_pid": ownership.leader_pid if ownership is not None else 0,
+        "owned_process_group": ownership.process_group if ownership is not None else 0,
+        "owned_session_id": ownership.session_id if ownership is not None else 0,
+        "recorded_member_identities": ownership.member_identities if ownership is not None else (),
+        "group_exists": proof.group_exists if proof is not None else None,
+        "proven_member_identities": proof.owned_member_identities if proof is not None else (),
+        "disproven_occupants": proof.disproven_occupants if proof is not None else (),
+        "start_timeout_seconds": registry.spec.start_timeout_seconds,
+        "next_start_at": registry.next_start_at,
+        "backoff_remaining_seconds": max(0.0, registry.next_start_at - registry.clock()),
+        "stderr_tail": registry._stderr_tail(),
+    }
+    return (
+        f"socket={registry.socket_path} "
+        f"service_dir={registry.service_dir} "
+        f"status={status.get('status') or status.get('error')} "
+        f"failure={status.get('failure_reason')} terminal={status.get('terminal_failure')} "
+        f"process={status.get('process_diagnostic')} startup={startup}"
+    )
 
 
 @dataclass

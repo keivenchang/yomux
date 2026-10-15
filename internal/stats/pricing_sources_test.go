@@ -180,6 +180,17 @@ func TestPricingRefreshFailureSurvivesRestoreWithoutReplacingAcceptedCatalog(t *
 	if check := reopened.sourceChecks[pricingOpenAIURL]; check.ETag != `"accepted-v1"` {
 		t.Fatalf("failure replaced accepted source checks: %+v", check)
 	}
+	if err := reopened.AcknowledgePricingInvalidation(); err != nil {
+		t.Fatal(err)
+	}
+	afterAcknowledgement := newCatalog()
+	if err := afterAcknowledgement.RestoreRefreshCache(); err != nil {
+		t.Fatal(err)
+	}
+	refreshStatus, warnings := afterAcknowledgement.RefreshResult()
+	if refreshStatus != "failed" || len(warnings) == 0 || afterAcknowledgement.PricingInvalidationPending() {
+		t.Fatalf("acknowledgement lost provider failure or retained pending work: %s %v", refreshStatus, warnings)
+	}
 	unchangedFetch := func(context.Context, string, map[string]string) (pricingFetchResponse, error) {
 		return pricingFetchResponse{Status: http.StatusNotModified}, nil
 	}

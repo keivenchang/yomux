@@ -5261,11 +5261,13 @@ def test_preview_touch_claim_rejects_a_deferred_stale_scroll_restore_across_fram
     assert 100 not in frames, frames
 
 
-def test_markdown_split_viewedit_scroll_sync_tracks_source_lines_with_tall_images(browser, tmp_path):
+@pytest.mark.parametrize("hold_layout_frame", [False, True])
+def test_markdown_split_viewedit_scroll_sync_tracks_source_lines_with_tall_images(browser, tmp_path, hold_layout_frame):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"], grid_width=920, grid_height=620)
     metrics = browser.execute_async_script(
         """
         const neutralDark = arguments[0];
+        const holdLayoutFrame = arguments[1];
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
@@ -5374,15 +5376,44 @@ def test_markdown_split_viewedit_scroll_sync_tracks_source_lines_with_tall_image
             }
             await settle(80);
             const afterOpenToggle = snapshot();
-            summary.click();
-            await settle(80);
-            const afterCloseToggle = snapshot();
+            const nativeRaf = window.requestAnimationFrame;
+            const originalLayoutSync = scheduleFileEditorPreviewLayoutSync;
+            let heldFrame = null;
+            let releasedByClamp = false;
+            const releaseOnClamp = () => {
+              if (!heldFrame) return;
+              const callback = heldFrame;
+              heldFrame = null;
+              releasedByClamp = true;
+              nativeRaf(callback);
+            };
+            if (holdLayoutFrame) {
+              scheduleFileEditorPreviewLayoutSync = host => {
+                if (host !== panel) return originalLayoutSync(host);
+                window.requestAnimationFrame = callback => { heldFrame = callback; return -734; };
+                try { return originalLayoutSync(host); }
+                finally { window.requestAnimationFrame = nativeRaf; }
+              };
+              preview.addEventListener('scroll', releaseOnClamp);
+            }
+            let afterCloseToggle;
+            try {
+              summary.click();
+              await settle(80);
+              afterCloseToggle = snapshot();
+            } finally {
+              scheduleFileEditorPreviewLayoutSync = originalLayoutSync;
+              window.requestAnimationFrame = nativeRaf;
+              preview.removeEventListener('scroll', releaseOnClamp);
+              if (heldFrame) nativeRaf(heldFrame);
+            }
             panel._previewLayoutScrollUntil = 0;
             preview.scrollTop = Math.min(maxScroll(preview), Math.max(0, scrollTopForPreviewElement(preview, targetHeading) - (preview.clientHeight / 4)));
             preview.dispatchEvent(new Event('scroll', {bubbles: true}));
             await settle();
             done({
               targetLine,
+              releasedByClamp,
               afterClosedEditorDrive,
               afterOpenToggle,
               afterCloseToggle,
@@ -5399,9 +5430,11 @@ def test_markdown_split_viewedit_scroll_sync_tracks_source_lines_with_tall_image
           }
         })();
         """,
-        ui_pin("paneMetaPathLight"),
+        ui_pin("paneMetaPathLight"), hold_layout_frame,
     )
     assert "error" not in metrics, metrics.get("error", metrics)
+    if hold_layout_frame:
+        assert metrics["releasedByClamp"] is True, metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
     assert metrics["afterClosedEditorDrive"]["detailsOpen"] is False, metrics
@@ -8002,6 +8035,8 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
               firstScroller.scrollTop = Math.min(9000, firstScroller.scrollHeight - firstScroller.clientHeight - 10);
               await frame();
               await frame();
+              // Flush pending viewport measurement before sampling the pixels compared after recreation.
+              panel._cmView.lineBlockAtHeight(firstScroller.scrollTop);
               const savedTop = firstScroller.scrollTop;
               captureFileEditorPanelViewState(item, panel);
               const savedSnapshot = Boolean(fileEditorViewState.get(item)?.scrollSnapshot);

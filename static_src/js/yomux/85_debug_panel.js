@@ -6,6 +6,10 @@
 // is the durable one-second owner delta, so the visible graph advances without
 // waiting for the 30-second history-backfill poll.  Polling remains the
 // range/zoom and reconnect fallback, not the live-tail transport.
+function debugDisplayProductLabel(value) {
+  return String(value ?? '').replace(/yolomux/gi, 'yomux');
+}
+
 function applyJsDebugStatsSamplePush(payload = {}) {
   // Protocol-v2 snapshots/deltas are the sole exact-mode owner. The legacy
   // shared stats_sample event carries a different bucket dialect and must not
@@ -1340,7 +1344,7 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
     if (!(bucket.servers instanceof Map)) continue;
     for (const [processId, process] of bucket.servers.entries()) {
       if (Number(process?.cpuCount || 0) <= 0) continue;
-      if (!processes.has(processId)) processes.set(processId, {label: String(process?.label || processId)});
+      if (!processes.has(processId)) processes.set(processId, {label: debugDisplayProductLabel(process?.label || processId)});
     }
   }
   const currentPort = String(location.port || (location.protocol === 'https:' ? '443' : '80')).trim();
@@ -1359,9 +1363,9 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
     .map(([processId, process]) => {
       const current = processId === currentProcessId;
       const legacyWebPort = String(processId).match(/^port:(\d+)$/);
-      const displayLabel = legacyWebPort && process.label === processId
+      const displayLabel = debugDisplayProductLabel(legacyWebPort && process.label === processId
         ? (current ? 'yolomux.py (web)' : `yolomux.py (web) :${legacyWebPort[1]}`)
-        : process.label;
+        : process.label);
       const color = current
         ? jsDebugGraphProcessCpuColors.current
         : jsDebugGraphProcessCpuColors.peers[peerIndex++ % jsDebugGraphProcessCpuColors.peers.length];
@@ -1521,7 +1525,8 @@ function debugGraphHostProcessSeriesDefs(buckets, metric) {
       if (!current || value > current.peakValue) {
         const rawLabel = String(item.label || key);
         const goInstance = /^(yolomux|yomux)[-_]go-pid-(\d+)-[0-9a-f]{8}$/.exec(rawLabel);
-        processes.set(key, {label: goInstance ? `${goInstance[1]}-go (PID ${goInstance[2]})` : rawLabel, peakValue: value});
+        const label = goInstance ? `yomux-go (PID ${goInstance[2]})` : rawLabel;
+        processes.set(key, {label: debugDisplayProductLabel(label), peakValue: value});
       }
     }
   }
@@ -1609,9 +1614,9 @@ function debugGraphServiceLoadLabel(source) {
     'runtime:host_collector:system_memory': 'host memory collector (runtime occupancy)',
     'runtime:host_collector:gpu': 'host GPU collector (runtime occupancy)',
   };
-  if (labels[source]) return labels[source];
+  if (labels[source]) return debugDisplayProductLabel(labels[source]);
   const goPrefix = ['yomux-go', 'yolomux-go'].find(prefix => source === prefix || source.startsWith(`${prefix}:`));
-  if (goPrefix === 'yolomux-go' && source === goPrefix) return 'yolomux-go (legacy process; identity unavailable)';
+  if (goPrefix === 'yolomux-go' && source === goPrefix) return 'yomux-go (legacy process; identity unavailable)';
   if (goPrefix === 'yomux-go' && source === goPrefix) return 'yomux-go (process; identity unavailable)';
   if (goPrefix && source.startsWith(`${goPrefix}:process:`)) {
     const parts = source.split(':');
@@ -1624,7 +1629,7 @@ function debugGraphServiceLoadLabel(source) {
     const details = [`PID ${pid}`];
     if (port > 0) details.push(`port ${port}`);
     if (parentPid > 0) details.push(`PPID ${parentPid}`);
-    return `${name} (${details.join(', ')})`;
+    return debugDisplayProductLabel(`${name} (${details.join(', ')})`);
   }
   if (goPrefix && source.startsWith(`${goPrefix}:thread:`)) {
     return `Go OS thread ${source.slice(`${goPrefix}:thread:`.length).split(':', 1)[0]}`;
@@ -1635,7 +1640,7 @@ function debugGraphServiceLoadLabel(source) {
   if (source.startsWith('runtime:agent_tokens:opencode:')) {
     return `OpenCode ${source.slice('runtime:agent_tokens:opencode:'.length)} (goroutine, in-process)`;
   }
-  return source;
+  return debugDisplayProductLabel(source);
 }
 
 function debugGraphDefaultServiceLoadMode(buckets) {
@@ -1705,7 +1710,7 @@ function debugGraphServiceLoadSeriesDefs(buckets, group = null) {
   const mode = debugGraphServiceLoadEffectiveMode(buckets, undefined, group);
   const services = new Map();
   for (const [key, item] of debugGraphVisibleServiceLoadItems(buckets, group)) {
-    services.set(key, String(item.label || key));
+    services.set(key, debugDisplayProductLabel(item.label || key));
   }
   const items = [...services.entries()].sort((left, right) => left[1].localeCompare(right[1]) || left[0].localeCompare(right[0]));
   const visuals = debugGraphStableServiceLoadVisuals(items, metric);
@@ -3340,22 +3345,6 @@ function debugGraphLiveAgentWindowRows() {
       return;
     }
     const existing = rows[existingIndex];
-    // Activity fallback rows identify the live pane but have no immutable snapshot
-    // revision. A revisioned stats row normally replaces them, except that an
-    // unavailable stats row is a capture failure, not a newer assertion that the
-    // pane stopped working. Preserve a concrete Go activity state in that case so
-    // the JS Agents detail does not turn a live Codex pane gray while Tabber is green.
-    const existingUnavailable = typeof agentWindowStateKey === 'function'
-      && agentWindowStateKey(existing.agent?.state) === 'unavailable';
-    const incomingUnavailable = typeof agentWindowStateKey === 'function'
-      && agentWindowStateKey(row.agent?.state) === 'unavailable';
-    const activityFallback = typeof goAgentStatusUsesActivityFallback === 'function'
-      && goAgentStatusUsesActivityFallback();
-    if (activityFallback && incomingUnavailable && !existingUnavailable) return;
-    if (activityFallback && existingUnavailable && !incomingUnavailable) {
-      rows[existingIndex] = row;
-      return;
-    }
     if (Number(row.revision || 0) >= Number(existing.revision || 0)) rows[existingIndex] = row;
   };
   for (const [session, payload] of autoApproveStates.entries()) {
@@ -3386,7 +3375,7 @@ function debugGraphLiveAgentWindowRows() {
     for (let index = rows.length - 1; index >= 0; index -= 1) {
       const row = rows[index];
       const key = `${row.session}\u0000${agentWindowPhysicalKey(row.agent)}\u0000${row.kind}`;
-      if (authoritativeKeys.has(key)) continue;
+      if (authoritativeKeys.has(key) || row.revision > statsRows.revision) continue;
       rows.splice(index, 1);
     }
     rowIndexes.clear();
@@ -3394,7 +3383,7 @@ function debugGraphLiveAgentWindowRows() {
   }
   for (const row of statsRows.rows) {
     appendRow(row);
-    sessionRevisions.set(String(row.session), row.revision);
+    sessionRevisions.set(String(row.session), Math.max(sessionRevisions.get(String(row.session)) || 0, row.revision));
     if (row.revision > 0) revisions.add(row.revision);
   }
   rows.sort((left, right) => String(left.session).localeCompare(String(right.session))
@@ -4866,8 +4855,7 @@ function jsDebugCurrentBucketRecord(bucket) {
     } else if (name.startsWith('owned_process_cpu_percent:')) {
       const binary = name.slice('owned_process_cpu_percent:'.length);
       const projected = jsDebugCurrentCpuProjectionValue(series, name, `owned_process_cpu_max_percent:${binary}`, duration);
-      const normalizedBinary = String(binary || '').trim().toLowerCase();
-      const label = normalizedBinary === 'yolomux_go' || normalizedBinary === 'yolomux-go' ? 'yolomux-go' : binary;
+      const label = debugDisplayProductLabel(binary);
       record.servers[binary] = {label, cpu_total_percent: projected, cpu_count: 1};
     } else if (name.startsWith('process_cpu_percent:')) {
       const binary = name.slice('process_cpu_percent:'.length);
@@ -5958,8 +5946,8 @@ function debugSystemRosterServiceRow(service = {}, {structuralResourceMetrics = 
     id,
     kind: 'service',
     parentId: String(service?.parent_id || service?.parentId || ''),
-    label: String(service?.label || id),
-    qualifier: id,
+    label: debugDisplayProductLabel(service?.label || id),
+    qualifier: debugDisplayProductLabel(id),
     state: String(service?.state || 'unavailable'),
     reason: String(service?.reason || ''),
     pid: Number(service?.pid || 0),
@@ -5991,7 +5979,7 @@ function debugSystemRosterServiceRow(service = {}, {structuralResourceMetrics = 
 function debugSystemRosterHealthRows(payload = {}) {
   return debugSystemRosterRows(payload).map(row => ({
     id: String(row.id || ''),
-    label: String(row.label || row.id || ''),
+    label: debugDisplayProductLabel(row.label || row.id || ''),
     severity: backendHealthToneSeverity[row.tone || debugSystemStateTone(row.state)] || 'down',
     reasonCode: String(row.service?.reason_code || row.reasonCode || ''),
   }));
@@ -7047,7 +7035,7 @@ function debugSystemDaemonsChartHtml() {
   }).join('');
   const runtimeLoad = debugGraphResolvedChartGroup(jsDebugGraphDaemonsChartGroup, defaultBuckets).runtimeOnly === true;
   const note = runtimeLoad
-    ? 'Daemons load shows measured in-process occupancy with the yolomux-go process CPU as a comparison line; daemon memory shows retained process resident memory. Labels identify goroutines and SQLite cgo work; Unix child processes and OS threads remain in the expanded daemon details.'
+    ? 'Daemons load shows measured in-process occupancy with the yomux-go process CPU as a comparison line; daemon memory shows retained process resident memory. Labels identify goroutines and SQLite cgo work; Unix child processes and OS threads remain in the expanded daemon details.'
     : 'Daemons load shows CPU use for local services; daemon memory shows retained process resident memory.';
   return `<div class="js-debug-daemons-chart" data-js-debug-daemons-graph><div class="js-debug-daemons-controls">${debugGraphRangeResolutionControlsHtml(nowMs, {idPrefix: 'daemons', focusKeyPrefix: 'daemons'})}</div><div class="js-debug-chart-shell"><div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-chart-layout="${esc(debugRuntimeState.graphChartLayout)}" data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}">${charts}</div></div><p class="js-debug-roster-note" data-js-debug-daemons-chart-note>${esc(note)}</p></div>`;
 }

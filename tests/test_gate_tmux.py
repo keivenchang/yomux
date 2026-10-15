@@ -1869,13 +1869,13 @@ def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="
               const dockTab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(session)}"]`);
               if (dockTab) return dockTab.classList.contains('active') && dockTab.closest('.dv-tab')?.classList.contains('dv-active-tab') === true;
               const row = document.querySelector(`.file-tree-row[data-tabber-session="${CSS.escape(session)}"]`);
-              return row?.classList.contains('tabber-active-normal') === true || (row?.classList.contains('tabber-active-session') === true && row.querySelector('.tabber-session-tab')?.classList.contains('active') === true);
+              return row?.classList.contains('tabber-active-normal') === true;
             };
             const renderedPreviousHighlights = session => {
               const dockTab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(session)}"]`);
               if (dockTab) return [...(dockTab.closest('.dv-groupview')?.querySelectorAll('.dockview-pane-tab.active') || [])]
                 .map(tab => tab.dataset.paneTab).filter(item => item && item !== session);
-              return [...document.querySelectorAll('.file-tree-row.tabber-active-session, .file-tree-row.tabber-active-normal')]
+              return [...document.querySelectorAll('.file-tree-row.tabber-active-normal')]
                 .map(row => row.dataset.tabberSession).filter(item => item && item !== session);
             };
             const observeHighlight = sample => requestAnimationFrame(() => {
@@ -2034,6 +2034,53 @@ def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="
 @pytest.mark.browser
 def test_go_tab_and_body_activation_coalesces_work_and_preserves_native_echo(browser, isolated_dev_server_factory, mode):
     _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode, profile=mode in ("plain", "tabber"))
+
+
+@pytest.mark.browser
+def test_go_manual_refresh_notifies_remote_terminal_size(browser, isolated_dev_server_factory):
+    runtime = isolated_dev_server_factory("manual-refresh-size", session_count=1)
+    session = runtime.tmux.sessions[0]
+    try:
+        browser.get(f"{runtime.base_url}/?{urlencode({'sessions': session, 'layout': 'left'})}")
+        assert_live_runtime_boot_healthy(browser, "go-manual-refresh-size", timeout=20)
+        WebDriverWait(browser, 20).until(lambda driver: driver.execute_script(
+            "const item=terminals.get(arguments[0]); return item?.terminalOutputSeen && item.socket.readyState === WebSocket.OPEN;", session
+        ))
+        initial = browser.execute_script(
+            "const item=terminals.get(arguments[0]); return {cols:item.term.cols, rows:item.term.rows, height:item.container.clientHeight};", session
+        )
+        browser.execute_script("""
+          const item = terminals.get(arguments[0]);
+          const send = item.socket.send.bind(item.socket);
+          window.__manualRefreshResizeMessages = [];
+          window.__manualRefreshStarted = false;
+          let changedHeightAfterImmediateClaim = false;
+          item.socket.send = payload => {
+            const message = JSON.parse(payload);
+            if (message.type === 'resize') window.__manualRefreshResizeMessages.push(message);
+            const result = send(payload);
+            if (window.__manualRefreshStarted && !changedHeightAfterImmediateClaim
+                && message.type === 'resize' && message.activate === true) {
+              changedHeightAfterImmediateClaim = true;
+              item.container.style.height = `${Math.max(180, Math.floor(item.container.clientHeight / 2))}px`;
+            }
+            return result;
+          };
+        """, session)
+
+        browser.execute_script("window.__manualRefreshStarted = true;")
+        click_visible_selector(browser, "#refreshMeta")
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+            "return window.__manualRefreshResizeMessages.some(message => message.type === 'resize' && message.activate === true && message.rows < arguments[0]);",
+            initial["rows"],
+        ))
+        messages = browser.execute_script("return window.__manualRefreshResizeMessages;")
+        assert any(message.get("activate") is True and message["cols"] == initial["cols"] and message["rows"] < initial["rows"] for message in messages), {
+            "initial": initial,
+            "messages": messages,
+        }
+    finally:
+        browser.get("about:blank")
 
 
 @pytest.mark.browser

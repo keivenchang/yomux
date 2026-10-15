@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/keivenchang/yomux/internal/cache"
+	"github.com/keivenchang/yomux/internal/work"
 )
 
 const (
@@ -115,7 +116,7 @@ type Service struct {
 	uploadLimits       UploadLimits
 	publish            EventPublisher
 	mu                 sync.Mutex
-	nativeMu           sync.Mutex
+	nativeMu           work.ContextMutex
 	watches            map[string]watchRecord
 	watchGeneration    uint64
 	epoch              string
@@ -132,6 +133,8 @@ type Service struct {
 	registrationRebuilds       uint64
 	publishGitRename           func(context.Context, *gitRenamePlan, string) error
 	beforeWriteConflictRecheck func()
+	watchContext               context.Context
+	watchCancel                context.CancelFunc
 	stop                       chan struct{}
 	done                       chan struct{}
 	stopOnce                   sync.Once
@@ -143,24 +146,25 @@ type Service struct {
 	gitReachabilityCache       *cache.LRU[string, struct{}]
 	gitHistoryStatsCache       *cache.LRU[string, gitHistoryStatsInfo]
 	gitObjectLayouts           gitObjectLayoutCache
-	gitObjectSnapshots         *darwinGitObjectSnapshotCache
+	gitSnapshots               *darwinGitSnapshotCache
 	searchIndex                *SearchIndexWorkerClient
 }
 
 type watchRecord struct {
-	Roots           []string
-	SearchRoots     []string
-	SignaturePaths  []string
-	Files           []string
-	BackgroundFiles []string
-	RootSurfaces    []map[string]any
-	ContextItems    []map[string]any
-	SessionFiles    []map[string]any
-	ActivitySummary map[string]any
-	Signatures      map[string]string
-	UpdatedAt       time.Time
-	ExpiresAt       time.Time
-	Generation      uint64
+	Roots               []string
+	SearchRoots         []string
+	SignaturePaths      []string
+	Files               []string
+	BackgroundFiles     []string
+	RootSurfaces        []map[string]any
+	RootSurfacesVersion int
+	ContextItems        []map[string]any
+	SessionFiles        []map[string]any
+	ActivitySummary     map[string]any
+	Signatures          map[string]string
+	UpdatedAt           time.Time
+	ExpiresAt           time.Time
+	Generation          uint64
 }
 
 type watchChange struct {
@@ -294,7 +298,9 @@ func NewWithLimits(root string, publish EventPublisher, uploadLimits UploadLimit
 }
 
 func newService(root string, publish EventPublisher, native nativeWatchController, nativeStatus nativeWatchStatus, uploadLimits UploadLimits) *Service {
+	watchContext, watchCancel := context.WithCancel(context.Background())
 	s := &Service{
+		watchContext: watchContext, watchCancel: watchCancel,
 		root: root, uploadLimits: uploadLimits, publish: publish, watches: make(map[string]watchRecord),
 		native: native, nativeStatus: nativeStatus, epoch: fmt.Sprintf("finder-%d", time.Now().UnixNano()),
 		demandChanged: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{}),
@@ -302,7 +308,7 @@ func newService(root string, publish EventPublisher, native nativeWatchControlle
 		gitCommitCache:       cache.NewLRU[string, map[string]any](maxGitProductCacheEntries),
 		gitReachabilityCache: cache.NewLRU[string, struct{}](maxGitHistoryStatsCacheEntries),
 		gitHistoryStatsCache: cache.NewLRU[string, gitHistoryStatsInfo](maxGitHistoryStatsCacheEntries),
-		gitObjectSnapshots:   newDarwinGitObjectSnapshotCache(),
+		gitSnapshots:         newDarwinGitSnapshotCache(),
 	}
 	go s.watchLoop()
 	return s
@@ -311,7 +317,8 @@ func newService(root string, publish EventPublisher, native nativeWatchControlle
 func (s *Service) Close() {
 	s.stopOnce.Do(func() {
 		close(s.stop)
-		s.gitObjectSnapshots.close()
+		s.watchCancel()
+		s.gitSnapshots.close()
 		if s.native != nil {
 			s.nativeMu.Lock()
 			s.native.Close()
@@ -1121,22 +1128,10 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 	generation := s.watchGeneration
 	s.watches[clientID] = watchRecord{
 		Roots: normalized, SearchRoots: searchRoots, SignaturePaths: signaturePaths, Files: files, BackgroundFiles: watchPayload.BackgroundFiles,
-		RootSurfaces: watchPayload.RootSurfaces, ContextItems: watchPayload.ContextItems,
+		RootSurfacesVersion: watchPayload.RootSurfacesVersion, RootSurfaces: watchPayload.RootSurfaces, ContextItems: watchPayload.ContextItems,
 		SessionFiles: watchPayload.SessionFiles, ActivitySummary: watchPayload.ActivitySummary,
 		Signatures: signatures, UpdatedAt: now, ExpiresAt: now.Add(watchLeaseDuration), Generation: generation,
 	}
-	result := map[string]any{
-		"ok": true, "roots": normalized, "files": files, "background_files": watchPayload.BackgroundFiles,
-		"removed_roots":         removedRoots,
-		"root_surfaces_version": watchPayload.RootSurfacesVersion, "root_surfaces": watchPayload.RootSurfaces,
-		"context_items": watchPayload.ContextItems, "session_files": watchPayload.SessionFiles,
-		"activity_summary": watchPayload.ActivitySummary, "mode": "ttl-fallback", "ttl_seconds": 30,
-	}
-	result["watch_token"] = s.watchTokenLocked()
-	result["revision"] = s.revision
-	result["watch_status"] = s.watchStatusPayloadLocked()
-	result["watch_degraded"] = s.nativeStatus.degraded
-	result["watch_degradation_reason"] = s.nativeStatus.reason
 	s.mu.Unlock()
 	if err := s.reconfigureNative(ctx, false); err != nil {
 		s.mu.Lock()
@@ -1157,8 +1152,15 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 	s.establishWatchBaselines(ctx, clientID, generation)
 	s.notifyDemandChanged()
 	s.mu.Lock()
+	// Registration can yield to a newer request for this client. Only the surviving
+	// generation may journal removals or publish a root replacement.
+	current, exists := s.watches[clientID]
+	ownsGeneration := exists && current.Generation == generation
+	if !ownsGeneration {
+		removedRoots = []string{}
+	}
 	var rootChangePayload map[string]any
-	if rootsChanged {
+	if ownsGeneration && rootsChanged {
 		s.revision++
 		changedRoots := append(append([]string{}, previous.Roots...), normalized...)
 		changedRoots = uniqueWatchPaths(changedRoots)
@@ -1170,6 +1172,14 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 			"paths": changedRoots, "roots": normalized, "removed_roots": removedRoots,
 			"client_id": clientID, "reason": "watch-roots-replaced", "token": s.watchTokenLocked(), "revision": s.revision,
 		}
+	}
+	// Respond with the surviving registration even when this request was superseded.
+	result := map[string]any{
+		"ok": true, "roots": append([]string{}, current.Roots...), "files": append([]string{}, current.Files...),
+		"background_files": append([]string{}, current.BackgroundFiles...), "removed_roots": removedRoots,
+		"root_surfaces_version": current.RootSurfacesVersion, "root_surfaces": append([]map[string]any{}, current.RootSurfaces...),
+		"context_items": append([]map[string]any{}, current.ContextItems...), "session_files": append([]map[string]any{}, current.SessionFiles...),
+		"activity_summary": map[string]any{},
 	}
 	result["mode"] = s.watchModeLocked()
 	result["ttl_seconds"] = int(watchLeaseDuration / time.Second)
@@ -1595,7 +1605,7 @@ func (s *Service) pollWatchesFiltered(uncoveredOnly bool) {
 			}
 			signature, scanned := sharedSignatures[key]
 			if !scanned {
-				signature = s.watchPathSignature(context.Background(), path, record)
+				signature = s.watchPathSignature(s.watchContext, path, record)
 				sharedSignatures[key] = signature
 			}
 			if previous := record.Signatures[path]; previous != signature {
@@ -1669,7 +1679,15 @@ func (s *Service) reconfigureNative(ctx context.Context, force bool) error {
 	if s.native == nil {
 		return nil
 	}
-	s.nativeMu.Lock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	stopCancellation := context.AfterFunc(s.watchContext, cancel)
+	defer func() { stopCancellation(); cancel() }()
+	if err := s.nativeMu.LockContext(ctx, s.stop); err != nil {
+		return err
+	}
 	defer s.nativeMu.Unlock()
 	s.mu.Lock()
 	if s.nativeEventsClosed {

@@ -3130,6 +3130,56 @@ func TestTmuxWindowRouteSelectsExactWindow(t *testing.T) {
 	}
 }
 
+func TestKillTmuxWindowRejectsLastWindowAndKillsExactWindowByID(t *testing.T) {
+	socketDir := testsupport.ShortTempDir(t)
+	socket := filepath.Join(socketDir, "tmux.sock")
+	root := t.TempDir()
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "1", "-c", root).CombinedOutput(); err != nil {
+		t.Fatalf("create tmux session: %v (%s)", err, output)
+	}
+	listWindowIDs := func() []string {
+		t.Helper()
+		output, err := exec.Command("tmux", "-S", socket, "list-windows", "-t", "=1:", "-F", "#{window_id}").Output()
+		if err != nil {
+			t.Fatalf("list tmux windows: %v", err)
+		}
+		return strings.Fields(string(output))
+	}
+	server := &server{}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+
+	lastWindowID := listWindowIDs()[0]
+	last := httptest.NewRecorder()
+	server.killWindow(last, httptest.NewRequest(http.MethodPost, "/api/kill-window?session=1&window_id="+url.QueryEscape(lastWindowID), nil))
+	if last.Code != http.StatusConflict {
+		t.Fatalf("last-window kill status = %d, body=%s", last.Code, last.Body.String())
+	}
+	if got := listWindowIDs(); len(got) != 1 || got[0] != lastWindowID {
+		t.Fatalf("last-window refusal changed windows: %v", got)
+	}
+
+	if output, err := exec.Command("tmux", "-S", socket, "new-window", "-d", "-t", "=1:", "-n", "codex", "-c", root, "sleep", "60").CombinedOutput(); err != nil {
+		t.Fatalf("create second tmux window: %v (%s)", err, output)
+	}
+	windowIDs := listWindowIDs()
+	if len(windowIDs) != 2 {
+		t.Fatalf("tmux windows = %v, want two", windowIDs)
+	}
+	targetWindowID := windowIDs[1]
+	response := httptest.NewRecorder()
+	server.killWindow(response, httptest.NewRequest(http.MethodPost, "/api/kill-window?session=1&window_id="+url.QueryEscape(targetWindowID), nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("window kill status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if got := listWindowIDs(); len(got) != 1 || got[0] != windowIDs[0] {
+		t.Fatalf("remaining windows = %v, want only %s", got, windowIDs[0])
+	}
+	if err := exec.Command("tmux", "-S", socket, "has-session", "-t", "=1:").Run(); err != nil {
+		t.Fatalf("session was removed after killing one of two windows: %v", err)
+	}
+}
+
 func TestTmuxSessionSortKeyMatchesPythonRosterOrdering(t *testing.T) {
 	got := []string{"zeta", "project10", "yolomux10", "project2", "yolomux2", "Alpha"}
 	sort.SliceStable(got, func(i, j int) bool {
@@ -6622,6 +6672,8 @@ type blockingFinderSSEWriter struct {
 	mu      sync.Mutex
 	writes  int
 	status  int
+	closed  bool
+	lateIO  int
 }
 
 func newBlockingFinderSSEWriter() *blockingFinderSSEWriter {
@@ -6650,6 +6702,9 @@ func (w *blockingFinderSSEWriter) Status() int {
 func (w *blockingFinderSSEWriter) Write(value []byte) (int, error) {
 	w.mu.Lock()
 	w.writes++
+	if w.closed {
+		w.lateIO++
+	}
 	shouldBlock := w.writes == 2
 	w.mu.Unlock()
 	if shouldBlock {
@@ -6659,7 +6714,71 @@ func (w *blockingFinderSSEWriter) Write(value []byte) (int, error) {
 	return len(value), nil
 }
 
-func (w *blockingFinderSSEWriter) Flush() {}
+func (w *blockingFinderSSEWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		w.lateIO++
+	}
+}
+
+func (w *blockingFinderSSEWriter) markHandlerReturned() {
+	w.mu.Lock()
+	w.closed = true
+	w.mu.Unlock()
+}
+
+func (w *blockingFinderSSEWriter) lateIOCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.lateIO
+}
+
+func TestFinderSearchStreamWaitsForCanceledPublisherBeforeReturning(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "needle.txt"), []byte("needle"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	streamJobs := work.New(1, 1)
+	defer streamJobs.Close()
+	s := &server{root: root, finder: service, finderStreamJobs: streamJobs}
+	writer := newBlockingFinderSSEWriter()
+	requestContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequest(http.MethodGet, "/api/fs/search-stream?root="+url.QueryEscape(root)+"&query=needle&limit=10", nil).WithContext(requestContext)
+	handlerDone := make(chan struct{})
+	go func() {
+		s.fsSearch(writer, request)
+		writer.markHandlerReturned()
+		close(handlerDone)
+	}()
+	select {
+	case <-writer.blocked:
+	case <-time.After(time.Second):
+		t.Fatal("stream publisher did not reach the blocked response write")
+	}
+	cancel()
+	select {
+	case <-handlerDone:
+		close(writer.release)
+		t.Fatal("search handler returned while its scheduled publisher still owned the response writer")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(writer.release)
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("search handler did not finish after the blocked response write was released")
+	}
+	if lateIO := writer.lateIOCount(); lateIO != 0 {
+		t.Fatalf("scheduled publisher performed %d response operations after handler return", lateIO)
+	}
+}
 
 func TestFinderHTTPSlowStreamsDoNotOccupyFinderWorkers(t *testing.T) {
 	root := t.TempDir()
@@ -6719,6 +6838,60 @@ func TestFinderHTTPSlowStreamsDoNotOccupyFinderWorkers(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("slow HTTP stream did not finish")
 		}
+	}
+}
+
+func TestFinderStreamCancellationClosesResponseAfterInFlightPublish(t *testing.T) {
+	root := t.TempDir()
+	for index := range 40 {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("needle-%02d.txt", index)), []byte("needle"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	streamJobs := work.New(1, 1)
+	defer streamJobs.Close()
+	s := &server{root: root, finder: service, finderStreamJobs: streamJobs}
+	writer := newBlockingSSEResponseWriter()
+	releaseOnce := sync.Once{}
+	release := func() { releaseOnce.Do(func() { close(writer.release) }) }
+	defer release()
+	requestContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequest(http.MethodGet, "/api/fs/search-stream?root="+url.QueryEscape(root)+"&query=needle&limit=40", nil).WithContext(requestContext)
+	handlerDone := make(chan struct{})
+	go func() {
+		s.fsSearch(writer, request)
+		close(handlerDone)
+	}()
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("search stream did not enter an in-flight chunk write")
+	}
+	cancel()
+	select {
+	case <-writer.cancelObserved:
+	case <-time.After(time.Second):
+		t.Fatal("response did not observe cancellation")
+	}
+	select {
+	case <-handlerDone:
+		t.Fatal("handler returned while a worker was writing through its response")
+	default:
+	}
+	release()
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not return after the in-flight response write finished")
+	}
+	if got := writer.writeCount(); got != 2 {
+		t.Fatalf("underlying response writes = %d, want start plus one in-flight chunk", got)
 	}
 }
 

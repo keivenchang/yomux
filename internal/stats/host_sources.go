@@ -273,7 +273,11 @@ func (s *DarwinHostSources) Memory(ctx context.Context) (MemoryCounters, []Proce
 	for _, row := range rows {
 		processRows = append(processRows, row.censusRow())
 	}
-	return MemoryCounters{CapacityBytes: total, UsedBytes: total - darwinAvailableMemory(s, ctx, total), ProcessCensusIncomplete: !complete}, processRows, nil
+	available, err := darwinAvailableMemory(s, ctx, total)
+	if err != nil {
+		return MemoryCounters{}, nil, err
+	}
+	return MemoryCounters{CapacityBytes: total, UsedBytes: total - available, ProcessCensusIncomplete: !complete}, processRows, nil
 }
 
 func (s *DarwinHostSources) GPU(ctx context.Context) ([]GPUDevice, error) {
@@ -289,36 +293,59 @@ func (s *DarwinHostSources) Disk(ctx context.Context) ([]DiskUsageSample, error)
 	return collectDiskUsageFromDF(ctx, s.run)
 }
 
-func darwinAvailableMemory(s *DarwinHostSources, ctx context.Context, total uint64) uint64 {
+func darwinAvailableMemory(s *DarwinHostSources, ctx context.Context, total uint64) (uint64, error) {
 	result, err := s.run(ctx, []string{"vm_stat"})
-	if err != nil || result.ExitCode != 0 {
-		return 0
+	if err != nil {
+		return 0, fmt.Errorf("Darwin available memory: %w", err)
 	}
-	page := uint64(os.Getpagesize())
+	if result.ExitCode != 0 {
+		return 0, fmt.Errorf("vm_stat exited with status %d", result.ExitCode)
+	}
+	// vm_stat reports the observed page size; a Linux probe's page size is not a Mac's.
+	lines := strings.Split(strings.TrimSpace(string(result.Stdout)), "\n")
+	if len(lines) == 0 {
+		return 0, errors.New("missing vm_stat header")
+	}
+	_, pageText, found := strings.Cut(lines[0], "page size of ")
+	pageFields := strings.Fields(pageText)
+	if !found || len(pageFields) == 0 {
+		return 0, errors.New("invalid vm_stat page size")
+	}
+	page, err := strconv.ParseUint(pageFields[0], 10, 64)
+	if err != nil || page == 0 {
+		return 0, errors.New("invalid vm_stat page size")
+	}
+	required := map[string]bool{"Pages free": false, "Pages inactive": false, "Pages speculative": false}
 	var available uint64
-	for _, line := range strings.Split(string(result.Stdout), "\n") {
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
+	for _, line := range lines[1:] {
+		key, text, ok := strings.Cut(line, ":")
+		seen, needed := required[key]
+		if !needed {
 			continue
 		}
-		fields := strings.Fields(parts[1])
-		if len(fields) == 0 {
-			continue
+		if !ok || seen {
+			return 0, errors.New("invalid or duplicate vm_stat counter")
+		}
+		fields := strings.Fields(text)
+		if len(fields) != 1 {
+			return 0, errors.New("invalid vm_stat counter")
 		}
 		value, err := strconv.ParseUint(strings.TrimSuffix(fields[0], "."), 10, 64)
-		if err != nil || value > ^uint64(0)/page {
-			continue
+		if err != nil || value > (^uint64(0)-available)/page {
+			return 0, errors.New("invalid or overflowing vm_stat counter")
 		}
-		if strings.HasPrefix(parts[0], "Pages free") || strings.HasPrefix(parts[0], "Pages inactive") || strings.HasPrefix(parts[0], "Pages speculative") {
-			if available <= ^uint64(0)-value*page {
-				available += value * page
-			}
+		available += value * page
+		required[key] = true
+	}
+	for _, seen := range required {
+		if !seen {
+			return 0, errors.New("missing vm_stat counter")
 		}
 	}
 	if available > total {
-		return total
+		return 0, errors.New("vm_stat available memory exceeds capacity")
 	}
-	return available
+	return available, nil
 }
 
 func (s *LinuxHostSources) CPU(ctx context.Context) (CPUSnapshot, error) {

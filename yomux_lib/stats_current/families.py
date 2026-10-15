@@ -34,10 +34,7 @@ class FoldKind(StrEnum):
 
 
 ValueKind: TypeAlias = str
-NUMBER: ValueKind = "number"
-NULLABLE_NUMBER: ValueKind = "nullable_number"
-STRING: ValueKind = "string"
-BOOLEAN: ValueKind = "boolean"
+
 @dataclass(frozen=True, slots=True)
 class PayloadField:
     """One bounded top-level fact in a collector payload."""

@@ -75,10 +75,6 @@ func alnumSearchText(value string) string {
 	return builder.String()
 }
 
-func fuzzySubsequenceSpan(query, text string) (int, bool) {
-	return fuzzySubsequenceSpanPrepared(compactSearchText(query), text)
-}
-
 func fuzzySubsequenceSpanPrepared(needle, text string) (int, bool) {
 	if needle == "" {
 		return 0, true
@@ -171,11 +167,6 @@ func searchTokenTextsRankPrepared(token preparedSearchToken, name, stemName stri
 		return 60 + span, true
 	}
 	return 0, false
-}
-
-func searchTokenRank(token, name, relative string) (int, bool) {
-	prepared := prepareSearchTokens([]string{token})[0]
-	return searchTokenRankPrepared(prepared, name, relative)
 }
 
 func searchTokenRankPrepared(token preparedSearchToken, name, relative string) (int, bool) {

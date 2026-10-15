@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import json
 from pathlib import Path
@@ -351,3 +352,31 @@ def test_new_nested_collecting_module_line_count_is_a_warning(tmp_path):
     )
     assert "test_owner_lines: untracked tests/nested/test_new.py=2" in result.warnings
     assert result.violations == ()
+
+
+def test_duplicate_definitions_reject_shadowing_in_each_lexical_scope():
+    source = """
+def same(): pass
+if True:
+    def same(): pass
+class Sample:
+    def method(self): pass
+    def method(self): pass
+    @property
+    def value(self): return 1
+    @value.getter
+    def value(self): return 2
+    @value.setter
+    def value(self, value): pass
+    @value.setter
+    def value(self, value): pass
+    @value.deleter
+    def value(self): pass
+def independent():
+    def same(): pass
+"""
+    findings = architecture_budgets.duplicate_python_definitions(ast.parse(source))
+    assert len(findings) == 3
+    assert findings[0].startswith("same:")
+    assert findings[1].startswith("Sample.method:")
+    assert findings[2].startswith("Sample.value:")

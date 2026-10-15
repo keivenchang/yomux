@@ -368,22 +368,6 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   }
   const stateRevision = agentWindowSnapshotRevision(statePayload);
   const activityRevision = agentWindowSnapshotRevision(tabberActivityPayload);
-  // Go has no Python auto-approve snapshot. During a pane-capture miss, its shared activity
-  // snapshot can already have recovered to a concrete state while the compatibility state map
-  // still contains `unavailable`. Let that newer Go activity row repair only the unavailable
-  // canonical row; Python keeps its normal canonical-status precedence unchanged.
-  const activityCanRepairUnavailable = !(stateRevision > 0 && activityRevision > 0 && activityRevision < stateRevision);
-  if (activityCanRepairUnavailable
-      && typeof goAgentStatusUsesActivityFallback === 'function' && goAgentStatusUsesActivityFallback()) {
-    stateRows = stateRows.map(stateRow => {
-      if (agentWindowStateKey(stateRow?.state) !== 'unavailable') return stateRow;
-      const replacement = activityRows.find(activityRow => (
-        agentWindowSameInstance(activityRow, stateRow)
-        && agentWindowStateKey(activityRow?.state) !== 'unavailable'
-      ));
-      return replacement ? {...stateRow, ...replacement} : stateRow;
-    });
-  }
   // A positive generation is an immutable statusd snapshot. Never enrich its rows from a
   // different Tabber generation: stale metadata is acceptable, stale state-adjacent fields are
   // not. Old clients have no revision and retain the established compatibility behavior.
@@ -1013,16 +997,10 @@ function refreshAgentWindowActivityDisplays(sessionNames = sessions) {
     if (changedSessions.includes(view.sourceSession)) changedSessions.push(item);
   }
   if (!changedSessions.length) return;
-  if (typeof updateSessionStateClasses === 'function') {
-    updateSessionStateClasses(changedSessions);
-    if (typeof refreshPaneTabSessionPopovers === 'function') refreshPaneTabSessionPopovers(changedSessions);
-    if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome(changedSessions);
-  }
-  else {
-    if (typeof updateTopbarActivityStatus === 'function') updateTopbarActivityStatus();
-    if (typeof refreshPaneTabSessionPopovers === 'function') refreshPaneTabSessionPopovers(changedSessions);
-    if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome(changedSessions);
-  }
+  if (typeof updateTopbarActivityStatus === 'function') updateTopbarActivityStatus();
+  if (typeof updateSessionStateClasses === 'function') updateSessionStateClasses(changedSessions);
+  if (typeof refreshPaneTabSessionPopovers === 'function') refreshPaneTabSessionPopovers(changedSessions);
+  if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome(changedSessions);
   if (typeof updatePanelWindowStepButtons === 'function') {
     for (const session of changedSessions) {
       if (typeof isTmuxSession === 'function' && !isTmuxSession(session)) continue;

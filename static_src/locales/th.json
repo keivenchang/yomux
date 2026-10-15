@@ -2540,5 +2540,11 @@
   "pref.section.sizes": "ขนาด",
   "contextmenu.copyText": "คัดลอกข้อความ",
   "contextmenu.copyWithStyle": "คัดลอกพร้อมรูปแบบ",
-  "status.copiedStyledText": "คัดลอกพร้อมรูปแบบแล้ว"
+  "status.copiedStyledText": "คัดลอกพร้อมรูปแบบแล้ว",
+  "menu.tmux.kill.window": "ปิด {window} ในเซสชัน tmux",
+  "menu.tmux.kill.session.windows": "ปิดเซสชัน tmux ทั้งหมด ({count} หน้าต่าง)",
+  "status.tmux.windowKill.confirm": "ปิด {window} ในเซสชัน tmux '{session}' หรือไม่",
+  "status.tmux.windowKill.pending": "กำลังปิด {window} ในเซสชัน tmux '{session}'",
+  "status.tmux.windowKill.failed": "ปิด {window} ในเซสชัน tmux '{session}' ไม่สำเร็จ",
+  "status.tmux.windowKill.success": "ปิด {window} ในเซสชัน tmux '{session}' แล้ว"
 }

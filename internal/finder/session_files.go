@@ -1287,10 +1287,6 @@ func (s *Service) untrackedLineCount(ctx context.Context, repo, relative string)
 	return count, false
 }
 
-func (s *Service) sessionFileEntry(ctx context.Context, session, repo, relative, status string, counts gitCommitCount) (map[string]any, int, int) {
-	return s.sessionFileEntryWithAttribution(ctx, session, repo, relative, status, counts, nil, "git")
-}
-
 func (s *Service) sessionFileEntryWithAttribution(ctx context.Context, session, repo, relative, status string, counts gitCommitCount, attribution *sessionFileAttribution, source string) (map[string]any, int, int) {
 	return s.sessionFileEntryWithAttributionMode(ctx, session, repo, relative, status, counts, attribution, source, sessionFileMetadataComplete)
 }

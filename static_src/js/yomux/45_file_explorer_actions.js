@@ -583,10 +583,7 @@ function fileExplorerToolbarView(container = null) {
 
 async function setAllFileTreeDirectoriesExpanded(source, expand, options = {}) {
   const view = options.view || fileExplorerToolbarView(source);
-  if (view === 'tabber') {
-    setAllTabberCollapsed(!expand);
-    return;
-  }
+  if (view === 'tabber') return;
   if (view === 'differ' || source?.closest?.('.file-explorer-changes-panel')) {
     setAllFileExplorerChangesDirectoriesExpanded(expand);
     return;
@@ -634,7 +631,6 @@ function bindFileExplorerHeaderActions(container = document) {
     else if (action.matches('[data-file-explorer-refresh]')) {
     const view = fileExplorerToolbarView(container);
     if (view === 'tabber') {
-      clearTabberSessionFilesStates();
       fetchTabberActivity();
       refreshTabberPanels();
     } else if (view === 'differ') fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), force: true});
@@ -1103,6 +1099,8 @@ async function refreshFileExplorerTreesInPlace(options = {}) {
   if (!rootEntries) return false;
   if (root !== normalizeDirectoryPath(currentFileExplorerRoot())
       || (fileExplorerRootMode === 'sync' && syncGeneration !== fileExplorerSyncState.generation)) return false;
+  const publication = activeFileExplorerSyncPublication(root);
+  if (publication) return publication.publish(new Map(entriesByDir).set(root, rootEntries));
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
   if (fileExplorerTree) {
     setFileExplorerPathDisplay(root);

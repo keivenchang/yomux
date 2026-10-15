@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -33,7 +34,7 @@ func TestDarwinGitObjectSnapshotCacheReusesAndInvalidatesInventory(t *testing.T)
 	}
 	defer source.Close()
 
-	cache := newDarwinGitObjectSnapshotCache()
+	cache := newDarwinGitSnapshotCache()
 	t.Cleanup(cache.close)
 	firstPath, releaseFirst, reused, err := cache.acquire(context.Background(), source)
 	if err != nil || reused {
@@ -96,7 +97,7 @@ func TestDarwinGitObjectSnapshotClosePreservesActiveLeases(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer source.Close()
-	cache := newDarwinGitObjectSnapshotCache()
+	cache := newDarwinGitSnapshotCache()
 	t.Cleanup(cache.close)
 	path, releaseFirst, _, err := cache.acquire(context.Background(), source)
 	if err != nil {
@@ -131,7 +132,7 @@ func TestDarwinGitObjectFingerprintRejectsCancelledEmptyTree(t *testing.T) {
 	defer source.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := fingerprintDarwinGitObjects(ctx, source); !errors.Is(err, context.Canceled) {
+	if _, err := fingerprintDarwinGitSnapshot(ctx, source); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled fingerprint = %v, want context.Canceled", err)
 	}
 }
@@ -149,7 +150,7 @@ func TestDarwinGitObjectSnapshotHonorsRemainingNamespaceEntryBudget(t *testing.T
 		t.Fatal(err)
 	}
 	defer source.Close()
-	cache := newDarwinGitObjectSnapshotCache()
+	cache := newDarwinGitSnapshotCache()
 	t.Cleanup(cache.close)
 	if _, _, _, err := cache.acquireWithEntryLimit(context.Background(), source, nil, 1); err == nil || err.Error() != "Git snapshot entry limit exceeded" {
 		t.Fatalf("snapshot with one remaining namespace entry = %v, want entry limit error", err)
@@ -165,11 +166,11 @@ func TestDarwinGitObjectSnapshotCapacityPreservesLeases(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer source.Close()
-	cache := newDarwinGitObjectSnapshotCache()
+	cache := newDarwinGitSnapshotCache()
 	t.Cleanup(cache.close)
 	var paths []string
 	var releases []func()
-	for index := 0; index < darwinGitObjectSnapshotCacheEntries+2; index++ {
+	for index := 0; index < darwinGitSnapshotCacheEntries+2; index++ {
 		if err := os.WriteFile(filepath.Join(source.Name(), "object"), []byte(fmt.Sprintf("generation %d", index)), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -180,10 +181,10 @@ func TestDarwinGitObjectSnapshotCapacityPreservesLeases(t *testing.T) {
 		t.Cleanup(release)
 		paths = append(paths, path)
 		releases = append(releases, release)
-		if len(cache.entries) > darwinGitObjectSnapshotCacheEntries || cache.bytes > darwinGitSnapshotMaxBytes {
+		if len(cache.entries) > darwinGitSnapshotCacheEntries || cache.bytes > darwinGitSnapshotMaxBytes {
 			t.Fatal("cache exceeded capacity")
 		}
-		if index == darwinGitObjectSnapshotCacheEntries {
+		if index == darwinGitSnapshotCacheEntries {
 			// With every cached generation leased, this snapshot must be private.
 			release()
 			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
@@ -199,6 +200,144 @@ func TestDarwinGitObjectSnapshotCapacityPreservesLeases(t *testing.T) {
 		if _, err := os.Stat(paths[index]); err != nil {
 			t.Fatalf("leased generation %d removed: %v", index, err)
 		}
+	}
+}
+
+type darwinSnapshotWaitContext struct {
+	context.Context
+	observe atomic.Bool
+	waiting chan struct{}
+}
+
+func (ctx *darwinSnapshotWaitContext) Done() <-chan struct{} {
+	if ctx.observe.CompareAndSwap(true, false) {
+		close(ctx.waiting)
+	}
+	return ctx.Context.Done()
+}
+
+func TestDarwinGitSnapshotCacheCoalescesBuildersAndCancelsWaiters(t *testing.T) {
+	sourcePath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sourcePath, "object"), []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	cache := newDarwinGitSnapshotCache()
+	defer cache.close()
+	building := make(chan struct{})
+	resume := make(chan struct{})
+	var resumeOnce atomic.Bool
+	resumeBuilder := func() {
+		if resumeOnce.CompareAndSwap(false, true) {
+			close(resume)
+		}
+	}
+	defer resumeBuilder()
+	var clones atomic.Int32
+	budget := newDarwinSnapshotBudget()
+	budget.beforeClone = func() {
+		clones.Add(1)
+		close(building)
+		<-resume
+	}
+	type result struct {
+		path    string
+		release func()
+		err     error
+	}
+	first := make(chan result, 1)
+	go func() {
+		path, release, _, err := cache.acquireWithLimits(context.Background(), source, nil, 10, budget)
+		first <- result{path, release, err}
+	}()
+	<-building
+	ctx, cancel := context.WithCancel(context.Background())
+	waitContext := &darwinSnapshotWaitContext{Context: ctx, waiting: make(chan struct{})}
+	waiter := make(chan result, 1)
+	go func() {
+		path, release, _, err := cache.acquireWithInventoryHook(waitContext, source, func() { waitContext.observe.Store(true) })
+		waiter <- result{path, release, err}
+	}()
+	<-waitContext.waiting
+	cancel()
+	select {
+	case got := <-waiter:
+		if !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("cancelled waiter = %v", got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled waiter did not return while the builder was held")
+	}
+	secondContext := &darwinSnapshotWaitContext{Context: context.Background(), waiting: make(chan struct{})}
+	second := make(chan result, 1)
+	secondBudget := newDarwinSnapshotBudget()
+	secondBudget.beforeClone = func() { clones.Add(1) }
+	go func() {
+		path, release, _, err := cache.acquireWithLimits(secondContext, source, func() { secondContext.observe.Store(true) }, 10, secondBudget)
+		second <- result{path, release, err}
+	}()
+	<-secondContext.waiting
+	resumeBuilder()
+	left, right := <-first, <-second
+	if left.release != nil {
+		defer left.release()
+	}
+	if right.release != nil {
+		defer right.release()
+	}
+	if left.err != nil || right.err != nil || left.path != right.path || clones.Load() != 1 {
+		t.Fatalf("builders = %d, paths = %q/%q, errors = %v/%v; want one shared build", clones.Load(), left.path, right.path, left.err, right.err)
+	}
+	if budget.entries != 1 || secondBudget.entries != 1 {
+		t.Fatalf("cold/warm entry budgets = %d/%d; cache hits must count reused entries", budget.entries, secondBudget.entries)
+	}
+}
+
+func TestDarwinGitSnapshotFingerprintDetectsRestoredMtimeAndSymlinks(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "object")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := newDarwinGitSnapshotCache()
+	defer cache.close()
+	_, release, _, err := cache.acquire(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	_, _, reused, err := cache.acquireWithInventoryHook(context.Background(), source, func() {
+		if err := os.WriteFile(path, []byte("new"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if reused || !errors.Is(err, errGitNamespaceChanged) {
+		t.Fatalf("same-size mutation with restored mtime reused=%t error=%v", reused, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "outside"), path); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := cache.acquire(context.Background(), source); err == nil {
+		t.Fatal("snapshot accepted a source symlink")
 	}
 }
 
@@ -355,6 +494,123 @@ func TestDarwinGitMetadataSnapshotSkipsWorktreeFiles(t *testing.T) {
 	entries, err = os.ReadDir(scope.namespace.snapshotWork)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("Git status snapshot entries = %v, error=%v; status must leave the worktree uncopied", entries, err)
+	}
+}
+
+func TestDarwinGitMetadataSnapshotReusesRefs(t *testing.T) {
+	root, head := newCommittedTestRepo(t)
+	refs := filepath.Join(root, ".git", "refs", "heads")
+	for index := range 100 {
+		if err := os.WriteFile(filepath.Join(refs, fmt.Sprintf("branch-%03d", index)), []byte(head+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	var paths []string
+	var objectPaths []string
+	var privatePaths []string
+	var coldBuilds uint64
+	for iteration := range 2 {
+		started := time.Now()
+		payload, finderErr := service.GitHistoryMetadata(context.Background(), root, "1", "", -1)
+		if finderErr != nil || payload["head"] != head {
+			t.Fatalf("history = %v, error = %v", payload, finderErr)
+		}
+		t.Logf("native Mac history latency: %s", time.Since(started))
+		scope, finderErr := service.openGitHistoryScope(root)
+		if finderErr != nil {
+			t.Fatal(finderErr)
+		}
+		defer scope.close()
+		if err := scope.namespace.prepareSnapshot(context.Background(), scope.directory); err != nil {
+			t.Fatal(err)
+		}
+		path, err := filepath.EvalSymlinks(filepath.Join(scope.namespace.snapshotCommon, "refs"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, path)
+		objectPaths = append(objectPaths, scope.namespace.snapshotObjects)
+		privatePaths = append(privatePaths, scope.namespace.snapshotRoot)
+		service.gitSnapshots.mu.Lock()
+		builds := service.gitSnapshots.builds
+		service.gitSnapshots.mu.Unlock()
+		if iteration == 0 {
+			coldBuilds = builds
+		} else if builds != coldBuilds {
+			t.Fatalf("warm history cloned cached trees: builds %d -> %d", coldBuilds, builds)
+		}
+	}
+	if paths[0] != paths[1] {
+		t.Fatalf("warm history rebuilt refs: %q != %q", paths[0], paths[1])
+	}
+	if objectPaths[0] != objectPaths[1] || privatePaths[0] == privatePaths[1] {
+		t.Fatal("objects must be reused, but HEAD/index/config namespaces must remain request-local")
+	}
+}
+
+func TestDarwinGitRefsCacheInvalidatesAndPreservesLeasedGeneration(t *testing.T) {
+	for _, change := range []string{"add", "pack", "remove", "symlink"} {
+		t.Run(change, func(t *testing.T) {
+			root, head := newCommittedTestRepo(t)
+			service, err := New(root, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close()
+			openSnapshot := func() *gitHistoryScope {
+				scope, finderErr := service.openGitHistoryScope(root)
+				if finderErr != nil {
+					t.Fatal(finderErr)
+				}
+				t.Cleanup(scope.close)
+				if err := scope.namespace.prepareSnapshot(context.Background(), scope.directory); err != nil {
+					t.Fatal(err)
+				}
+				return scope
+			}
+			first := openSnapshot()
+			refs := filepath.Join(root, ".git", "refs")
+			switch change {
+			case "add":
+				err = os.WriteFile(filepath.Join(refs, "heads", "new-branch"), []byte(head+"\n"), 0o600)
+			case "pack", "remove":
+				output, packErr := exec.Command("git", "-C", root, "pack-refs", "--all", "--prune").CombinedOutput()
+				if packErr != nil {
+					t.Fatalf("pack refs: %v (%s)", packErr, output)
+				}
+				if change == "remove" {
+					err = os.RemoveAll(refs)
+				}
+			case "symlink":
+				err = os.Symlink(t.TempDir(), filepath.Join(refs, "outside"))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if change == "symlink" {
+				if _, finderErr := service.GitHistoryMetadata(context.Background(), root, "1", "", -1); finderErr == nil {
+					t.Fatal("cached refs hid a new source symlink")
+				}
+			} else {
+				second := openSnapshot()
+				output, _, err := runGitMetadataBounded(context.Background(), second.directory, nil, []string{"show-ref", "--heads"}, 8192, second.namespace)
+				if err != nil || !strings.Contains(string(output), head+" refs/heads/master") {
+					t.Fatalf("fresh refs = %q, error = %v", output, err)
+				}
+				if change == "add" && !strings.Contains(string(output), "refs/heads/new-branch") {
+					t.Fatalf("new branch missing from fresh snapshot: %q", output)
+				}
+			}
+			oldRef, err := os.ReadFile(filepath.Join(first.namespace.snapshotCommon, "refs", "heads", "master"))
+			if err != nil || string(oldRef) != head+"\n" {
+				t.Fatalf("leased refs changed: %q, error = %v", oldRef, err)
+			}
+		})
 	}
 }
 
@@ -621,7 +877,6 @@ func TestDarwinGitReadsPinnedSnapshotWhenLooseRefIsReplacedAndRestored(t *testin
 	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("YOLO_REF", ref)
 	t.Setenv("YOLO_BACKUP", backup)
 	t.Setenv("YOLO_REPLACEMENT", strings.TrimSpace(string(replacementSHA)))
@@ -642,7 +897,27 @@ func TestDarwinGitReadsPinnedSnapshotWhenLooseRefIsReplacedAndRestored(t *testin
 		t.Fatal(finderErr)
 	}
 	defer namespace.close()
-	output, _, err := runGitBounded(context.Background(), directory, nil, []string{"rev-parse", "HEAD"}, 4096, namespace)
+	if err := namespace.prepareSnapshot(context.Background(), directory); err != nil {
+		t.Fatal(err)
+	}
+	warm, finderErr := service.openGitNamespace(directory, root, root)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	defer warm.close()
+	if err := warm.prepareSnapshot(context.Background(), directory); err != nil {
+		t.Fatal(err)
+	}
+	firstRefs, err := filepath.EvalSymlinks(filepath.Join(namespace.snapshotCommon, "refs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	warmRefs, err := filepath.EvalSymlinks(filepath.Join(warm.snapshotCommon, "refs"))
+	if err != nil || firstRefs != warmRefs {
+		t.Fatalf("attack must exercise shared warm refs: %q/%q error=%v", firstRefs, warmRefs, err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	output, _, err := runGitBounded(context.Background(), directory, nil, []string{"rev-parse", "HEAD"}, 4096, warm)
 	if err != nil || strings.TrimSpace(string(output)) != strings.TrimSpace(string(masterSHA)) {
 		t.Fatalf("pinned Git HEAD = %q, error=%v, want %q", strings.TrimSpace(string(output)), err, strings.TrimSpace(string(masterSHA)))
 	}

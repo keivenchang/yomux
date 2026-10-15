@@ -8,6 +8,7 @@ package work
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -70,6 +71,9 @@ func (s *Scheduler) Submit(parent context.Context, id string, task Task) (<-chan
 	if parent == nil {
 		parent = context.Background()
 	}
+	if err := parent.Err(); err != nil {
+		return nil, err
+	}
 	ctx, cancelTask := context.WithCancel(parent)
 	stop := context.AfterFunc(s.ctx, cancelTask)
 	cancel := func() { stop(); cancelTask() }
@@ -80,6 +84,11 @@ func (s *Scheduler) Submit(parent context.Context, id string, task Task) (<-chan
 		s.mu.Unlock()
 		cancel()
 		return nil, ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		cancel()
+		return nil, err
 	}
 	if id != "" {
 		if _, exists := s.jobs[id]; exists {
@@ -161,21 +170,11 @@ func (s *Scheduler) worker() {
 			s.mu.Unlock()
 			if closed {
 				item.cancel()
-				item.result <- Result{Err: context.Canceled}
-				s.remove(item.id)
+				s.finish(item, Result{Err: context.Canceled})
 				s.drainCancelled()
 				return
 			}
-			if item.task == nil {
-				item.result <- Result{Err: errors.New("job task is nil")}
-				s.remove(item.id)
-				item.cancel()
-				continue
-			}
-			value, err := item.task(item.ctx)
-			item.result <- Result{Value: value, Err: err}
-			s.remove(item.id)
-			item.cancel()
+			s.finish(item, runTask(item))
 		}
 	}
 }
@@ -184,9 +183,7 @@ func (s *Scheduler) drainCancelled() {
 	for {
 		select {
 		case item := <-s.queue:
-			item.cancel()
-			item.result <- Result{Err: context.Canceled}
-			s.remove(item.id)
+			s.finish(item, Result{Err: context.Canceled})
 		default:
 			return
 		}
@@ -200,4 +197,32 @@ func (s *Scheduler) remove(id string) {
 	s.mu.Lock()
 	delete(s.jobs, id)
 	s.mu.Unlock()
+}
+
+// WaitStopped retains dependency ownership after a diagnostic shutdown timeout.
+// Callers must stop admission with CloseWithTimeout before waiting.
+func (s *Scheduler) WaitStopped() {
+	<-s.done
+}
+
+func (s *Scheduler) finish(item job, result Result) {
+	s.remove(item.id)
+	item.cancel()
+	item.result <- result
+}
+
+func runTask(item job) (result Result) {
+	if err := item.ctx.Err(); err != nil {
+		return Result{Err: err}
+	}
+	if item.task == nil {
+		return Result{Err: errors.New("job task is nil")}
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = Result{Err: fmt.Errorf("job task panicked: %v", recovered)}
+		}
+	}()
+	result.Value, result.Err = item.task(item.ctx)
+	return result
 }

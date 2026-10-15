@@ -2348,6 +2348,52 @@ def requires_known_session(refresh: bool = False, maintenance: bool = True) -> C
     return decorator
 
 
+@requires_known_session(refresh=True)
+def kill_tmux_window(app: Any, session: str, window_id: str) -> tuple[dict[str, Any], HTTPStatus]:
+    window_id = str(window_id or "").strip()
+    if len(window_id) < 2 or window_id[0] != "@" or not window_id[1:].isdigit():
+        return {"session": session, "window_id": window_id, "error": "window_id must use the tmux @<number> format"}, HTTPStatus.BAD_REQUEST
+    target = tmux_session_target(session)
+    listed = tmux(["list-windows", "-t", target, "-F", "#{window_id}"], timeout=3.0)
+    if listed.returncode != 0:
+        diagnostic = cmd_error(listed, "tmux list-windows failed")
+        return {"session": session, "window_id": window_id, "error": diagnostic}, HTTPStatus.INTERNAL_SERVER_ERROR
+    window_ids = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+    if window_id not in window_ids:
+        return {"session": session, "window_id": window_id, "error": "unknown tmux window"}, HTTPStatus.NOT_FOUND
+    if len(window_ids) < 2:
+        return {"session": session, "window_id": window_id, "error": "refusing to kill the last window in a tmux session"}, HTTPStatus.CONFLICT
+    result = tmux(
+        ["if-shell", "-F", "-t", target, "#{>=:#{session_windows},2}", f"kill-window -t {window_id}", ""],
+        timeout=3.0,
+    )
+    if result.returncode != 0:
+        diagnostic = cmd_error(result, "tmux conditional kill-window failed")
+        return {"session": session, "window_id": window_id, "error": diagnostic}, HTTPStatus.INTERNAL_SERVER_ERROR
+    remaining = tmux(["list-windows", "-t", target, "-F", "#{window_id}"], timeout=3.0)
+    if remaining.returncode != 0:
+        diagnostic = cmd_error(remaining, "tmux list-windows failed after kill")
+        return {"session": session, "window_id": window_id, "error": diagnostic}, HTTPStatus.INTERNAL_SERVER_ERROR
+    remaining_ids = [line.strip() for line in remaining.stdout.splitlines() if line.strip()]
+    if window_id in remaining_ids:
+        return {"session": session, "window_id": window_id, "error": "tmux window could not be killed without removing the session"}, HTTPStatus.CONFLICT
+    app.invalidate_status_topology_async()
+    app.log_event(
+        session,
+        "tmux_window_killed",
+        f"killed window {window_id} in {session}",
+        {"session": session, "window_id": window_id},
+    )
+    return {
+        "ok": True,
+        "session": session,
+        "window_id": window_id,
+        "windows_remaining": len(remaining_ids),
+        "sessions": app.sessions,
+        "topology_generation": app.topology_generation,
+    }, HTTPStatus.OK
+
+
 class YoagentAppField:
     def __init__(self, name: str):
         self.name = name
@@ -7291,32 +7337,6 @@ class ActivityCache:
             with self.state.tabber_cache_lock:
                 if self.state.tabber_cache_record.refresh_worker is worker:
                     self.state.tabber_cache_record.refresh_worker = None
-    def start_tabber_activity_cache_refresh(self, app) -> bool:
-        with background_scheduler_admission(app, BACKGROUND_ROLE_TABBER_ACTIVITY) as admitted:
-            if not admitted:
-                should_request = True
-            else:
-                should_request = False
-                with self.state.tabber_cache_lock:
-                    if self.state.tabber_cache_record.refresh_worker is not None:
-                        return False
-                    worker: threading.Thread
-
-                    def run_refresh() -> None:
-                        app.run_tabber_activity_cache_refresh(worker)
-
-                    worker = threading.Thread(target=run_refresh, name="tabber-activity-refresh", daemon=True)
-                    self.state.tabber_cache_record.refresh_worker = worker
-
-                def rollback() -> None:
-                    with self.state.tabber_cache_lock:
-                        if self.state.tabber_cache_record.refresh_worker is worker:
-                            self.state.tabber_cache_record.refresh_worker = None
-
-                common.start_thread_with_rollback(worker, rollback)
-        if should_request:
-            app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "async-refresh"})
-            return False
     def start_tabber_activity_cache_refresh(self, app, session_scope: Any = "configured") -> bool:
         with background_scheduler_admission(app, BACKGROUND_ROLE_TABBER_ACTIVITY) as admitted:
             if not admitted:

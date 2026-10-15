@@ -2008,37 +2008,6 @@ function scrollTopForPreviewElement(scroller, element) {
   return Math.max(0, Number(scroller.scrollTop || 0) + element.getBoundingClientRect().top - scrollViewportTopForElement(scroller));
 }
 
-function previewSourceLineForScroller(previewRoot, scroller) {
-  const anchors = previewSourceLineAnchors(previewRoot);
-  if (!anchors.length || !scroller) return null;
-  const top = Number(scroller.scrollTop || 0) + 6;
-  let best = anchors[0];
-  for (const item of anchors) {
-    if (scrollTopForPreviewElement(scroller, item.element) > top) break;
-    best = item;
-  }
-  return best.line;
-}
-
-function scrollPreviewScrollerToSourceLine(previewRoot, scroller, sourceLine) {
-  const anchor = previewAnchorForSourceLine(previewRoot, sourceLine);
-  if (!anchor || !scroller) return false;
-  writeOwnedElementScroll(scroller, {top: Math.max(0, scrollTopForPreviewElement(scroller, anchor.element) - 4)}, 'preview-source-line-reveal', {previewSurface: 'preview'});
-  return true;
-}
-
-function previewSourceLineForScroll(previewPane) {
-  const anchors = previewSourceLineAnchors(previewPane);
-  if (!anchors.length) return null;
-  const top = (previewPane?.scrollTop || 0) + 6;
-  let best = anchors[0];
-  for (const item of anchors) {
-    if (item.element.offsetTop > top) break;
-    best = item;
-  }
-  return best.line;
-}
-
 function clampScrollTop(element, value) {
   const max = Math.max(0, Number(element?.scrollHeight || 0) - Number(element?.clientHeight || 0));
   return Math.min(max, Math.max(0, Number(value || 0)));
@@ -2202,6 +2171,7 @@ function fileEditorScrollCoordinates(panel, source) {
   return {
     top: Number(element.scrollTop || 0),
     left: Number(element.scrollLeft || 0),
+    userGeneration: previewScrollUserOwnershipGeneration(element),
   };
 }
 
@@ -2223,7 +2193,8 @@ function fileEditorReflectedScrollMatches(panel, source) {
   const record = panel?._splitScrollReflections?.[source];
   if (!record || record.generation !== Number(panel?._splitScrollGeneration || 0)) return false;
   const coordinates = fileEditorScrollCoordinates(panel, source);
-  if (coordinates && coordinates.top === record.top && coordinates.left === record.left) return true;
+  if (coordinates && coordinates.top === record.top && coordinates.left === record.left
+      && coordinates.userGeneration === record.userGeneration) return true;
   delete panel._splitScrollReflections[source];
   return false;
 }
@@ -2231,8 +2202,7 @@ function fileEditorReflectedScrollMatches(panel, source) {
 function promoteFileEditorReflectedScrollOwner(panel, ownerSource, generation) {
   for (const [targetSource, record] of Object.entries(panel?._splitScrollReflections || {})) {
     if (record?.ownerSource !== ownerSource) continue;
-    const coordinates = fileEditorScrollCoordinates(panel, targetSource);
-    if (coordinates && coordinates.top === record.top && coordinates.left === record.left) record.generation = generation;
+    if (fileEditorReflectedScrollMatches(panel, targetSource)) record.generation = generation;
     else delete panel._splitScrollReflections[targetSource];
   }
 }
@@ -2350,19 +2320,6 @@ function fileEditorSourceCanDrive(panel, source) {
   return elementCanScroll(fileEditorSourceElement(panel, source));
 }
 
-function fileEditorSourceLineForScroll(panel, source) {
-  if (source === 'preview') return previewSourceLineForScroll(fileEditorPanelPreviewPane(panel));
-  if (panel?._cmView) {
-    try {
-      const block = panel._cmView.lineBlockAtHeight(panel._cmView.scrollDOM.scrollTop);
-      return panel._cmView.state.doc.lineAt(block.from).number;
-    } catch (_) {
-      return null;
-    }
-  }
-  return null;
-}
-
 function scrollFileEditorPanelToSourceLine(panel, source, line) {
   if (!panel || !line) return false;
   setFileEditorScrollSyncGuard(panel);
@@ -2434,9 +2391,9 @@ function scheduleFileEditorSplitScrollSync(host, source, options = {}) {
   if (!host) return false;
   if (options.forceSource !== true && fileEditorReflectedScrollMatches(host, source)) return true;
   const generation = Number(host._splitScrollGeneration || 0) + 1;
+  promoteFileEditorReflectedScrollOwner(host, source, generation);
   host._splitScrollGeneration = generation;
   host._splitScrollBottomConvergence = null;
-  promoteFileEditorReflectedScrollOwner(host, source, generation);
   host._splitScrollPendingGeneration = generation;
   host._splitScrollPendingSource = source;
   host._splitScrollDeferredOwner = createPassiveDeferredElementScrollOwner(
@@ -2477,7 +2434,11 @@ function fileEditorPreviewScrollSyncSource(panel) {
 function scheduleFileEditorPreviewLayoutSync(panel) {
   if (!panel) return false;
   panel._previewLayoutScrollUntil = nowMs() + fileEditorPreviewLayoutScrollSyncMs;
-  return scheduleFileEditorSplitScrollSync(panel, 'editor', {forceSource: true});
+  const scheduled = scheduleFileEditorSplitScrollSync(panel, 'editor', {forceSource: true});
+  // A collapsed layout can emit its clamp scroll before the editor refit frame runs.
+  // Keep that exact position with the pending editor owner; later input supersedes it.
+  rememberFileEditorReflectedScroll(panel, 'preview', 'editor', Number(panel._splitScrollGeneration || 0));
+  return scheduled;
 }
 
 function refreshEditorPreviews() {

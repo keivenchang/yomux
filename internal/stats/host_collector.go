@@ -733,12 +733,3 @@ func sourceReason(ctx context.Context, err error) string {
 	}
 	return "source_error"
 }
-
-func appendBatch(result AppendBatch, batches ...AppendBatch) AppendBatch {
-	for _, batch := range batches {
-		result.Observations = append(result.Observations, batch.Observations...)
-		result.CoverageEpochs = append(result.CoverageEpochs, batch.CoverageEpochs...)
-		result.UnavailableSpans = append(result.UnavailableSpans, batch.UnavailableSpans...)
-	}
-	return result
-}

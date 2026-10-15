@@ -171,7 +171,7 @@ func NextWindowEnd(now time.Time, resolutionSeconds int) int64 {
 // lifecycle uses it to derive the language-neutral cache generation before
 // encoding the next batch of bucket payloads.
 func (w *Writer) RingPublicationState(ctx context.Context) (int64, float64, error) {
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return 0, 0, fmt.Errorf("nil YO!stats writer")
 	}
 	var ringGeneration int64
@@ -617,7 +617,7 @@ func (w *Writer) PendingInvalidationCells(ctx context.Context) ([]InvalidationCe
 // and both generations fence a concurrent replacement so a stale decode error
 // cannot invalidate a healthy publication.
 func (w *Writer) InvalidateCorruptRingPayload(ctx context.Context, row RingBucketRow, payload string, now float64) (bool, error) {
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return false, errors.New("nil YO!stats writer")
 	}
 	if _, ok := ringCapacities[row.ResolutionSeconds]; !ok || row.BucketStart < 0 || row.BucketStart%int64(row.ResolutionSeconds) != 0 || row.SourceGeneration < 0 || row.RingGeneration <= 0 || math.IsNaN(now) || math.IsInf(now, 0) || now < 0 {
@@ -840,7 +840,7 @@ func (w *Writer) pendingRingBuckets(ctx context.Context, resolutionSeconds int) 
 // WAL snapshot; callers that require a complete checkpoint must inspect the
 // returned frame counts or use the stricter truncateStatsWAL path.
 func (w *Writer) Checkpoint(ctx context.Context) (WALCheckpointResult, error) {
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return WALCheckpointResult{}, fmt.Errorf("nil YO!stats writer")
 	}
 	var result WALCheckpointResult
@@ -850,7 +850,7 @@ func (w *Writer) Checkpoint(ctx context.Context) (WALCheckpointResult, error) {
 	return result, nil
 }
 func (w *Writer) Vacuum(ctx context.Context, completedAt float64) error {
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return fmt.Errorf("nil YO!stats writer")
 	}
 	if math.IsNaN(completedAt) || math.IsInf(completedAt, 0) || completedAt < 0 {
@@ -883,16 +883,13 @@ func (w *Writer) Vacuum(ctx context.Context, completedAt float64) error {
 func invalidationBucket(resolution int, timestamp float64) int64 {
 	return int64(math.Floor(timestamp/float64(resolution))) * int64(resolution)
 }
-func recordFactInvalidations(ctx context.Context, tx *sql.Tx, generation int64, timestamps []float64, now float64) error {
-	return recordRingInvalidations(ctx, tx, generation, now, "fact_mutation", timestamps, nil)
-}
 
 // InvalidatePricingCatalog advances the source generation and dirties every
 // populated ring cell containing a usage atom. Cost is derived from the live
 // pricing catalog rather than stored as an immutable fact, so a catalog change
 // must rebuild existing products before they are served again.
 func (w *Writer) InvalidatePricingCatalog(ctx context.Context, now float64) (int64, error) {
-	if w == nil || w.db == nil {
+	if w == nil || w.db == nil || w.closed.Load() {
 		return 0, errors.New("nil YO!stats writer")
 	}
 	if math.IsNaN(now) || math.IsInf(now, 0) || now < 0 {

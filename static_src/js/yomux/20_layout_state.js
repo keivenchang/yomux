@@ -1265,7 +1265,6 @@ function layoutUrlFinderStateSnapshot() {
     selectionLead: fileExplorerSelectionLead || '',
     changesFolderCollapsed: layoutUrlSetSnapshot(changesFolderCollapsed),
     changesRepoCollapsed: layoutUrlSetSnapshot(changesRepoCollapsed),
-    tabberCollapsed: layoutUrlSetSnapshot(fileExplorerTabberCollapsed),
     diffRefsByRepo: layoutUrlDiffRefsByRepoSnapshot(),
   };
 }
@@ -1478,7 +1477,6 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   if ('selectionLead' in finder) fileExplorerSelectionLead = String(finder.selectionLead || '');
   if ('changesFolderCollapsed' in finder) layoutUrlReplaceSet(changesFolderCollapsed, finder.changesFolderCollapsed);
   if ('changesRepoCollapsed' in finder) layoutUrlReplaceSet(changesRepoCollapsed, finder.changesRepoCollapsed);
-  if ('tabberCollapsed' in finder) layoutUrlReplaceSet(fileExplorerTabberCollapsed, finder.tabberCollapsed);
 }
 
 function applyEditorStateFields(editor = {}, {applyModeEntry = null} = {}) {

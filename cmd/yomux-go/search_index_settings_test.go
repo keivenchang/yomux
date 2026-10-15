@@ -5,9 +5,13 @@ package main
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/keivenchang/yomux/internal/finder"
 	"github.com/keivenchang/yomux/internal/testsupport"
@@ -183,5 +187,50 @@ func TestFinderIndexPendingRootChangeKeepsUnaffectedActivePolicy(t *testing.T) {
 	}
 	if options := settings.finderSearchOptions(removed, "", false); !options.IndexedOnly {
 		t.Fatal("removed root was not gated before acknowledgment")
+	}
+}
+
+func TestFinderIndexSettingsCancelledWaiter(t *testing.T) {
+	s := &server{}
+	s.indexSettingsUpdateMu.Lock()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.reloadFinderIndexSettings(ctx, false) }()
+	select {
+	case err := <-done:
+		s.indexSettingsUpdateMu.Unlock()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled reload = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		s.indexSettingsUpdateMu.Unlock()
+		<-done
+		t.Fatal("cancelled settings reload waited for another operation's lock")
+	}
+}
+
+func TestFinderIndexSettingsHTTPCancelledWaiter(t *testing.T) {
+	s := &server{}
+	s.indexSettingsUpdateMu.Lock()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodGet, "/api/settings", nil).WithContext(ctx)
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		s.settings(response, request)
+		close(done)
+	}()
+	select {
+	case <-done:
+		s.indexSettingsUpdateMu.Unlock()
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("cancelled settings status = %d", response.Code)
+		}
+	case <-time.After(time.Second):
+		s.indexSettingsUpdateMu.Unlock()
+		<-done
+		t.Fatal("cancelled HTTP settings request waited for another operation's lock")
 	}
 }

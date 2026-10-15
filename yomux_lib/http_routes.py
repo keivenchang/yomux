@@ -23,6 +23,7 @@ from .infra.common import auth_setup_required
 from .infra.common import error_payload
 from .infra.common import inline_json_product_metadata
 from .infra.common import parse_bool
+from .app import kill_tmux_window
 from .state_services import ClientWatchRootValidationError
 from .chat.chat_service import ChatServiceError
 from .chat.chat_store import ChatStoreValidationError
@@ -1318,6 +1319,14 @@ def post_kill_session(request: Any, parsed: Any, route: Route) -> None:
     request.write_app_result(request.server.app.kill_session(session))
 
 
+def post_kill_window(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = request_query(request, parsed)
+    session = session_param(qs)
+    window_id = str(query_one(qs, "window_id", "") or "")
+    request.write_app_result(kill_tmux_window(request.server.app, session, window_id))
+
+
 def post_upload(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
@@ -1656,6 +1665,7 @@ CORE_ROUTES = (
     Route("POST", "/api/create-session", "admin", post_create_session, protocol=RESPONSE_JSON, group="core"),
     Route("POST", "/api/rename-session", "admin", post_rename_session, protocol=RESPONSE_JSON, group="core"),
     Route("POST", "/api/kill-session", "admin", post_kill_session, protocol=RESPONSE_JSON, group="core"),
+    Route("POST", "/api/kill-window", "admin", post_kill_window, protocol=RESPONSE_JSON, group="core"),
     Route("POST", "/api/upload", "admin", post_upload, protocol=RESPONSE_JSON, group="core"),
     Route("POST", "/api/auto-approve", "admin", post_auto_approve, protocol=RESPONSE_JSON, group="core"),
     Route("POST", "/api/attention-ack", "admin", post_attention_ack, protocol=RESPONSE_JSON, body_limit=16 * 1024, group="core"),

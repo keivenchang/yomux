@@ -46,6 +46,7 @@ DISCOVERED_MUTATING_ACTIONS = {
     "tabber-description-rename": "pending",
     "tabber-window-view": "pending",
     "kill-session": "pending",
+    "kill-window": "pending",
     "settings-save": "pending",
     "yoagent-cancel": "pending",
     "yoagent-reset": "pending",

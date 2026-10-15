@@ -450,6 +450,11 @@ func TestSearchIndexV2WorkerHelperProcess(t *testing.T) {
 			runtime.KeepAlive(writer)
 			os.Exit(0)
 		}
+		if arg == "--notification-index-worker" {
+			fmt.Fprintln(os.Stdout, `{"id":0,"ok":true,"payload":{"root":"/held"}}`)
+			_, _ = io.Copy(io.Discard, os.Stdin)
+			os.Exit(0)
+		}
 		if arg == "--unresponsive-index-worker" {
 			_, _ = io.Copy(io.Discard, os.Stdin)
 			os.Exit(0)
@@ -1039,5 +1044,111 @@ func TestSearchIndexV2RootChangePreservesUnaffectedSnapshot(t *testing.T) {
 	readded, err := engine.status(roots[0], fileID(removedInfo))
 	if err != nil || readded["generation"] != 2 {
 		t.Fatalf("readded root lost high-water generation: %v %v", readded, err)
+	}
+}
+
+func TestSearchIndexClientRepairAdmissionAfterClose(t *testing.T) {
+	client := NewSearchIndexWorkerClient(t.TempDir())
+	client.Close()
+	client.QueueRepair(indexRequest{Root: t.TempDir()}, nil)
+	client.repairMu.Lock()
+	count := len(client.repairs)
+	client.repairMu.Unlock()
+	client.Close()
+	if count != 0 {
+		t.Fatalf("closed client admitted %d repair timers", count)
+	}
+}
+
+func TestSearchIndexClientPersistentWaitAbortsOnShutdown(t *testing.T) {
+	client := NewSearchIndexWorkerClient(t.TempDir())
+	client.repairMu.Lock()
+	client.closeOnce.Do(func() { close(client.closing) })
+	done := make(chan error, 1)
+	go func() { done <- client.SetPersistent(false) }()
+	select {
+	case err := <-done:
+		client.repairMu.Unlock()
+		if err == nil {
+			t.Fatal("closed client accepted a persistence update")
+		}
+	case <-time.After(time.Second):
+		client.repairMu.Unlock()
+		<-done
+		t.Fatal("persistence update waited on repair ownership after shutdown")
+	}
+	client.Close()
+}
+
+func TestSearchIndexV2EngineSettingsLockWaitRespectsCancellation(t *testing.T) {
+	store, err := openSearchIndexStore(filepath.Join(t.TempDir(), "index.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.db.Close()
+	engine := newSearchIndexEngine(store)
+	engine.settingsApplyMu.Lock()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := engine.handleContext(ctx, indexRequest{Action: "settings_fence", PreserveSnapshots: true})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		engine.settingsApplyMu.Unlock()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("settings-fence lock result = %v", err)
+		}
+	case <-time.After(time.Second):
+		engine.settingsApplyMu.Unlock()
+		<-done
+		t.Fatal("cancelled worker settings fence waited on another settings operation")
+	}
+}
+
+func TestSearchIndexClientCloseJoinsNotificationCallback(t *testing.T) {
+	previous := execCommand
+	t.Cleanup(func() { execCommand = previous })
+	t.Setenv("YOMUX_TEST_INDEX_WORKER", "1")
+	execCommand = func(_ string, args ...string) *exec.Cmd {
+		return exec.Command(os.Args[0], append([]string{"-test.run=^TestSearchIndexV2WorkerHelperProcess$", "--", "--notification-index-worker"}, args...)...)
+	}
+	client := NewSearchIndexWorkerClient(t.TempDir())
+	started, release, callbackDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	client.OnComplete = func(map[string]any) {
+		close(started)
+		<-release
+		close(callbackDone)
+	}
+	client.initialPolicy = &indexRequest{Action: "settings_fence"}
+	client.mu.Lock()
+	err := client.startLocked(context.Background())
+	client.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		close(release)
+		client.Close()
+		t.Fatal("worker notification did not arrive")
+	}
+	closed := make(chan struct{})
+	go func() { client.Close(); close(closed) }()
+	select {
+	case <-closed:
+		close(release)
+		<-callbackDone
+		t.Fatal("client Close returned while its notification callback still owned server dependencies")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not finish after callback release")
 	}
 }

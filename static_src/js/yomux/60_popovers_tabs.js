@@ -335,13 +335,6 @@ if (fileExplorerHiddenToggle) {
   fileExplorerHiddenToggle.addEventListener('click', toggleHiddenFiles);
 }
 
-function updateSessionButtonStates(sessionNames = sessions) {
-  updateTopbarActivityStatus();
-  updateSessionStateClasses(sessionNames);
-  refreshPaneTabSessionPopovers(sessionNames);
-  syncSessionTabLeadingActivityChrome(sessionNames);
-}
-
 function updateSessionStateClasses(sessionNames = sessions) {
   const included = new Set(sessionNames);
   for (const tab of document.querySelectorAll('.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab], .tmux-pane-tab-token[data-pane-tab]')) {
@@ -448,7 +441,7 @@ function closeOtherSessionPopovers(current, options = {}) {
   const force = options.force === true;
   let changed = false;
   for (const other of Array.from(document.getElementsByClassName('popover-open'))) {
-    if (!other.matches('.pane-tab, .tabber-session-tab, .panel-popover-zone')) continue;
+    if (!other.matches('.pane-tab, .panel-popover-zone')) continue;
     if (other !== current) {
       const popover = other.querySelector?.(':scope > .session-popover, :scope > .panel-detail-popover')
         || other.__yomuxDetachedPopover;
@@ -711,7 +704,7 @@ function tabInteractionControllerForApp() {
     return createHoverPopover({
       anchor,
       popover: detailPopover,
-      showDelay: () => (document.querySelector('.pane-tab.popover-open, .tabber-session-tab.popover-open') ? popoverHideDelayMs : popoverShowDelayMs),
+      showDelay: () => (document.querySelector('.pane-tab.popover-open') ? popoverHideDelayMs : popoverShowDelayMs),
       hideDelay: () => popoverHideDelayMs,
       canOpen: () => !appMenuIsOpen() && !contextMenuIsOpen() && !topbar?.matches?.(':hover'),
       onQueue: event => currentDescriptor(descriptor)?.positionDetail?.(event),

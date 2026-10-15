@@ -2540,5 +2540,11 @@
   "pref.section.sizes": "आकार",
   "contextmenu.copyText": "टेक्स्ट कॉपी करें",
   "contextmenu.copyWithStyle": "शैली के साथ कॉपी करें",
-  "status.copiedStyledText": "शैली के साथ कॉपी किया गया"
+  "status.copiedStyledText": "शैली के साथ कॉपी किया गया",
+  "menu.tmux.kill.window": "tmux सत्र में {window} बंद करें",
+  "menu.tmux.kill.session.windows": "पूरा tmux सत्र बंद करें ({count} विंडो)",
+  "status.tmux.windowKill.confirm": "tmux सत्र '{session}' में {window} बंद करें?",
+  "status.tmux.windowKill.pending": "tmux सत्र '{session}' में {window} बंद हो रहा है",
+  "status.tmux.windowKill.failed": "tmux सत्र '{session}' में {window} बंद नहीं हो सका",
+  "status.tmux.windowKill.success": "tmux सत्र '{session}' में {window} बंद किया गया"
 }

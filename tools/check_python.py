@@ -7,7 +7,7 @@ import sys
 from collections.abc import Sequence
 
 
-MIN_PYTHON = (3, 10)
+MIN_PYTHON = (3, 11)
 
 
 def python_requirement_error(

@@ -114,7 +114,7 @@ func (s *server) statsRefill(w http.ResponseWriter, r *http.Request) {
 	if parent == nil {
 		parent = context.Background()
 	}
-	go func() {
+	if !s.startBackgroundWork(func() {
 		defer lock.Close()
 		ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
 		defer cancel()
@@ -187,7 +187,15 @@ func (s *server) statsRefill(w http.ResponseWriter, r *http.Request) {
 		if writeErr := writeRefillStatus(root, status); writeErr != nil {
 			slog.Error("refill terminal status failed", "error", writeErr)
 		}
-	}()
+	}) {
+		held = false
+		status["state"] = "failed"
+		status["message"] = "Server is shutting down. Try again after restart."
+		_, _ = s.terminalizeOperation(id, cloneMap(status), http.StatusServiceUnavailable)
+		_ = writeRefillStatus(root, status)
+		jsonResponse(w, http.StatusServiceUnavailable, status)
+		return
+	}
 	jsonResponse(w, http.StatusAccepted, responseStatus)
 }
 

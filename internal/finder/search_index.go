@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"github.com/mattn/go-sqlite3"
+
+	"github.com/keivenchang/yomux/internal/work"
 )
 
 const (
@@ -407,7 +409,7 @@ type searchIndexEngine struct {
 	settingsFloor          uint64
 	settingsFloorSet       bool
 	settingsPolicy         string
-	settingsApplyMu        sync.Mutex
+	settingsApplyMu        work.ContextMutex
 	applicationEpoch       uint64
 	budgetBytes            int64
 	fenceLoadErr           error
@@ -525,7 +527,9 @@ func (engine *searchIndexEngine) handleContext(ctx context.Context, request inde
 		return map[string]any{"ok": true, "purged": true}, nil
 	}
 	if request.Action == "settings_fence" {
-		engine.settingsApplyMu.Lock()
+		if err := engine.settingsApplyMu.LockContext(ctx, nil); err != nil {
+			return nil, err
+		}
 		defer engine.settingsApplyMu.Unlock()
 		names := make(map[string]struct{}, len(request.ExcludeDirs))
 		for _, name := range request.ExcludeDirs {
@@ -1558,46 +1562,6 @@ func (engine *searchIndexEngine) writeDiscoveredPaths(root string, generation in
 	return transaction.Commit()
 }
 
-func (engine *searchIndexEngine) replaceGenerationWithinBudget(job indexBuildJob, generation, count int, bytes int64, reason string, duration time.Duration, snapshot *searchIndexSnapshot, paths []discoveredIndexPath) (bool, error) {
-	engine.crawlPause.Lock()
-	defer engine.crawlPause.Unlock()
-	engine.mu.Lock()
-	defer engine.mu.Unlock()
-	if engine.fences[job.root] != job.fence || !engine.settingsRevisionAcceptedLocked(job.root, job.settingsRevision) {
-		return false, nil
-	}
-	transaction, err := engine.store.db.Begin()
-	if err != nil {
-		return false, err
-	}
-	if _, err := transaction.Exec(`DELETE FROM entries WHERE root=?`, job.root); err != nil {
-		_ = transaction.Rollback()
-		return false, err
-	}
-	if err := writeDiscoveredPathsTx(transaction, job.root, generation, paths); err != nil {
-		_ = transaction.Rollback()
-		return false, err
-	}
-	now := time.Now().UnixNano()
-	result, err := transaction.Exec(`UPDATE roots SET identity=?,generation=?,state='partial',coverage='partial',count=?,bytes=?,updated_ns=?,error=?,settings_revision=?,scan_duration_ns=?,last_success_ns=? WHERE root=?`, job.identity, generation, count, bytes, now, reason, job.settingsRevision, duration.Nanoseconds(), now, job.root)
-	if err == nil {
-		var affected int64
-		affected, err = result.RowsAffected()
-		if err == nil && affected != 1 {
-			err = errors.New("root snapshot disappeared before publication")
-		}
-	}
-	if err != nil {
-		_ = transaction.Rollback()
-		return false, err
-	}
-	if err := transaction.Commit(); err != nil {
-		return false, err
-	}
-	engine.snapshots[job.root] = snapshot
-	return true, nil
-}
-
 func writeDiscoveredPathsTx(transaction *sql.Tx, root string, generation int, paths []discoveredIndexPath) error {
 	return writeNormalizedPaths(transaction, root, generation, paths)
 }
@@ -1896,65 +1860,30 @@ func (engine *searchIndexEngine) searchContext(ctx context.Context, root, identi
 }
 
 // SearchIndexWorkerClient supervises one worker process and serializes its private RPC stream.
-type contextMutex struct {
-	initOnce sync.Once
-	token    chan struct{}
-}
-
-func (mutex *contextMutex) Lock() {
-	_ = mutex.LockContext(context.Background(), nil)
-}
-
-func (mutex *contextMutex) LockContext(ctx context.Context, abort <-chan struct{}) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	mutex.initOnce.Do(func() { mutex.token = make(chan struct{}, 1) })
-	select {
-	case mutex.token <- struct{}{}:
-		if err := ctx.Err(); err != nil {
-			mutex.Unlock()
-			return err
-		}
-		select {
-		case <-abort:
-			mutex.Unlock()
-			return errors.New("search index worker is shutting down")
-		default:
-			return nil
-		}
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-abort:
-		return errors.New("search index worker is shutting down")
-	}
-}
-
-func (mutex *contextMutex) Unlock() {
-	<-mutex.token
-}
-
 type SearchIndexWorkerClient struct {
-	replies        chan workerReply
-	OnComplete     func(map[string]any)
-	repairRequests map[string]indexRequest
-	mu             contextMutex
-	repairMu       contextMutex
-	stateDir       string
-	persistent     bool
-	closed         bool
-	repairs        map[string]*time.Timer
-	repairEpochs   map[string]uint64
-	repairFlights  map[string]map[chan struct{}]struct{}
-	closing        chan struct{}
-	closeOnce      sync.Once
-	cmd            *exec.Cmd
-	input          io.WriteCloser
-	output         *bufio.Reader
-	stdin          io.WriteCloser
-	stdout         io.ReadCloser
-	initialPolicy  *indexRequest
-	nextID         uint64
+	replies         chan workerReply
+	OnComplete      func(map[string]any)
+	repairRequests  map[string]indexRequest
+	mu              work.ContextMutex
+	repairMu        work.ContextMutex
+	stateDir        string
+	persistent      bool
+	closed          bool
+	repairs         map[string]*time.Timer
+	repairEpochs    map[string]uint64
+	repairFlights   map[string]map[chan struct{}]struct{}
+	repairCallbacks sync.WaitGroup
+	closing         chan struct{}
+	closeOnce       sync.Once
+	cmd             *exec.Cmd
+	input           io.WriteCloser
+	output          *bufio.Reader
+	stdin           io.WriteCloser
+	stdout          io.ReadCloser
+	readerDone      chan struct{}
+	readerStop      chan struct{}
+	initialPolicy   *indexRequest
+	nextID          uint64
 }
 
 func NewSearchIndexWorkerClient(stateDir string) *SearchIndexWorkerClient {
@@ -1965,7 +1894,9 @@ func (client *SearchIndexWorkerClient) QueueRepair(request indexRequest, onSched
 	if request.Root == "" {
 		return
 	}
-	client.repairMu.Lock()
+	if err := client.repairMu.LockContext(context.Background(), client.closing); err != nil {
+		return
+	}
 	defer client.repairMu.Unlock()
 	if existing := client.repairs[request.Root]; existing != nil {
 		previous := client.repairRequests[request.Root]
@@ -1994,7 +1925,9 @@ func (client *SearchIndexWorkerClient) QueueRepair(request indexRequest, onSched
 			client.repairFlights[request.Root] = make(map[chan struct{}]struct{})
 		}
 		client.repairFlights[request.Root][done] = struct{}{}
+		client.repairCallbacks.Add(1)
 		client.repairMu.Unlock()
+		defer client.repairCallbacks.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		_, err := client.Request(ctx, request)
 		cancel()
@@ -2014,14 +1947,18 @@ func (client *SearchIndexWorkerClient) QueueRepair(request indexRequest, onSched
 }
 
 func (client *SearchIndexWorkerClient) SetPersistent(persistent bool) error {
-	client.repairMu.Lock()
-	defer client.repairMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if err := client.repairMu.LockContext(ctx, client.closing); err != nil {
+		return err
+	}
+	defer client.repairMu.Unlock()
 	if err := client.cancelAllRepairsLocked(ctx); err != nil {
 		return err
 	}
-	client.mu.Lock()
+	if err := client.mu.LockContext(ctx, client.closing); err != nil {
+		return err
+	}
 	defer client.mu.Unlock()
 	return client.setPersistentLocked(persistent)
 }
@@ -2079,9 +2016,12 @@ func (client *SearchIndexWorkerClient) startLocked(ctx context.Context) error {
 	client.input, client.output = stdin, bufio.NewReader(stdout)
 	replies := make(chan workerReply, 1)
 	client.replies = replies
+	done, stop := make(chan struct{}), make(chan struct{})
+	client.readerDone, client.readerStop = done, stop
 	reader := client.output
 	notify := client.OnComplete
 	go func() {
+		defer close(done)
 		for {
 			line, err := reader.ReadBytes('\n')
 			var response indexResponse
@@ -2089,8 +2029,16 @@ func (client *SearchIndexWorkerClient) startLocked(ctx context.Context) error {
 				err = json.Unmarshal(line, &response)
 			}
 			if err != nil {
-				replies <- workerReply{err: err}
+				select {
+				case replies <- workerReply{err: err}:
+				case <-stop:
+				}
 				return
+			}
+			select {
+			case <-stop:
+				return
+			default:
 			}
 			if response.ID == 0 {
 				if notify != nil {
@@ -2098,7 +2046,11 @@ func (client *SearchIndexWorkerClient) startLocked(ctx context.Context) error {
 				}
 				continue
 			}
-			replies <- workerReply{response: response}
+			select {
+			case replies <- workerReply{response: response}:
+			case <-stop:
+				return
+			}
 		}
 	}()
 	if initial != nil {
@@ -2179,22 +2131,8 @@ func (client *SearchIndexWorkerClient) requestLocked(ctx context.Context, reques
 		client.stopLocked()
 		return nil, err
 	}
-	result := make(chan struct {
-		response indexResponse
-		err      error
-	}, 1)
 	replies := client.replies
-	go func() {
-		reply := <-replies
-		result <- struct {
-			response indexResponse
-			err      error
-		}{reply.response, reply.err}
-	}()
-	finishResponse := func(result struct {
-		response indexResponse
-		err      error
-	}) (map[string]any, error) {
+	finishResponse := func(result workerReply) (map[string]any, error) {
 		if result.err != nil {
 			client.stopLocked()
 			return nil, result.err
@@ -2208,21 +2146,15 @@ func (client *SearchIndexWorkerClient) requestLocked(ctx context.Context, reques
 		}
 		return result.response.Payload, nil
 	}
-	waitForShutdown := func() (struct {
-		response indexResponse
-		err      error
-	}, bool) {
+	waitForShutdown := func() (workerReply, bool) {
 		timer := time.NewTimer(5 * time.Second)
 		defer timer.Stop()
 		select {
-		case response := <-result:
+		case response := <-replies:
 			return response, true
 		case <-timer.C:
 			client.stopLocked()
-			return struct {
-				response indexResponse
-				err      error
-			}{}, false
+			return workerReply{}, false
 		}
 	}
 	select {
@@ -2257,7 +2189,7 @@ func (client *SearchIndexWorkerClient) requestLocked(ctx context.Context, reques
 			return nil, err
 		}
 		return nil, errors.New("search index worker is shutting down")
-	case response := <-result:
+	case response := <-replies:
 		return finishResponse(response)
 	}
 }
@@ -2393,6 +2325,7 @@ func (client *SearchIndexWorkerClient) stopLocked() {
 		_ = client.cmd.Process.Kill()
 		_ = client.cmd.Wait()
 	}
+	client.stopReaderLocked()
 	client.cmd = nil
 	client.input = nil
 	client.output = nil
@@ -2408,7 +2341,6 @@ func (client *SearchIndexWorkerClient) Close() {
 	}
 	client.repairMu.Unlock()
 	client.mu.Lock()
-	defer client.mu.Unlock()
 	client.closed = true
 	if client.stdin != nil {
 		_ = client.stdin.Close()
@@ -2423,11 +2355,29 @@ func (client *SearchIndexWorkerClient) Close() {
 			<-done
 		}
 	}
+	client.stopReaderLocked()
 	client.cmd = nil
 	client.input = nil
 	client.output = nil
 	client.stdin = nil
 	client.stdout = nil
+	client.mu.Unlock()
+	client.repairCallbacks.Wait()
 }
 
 var execCommand = func(path string, args ...string) *exec.Cmd { return exec.Command(path, args...) }
+
+// Notifications run in the reader, so joining it retains server dependency
+// ownership until the final callback has returned. OnComplete must not reenter
+// this client: request serialization also waits for this same reader.
+func (client *SearchIndexWorkerClient) stopReaderLocked() {
+	if client.readerStop == nil {
+		return
+	}
+	close(client.readerStop)
+	if client.stdout != nil {
+		_ = client.stdout.Close()
+	}
+	<-client.readerDone
+	client.readerStop, client.readerDone = nil, nil
+}

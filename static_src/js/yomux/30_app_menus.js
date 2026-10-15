@@ -313,15 +313,27 @@ function tmuxSessionActionCommands(session, options = {}) {
   return commands;
 }
 
-function tmuxSessionKillCommand(session) {
+function tmuxSessionKillCommand(session, options = {}) {
   const hasSession = isTmuxSession(session);
   const readonlyDetail = t('menu.common.adminOnly');
   const focusDetail = hasSession ? menuTabDetail(session) : t('menu.tmux.focusSessionFirst');
   const visibleDetail = readOnlyMode ? readonlyDetail : (hasSession ? '' : t('menu.tmux.noTabFocused'));
-  const label = hasSession ? t('menu.tmux.kill.for', {session}) : t('menu.tmux.kill');
+  const label = options.label || (hasSession ? t('menu.tmux.kill.for', {session}) : t('menu.tmux.kill'));
   return menuCommand(label, () => killTmuxSession(session), {
     disabled: readOnlyMode || !hasSession,
     detail: visibleDetail,
+    ariaLabel: [label, focusDetail].filter(Boolean).join(' - '),
+  });
+}
+
+function tmuxWindowKillCommand(session, windowRecord) {
+  const windowId = String(windowRecord?.windowId || '');
+  const windowName = String(windowRecord?.name || '').trim();
+  const label = localizedLabel('menu.tmux.kill.window', 'Kill {window} in tmux session', {window: windowName || 'window'});
+  const focusDetail = isTmuxSession(session) ? menuTabDetail(session) : t('menu.tmux.focusSessionFirst');
+  return menuCommand(label, () => killTmuxWindow(session, windowRecord), {
+    disabled: readOnlyMode || !isTmuxSession(session) || !/^@[0-9]+$/.test(windowId) || !windowName,
+    detail: readOnlyMode ? t('menu.common.adminOnly') : '',
     ariaLabel: [label, focusDetail].filter(Boolean).join(' - '),
   });
 }

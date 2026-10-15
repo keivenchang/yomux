@@ -290,15 +290,17 @@ func (s *server) scheduleSessionFilesCacheViewTouch(viewID string) <-chan struct
 	done := make(chan struct{})
 	s.sessionFilesCache.recencyTouch[viewID] = done
 	s.sessionFilesCache.mu.Unlock()
-	go func() {
-		s.touchSessionFilesCacheView(viewID)
+	finish := func() {
 		s.sessionFilesCache.mu.Lock()
 		if s.sessionFilesCache.recencyTouch[viewID] == done {
 			delete(s.sessionFilesCache.recencyTouch, viewID)
 			close(done)
 		}
 		s.sessionFilesCache.mu.Unlock()
-	}()
+	}
+	if !s.startBackgroundWork(func() { defer finish(); s.touchSessionFilesCacheView(viewID) }) {
+		finish()
+	}
 	return done
 }
 
@@ -574,14 +576,18 @@ func (s *server) scheduleSessionFilesRefresh(request sessionFilesRequest, viewID
 	}
 	scheduler := s.finderBackgroundScheduler()
 	if scheduler == nil {
-		go func() {
+		if !s.startBackgroundWork(func() {
 			defer cancel()
 			defer finish()
 			payload, finderErr := task(parent)
 			if finderErr == nil {
 				writeIfCurrent(payload)
 			}
-		}()
+		}) {
+			cancel()
+			finish()
+			return false
+		}
 		return true
 	}
 	result, err := scheduler.Submit(parent, "", func(ctx context.Context) (any, error) {
@@ -596,7 +602,7 @@ func (s *server) scheduleSessionFilesRefresh(request sessionFilesRequest, viewID
 		finish()
 		return false
 	}
-	go func() {
+	if !s.startBackgroundWork(func() {
 		defer cancel()
 		defer finish()
 		completed := <-result
@@ -607,7 +613,11 @@ func (s *server) scheduleSessionFilesRefresh(request sessionFilesRequest, viewID
 		if ok {
 			writeIfCurrent(payload)
 		}
-	}()
+	}) {
+		cancel()
+		finish()
+		return false
+	}
 	return true
 }
 

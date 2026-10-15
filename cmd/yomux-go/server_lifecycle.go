@@ -4,12 +4,14 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -855,9 +857,78 @@ func releaseInstanceRootLease(lock *os.File) {
 	_ = lock.Close()
 }
 
+// Accepted background operations survive their request but must finish before
+// shutdown releases databases and ownership leases. Admission and Add share a
+// lock so Wait cannot observe zero just before a late handler starts work.
+func (s *server) startBackgroundWork(run func()) bool {
+	s.backgroundWorkMu.Lock()
+	defer s.backgroundWorkMu.Unlock()
+	if s.backgroundWorkClosed {
+		return false
+	}
+	s.backgroundWork.Add(1)
+	go func() {
+		defer s.backgroundWork.Done()
+		run()
+	}()
+	return true
+}
+
+func (s *server) stopBackgroundWork() {
+	s.backgroundWorkMu.Lock()
+	s.backgroundWorkClosed = true
+	s.backgroundWorkMu.Unlock()
+	s.backgroundWork.Wait()
+}
+
+func (s *server) backgroundWorkAdmissionClosed() bool {
+	s.backgroundWorkMu.Lock()
+	defer s.backgroundWorkMu.Unlock()
+	return s.backgroundWorkClosed
+}
+
+// Requests retain dependency ownership until their handler and logging have returned.
+func (s *server) beginRequest(r *http.Request) (func(), bool) {
+	s.requestMu.Lock()
+	defer s.requestMu.Unlock()
+	if s.requestClosed {
+		return nil, false
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	*r = *r.WithContext(ctx)
+	if s.requestCancels == nil {
+		s.requestCancels = make(map[*http.Request]context.CancelFunc)
+	}
+	s.requestCancels[r] = cancel
+	s.requestWorkers.Add(1)
+	return func() {
+		cancel()
+		s.requestMu.Lock()
+		delete(s.requestCancels, r)
+		s.requestMu.Unlock()
+		s.requestWorkers.Done()
+	}, true
+}
+func (s *server) stopRequestAdmission() {
+	s.requestMu.Lock()
+	s.requestClosed = true
+	if s.tmuxPointCancel != nil {
+		s.tmuxPointCancel()
+	}
+	for _, cancel := range s.requestCancels {
+		cancel()
+	}
+	s.requestMu.Unlock()
+}
+
 func (s *server) shutdown() {
 	s.shutdownOnce.Do(func() {
 		shutdownClean := true
+		if s.serverCancel != nil {
+			s.serverCancel()
+		}
+		s.stopRequestAdmission()
+		s.requestWorkers.Wait()
 
 		if s.tmuxRosterWatchCancel != nil {
 			s.tmuxRosterWatchCancel()
@@ -878,24 +949,54 @@ func (s *server) shutdown() {
 			if !s.finderJobs.CloseWithTimeout(5 * time.Second) {
 				shutdownClean = false
 				slog.Warn("finder job scheduler did not stop before shutdown timeout")
+				s.finderJobs.WaitStopped()
 			}
 		}
 		if s.finderBackgroundJobs != nil {
 			if !s.finderBackgroundJobs.CloseWithTimeout(5 * time.Second) {
 				shutdownClean = false
 				slog.Warn("finder background scheduler did not stop before shutdown timeout")
+				s.finderBackgroundJobs.WaitStopped()
 			}
 		}
 		if s.finderBulkJobs != nil {
 			if !s.finderBulkJobs.CloseWithTimeout(5 * time.Second) {
 				shutdownClean = false
 				slog.Warn("finder bulk job scheduler did not stop before shutdown timeout")
+				s.finderBulkJobs.WaitStopped()
 			}
 		}
 		if s.finderStreamJobs != nil {
 			if !s.finderStreamJobs.CloseWithTimeout(5 * time.Second) {
 				shutdownClean = false
 				slog.Warn("finder stream scheduler did not stop before shutdown timeout")
+				s.finderStreamJobs.WaitStopped()
+			}
+		}
+		if s.yolo != nil {
+			s.yolo.close()
+		}
+		s.stopBackgroundWork()
+		if s.statsRuntimeRecorder != nil {
+			if err := s.statsRuntimeRecorder.Stop(); err != nil {
+				shutdownClean = false
+			}
+		}
+		if s.hostCollector != nil {
+			s.hostCollector.Stop()
+		}
+		if s.agentStatusCollector != nil {
+			s.agentStatusCollector.Stop()
+		}
+		if s.tokenCollector != nil {
+			s.tokenCollector.Stop()
+		}
+		if s.statsLifecycle != nil {
+			s.statsLifecycle.Stop()
+		}
+		if s.statsWriter != nil {
+			if err := s.statsWriter.Close(); err != nil {
+				shutdownClean = false
 			}
 		}
 		if s.finder != nil {
@@ -907,9 +1008,6 @@ func (s *server) shutdown() {
 		if s.background != nil {
 			s.background.close()
 		}
-		if s.yolo != nil {
-			s.yolo.close()
-		}
 		s.mu.Lock()
 		rootLease := s.rootLease
 		s.rootLease = nil
@@ -920,7 +1018,7 @@ func (s *server) shutdown() {
 		s.mu.Unlock()
 		releaseInstanceRootLease(rootLease)
 		for _, command := range children {
-			if command.Process == nil || command.ProcessState != nil {
+			if command.Process == nil {
 				continue
 			}
 			_ = syscall.Kill(-command.Process.Pid, syscall.SIGTERM)

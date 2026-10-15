@@ -2521,7 +2521,7 @@ globalThis.__layoutTestApi = {
   },
   attentionAcknowledgementRecordCountForTest() { return attentionAcknowledgementRecords.size; },
   terminalDataShouldAcknowledgeAttentionForTest: terminalDataShouldAcknowledgeAttention,
-  updateSessionButtonStatesForTest: updateSessionButtonStates,
+  updateSessionButtonStatesForTest: refreshAgentWindowActivityDisplays,
   browserFaviconBadgeCount,
   browserFaviconBadgeLabel,
   tmuxSignalPaneForTarget,
@@ -3102,7 +3102,6 @@ globalThis.__layoutTestApi = {
   tmuxWindowAgentKeyForTest: tmuxWindowAgentKey,
   sessionFileAgentKindsForTest: sessionFileAgentKinds,
   tabberWindowIsAgentForTest: tabberWindowIsAgent,
-  buildTabberTreeForTest: buildTabberTree,
   tabberWindowRecencyForTest: tabberWindowRecency,
   tabberRecencyForTest: tabberRecency,
   tabMenuItems,
@@ -3286,7 +3285,6 @@ globalThis.__layoutTestApi = {
     else localStorage.setItem(fileExplorerModeStorageKey, value);
     return readStoredFileExplorerMode();
   },
-  buildTabberTree,
   buildTabberNormalRowsForTest: buildTabberNormalRows,
   defaultNormalTabberLayoutSlotsForTest: defaultNormalTabberLayoutSlots,
   toggleTabberNormalPaneForTest: toggleTabberNormalPane,
@@ -3314,12 +3312,11 @@ globalThis.__layoutTestApi = {
   setApiFetchJsonForTest(fetcher) { apiFetchJson = fetcher; },
   terminalDataShouldAcknowledgeAttentionForTest: terminalDataShouldAcknowledgeAttention,
   renderTabberTree,
-  fetchTabberSessionFilesForTest: fetchTabberSessionFiles,
-  fetchTabberSessionFilesBatchForTest: fetchTabberSessionFilesBatch,
   tabberSessionForNumericKey,
   tabberNormalRowForSessionForTest: tabberNormalRowForSession,
   openTabberSessionForTest: openTabberSession,
   bindTabberPanelForTest: bindTabberPanel,
+  tabInteractionControllerForTest: tabInteractionControllerForApp,
   fileExplorerChangesPanelStaticHtmlForTest: fileExplorerChangesPanelStaticHtml,
   fileExplorerTreeSortSelectHtmlForTest: fileExplorerTreeSortSelectHtml,
   fileExplorerModeSwitcherHtml,
@@ -3343,41 +3340,7 @@ globalThis.__layoutTestApi = {
   setFileExplorerTreeSortModeForTest(mode) {
     for (const view of ['finder', 'tabber', 'differ']) setFileExplorerViewSetting(view, 'treeSortMode', mode, {refresh: false, publish: false});
   },
-  setTabberSessionFilesForTest(session, files) {
-    const state = tabberSessionFilesState(session);
-    state.files = files;
-    state.loaded = true;
-    state.loading = false;
-  },
-  setTabberSessionFilesLoadingForTest(session) {
-    const state = tabberSessionFilesState(session);
-    state.files = [];
-    state.loaded = false;
-    state.loading = true;
-  },
-  setTabberCollapsedForTest(paths) {
-    fileExplorerTabberCollapsed.clear();
-    fileExplorerTabberExpanded.clear();
-    for (const path of paths || []) fileExplorerTabberCollapsed.add(path);
-  },
-  setTabberPathExpandedForTest: setTabberPathExpanded,
   tabberRenderedRowsForTest(options = {}) {
-    if (options.preserveCollapsed !== true) {
-      fileExplorerTabberCollapsed.clear();
-      fileExplorerTabberExpanded.clear();
-      if (options.defaultCollapsed !== true) {
-        const {entries, entriesByDir} = buildTabberTree();
-        const expandAll = (list, parent) => {
-          for (const entry of list || []) {
-            if (entry.kind !== 'dir') continue;
-            const path = parent === '/' ? '/' + entry.name : parent + '/' + entry.name;
-            fileExplorerTabberExpanded.add(path);
-            expandAll(entriesByDir.get(normalizeDirectoryPath(path)), path);
-          }
-        };
-        expandAll(entries, '/');
-      }
-    }
     const el = document.createElement('div');
     el.className = 'changes-groups';
     renderTabberTree(el);
@@ -3413,7 +3376,6 @@ globalThis.__layoutTestApi = {
     });
   },
   tabberRenderedNamesForTest() {
-    fileExplorerTabberCollapsed.clear();
     const el = document.createElement('div');
     el.className = 'changes-groups';
     renderTabberTree(el);

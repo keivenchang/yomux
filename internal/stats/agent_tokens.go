@@ -1955,15 +1955,6 @@ func (c *AgentTokenCollector) saveCodexForkRepairFrontierLocked() error {
 	return c.transcriptCursor.SaveCodexForkRepairFrontier(frontier)
 }
 
-func (c *AgentTokenCollector) persistCodexForkRepairFrontier() error {
-	if err := c.loadCodexForkRepairFrontier(); err != nil {
-		return err
-	}
-	c.codexForkRepairMu.Lock()
-	defer c.codexForkRepairMu.Unlock()
-	return c.saveCodexForkRepairFrontierLocked()
-}
-
 func (c *AgentTokenCollector) boundCodexForkRepairRoots(roots []string, completed map[string]struct{}) ([]string, error) {
 	if err := c.loadCodexForkRepairFrontier(); err != nil {
 		return nil, err
@@ -2996,12 +2987,15 @@ func openCodeProcessSource(record AgentRecord) string {
 }
 
 func (c *AgentTokenCollector) addOpenCodePart(batch *AppendBatch, cursor openCodeCursorState, part OpenCodeStepFinishPart, agentID, rootSessionID string, observed, cadence float64) {
+	revision := ""
 	for dimension, quantity := range map[string]int64{"input": part.Tokens.Input, "cache_read": part.Tokens.CacheRead, "output": part.Tokens.Output} {
 		if !part.Tokens.Present[dimension] || quantity <= 0 {
 			continue
 		}
+		if revision == "" {
+			revision = openCodeRevision(part)
+		}
 		key := openCodeRevisionKey(part.SessionID, part.PartID, dimension)
-		revision := openCodeRevision(part)
 		if previous, ok := cursor.Events[key]; ok {
 			if previous == revision {
 				continue
