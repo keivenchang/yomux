@@ -623,6 +623,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.fileEditorPreviewScrollSyncSourceForTest(panel), 'preview', 'a claimed native Preview gesture outranks the temporary editor-owned layout window');
     api.scheduleFileEditorSplitScrollSyncForTest(panel, api.fileEditorPreviewScrollSyncSourceForTest(panel));
     assert.equal(panel._splitScrollPendingSource, 'preview', 'the short gesture cannot queue an editor reflection that snaps Preview backward');
+    api.expirePreviewScrollOwnershipForTest();
+    assert.equal(api.fileEditorPreviewScrollSyncSourceForTest(panel), 'editor', 'expired gesture generations do not own a later layout refit');
+    api.dispatchDocumentEventForTest('scroll', {target: preview});
+    assert.equal(api.fileEditorPreviewScrollSyncSourceForTest(panel), 'editor', 'a layout clamp cannot revive expired gesture ownership');
+    const summary = new TestElement('', 'SUMMARY');
+    preview.append(summary);
+    api.dispatchDocumentEventForTest('keydown', {type: 'keydown', target: summary, key: ' '});
+    assert.equal(api.fileEditorPreviewScrollSyncSourceForTest(panel), 'editor', 'keyboard details activation retains the layout source');
   });
 
   for (const input of ['touch', 'wheel', 'keyboard', 'scrollbar']) {
@@ -1181,7 +1189,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       send(message) { pageFrames.push(JSON.parse(message)); },
     });
     assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'tmux-scroll-up'), true, 'the touch PgUp key is delivered when an alternate-screen app owns paging');
-    assert.deepStrictEqual(canonical(pageFrames), [{type: 'input', data: '\x1b[5~'}], 'the touch PgUp key reaches an alternate-screen app as its native page byte instead of tmux-scroll');
+    assert.deepStrictEqual(canonical(pageFrames), [{type: 'input', data: '\x1b[5~', user_input: true}], 'the touch PgUp key reaches an alternate-screen app as its native page byte instead of tmux-scroll');
     const readOnlyTouchApi = loadYomux('', ['1'], 'http:', 'iPad', 'viewer', {coarsePointer: true});
     const readOnlyTouchHtml = readOnlyTouchApi.terminalMobileAccessoryHtmlForTest('1');
     assert.ok(readOnlyTouchHtml.includes('data-terminal-mobile-toggle="1"'), 'read-only coarse-pointer terminals still expose the movable launcher');
@@ -2589,7 +2597,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const openCodeTerm = {rows: 40, modes: {mouseTrackingMode: 'none'}};
     api.registerTerminalForTest('1', openCodeTerm, {readyState: 1, send(frame) { pageFrames.push(JSON.parse(frame)); }}).container = openCodeContainer;
     assert.equal(api.routeTerminalScrollLinesForTest('1', openCodeTerm, openCodeContainer, -3, {source: 'touch'}), true, 'OpenCode touch pan uses native page navigation even when tmux reports normal screen');
-    assert.deepStrictEqual(pageFrames.at(-1), {type: 'input', data: '\x1b\x19\x1b\x19\x1b\x19'}, 'OpenCode touch pan sends native one-line-up bindings so the prompt/footer stays fixed');
+    assert.deepStrictEqual(pageFrames.at(-1), {type: 'input', data: '\x1b\x19\x1b\x19\x1b\x19', user_input: false}, 'OpenCode touch pan sends native one-line-up bindings so the prompt/footer stays fixed');
     assert.equal(openCodeWheelEvents.length, 0, 'OpenCode touch pan does not synthesize a wheel that can move the prompt');
 
     openCodeWheelEvents.length = 0;
@@ -2615,7 +2623,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
             preventDefault() { pagePrevented += 1; },
           }), true, `plain OpenCode page event uses the app route with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
           assert.equal(pagePrevented, 1, `plain OpenCode page event is consumed with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
-          assert.deepStrictEqual(pageFrames.at(-1), {type: 'input', data: direction < 0 ? '\x1b[5~' : '\x1b[6~'}, `plain OpenCode page event uses its native page byte with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+          assert.deepStrictEqual(pageFrames.at(-1), {type: 'input', data: direction < 0 ? '\x1b[5~' : '\x1b[6~', user_input: true}, `plain OpenCode page event uses its native page byte with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
           assert.equal(openCodeWheelEvents.length, 0, `plain OpenCode page event does not synthesize wheel reports with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
           openCodeWheelEvents.length = 0;
         }
@@ -2630,7 +2638,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 
         for (const [action, direction] of [['tmux-scroll-up', -1], ['tmux-scroll-down', 1]]) {
           assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', action), true, `mobile OpenCode ${action} uses the app route with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
-          assert.deepStrictEqual(pageFrames.at(-1), {type: 'input', data: direction < 0 ? '\x1b[5~' : '\x1b[6~'}, `mobile OpenCode ${action} uses its native page byte with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+          assert.deepStrictEqual(pageFrames.at(-1), {type: 'input', data: direction < 0 ? '\x1b[5~' : '\x1b[6~', user_input: true}, `mobile OpenCode ${action} uses its native page byte with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
           assert.equal(openCodeWheelEvents.length, 0, `mobile OpenCode ${action} does not synthesize wheel reports with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
           openCodeWheelEvents.length = 0;
         }
@@ -2677,7 +2685,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.registerTerminalForTest('1', vimTerm, {readyState: 1, send(frame) { frames.push(JSON.parse(frame)); }});
     assert.equal(api.terminalHasMouseTracking(vimTerm), false, 'a non-reporting alternate app stays on the keyboard fallback');
     assert.equal(api.routeTerminalScrollLinesForTest('1', vimTerm, container, -2, {source: 'touch'}), true, 'a non-reporting alternate touch pan still has a fallback');
-    assert.deepStrictEqual(frames, [{type: 'input', data: '\x1b[A\x1b[A'}], 'the fallback sends cursor arrows, not tmux-scroll or wheel data');
+    assert.deepStrictEqual(frames, [{type: 'input', data: '\x1b[A\x1b[A', user_input: false}], 'the fallback sends cursor arrows, not tmux-scroll or wheel data');
     let vimPrevented = 0;
     assert.equal(api.handleTerminalTmuxHistoryNavigationKeydownForTest('1', vimTerm, {
       type: 'keydown', key: 'PageUp', code: 'PageUp', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false,
@@ -3641,7 +3649,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.equal(source.includes(oldMap), false, `${oldMap} cannot return as a parallel terminal input-parser state source`);
     }
     assert.ok(/function noteTerminalTmuxWindowSwitch\(session, shortcut\)[\s\S]*const sequence = directIndex !== null[\s\S]*setTmuxWindowActiveIndexOverride\(session, directIndex\)[\s\S]*setTmuxWindowActiveIndexPending\(session\)[\s\S]*expectedIndex: directIndex, sequence[\s\S]*previousIndex, sequence/.test(source), 'terminal prefix observer highlights explicit targets and carries a sequence through readback');
-    assert.ok(/function handleTerminalDataMeasured\(session, data, options = \{\}\)[\s\S]*socket\.send\(JSON\.stringify\(\{type: 'input', data: filtered\}\)\)[\s\S]*observeTerminalTmuxPrefixWindowSwitches\(session, filtered\);/.test(source), 'terminal bytes are sent unchanged before secondary tmux prefix observation');
+    assert.ok(/function handleTerminalDataMeasured\(session, data, options = \{\}\)[\s\S]*socket\.send\(JSON\.stringify\(\{type: 'input', data: filtered, user_input: userInput\}\)\)[\s\S]*observeTerminalTmuxPrefixWindowSwitches\(session, filtered\);/.test(source), 'terminal bytes are sent unchanged before secondary tmux prefix observation');
     assert.ok(/const sequence = setTmuxWindowActiveIndexOverride\(session, directIndex\)[\s\S]*apiFetchJson\(`\/api\/tmux-window\?session=\$\{encodeURIComponent\(session\)\}&window=\$\{encodeURIComponent\(String\(directIndex\)\)\}`[\s\S]*tmuxWindowSwitchSequenceMatches\(session, sequence\)[\s\S]*scheduleTmuxWindowReadback\(session, \{delayMs: 0, clearActiveIndexOverride: true, expectedIndex: directIndex, sequence\}\)/.test(source), 'direct window buttons highlight before POST and keep the optimistic target until authoritative confirmation');
     assert.ok(/function setTmuxWindowActiveIndexOverride\(session, windowIndex, options = \{\}\)[\s\S]*applyTmuxWindowActiveIndexToTranscriptInfo\(String\(session\), indexKey, \{render: true\}\)/.test(source), 'known direct tmux targets overlay transcript metadata immediately so stale polls do not flash the old window');
     assert.ok(/async function applySessionMetadataPayload\(payload, options = \{\}\)[\s\S]*const nextPayload = transcriptPayloadWithTmuxWindowOverrides\([\s\S]*setTranscriptMetadataPayload\(nextPayload/.test(source), 'incoming session metadata payloads preserve pending direct-window overrides');

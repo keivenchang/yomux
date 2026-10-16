@@ -1293,8 +1293,7 @@ func TestGoYoloCapacityWorkerSubmitsThroughPrivateTmuxAPI(t *testing.T) {
 	countPath := filepath.Join(root, "submissions")
 	workingPath := filepath.Join(root, "working")
 	scriptPath := filepath.Join(root, "codex-fixture.sh")
-	script := fmt.Sprintf(`#!/bin/sh
-printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n'
+	script := fmt.Sprintf(`printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n'
 printf '■ Selected model is at capacity. Please try a different model.\n\n›\n\n  gpt-5.5 xhigh · ~/repo\n'
 while IFS= read -r line; do
   if [ "$line" = continue ]; then
@@ -1309,7 +1308,7 @@ while IFS= read -r line; do
   fi
 done
 `, countPath, countPath, countPath, workingPath)
-	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(scriptPath, []byte(testsupport.ShellScript(t, script)), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "yo-private", scriptPath).CombinedOutput(); err != nil {

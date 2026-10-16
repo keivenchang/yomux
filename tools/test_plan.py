@@ -143,7 +143,7 @@ LANE_SPECS: Final[tuple[LaneSpec, ...]] = (
     LaneSpec("static", "static source checks", (StepId.STATIC_BUILD, StepId.TEXTSHAPE, StepId.ARCHITECTURE_BUDGETS, StepId.LOCAL_SERVICE_TYPES), True),
     LaneSpec("node-syntax", "node syntax", (StepId.NODE_YOMUX_SYNTAX, StepId.NODE_WALL_SYNTAX), True),
     LaneSpec("node-layout", "node layout suite", (StepId.NODE_LAYOUT,), True, worker_class="node"),
-    LaneSpec("bazel-go", "Bazel Go and Docker tests", (StepId.BAZEL_GO,), True, worker_class="bazel"),
+    LaneSpec("bazel-go", "Bazel Go and integration tests", (StepId.BAZEL_GO,), True, worker_class="bazel"),
     LaneSpec("pytest", "pytest non-browser", (StepId.PYTEST_NONBROWSER,), True, phases=("nonbrowser",), worker_class="pytest-xdist"),
     LaneSpec("pytest-boot", "pytest boot smoke", (StepId.PYTEST_BOOT,), phases=("boot",), worker_class="pytest-serial"),
     LaneSpec(

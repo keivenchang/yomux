@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func TestFirstTabberContextDoesNotUseLaterUserTurn(t *testing.T) {
@@ -34,7 +36,7 @@ func TestFirstTabberContextDoesNotUseLaterUserTurn(t *testing.T) {
 }
 
 func TestTabberWindowDescriptionsPersistAndManualWinsOverlap(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "t.sock")
+	socket := filepath.Join(testsupport.ShortTempDir(t), "t.sock")
 	t.Setenv("YOMUX_TMUX_SOCKET", socket)
 	tmux := func(args ...string) string {
 		t.Helper()
@@ -124,7 +126,7 @@ func TestEmptyDescriptionKeepsLastWindowIdentity(t *testing.T) {
 }
 
 func TestTabberDescriptionRejectsReusedWindowIndex(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "t.sock")
+	socket := filepath.Join(testsupport.ShortTempDir(t), "t.sock")
 	t.Setenv("YOMUX_TMUX_SOCKET", socket)
 	tmux := func(args ...string) string {
 		t.Helper()
@@ -166,7 +168,7 @@ func TestTabberDescriptionRejectsReusedWindowIndex(t *testing.T) {
 }
 
 func TestReservedLookingUnownedSessionIsNeverRetired(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "t.sock")
+	socket := filepath.Join(testsupport.ShortTempDir(t), "t.sock")
 	t.Setenv("YOMUX_TMUX_SOCKET", socket)
 	name := "__yomux_view_notes"
 	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", name).CombinedOutput(); err != nil {
@@ -184,7 +186,7 @@ func TestReservedLookingUnownedSessionIsNeverRetired(t *testing.T) {
 }
 
 func TestTabberSimultaneousNumericCreationPreservesExistingNames(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "t.sock")
+	socket := filepath.Join(testsupport.ShortTempDir(t), "t.sock")
 	t.Setenv("YOMUX_TMUX_SOCKET", socket)
 	for _, name := range []string{"1", "3", "existing-name"} {
 		if out, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", name).CombinedOutput(); err != nil {

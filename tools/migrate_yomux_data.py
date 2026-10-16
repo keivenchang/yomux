@@ -118,14 +118,13 @@ def active_writer_processes(
                     ["ps", "-axo", "pid=,command="],
                     check=False,
                     capture_output=True,
-                    text=True,
                     timeout=5,
                 )
             except (OSError, subprocess.TimeoutExpired):
                 result = None
             if result is None or result.returncode != 0:
                 return [{"pid": None, "command": "macOS process census unavailable; refusing migration"}]
-            for line in result.stdout.splitlines():
+            for line in os.fsdecode(result.stdout).splitlines():
                 fields = line.strip().split(None, 1)
                 if len(fields) != 2:
                     continue

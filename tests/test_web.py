@@ -15,6 +15,8 @@ import re
 from yomux_lib import common
 from yomux_lib import web
 from yomux_lib.stats_current import storage as stats_current_storage
+from tools.bazel_execution_contract import xterm_fixture_paths
+from tools.product_environment import product_env
 
 _BOOTSTRAP_RE = re.compile(r'<script id="yomux-bootstrap"[^>]*>(.*?)</script>', re.DOTALL)
 
@@ -210,12 +212,7 @@ def test_xterm_asset_path_requires_tracked_vendor_asset(monkeypatch, tmp_path):
 
 
 def test_tracked_xterm_vendor_assets_match_pinned_package_fixture():
-    package_root = Path("/opt/xterm/node_modules")
-    package_paths = {
-        "xterm.js": package_root / "@xterm" / "xterm" / "lib" / "xterm.js",
-        "xterm.css": package_root / "@xterm" / "xterm" / "css" / "xterm.css",
-        "xterm-addon-unicode11.js": package_root / "@xterm" / "addon-unicode11" / "lib" / "addon-unicode11.js",
-    }
+    package_paths = xterm_fixture_paths(product_env("XTERM_PACKAGE_ROOT", "/opt/xterm/node_modules"))
     assert all(path.is_file() for path in package_paths.values())
     assert {
         name: (common.STATIC_DIR / "vendor" / name).read_bytes()

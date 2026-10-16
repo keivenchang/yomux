@@ -2285,6 +2285,113 @@ test('only an echoed 1s resolution requests seconds on the X axis', () => {
   }
 });
 
+test('unchanged stats repairs recover panel readiness without repainting the generation', async () => {
+  const panelSource = fs.readFileSync('static_src/js/yomux/85_debug_panel.js', 'utf8');
+  const ownerSource = panelSource.slice(panelSource.indexOf('function ensureJsDebugCurrentStatsClient()'),
+    panelSource.indexOf('\nfunction syncJsDebugCurrentStatsClient('));
+  const readinessSource = panelSource.slice(panelSource.indexOf('function updateJsDebugCurrentSnapshotState('),
+    panelSource.indexOf('\nfunction applyJsDebugCurrentSnapshot('));
+  const paintSource = panelSource.slice(panelSource.indexOf('function commitJsDebugCurrentStatsPaint('),
+    panelSource.indexOf('\nfunction paintJsDebugCurrentStatsDelta('));
+  const keySource = panelSource.slice(panelSource.indexOf('function jsDebugCurrentStatsGenerationKey('),
+    panelSource.indexOf('\nfunction jsDebugCurrentStatsStreamEvidence('));
+  const syncSource = panelSource.slice(panelSource.indexOf('function syncJsDebugCurrentStatsClient('),
+    panelSource.indexOf('\nfunction jsDebugStatsTokenConsumerEnabled('));
+  for (const repairKind of ['not-modified', 'identical-full']) for (const hiddenDuringRepair of [false, true]) {
+    ManualEventSource.instances = [];
+    const clock = new FakeClock();
+    const namespace = loadNamespace();
+    const readiness = {phase: 'loading', error: '', nextAutoRetryAtMs: 0};
+    const selection = {rangeSeconds: 300, resolution: 'AUTO'};
+    let visible = true;
+    let paints = 0;
+    let clientOptions;
+    const context = {
+      jsDebugHistoryReadiness: readiness,
+      jsDebugCurrentStatsClientState: {client: null},
+      jsDebugStatsPollState: {firstSampleReceived: true}, jsDebugStatsServerSequence: 0,
+      jsDebugHistoryRetryInitialDelayMs: 100,
+      jsDebugCurrentStatsSelection: () => selection, jsDebugStatsPanelVisible: () => visible,
+      performanceNow: () => clock.now(), loadJsDebugStatsUiPreferences() {},
+      jsDebugStatsDocumentVisible: () => true, refreshJsDebugSessionAliases() {}, ensureJsDebugAgentHistoryRefill() {},
+      jsDebugStatsClientIdForRequest: () => 'panel-repair',
+      recordJsDebugCurrentStatsFailure() {}, recordJsDebugCurrentStatsRetirement() {},
+      acceptJsDebugCurrentStatsPushProof() {}, applyJsDebugCurrentRuntimeLoad() {}, claimTerminalAuthentication() {},
+      setJsDebugHistoryReadiness: (phase, updates) => Object.assign(readiness, updates, {phase}),
+      jsDebugCurrentCoverageIntervals: () => [], debugGraphApplyUsageAtomBackfill() {},
+      jsDebugCurrentSnapshotAgentWindowRevision: () => 0, resolveDebugGraphResolutionChange() {},
+      scheduleJsDebugPanelRefresh() {}, armJsDebugStatsPolling() {},
+      applyJsDebugCurrentSnapshot(snapshot) {
+        paints += 1;
+        context.updateJsDebugCurrentSnapshotState(snapshot);
+        context.commitJsDebugCurrentStatsPaint();
+      },
+      apiFetch: async url => {
+        assert.equal(url, '/api/stats-capabilities');
+        return response(200, capabilities());
+      },
+      debugGraphStatsCurrentModule: () => ({createBrowserClient(options) {
+        clientOptions = options;
+        return namespace.createBrowserClient({...options, EventSource: ManualEventSource,
+          controllerOptions: {...options.controllerOptions, clock, repairBaseMs: 100, repairMaxMs: 400}});
+      }}),
+    };
+    vm.createContext(context);
+    vm.runInContext([readinessSource, keySource, paintSource, ownerSource, syncSource].join('\n'), context);
+    const client = context.ensureJsDebugCurrentStatsClient();
+    try {
+      await client.start();
+      await clock.advance(0);
+      const original = snapshot({cache: 41});
+      emitSnapshotSequence(ManualEventSource.instances[0], original);
+      await flushPromises();
+      assert.equal(readiness.phase, 'ready');
+      assert.equal(paints, 1);
+      visible = !hiddenDuringRepair;
+      ManualEventSource.instances[0].emit('unavailable', JSON.stringify({reason: 'transient unavailable'}));
+      await flushPromises();
+      assert.equal(readiness.phase, 'error');
+      const assertUnrepaired = stage => {
+        visible = true;
+        context.paintJsDebugCurrentStatsGeneration(client.controller().generation());
+        assert.equal(readiness.phase, 'error', `${stage} cannot reuse historical stream health`);
+        visible = !hiddenDuringRepair;
+      };
+      assertUnrepaired('closed failed stream');
+      await clock.advance(100);
+      const repair = ManualEventSource.instances.at(-1);
+      assertUnrepaired('new stream before readiness');
+      if (repairKind === 'not-modified') {
+        repair.emit('ack', JSON.stringify({cache_generation: 41, chunk_count: 1, not_modified: true,
+          range_seconds: 300, requested_resolution: 'AUTO', resolution_seconds: 1}));
+        assertUnrepaired('acknowledged stream before readiness');
+        repair.emit('ready', JSON.stringify({cache_generation: 41, revision: 0}));
+      } else emitSnapshotSequence(repair, original);
+      await flushPromises();
+      assert.equal(client.streamEvidence().healthy, true);
+      if (hiddenDuringRepair) {
+        assert.equal(readiness.phase, 'error', 'a hidden panel retains its readiness owner');
+        visible = true;
+        context.syncJsDebugCurrentStatsClient();
+        await flushPromises();
+      }
+      assert.equal(readiness.phase, 'ready', repairKind);
+      assert.equal(readiness.error, '');
+      assert.equal(readiness.nextAutoRetryAtMs, 0);
+      assert.equal(paints, 1, 'an unchanged immutable generation needs no second bucket paint');
+      for (const stale of ['hidden', 'range', 'resolution', 'generation']) {
+        readiness.phase = 'error';
+        visible = stale !== 'hidden';
+        selection.rangeSeconds = stale === 'range' ? 900 : 300;
+        selection.resolution = stale === 'resolution' ? 1 : 'AUTO';
+        const generation = client.controller().generation();
+        clientOptions.controllerOptions.onRepairComplete(stale === 'generation' ? {...generation} : generation);
+        assert.equal(readiness.phase, 'error', `${stale} cannot recover another UI owner`);
+      }
+    } finally {client.stop();}
+  }
+});
+
 test('browser transport uses one authenticated current stream and exact snapshot repair', async () => {
   ManualEventSource.instances = [];
   const clock = new FakeClock();

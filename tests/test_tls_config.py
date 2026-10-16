@@ -1,3 +1,4 @@
+from tests.helpers.fixture_tools import fixture_executable, fixture_script
 import argparse
 import json
 import os
@@ -8,6 +9,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from tools.tmux_paths import short_fixture_path
 from types import SimpleNamespace
 
 import pytest
@@ -84,7 +86,7 @@ def test_setup_tls_dry_run_uses_shared_san_and_state_dir(tmp_path):
 
     result = subprocess.run(
         [
-            "bash",
+            fixture_executable("bash"),
             "tools/setup-tls.sh",
             "--dry-run",
             "--no-trust",
@@ -188,7 +190,7 @@ def test_exec_go_backend_forwards_dangerous_yolo_to_binary(monkeypatch, tmp_path
         monkeypatch.setattr(cli, "__file__", str(repo_root / "yomux_lib" / "cli.py"))
         monkeypatch.delenv("YOMUX_GO_BINARY", raising=False)
         monkeypatch.delenv("YOLOMUX_GO_BINARY", raising=False)
-    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.write_text(fixture_script("#!/bin/sh\n"), encoding="utf-8")
     binary.chmod(0o755)
     captured = {}
     lease_descriptors = []
@@ -287,7 +289,7 @@ def test_exec_go_backend_rejects_invalid_tls_options_before_launch(monkeypatch, 
 
 def test_empty_canonical_go_binary_does_not_fall_back_to_legacy_value(monkeypatch, tmp_path, capsys):
     legacy_binary = tmp_path / "legacy-go"
-    legacy_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    legacy_binary.write_text(fixture_script("#!/bin/sh\n"), encoding="utf-8")
     legacy_binary.chmod(0o755)
     monkeypatch.setenv("YOMUX_GO_BINARY", "")
     monkeypatch.setenv("YOLOMUX_GO_BINARY", str(legacy_binary))
@@ -314,7 +316,7 @@ def test_empty_canonical_go_binary_does_not_fall_back_to_legacy_value(monkeypatc
 
 
 def test_exec_go_backend_keeps_managed_leases_across_real_exec(tmp_path, request):
-    root = Path("/tmp") / f"yg{os.getpid()}"
+    root = short_fixture_path(f"yg{os.getpid()}")
     root.mkdir(mode=0o700)
     request.addfinalizer(lambda: shutil.rmtree(root, ignore_errors=True))
     roots = YomuxRoots(
@@ -328,12 +330,12 @@ def test_exec_go_backend_keeps_managed_leases_across_real_exec(tmp_path, request
     marker = tmp_path / "go-child-started"
     binary = tmp_path / "yolomux-go"
     binary.write_text(
-        "#!/usr/bin/env python3\n"
+        fixture_script("#!/usr/bin/env python3\n"
         "import os\n"
         "import signal\n"
         "from pathlib import Path\n"
         "Path(os.environ['YOLOMUX_CHILD_MARKER']).write_text(str(os.getpid()))\n"
-        "signal.pause()\n",
+        "signal.pause()\n"),
         encoding="utf-8",
     )
     binary.chmod(0o755)

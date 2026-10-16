@@ -663,7 +663,7 @@ def test_k1_every_mutation_visibly_acknowledges_within_one_frame_and_settles(bro
         const done = arguments[arguments.length - 1];
         const before = document.getElementById('status')?.textContent || '';
         window.__fixtureHoldAutoApprove = true;
-        const request = toggleAutoApprove('1');
+        window.__fixtureAutoApproveRequest = toggleAutoApprove('1');
         requestAnimationFrame(() => {
           const status = document.getElementById('status');
           done({before, text: status?.textContent || ''});
@@ -687,10 +687,43 @@ def test_k1_every_mutation_visibly_acknowledges_within_one_frame_and_settles(bro
             """
             const done = arguments[arguments.length - 1];
             window.__fixtureReleaseAutoApprove();
-            requestAnimationFrame(() => requestAnimationFrame(() => done(document.getElementById('status')?.textContent || '')));
+            const request = window.__fixtureAutoApproveRequest;
+            (async () => {
+              let requestState = 'resolved';
+              try {
+                await request;
+              } catch (error) {
+                requestState = `rejected: ${String(error)}`;
+              }
+              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+              done({
+                requestState,
+                text: document.getElementById('status')?.textContent || '',
+              });
+            })();
             """
         )
-    assert settled.strip(), settled
+    assert settled == {"requestState": "resolved", "text": ""}, 'successful toggles must clear the global notice after their request settles'
+
+
+
+def test_yolo_toggle_completion_preserves_a_newer_status_message(browser, tmp_path):
+    _load_toggle_fixture(browser, tmp_path)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        window.__fixtureHoldAutoApprove = true;
+        const request = toggleAutoApprove('1');
+        showLayoutStatus('Newer unrelated status', 'advisory');
+        window.__fixtureReleaseAutoApprove();
+        request.then(() => {
+          const text = document.getElementById('status').textContent;
+          showLayoutStatus('');
+          done(text);
+        });
+        """
+    )
+    assert result == "Newer unrelated status"
 
 
 def test_k2_submitted_control_disables_before_request_and_reenables_in_finally(browser, tmp_path):

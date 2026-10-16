@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+from tools.tmux_paths import short_temp_base, short_temp_prefix
 import signal
 import sqlite3
 import subprocess
@@ -47,6 +48,7 @@ from yomux_lib.infra.worktree_writer import child_process_artifact_environment
 from yomux_lib.stats_current import service as stats_service
 from yomux_lib.stats_current import storage
 from tools.instance_isolation import synthetic_test_environment
+from tools.bazel_execution_contract import repository_head_sha
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -54,30 +56,11 @@ PAIRS = ((300, 10), (900, 10), (3_600, 60), (86_400, 300))
 
 
 def _repository_head_for_evidence() -> str:
-    """Read this checkout's head without inheriting a child Git namespace."""
-
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith("GIT_")
-    }
-    return subprocess.run(
-        (
-            "git",
-            "-c",
-            f"safe.directory={REPO_ROOT}",
-            "-C",
-            str(REPO_ROOT),
-            "rev-parse",
-            "--short=9",
-            "HEAD",
-        ),
-        cwd=REPO_ROOT,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=True,
-    ).stdout.strip()
+    """Use orchestration provenance when the declared workspace has no Git metadata."""
+    revision = repository_head_sha(REPO_ROOT, declared=True)
+    if revision is None:
+        raise ValueError("checkout revision is unavailable for ring evidence")
+    return revision[:9]
 
 
 @pytest.mark.e2e
@@ -997,7 +980,7 @@ def _prepare_ring_runtime(
 
     port = gate_http_port.release()
     service_runtime_dir = Path(tempfile.mkdtemp(prefix="ring-runtime-", dir=gate_runtime_paths.root))
-    log_file = tempfile.NamedTemporaryFile(prefix="yolomux-ring-server-", suffix=".txt", dir="/tmp", delete=False)
+    log_file = tempfile.NamedTemporaryFile(prefix=short_temp_prefix("yolomux-ring-server-"), suffix=".out", dir=short_temp_base(), delete=False)
     log_path = Path(log_file.name)
     log_file.close()
     return _RingRuntime(

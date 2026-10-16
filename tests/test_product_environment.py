@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+from tests.helpers.fixture_tools import fixture_environment, fixture_executable
 import ast
 import importlib.util
 import json
@@ -98,7 +99,7 @@ def test_selected_checkout_loads_its_own_namespace(tmp_path):
 ])
 def test_shell_suffix_lookup_preserves_bytes_and_presence(values, expected, present):
     script = 'source "$1"; if product_env FIXTURE result; then printf present; else printf absent; fi; printf "\\0%s" "$result"'
-    result = subprocess.run(["bash", "-c", script, "probe", str(ROOT / "tools/product_environment.sh")],
+    result = subprocess.run([fixture_executable("bash"), "-c", script, "probe", str(ROOT / "tools/product_environment.sh")],
                             env={"PATH": "/usr/bin:/bin", **values}, capture_output=True, check=True)
     assert result.stdout == (b"present" if present else b"absent") + b"\0" + expected.encode()
     assert not result.stderr
@@ -122,12 +123,12 @@ def test_shell_rename_needs_no_caller_change(tmp_path):
     alternate.write_text(source[:start] + generate_product_environment.render_namespace(
         {"canonical": "NEXT_", "legacy": ["YOMUX_", "YOLOMUX_"]}) + source[end:])
     script = 'source "$1"; product_env FIXTURE result; [[ "$result" == "" ]]; product_env_assign FIXTURE=new; product_env FIXTURE result; [[ "$result" == new ]]; product_env_unset FIXTURE; ! product_env_present FIXTURE'
-    result = subprocess.run(["bash", "-c", script, "probe", str(alternate)],
+    result = subprocess.run([fixture_executable("bash"), "-c", script, "probe", str(alternate)],
                             env={"PATH": "/usr/bin:/bin", "NEXT_FIXTURE": "", "YOMUX_FIXTURE": "stale"}, capture_output=True)
     assert result.returncode == 0, result.stderr.decode()
 
 
-def test_bazel_environment_scrub_preserves_renamed_namespace_provenance(tmp_path):
+def test_bazel_environment_scrub_preserves_renamed_namespace_provenance(tmp_path, request):
     tools = tmp_path / "tools"
     tools.mkdir()
     source = (ROOT / "tools/product_environment.sh").read_text()
@@ -139,10 +140,18 @@ def test_bazel_environment_scrub_preserves_renamed_namespace_provenance(tmp_path
     )
     (tools / "bazel_test_common.sh").write_bytes((ROOT / "tools/bazel_test_common.sh").read_bytes())
     script = 'source "$1"; bazel_test_prepare_environment; product_env GO_BINARY selected; [[ "$selected" == fixture-canonical ]]'
+    child_environment = fixture_environment(request, {
+        "PATH": "/usr/bin:/bin", "TEST_TMPDIR": str(tmp_path / "test-tmp"),
+        "NEXT_GO_BINARY": "fixture-canonical", "NEXT_BAZEL_EXECUTION": "native",
+    })
+    for key, value in tuple(child_environment.items()):
+        setting = environment.product_env_suffix(key)
+        if setting is not None:
+            child_environment[namespace["canonical"] + setting] = value
+            del child_environment[key]
     result = subprocess.run(
-        ["bash", "-c", script, "probe", str(tools / "bazel_test_common.sh")],
-        env={"PATH": "/usr/bin:/bin", "TEST_TMPDIR": str(tmp_path / "test-tmp"),
-             "NEXT_GO_BINARY": "fixture-canonical", "NEXT_BAZEL_EXECUTION": "native"},
+        [fixture_executable("bash"), "-c", script, "probe", str(tools / "bazel_test_common.sh")],
+        env=child_environment,
         capture_output=True,
         text=True,
     )

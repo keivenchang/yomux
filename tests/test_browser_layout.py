@@ -515,7 +515,7 @@ def test_tab_minimize_spacing_keeps_its_hit_target_and_gives_titles_the_compact_
         return {width: rect.width, height: rect.height, clicked: close.dataset.clicked === 'yes'};
         """
     )
-    assert touch_metrics == {"width": 36, "height": 36, "clicked": True}, touch_metrics
+    assert touch_metrics == {"width": 18, "height": 18, "clicked": True}, touch_metrics
 
 
 def test_pane_width_fixture_keeps_the_production_tab_row_contract(browser, tmp_path):
@@ -7227,7 +7227,7 @@ def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_ine
         )
     )
     assert open_code["wheels"] == [], open_code
-    assert open_code["frames"] == [{"type": "input", "data": "\x1b\x19"}], open_code
+    assert open_code["frames"] == [{"type": "input", "data": "\x1b\x19", "user_input": False}], open_code
     assert open_code["target"] == "%opencode" and open_code["prevented"] and all(open_code["prevented"]), open_code
     touch_surface = browser.execute_script(
         """
@@ -7444,7 +7444,7 @@ def test_terminal_page_keys_route_by_screen_mode_and_shift_forces_scrollback(bro
         {"type": "tmux-scroll", "direction": "down", "lines": metrics["pageLines"]},
     ], metrics
     assert metrics["frames"][2:] == [
-        {"type": "input", "data": "\x1b[5~"},
+        {"type": "input", "data": "\x1b[5~", "user_input": True},
         {"type": "tmux-scroll", "direction": "down", "lines": metrics["pageLines"]},
     ], metrics
     assert metrics["openCodePage"] == {"accepted": False, "defaultPrevented": True}, metrics
@@ -8186,7 +8186,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
     assert metrics["closed"]["barHidden"] is True and metrics["closed"]["launcherHidden"] is False and metrics["closed"]["state"]["open"] is False, metrics
     assert metrics["reopened"]["barHidden"] is False and metrics["reopened"]["launcherHidden"] is True and metrics["reopened"]["state"]["open"] is True, metrics
     assert metrics["shiftSticky"] == {"locked": {"active": True, "locked": True, "pressed": "true", "classLocked": True}, "unlocked": {"active": False, "locked": False, "pressed": "false", "classLocked": False}}, metrics
-    assert {"type": "input", "data": "\t"} in metrics["frames"], metrics
+    assert {"type": "input", "data": "\t", "user_input": True} in metrics["frames"], metrics
 
 
 def test_live_touch_terminal_keeps_two_fixed_pages_and_closes(browser, tmp_path):
@@ -8352,13 +8352,16 @@ def test_live_touch_terminal_modifier_double_tap_locks_until_tapped_again(browse
     assert metrics["errors"] == [], metrics
     assert metrics["persistentBeforeModifier"]["open"] is True, metrics
     assert metrics["oneShotTap"] is True and metrics["oneShotKey"] is True, metrics
-    assert metrics["oneShotFrames"] == [{"type": "input", "data": "\x01"}], metrics
+    assert metrics["oneShotFrames"] == [{"type": "input", "data": "\x01", "user_input": True}], metrics
     assert metrics["oneShotAfter"]["open"] is True and metrics["oneShotAfter"]["ctrl"] is False, metrics
     assert metrics["firstTap"] is True and metrics["secondTap"] is True, metrics
     assert metrics["lockedBefore"]["ctrl"] is True and metrics["lockedBefore"]["ctrlLocked"] is True, metrics
     assert re.search(r'class="[^"]*\bactive\b[^"]*\blocked\b[^"]*\bmobile-terminal-key--ctrl\b[^"]*"[^>]*data-terminal-mobile-key="ctrl"', metrics["lockedHtml"]), metrics
     assert metrics["firstKey"] is True and metrics["secondKey"] is True, metrics
-    assert metrics["frames"] == [{"type": "input", "data": "\x01"}, {"type": "input", "data": "\x02"}], metrics
+    assert metrics["frames"] == [
+        {"type": "input", "data": "\x01", "user_input": False},
+        {"type": "input", "data": "\x02", "user_input": False},
+    ], metrics
     assert metrics["lockedAfterKeys"]["ctrl"] is True and metrics["lockedAfterKeys"]["ctrlLocked"] is True, metrics
     assert metrics["lockedAfterKeys"]["open"] is True, metrics
     assert metrics["offTap"] is True, metrics
@@ -8537,7 +8540,7 @@ def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
     assert abs(pair_center - desktop["center"]["center"]) <= 1, desktop
 
 
-def test_touch_pane_tab_close_uses_a_large_hit_target(browser, tmp_path):
+def test_touch_pane_tab_close_keeps_desktop_geometry(browser, tmp_path):
     page = tmp_path / "touch-pane-tab-close.html"
     load_static_html_fixture(
         browser,
@@ -8549,44 +8552,53 @@ def test_touch_pane_tab_close_uses_a_large_hit_target(browser, tmp_path):
     )
     metrics = browser.execute_script(
         """
-        document.body.classList.add('app-topbar-touch-compact');
         const control = document.getElementById('touch-tab-close');
+        const desktop = control.getBoundingClientRect();
+        document.body.classList.add('app-topbar-touch-compact');
         const style = getComputedStyle(control);
         let clicks = 0;
         control.addEventListener('click', () => { clicks += 1; });
         control.click();
-        return {width: control.getBoundingClientRect().width, height: control.getBoundingClientRect().height, touchAction: style.touchAction, clicks};
+        return {width: control.getBoundingClientRect().width, height: control.getBoundingClientRect().height, desktopWidth: desktop.width, desktopHeight: desktop.height, clicks};
         """
     )
-    assert metrics["width"] >= 36 and metrics["height"] >= 36, metrics
-    assert metrics["touchAction"] == "manipulation", metrics
+    assert metrics["width"] == metrics["desktopWidth"] == 18, metrics
+    assert metrics["height"] == metrics["desktopHeight"] == 18, metrics
     assert metrics["clicks"] == 1, metrics
 
 
-def test_touch_pane_minimize_matches_neighbor_geometry_and_accepts_one_tap(browser, tmp_path):
-    page = tmp_path / "touch-pane-minimize.html"
+def test_touch_pane_controls_keep_desktop_geometry_and_accept_one_tap(browser, tmp_path):
+    page = tmp_path / "touch-pane-controls.html"
     with trusted_touch_emulation(browser, user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"):
-        browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True})
+        browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844, "deviceScaleFactor": 2, "mobile": True})
         load_static_html_fixture(
-            browser,
-            page.parent,
-            page.name,
+            browser, page.parent, page.name,
             page_html("""
-          <div class="yomux-dockview"><div class="dockview-pane-header-actions"><div class="tabs">
-            <button id="touch-minimize" class="tab pane-minimize pc-window-control pc-minimize" type="button" data-pane-minimize="__finder__"></button>
-            <button id="touch-neighbor" class="tab pane-expand pc-window-control pc-zoom" type="button"></button>
-          </div></div></div>
+          <div class="yomux-dockview"><div class="dv-tabs-and-actions-container"><div class="dv-right-actions-container"><div class="dockview-pane-header-actions"><div class="tabs">
+            <button id="touch-minimize" class="tab pane-minimize pc-window-control pc-minimize" type="button"></button>
+            <button class="tab pane-expand pc-window-control pc-zoom" type="button"></button>
+            <button class="tab pane-actions" type="button"></button>
+            <button class="tab panel-tab-overflow" type="button"></button>
+            <button class="tab pane-close" type="button"></button>
+            <button class="tab pane-detail-toggle" type="button"></button>
+            <button class="tab pane-popout" type="button"></button>
+          </div></div></div></div></div>
         """, extra_css="body { margin: 0; padding: 12px; display: block; height: auto; min-height: 0; }"),
         )
-        browser.execute_script("document.body.classList.add('app-topbar-touch-compact');")
+        measure = """
+          return Array.from(document.querySelectorAll('.tabs .tab, .dv-tabs-and-actions-container, .dv-right-actions-container')).map(node => {
+            const rect = node.getBoundingClientRect(), style = getComputedStyle(node);
+            return {width:rect.width, height:rect.height, background:style.backgroundColor, border:style.border};
+          });
+        """
+        desktop = browser.execute_script(measure)
+        browser.execute_script("document.body.classList.add('app-topbar-touch-compact'); document.getElementById('touch-minimize').addEventListener('click', () => window.minimizeClicks = (window.minimizeClicks || 0) + 1);")
+        touch = browser.execute_script(measure)
         trusted_touch_tap(browser, '#touch-minimize')
-        metrics = browser.execute_script(
-            "const control = document.getElementById('touch-minimize'); const style = getComputedStyle(control); const neighbor = document.getElementById('touch-neighbor').getBoundingClientRect(); return {width: control.getBoundingClientRect().width, height: control.getBoundingClientRect().height, neighborWidth: neighbor.width, neighborHeight: neighbor.height, touchAction: style.touchAction};"
-        )
-    assert metrics["width"] > 0 and metrics["height"] > 0, metrics
-    assert abs(metrics["width"] - metrics["neighborWidth"]) <= 1, metrics
-    assert abs(metrics["height"] - metrics["neighborHeight"]) <= 1, metrics
-    assert metrics["touchAction"] == "manipulation", metrics
+        clicks = browser.execute_script("return window.minimizeClicks;")
+    assert touch == desktop, {"desktop": desktop, "touch": touch}
+    assert all(0 < control["width"] <= 20 and control["height"] == 18 for control in touch[2:]), touch
+    assert clicks == 1
 
 
 def test_touch_pane_minimize_dispatches_the_real_layout_action(browser, tmp_path):
@@ -8609,7 +8621,7 @@ def test_touch_pane_minimize_dispatches_the_real_layout_action(browser, tmp_path
             )
         )
         before = browser.execute_script(
-            "const button = document.querySelector(arguments[0]); const rect = button.getBoundingClientRect(); const neighbors = Array.from(button.parentElement.querySelectorAll('.tab')).filter(node => node !== button && node.getBoundingClientRect().width > 0 && getComputedStyle(node).visibility !== 'hidden').map(node => ({width:node.getBoundingClientRect().width,height:node.getBoundingClientRect().height})); return {source: slotForItem('1'), target: slotForItem('2'), width: rect.width, height: rect.height, neighbors};",
+            "const button = document.querySelector(arguments[0]); const rect = button.getBoundingClientRect(); const style = getComputedStyle(button); const glyph = getComputedStyle(button, '::before'); const neighbors = Array.from(button.parentElement.querySelectorAll('.tab')).filter(node => node !== button && node.getBoundingClientRect().width > 0 && getComputedStyle(node).visibility !== 'hidden').map(node => ({width:node.getBoundingClientRect().width,height:node.getBoundingClientRect().height})); return {source: slotForItem('1'), target: slotForItem('2'), width: rect.width, height: rect.height, background: style.backgroundColor, borderColor: style.borderTopColor, glyphWidth: glyph.width, glyphHeight: glyph.height, neighbors};",
             selector,
         )
         trusted_touch_tap(browser, selector)
@@ -8623,6 +8635,8 @@ def test_touch_pane_minimize_dispatches_the_real_layout_action(browser, tmp_path
         )
     assert before["source"] == "left" and before["target"] == "left", before
     assert before["width"] > 0 and before["height"] > 0, before
+    assert before["width"] <= 20 and before["height"] == 18, before
+    assert before["glyphWidth"] == "8px" and float(before["glyphHeight"].removesuffix("px")) <= 2, before
     assert any(abs(before["width"] - neighbor["width"]) <= 1
                and abs(before["height"] - neighbor["height"]) <= 1
                for neighbor in before["neighbors"]), before
@@ -10598,6 +10612,146 @@ def test_normal_tabber_activity_date_shares_name_row_and_description_sits_below(
     assert abs(metrics["nameTop"] - metrics["dateTop"]) <= 3, metrics
     assert metrics["descriptionTop"] > max(metrics["nameBottom"], metrics["dateBottom"]), metrics
     assert metrics["descriptionRight"] >= metrics["dateRight"] - 1, metrics
+
+
+def test_tabber_editor_and_repo_diff_activity_updates_without_counting_scroll(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+        "return typeof noteTabberItemActivity === 'function' && typeof createGitDiffPanel === 'function';"
+    ))
+    metrics = browser.execute_script(
+        """
+        autoFocusEnabled = false;
+        setTabberMode('normal', {refresh: false});
+        const path = '/home/test/repo/2026.md';
+        const editorItem = fileEditorItemFor(path);
+        setFileState(path, {kind: 'text', content: '# 2026', original: '# 2026', dirty: false, language: 'markdown'});
+        registerFileEditorLayoutItem(path);
+        const diffItem = resolveLayoutItem(gitDiffItemFor('/home/test/repo'));
+        const groups = document.createElement('div');
+        groups.className = 'changes-groups';
+        document.body.append(groups);
+        const rowFor = item => groups.querySelector(`.file-tree-row[data-tabber-item="${CSS.escape(item)}"]`);
+        renderTabberTree(groups);
+        const editorPanel = createFileEditorPanel(editorItem);
+        document.body.append(editorPanel);
+        const editorSurface = editorPanel.querySelector('[data-editor-surface="text-editor"]');
+        editorSurface.hidden = false;
+        const editorBefore = rowFor(editorItem)?.querySelector('.file-tree-date')?.textContent || '';
+        editorSurface.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+        renderTabberTree(groups);
+        const editorAfter = rowFor(editorItem)?.querySelector('.file-tree-date')?.textContent || '';
+
+        const diffPanel = createGitDiffPanel(diffItem);
+        document.body.append(diffPanel);
+        const diffBody = diffPanel.querySelector('.git-diff-panel-body');
+        const diffBefore = tabberLocalItemActivity.get(diffItem) || 0;
+        diffBody.dispatchEvent(new Event('scroll', {bubbles: true}));
+        const afterScroll = tabberLocalItemActivity.get(diffItem) || 0;
+        diffBody.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+        renderTabberTree(groups);
+        const diffAfter = rowFor(diffItem)?.querySelector('.file-tree-date')?.textContent || '';
+        const beforeReload = tabberLocalItemActivity.get(diffItem) || 0;
+        tabberLocalItemActivity.set(diffItem, beforeReload - 10);
+        diffPanel.querySelector('.git-diff-refresh').click();
+        const afterReload = tabberLocalItemActivity.get(diffItem) || 0;
+        return {editorBefore, editorAfter, diffBefore, afterScroll, diffAfter, beforeReload, afterReload};
+        """
+    )
+    assert not metrics["editorBefore"], metrics
+    assert metrics["editorAfter"], metrics
+    assert metrics["afterScroll"] == metrics["diffBefore"] == 0, metrics
+    assert metrics["diffAfter"], metrics
+    assert metrics["afterReload"] > metrics["beforeReload"], metrics
+
+
+def test_tabber_rows_render_the_status_and_repository_badges_from_pane_tabs(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["main-tag"],
+        settings={"general": {"default_tabber_mode": "normal"}},
+    )
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+        "return typeof sessionTabStatusDecorations === 'function' && typeof renderTabberTree === 'function';"
+    ))
+    metrics = browser.execute_script(
+        """
+        const session = sessions[0];
+        const info = {
+          panes: [{window:'0', window_index:0, pane:'0', window_active:true, active:true, process_label:'claude', command:'claude'}],
+          work_graph: {
+            version:1, tmux_sessions:{}, tmux_windows:{}, tmux_panes:{}, runtime_actors:{}, path_observations:{},
+            git_worktrees:{worktree:{id:'worktree', root:'/repo', local_repository_id:'local', current_branch_id:'branch', git:{root:'/repo'}}},
+            local_repositories:{local:{id:'local', local_branch_ids:['branch']}}, hosted_repositories:{},
+            local_branches:{branch:{id:'branch', name:'main'}}, pull_requests:{}, linear_issues:{}, worktree_branch_activity:{},
+          },
+        };
+        transcriptMetadataState.payload.sessions[session] = info;
+        autoApproveStates.set(session, {agent_windows:[
+          {kind:'claude', state:'needs-input', window_index:0, window_name:'claude', current:true, window_active:true},
+        ]});
+        refreshTabberPanels();
+        const row = document.querySelector('#panel-__tabber__ .file-tree-row[data-tabber-type="normal"]');
+        const paneTab = tmuxPaneTabHtml(session, info, sessionState(session, info), false);
+        return {row: row?.querySelector('.tabber-normal-primary')?.innerHTML || '', paneTab};
+        """
+    )
+    assert "ASK" in metrics["paneTab"] and "ASK" in metrics["row"], metrics
+    assert "MAIN" in metrics["paneTab"] and "MAIN" in metrics["row"], metrics
+
+
+def test_external_tmux_rename_refreshes_tabber_row_and_click_target(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["408-"],
+        settings={"general": {"default_tabber_mode": "normal"}},
+    )
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+        "return typeof applyTmuxRosterPayload === 'function' && !!document.querySelector('#panel-__tabber__ .file-tree');"
+    ))
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const wait = window.__yomuxTestWaitFor;
+          const oldName = '408-';
+          const newName = '408-v1-cases';
+          storeTabberNormalSelections([]);
+          const rows = () => [...document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="normal"]')];
+          const rowFor = name => rows().find(row => row.dataset.tabberPaneItem === name);
+          const before = rowFor(oldName);
+          if (!before) throw new Error('the original Tabber row was not rendered');
+          const generation = Math.max(tmuxTopologyGeneration, transcriptMetadataState.rosterGeneration) + 1;
+          const applied = applyTmuxRosterPayload({
+            server_epoch: transcriptMetadataState.epoch,
+            topology_generation: generation,
+            roster_generation: generation,
+            session_order: [newName],
+            renames: [{old_session: oldName, new_session: newName}],
+          });
+          if (!applied) throw new Error('the authoritative external rename was rejected');
+          const immediatelyVisible = {oldRow: !!rowFor(oldName), newRow: !!rowFor(newName)};
+          const staleAccepted = applyTmuxRosterPayload({
+            server_epoch: transcriptMetadataState.epoch,
+            topology_generation: generation - 1,
+            roster_generation: generation - 1,
+            session_order: [oldName],
+          });
+          const afterStale = {oldRow: !!rowFor(oldName), newRow: !!rowFor(newName)};
+          done({immediatelyVisible, afterStale, staleAccepted, selection: [...tabberNormalSelections], oldInLayout: itemInLayout(oldName), newInLayout: itemInLayout(newName)});
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in result, result
+    assert result["immediatelyVisible"] == {"oldRow": False, "newRow": True}, result
+    assert result["staleAccepted"] is False and result["afterStale"] == result["immediatelyVisible"], result
+    assert result["selection"] == ["408-v1-cases"] and result["oldInLayout"] is False and result["newInLayout"] is True, result
+    browser.find_element("css selector", '.file-tree-row[data-tabber-pane-item="408-v1-cases"]').click()
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+        "return tabberNormalSelections.length === 0;"
+    ))
 
 
 def test_tabber_advanced_toggle_saves_the_preference(browser, tmp_path):
@@ -13970,6 +14124,7 @@ def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers
             expectedGlyphBackground: probePaint('background:var(--subwindow-status-glyph-fill)', dot).background,
             expectedAcknowledgementBackground: probePaint('background:var(--muted)', dot).background,
             borderRadius: style.borderRadius,
+            clipPath: style.clipPath,
             before: pseudo(dot, '::before'),
             after: pseudo(dot, '::after'),
           };
@@ -14003,7 +14158,10 @@ def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers
     all_progress = [marker["progress"] for group in groups.values() for marker in group["markers"]]
     assert max(all_progress) - min(all_progress) < 0.04, metrics
     for marker in groups["tab"]["markers"]:
-        assert marker["background"] == marker["expectedBackground"] and marker["borderRadius"] == "50%", metrics
+        assert marker["background"] == marker["expectedBackground"], metrics
+        assert marker["borderRadius"] == "0px", metrics
+        expected_shape = "polygon" if marker["state"] in {"working", "cooldown"} else "inset"
+        assert expected_shape in marker["clipPath"], metrics
     for marker in groups["subwindow"]["markers"]:
         shape = marker["after"] if marker["state"] == "working" else marker["before"]
         if not (shape["width"] > 0 and shape["height"] > 0 and shape["background"] == marker["expectedGlyphBackground"]):
@@ -18480,6 +18638,20 @@ def test_tabber_activity_hover_retains_native_row_target(browser, tmp_path, mode
     fast_pointer_actions(browser).click().perform()
     assert browser.execute_script("return window.__nativeRowClick") == "1"
     fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".topbar")).perform()
+    browser.execute_async_script("const done=arguments[0]; setTimeout(done, 220)")
+    assert browser.execute_script("return window.__hoverRows()[0]?.dataset.tabberSession") == "1"
+    # Advance the shared renderer clock to its next interval, without a wall-clock wait.
+    browser.execute_script("""
+      const tree = document.querySelector('#panel-__tabber__ .file-tree');
+      const previousClock = window.__yomuxFileTreeRecencyNowMs;
+      try {
+        window.__yomuxFileTreeRecencyNowMs = tree.__tabberSortState.sortedAt + 60000;
+        refreshTabberPanels();
+      } finally {
+        if (previousClock === undefined) delete window.__yomuxFileTreeRecencyNowMs;
+        else window.__yomuxFileTreeRecencyNowMs = previousClock;
+      }
+    """)
     WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return window.__hoverRows()[0]?.dataset.tabberSession === '2'"))
 
     # Whitespace belongs to the pane, and reentry cancels an exit before its deferred reorder.
@@ -18504,8 +18676,22 @@ def test_tabber_activity_hover_retains_native_row_target(browser, tmp_path, mode
       tabberActivityPayload.activity['3:0'] = {active_recency_ts:Date.now()/1000};
       refreshTabberPanels();
     """)
-    assert browser.execute_script("return window.__survivingRows.every((row,i) => window.__hoverRows()[i] === row)")
-    assert browser.execute_script("return window.__hoverRows().at(-1).dataset.tabberSession") == "3"
+    surviving_after_add = browser.execute_script("""
+      const rows = window.__hoverRows();
+      const describe = row => ({session:row.dataset.tabberSession, window:row.dataset.tabberWindow,
+        path:row.dataset.path, y:row.getBoundingClientRect().y});
+      const surviving = rows.filter(row => row.dataset.tabberSession !== '3');
+      return {sameSurvivingRows:window.__survivingRows.length === surviving.length
+          && window.__survivingRows.every((row,i) => surviving[i] === row),
+        before:window.__survivingRows.map(describe), after:rows.map(describe),
+        mode:document.querySelector('#panel-__tabber__').dataset.tabberMode,
+        pointerInside:document.querySelector('#panel-__tabber__').__tabberPointerInside,
+        sortState:document.querySelector('#panel-__tabber__ .file-tree').__tabberSortState};
+    """)
+    assert surviving_after_add["sameSurvivingRows"], surviving_after_add
+    assert browser.execute_script("""
+      return window.__hoverRows().filter(row => row.dataset.tabberSession).at(-1)?.dataset.tabberSession;
+    """) == "3"
     browser.execute_script("""
       sessions.splice(sessions.indexOf('2'),1);
       delete transcriptMetadataState.payload.sessions['2'];

@@ -2421,10 +2421,9 @@ const fileEditorPreviewLayoutScrollSyncMs = 400;
 
 function fileEditorPreviewScrollSyncSource(panel) {
   const previewPane = fileEditorPanelPreviewPane(panel);
-  // A native vertical gesture is stronger evidence than the short-lived layout refit window. Once
-  // this Preview element has been claimed, its scroll events must never be relabeled as editor
-  // reflections; doing so writes the older editor position straight back into the user's gesture.
-  if (previewScrollUserOwnershipGeneration(previewPane) > 0) return 'preview';
+  // Current native input outranks layout refits. Historical invalidation generations must not
+  // turn a later details-collapse clamp into a new Preview gesture.
+  if (previewScrollUserOwnsElementNow(previewPane)) return 'preview';
   const layoutSyncActive = Number(panel?._previewLayoutScrollUntil || 0) > nowMs();
   return layoutSyncActive && fileEditorPanelMode(panel) === 'split' && fileEditorSourceCanDrive(panel, 'editor')
     ? 'editor'

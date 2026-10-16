@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_binary")
+
+exports_files(["main.go"])
+
+go_binary(
+    name = "versiongen",
+    srcs = ["main.go"],
+    deps = ["//internal/productversion:productversion_lib"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "qualified_sources",
+    srcs = glob(["**"], exclude = ["**/*.lock", "**/*.log"]),
+    visibility = ["//:__pkg__"],
+)

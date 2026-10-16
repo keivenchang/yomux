@@ -44,7 +44,7 @@ const {runSuite} = require('./layout_url.test.js');
 function installTreePublicationHelpers(context) {
   for (const [path, names] of [
     ['10_core_utils.js', ['setAttributeIfChanged', 'setStylePropertyIfChanged', 'setInnerHtmlIfChanged', 'clientElementIsVisible']],
-    ['40_file_explorer_files.js', ['setRowDataset', 'setHiddenIfChanged']],
+    ['40_file_explorer_files.js', ['setRowDataset', 'setHiddenIfChanged', 'beginFileExplorerSync', 'finishFileExplorerSync']],
   ]) {
     const source = fs.readFileSync(`static_src/js/yomux/${path}`, 'utf8');
     if (names.includes('setInnerHtmlIfChanged')) vm.runInContext('const elementHtmlState = new WeakMap();', context);
@@ -509,6 +509,7 @@ test('explicit file disclosure renewal retires an in-flight plan with the same s
     vm.createContext(context);
     const schedule = source.indexOf('function scheduleFileExplorerActiveTabSync(');
     vm.runInContext(source.slice(schedule, source.indexOf('function fileExplorerSyncPlanTargetStillCurrent(', schedule)), context);
+    installTreePublicationHelpers(context);
     const cancel = source.indexOf('function cancelPendingFileExplorerActiveSync(');
     vm.runInContext(source.slice(cancel, source.indexOf('async function syncFileExplorerRootToActiveTmux(', cancel)), context);
     context.scheduleFileExplorerActiveTabSync('file:/repo/src/file.py', {explicit: true});
@@ -1529,6 +1530,52 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
   assert.equal(context.renderChangesGroups(groups, [], {payload, changedRepo: {repo: latest.repo, files: [latest]}}), section, 'synchronous repository callers retain the section result');
 });
 
+
+  await testAsync('Finder filesystem pushes share progressive Sync publication ownership', async () => {
+    for (const producer of ['push', 'refresh']) {
+      const frames = [];
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+        requestAnimationFrame(callback) {frames.push(callback); return frames.length;}, cancelAnimationFrame() {},
+      });
+      api.setFileExplorerRootMode('sync', {sync: false});
+      const deep = deferredFetch();
+      let requested = false;
+      api.setFetchForTest(url => {
+        if (!String(url).startsWith('/api/fs/fast/list?')) return Promise.resolve(jsonResponse({}));
+        const path = new URL(url, 'https://fixture').searchParams.get('path');
+        if (path === '/repo') return Promise.resolve(jsonResponse({entries: [{name: 'a', kind: 'dir'}]}));
+        if (path === '/repo/a') return Promise.resolve(jsonResponse({entries: [{name: 'deep', kind: 'dir'}]}));
+        if (path === '/repo/a/deep') {requested = true; return deep.promise;}
+        throw new Error(path);
+      });
+      const transaction = api.syncFileExplorerRootToPlanForTest({session: '1', root: '/repo',
+        expandPaths: ['/repo/a', '/repo/a/deep'], affectedDirs: ['/repo/a/deep']}, '1');
+      for (let index = 0; index < 10; index += 1) {
+        await flushAsyncWork();
+        for (const frame of frames.splice(0)) frame();
+      }
+      assert.ok(requested);
+      const entriesByDir = new Map([
+        ['/repo', [{name: 'a', kind: 'dir'}, {name: 'pushed.txt', kind: 'file'}]],
+        ['/repo/a', [{name: 'deep', kind: 'dir'}]],
+      ]);
+      let refresh;
+      if (producer === 'push') {
+        refresh = api.refreshFileExplorerFromPushForTest({mode: 'full', directories: [...entriesByDir].map(([path, entries]) => ({path, data: {entries}}))});
+      } else {
+        for (const [path, entries] of entriesByDir) api.setFileExplorerFsResourceValueForTest(path, entries);
+        refresh = api.refreshFileExplorerTreesInPlaceForTest({root: '/repo', entriesByDir});
+      }
+      await flushAsyncWork();
+      deep.resolve(jsonResponse({entries: [{name: 'late.txt', kind: 'file'}]}));
+      await completeRenderFrames(Promise.all([transaction, refresh]), frames);
+      const tree = api.fileExplorerTreeForTest();
+      assert.ok(tree.querySelector('.file-tree-row[data-path="/repo/a/deep/late.txt"]'), `${producer} cannot retire the pending listing's publication`);
+      assert.ok(tree.querySelector('.file-tree-row[data-path="/repo/pushed.txt"]'), 'Sync cannot overwrite a newer cached parent listing');
+      assert.equal(api.fileExplorerSyncStateForTest().inFlightSignature, '');
+      assert.equal(api.fileExplorerSyncStateForTest().renderTransaction, null);
+    }
+  });
 
   await testAsync('Finder later listing waves preserve a newer container render and retire applied state', async () => {
   const frames=[];
@@ -3700,6 +3747,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       expandFileExplorerTreesToPath: () => new Promise(resolve => pending.push(resolve)),
     };
     vm.createContext(context);
+    installTreePublicationHelpers(context);
     vm.runInContext(source.slice(source.indexOf('async function syncFileExplorerToActiveTab('), source.indexOf('\nfunction fileExplorerTreeContainers(')), context);
     const old = context.syncFileExplorerToActiveTab('/repo/a');
     const middle = context.syncFileExplorerToActiveTab('/repo/b');
@@ -9337,6 +9385,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.deepStrictEqual(canonical(api.fileExplorerSyncStateForTest()), {
       publication: null,
       inFlightSignature: '',
+      renderTransaction: null,
       appliedPlanKey: '',
       generation: 5,
     }, 'manual selection invalidates the entire prior Finder Sync transaction record');
@@ -13530,6 +13579,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.deepStrictEqual(sent[0], {
         type: 'input',
         data: `[Image #1] '/home/test/${generatedName}'`,
+        user_input: true,
       }, 'pasted image upload inserts the image reference into xterm without trailing whitespace');
       assert.equal(
         calls.some(call => String(call.url).startsWith('/api/session-metadata')),
@@ -15020,10 +15070,10 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(api.terminalMobileAccessoryStateForTest('1').open, true, 'only the dedicated close action closes the palette');
       assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'interrupt'), true, 'mobile Ctrl-C sends through the shared terminal transport');
       assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'backspace'), true, 'visible mobile Backspace sends through the shared terminal transport');
-      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}, {type: 'input', data: '\x7f'}], 'mobile Ctrl-C and Backspace preserve their terminal control bytes');
+      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03', user_input: true}, {type: 'input', data: '\x7f', user_input: true}], 'mobile Ctrl-C and Backspace preserve their terminal control bytes');
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), true, 'mobile Ctrl latch turns on for the next OS-keyboard character');
       assert.equal(api.handleTerminalDataForTest('1', 'c'), true, 'a character following the Ctrl latch uses the normal xterm input path');
-      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}, {type: 'input', data: '\x7f'}, {type: 'input', data: '\x03'}], 'Ctrl plus the phone keyboard C becomes the same interrupt byte');
+      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03', user_input: true}, {type: 'input', data: '\x7f', user_input: true}, {type: 'input', data: '\x03', user_input: false}], 'Ctrl plus the phone keyboard C becomes the same interrupt byte');
       assert.deepStrictEqual(canonical(api.terminalMobileAccessoryStateForTest('1')), {ctrl: false, alt: false, shift: false, cmd: false, ctrlLocked: false, altLocked: false, shiftLocked: false, cmdLocked: false, more: false, open: true, palettePlacement: null, x: null, y: null, palettePress: null, launcherPress: null, suppressLauncherClick: false}, 'one-shot modifier state clears after the next key while the palette stays open');
       assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'close'), true, 'the dedicated X action closes the palette');
       assert.equal(api.terminalMobileAccessoryStateForTest('1').open, false, 'closing the palette leaves the terminal untouched');
@@ -15077,7 +15127,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         'an already-owned terminal key does not re-enter synchronous focus and attention ownership',
       );
       assert.equal(api.handleTerminalDataForTest('1', 'a'), true, 'the key still reaches the shared terminal transport');
-      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: 'a'}]);
+      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: 'a', user_input: true}]);
       const perf = Object.fromEntries(api.clientPerfSummaryForTest().map(counter => [counter.name, counter]));
       assert.equal(perf['term.onData'].count, 1, 'the root input owner still records one terminal data handler');
       assert.equal(perf.wsSend.count, 1, 'the root input owner still sends one WebSocket frame');
@@ -15187,6 +15237,10 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         return null;
       });
       const fetchCalls = [];
+      const pingResponses = [
+        {ok: true, version: '0.4.18', instance_id: 'old-instance'},
+        {ok: true, version: '0.4.18', instance_id: 'new-instance'},
+      ];
       api.setFetchForTest((url, options = {}) => {
         fetchCalls.push({url: String(url), method: options.method || 'GET'});
         if (String(url).startsWith('/api/self-update')) {
@@ -15196,9 +15250,10 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
             error: 'updated; restarting now',
             user_message: {key: 'update.result.restarting', params: {}, fallback: 'updated; restarting now'},
             target: '0.4.18',
+            instance_id: 'old-instance',
           }));
         }
-        if (String(url).startsWith('/api/ping')) return Promise.resolve(jsonResponse({ok: true}));
+        if (String(url).startsWith('/api/ping')) return Promise.resolve(jsonResponse(pingResponses.shift()));
         return Promise.reject(new Error(`unexpected fetch ${url}`));
       });
 
@@ -15218,13 +15273,35 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         deferredToastShown: false,
         pending: true,
         serverVersionReloadHandled: '0.4.18',
+        oldInstanceId: 'old-instance',
         target: '0.4.18',
       }, 'successful self-update owns the target version and starts reload polling');
 
       api.maybeHandleServerVersionChangeForTest('0.4.18');
       assert.equal(api.bodyChildren().some(node => node.id === 'serverUpdateBanner'), false, 'self-update target suppresses the generic reload banner');
       await api.pollSelfUpdateReloadForTest();
+      assert.equal(api.reloadCountForTest(), 0, 'old server ping cannot complete restart polling');
+      await api.pollSelfUpdateReloadForTest();
       assert.equal(api.reloadCountForTest(), 1, 'reachable restarted server triggers automatic reload');
+    });
+
+    await testAsync('self-update: reconnecting browser recovers a missed availability event', async () => {
+      const api = loadYomux('', ['1']);
+      const owner = api.testElementForId('update-toast');
+      owner.className = 'attention-alert toast toast-update';
+      api.setShowToastForTest((title) => title === 'YOmux update available' ? owner : null);
+      const calls = [];
+      api.setFetchForTest(url => {
+        calls.push(String(url));
+        if (String(url).startsWith('/api/update-status')) {
+          return Promise.resolve(jsonResponse({available: true, notify: true, current_version: '0.10.6', target: '0.10.7', target_version: '0.10.7'}));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      });
+
+      await api.checkForUpdateOnceForTest();
+      assert.deepStrictEqual(calls, ['/api/update-status'], 'reconnecting browser reads the cached server result');
+      assert.equal(api.testElementForId('update-toast').dataset.updateTarget, '0.10.7', 'missed update event is restored as an actionable notice');
     });
 
     await testAsync('self-update: dirty edits and active typing defer automatic reload safely', async () => {
@@ -15234,7 +15311,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         dirtyToasts.push({title, lines: Array.isArray(lines) ? lines : [lines]});
         return null;
       });
-      dirtyApi.setFetchForTest(() => Promise.resolve(jsonResponse({ok: true})));
+      dirtyApi.setFetchForTest(() => Promise.resolve(jsonResponse({ok: true, version: '0.4.19', instance_id: 'replacement'})));
       dirtyApi.setOpenFileStateForTest('/repo/app.py', {kind: 'text', content: 'dirty', original: 'clean', dirty: true});
       dirtyApi.startSelfUpdateReloadPollingForTest('0.4.19');
       await dirtyApi.pollSelfUpdateReloadForTest();
@@ -15250,7 +15327,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         typingToasts.push({title, lines: Array.isArray(lines) ? lines : [lines]});
         return null;
       });
-      typingApi.setFetchForTest(() => Promise.resolve(jsonResponse({ok: true})));
+      typingApi.setFetchForTest(() => Promise.resolve(jsonResponse({ok: true, version: '0.4.20', instance_id: 'replacement'})));
       const input = typingApi.testElementForId('typing-input');
       input.localName = 'input';
       input.tagName = 'INPUT';
@@ -15277,15 +15354,16 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         toasts.push({title, lines: Array.isArray(lines) ? lines : [lines]});
         return null;
       });
-      api.setFetchForTest(() => Promise.reject(new Error('server restarting')));
+      api.setFetchForTest(() => Promise.resolve(jsonResponse({ok: true, version: '0.4.20', instance_id: 'old-instance'})));
 
-      api.startSelfUpdateReloadPollingForTest('0.4.20');
+      api.startSelfUpdateReloadPollingForTest('0.4.20', 'old-instance');
       const priorTimer = timers.at(-1);
-      api.startSelfUpdateReloadPollingForTest('0.4.21');
+      api.startSelfUpdateReloadPollingForTest('0.4.21', 'old-instance');
       const replacementTimer = timers.at(-1);
       assert.deepStrictEqual(canonical(api.selfUpdateReloadStateForTest()), {
         attempts: 0,
         deferredToastShown: false,
+        oldInstanceId: 'old-instance',
         pending: true,
         serverVersionReloadHandled: '0.4.21',
         target: '0.4.21',

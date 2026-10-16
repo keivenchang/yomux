@@ -4466,7 +4466,21 @@ function commitJsDebugCurrentStatsPaint() {
 function paintJsDebugCurrentStatsGeneration(snapshot, {forceGraphRefresh = true} = {}) {
   if (!snapshot || !jsDebugStatsPanelVisible()) return false;
   const key = jsDebugCurrentStatsGenerationKey(snapshot);
-  if (key && [jsDebugCurrentStatsClientState.paintedGenerationKey, jsDebugCurrentStatsClientState.pendingGenerationKey].includes(key)) return false;
+  if (key && [jsDebugCurrentStatsClientState.paintedGenerationKey, jsDebugCurrentStatsClientState.pendingGenerationKey].includes(key)) {
+    const client = jsDebugCurrentStatsClientState.client;
+    // Recovery and activation can reuse a painted generation without receiving another bucket paint.
+    const stream = client?.streamEvidence?.();
+    if (stream?.healthy === true && stream.running && stream.visible && stream.streamOpen
+        && stream.lastDeliveryEpoch === stream.streamEpoch
+        && ['ready', 'delta', 'runtime'].includes(stream.lastDeliveryKind)
+        && jsDebugHistoryReadiness.phase !== 'ready') {
+      const selection = jsDebugCurrentStatsSelection();
+      if (snapshot === client.controller?.()?.generation?.()
+          && snapshot.range_seconds === selection.rangeSeconds
+          && String(snapshot.requested_resolution) === String(selection.resolution)) updateJsDebugCurrentSnapshotState(snapshot);
+    }
+    return false;
+  }
   jsDebugCurrentStatsClientState.pendingGenerationKey = key;
   try {
     applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh});
@@ -4544,6 +4558,9 @@ function ensureJsDebugCurrentStatsClient() {
       },
       onDelta(snapshot, delta) {
         paintJsDebugCurrentStatsDelta(snapshot, delta);
+      },
+      onRepairComplete(snapshot) {
+        paintJsDebugCurrentStatsGeneration(snapshot);
       },
       onRuntime(load) {
         applyJsDebugCurrentRuntimeLoad(load);
@@ -5011,6 +5028,8 @@ function updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh = false}
   const requestIntervals = [{startSeconds: snapshot.window_start, endSeconds: snapshot.window_end, resolutionSeconds: snapshot.resolution_seconds, sourceResolutionSeconds: snapshot.resolution_seconds}];
   jsDebugHistoryReadiness.phase = 'ready';
   jsDebugHistoryReadiness.reason = '';
+  jsDebugHistoryReadiness.error = '';
+  jsDebugHistoryReadiness.nextAutoRetryAtMs = 0;
   jsDebugHistoryReadiness.requestedRangeSeconds = snapshot.range_seconds;
   jsDebugHistoryReadiness.overlayVisible = false;
   jsDebugHistoryReadiness.requestCoverageIntervals = requestIntervals;

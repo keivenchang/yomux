@@ -8,7 +8,7 @@ bazel_test_prepare_environment
 test -x "$binary"
 test -f "$repo/yomux.py"
 cd "$repo"
-env "$(product_env_name GO_BINARY)=$binary" "$(product_env_name WORKTREE_WRITER_SLOT)=$(product_env_print WORKTREE_WRITER_SLOT "/tmp/yomux-bazel-writer-$$")" python3 -c '
+env "$(product_env_name GO_BINARY)=$binary" "$(product_env_name WORKTREE_WRITER_SLOT)=$(product_env_print WORKTREE_WRITER_SLOT "${YOMUX_NATIVE_SHORT_TMPDIR:-/tmp}/yomux-bazel-writer-$$")" python3 -c '
 import os
 import pytest
 

@@ -44,6 +44,7 @@ const COMMAND_ROUTES = Object.freeze({
   'rename-session': commandRoute({id: 'rename-session', method: 'POST', path: '/api/rename-session', contractClass: 'optimistic'}),
   'tabber-description-rename': commandRoute({id: 'tabber-description-rename', method: 'POST', path: '/api/tabber-description', contractClass: 'pending'}),
   'tabber-window-view': commandRoute({id: 'tabber-window-view', method: 'POST', path: '/api/tabber-view-session', contractClass: 'pending'}),
+  'tabber-activity-touch': commandRoute({id: 'tabber-activity-touch', method: 'POST', path: '/api/activity/touch', contractClass: 'background'}),
   'kill-session': commandRoute({id: 'kill-session', method: 'POST', path: '/api/kill-session', contractClass: 'pending'}),
   'kill-window': commandRoute({id: 'kill-window', method: 'POST', path: '/api/kill-window', contractClass: 'pending'}),
   'settings-save': commandRoute({id: 'settings-save', method: 'POST', path: '/api/settings', contractClass: 'pending'}),
@@ -174,12 +175,13 @@ function commandPublishGlobalStatus(message, tone = 'advisory') {
   status.setAttribute('aria-atomic', 'true');
   if (typeof showLayoutStatus === 'function') {
     showLayoutStatus(String(message || ''), tone);
-    return;
+    return status.firstChild;
   }
   status.textContent = String(message || '');
   status.classList?.add?.('layout-status-visible');
   status.classList?.toggle?.('layout-status-danger', tone === 'danger');
   status.classList?.toggle?.('layout-status-advisory', tone !== 'danger');
+  return status.firstChild;
 }
 
 function commandDescriptionIds(control) {
@@ -229,8 +231,9 @@ function commandPendingState(route, source) {
     control.setAttribute?.('aria-busy', 'true');
     if (status) control.setAttribute?.('aria-describedby', status.id);
   }
-  if (route.contractClass !== 'background') commandPublishGlobalStatus(route.pendingLabel);
-  const state = {control, previous, status, route, overdueTimer: null, settled: false};
+  const globalStatusNode = route.contractClass !== 'background'
+    ? commandPublishGlobalStatus(route.pendingLabel) : null;
+  const state = {control, previous, status, route, globalStatusNode, overdueTimer: null, settled: false};
   if (route.contractClass !== 'background' && route.overdueMs > 0) {
     state.overdueTimer = setTimeout(() => {
       if (state.settled) return;
@@ -238,7 +241,7 @@ function commandPendingState(route, source) {
         state.status.dataset.commandStatusPhase = 'overdue';
         state.status.textContent = route.overdueLabel;
       }
-      commandPublishGlobalStatus(route.overdueLabel);
+      state.globalStatusNode = commandPublishGlobalStatus(route.overdueLabel);
     }, route.overdueMs);
   }
   return state;
@@ -280,6 +283,11 @@ function settleCommandPendingState(state, error = null) {
     else state.control.setAttribute?.('aria-describedby', state.previous.ariaDescribedBy);
   }
   state.status?.remove?.();
+  // Text-node identity prevents completion from clearing a newer command or error message.
+  if (state.route.clearStatusOnSuccess && state.globalStatusNode
+      && globalThis.document?.getElementById?.('status')?.firstChild === state.globalStatusNode) {
+    commandPublishGlobalStatus('');
+  }
 }
 
 function commandInFlightMap(source) {

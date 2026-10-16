@@ -89,7 +89,7 @@ def go_test_server_binary(source_root: Path) -> Path:
         for path in directory.rglob("*.go")
     )
     digest = hashlib.sha256()
-    for path in [source_root / "go.mod", source_root / "go.sum", source_root / "yomux_lib/version.py", *go_sources]:
+    for path in [source_root / "go.mod", source_root / "go.sum", source_root / "version.yaml", *go_sources]:
         if path.is_file():
             digest.update(str(path.relative_to(source_root)).encode())
             digest.update(path.read_bytes())
@@ -103,7 +103,7 @@ def go_test_server_binary(source_root: Path) -> Path:
         generated = cache / "product_version_generated.go"
         overlay = cache / "go-overlay.json"
         generate_go_version_overlay(
-            source_root / "yomux_lib/version.py",
+            source_root / "version.yaml",
             generated,
             overlay,
             source_root / "cmd/yomux-go/product_version_generated.go",

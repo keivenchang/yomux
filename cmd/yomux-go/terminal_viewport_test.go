@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/keivenchang/yomux/internal/testsupport"
 	"io"
 	"os"
 	"os/exec"
@@ -20,7 +21,7 @@ import (
 func TestTerminalViewportNativeReflowKeepsCopyMode(t *testing.T) {
 	for _, content := range []string{"short", "wrapped", "unicode", "repeated"} {
 		t.Run(content, func(t *testing.T) {
-			runtime, err := os.MkdirTemp("/tmp", "tv-")
+			runtime, err := testsupport.MkdirShortTemp("tv-")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -98,7 +99,7 @@ func TestTerminalViewportCancelledTransactionDoesNotResize(t *testing.T) {
 }
 
 func TestTerminalViewportWaitsForRealPTYReflow(t *testing.T) {
-	runtime, err := os.MkdirTemp("/tmp", "tv-")
+	runtime, err := testsupport.MkdirShortTemp("tv-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +207,7 @@ func TestTerminalViewportWaitsForRealPTYReflow(t *testing.T) {
 }
 
 func TestTerminalViewportGeometryReadbackUsesRequestedClient(t *testing.T) {
-	runtime, err := os.MkdirTemp("/tmp", "tv-")
+	runtime, err := testsupport.MkdirShortTemp("tv-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +274,7 @@ func TestTerminalViewportNeverRepositionsCopyCursor(t *testing.T) {
 }
 
 func TestTerminalResizeDoesNotOverwriteAnotherServersNavigation(t *testing.T) {
-	runtime, err := os.MkdirTemp("/tmp", "tv-")
+	runtime, err := testsupport.MkdirShortTemp("tv-")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -43,3 +43,8 @@ go_sdk.download(
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
 use_repo(go_deps, "com_github_mattn_go_sqlite3", "in_gopkg_yaml_v3", "org_golang_x_sys", "org_golang_x_text")
+
+runtime = use_extension("//:tools/bazel_runtime_toolchain.bzl", "runtime")
+use_repo(runtime, "yomux_runtime")
+
+register_toolchains("@yomux_runtime//:toolchain")

@@ -9,6 +9,7 @@ from http.client import HTTPConnection
 import json
 import os
 from pathlib import Path
+from tools.tmux_paths import short_temp_base
 import shutil
 import signal
 import socket
@@ -4254,7 +4255,7 @@ def test_registry_reaper_settlement_failure_precedes_runtime_root_removal(tmp_pa
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
 @pytest.mark.shared_tooling
 def test_gate_root_retirement_stops_spawn_owner_before_adopter_reaper_and_root_removal(monkeypatch):
-    root = Path("/tmp") / f"ysd-{os.getpid()}-{time.time_ns():x}"
+    root = short_temp_base() / f"ysd-{os.getpid()}-{time.time_ns():x}"
     unrelated_root = root.with_name(f"{root.name}-unrelated")
     root.mkdir(mode=0o700)
     unrelated_root.mkdir(mode=0o700)
@@ -4392,7 +4393,7 @@ def test_gate_root_retirement_stops_spawn_owner_before_adopter_reaper_and_root_r
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
 @pytest.mark.shared_tooling
 def test_fixture_app_cleanup_retires_adopted_statusd_from_its_private_service_root(monkeypatch):
-    root = Path("/tmp") / f"ysd-app-{os.getpid()}-{time.time_ns():x}-{'x' * 80}"
+    root = short_temp_base() / f"ysd-app-{os.getpid()}-{time.time_ns():x}-{'x' * 80}"
     unrelated_root = root.with_name(f"{root.name}-unrelated")
     root.mkdir(mode=0o700)
     unrelated_root.mkdir(mode=0o700)

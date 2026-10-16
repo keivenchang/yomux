@@ -45,6 +45,7 @@ DISCOVERED_MUTATING_ACTIONS = {
     "rename-session": "optimistic",
     "tabber-description-rename": "pending",
     "tabber-window-view": "pending",
+    "tabber-activity-touch": "background",
     "kill-session": "pending",
     "kill-window": "pending",
     "settings-save": "pending",

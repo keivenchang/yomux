@@ -15,6 +15,7 @@ import os
 import shutil
 import uuid
 from pathlib import Path
+from tools.tmux_paths import short_temp_base
 from types import SimpleNamespace
 
 import pytest
@@ -111,7 +112,7 @@ def _isolate_state(monkeypatch, tmp_path, control_dir):
 def test_e2e_mock_prompt_reaches_structured_ask_payload(monkeypatch, tmp_path, agent, steps):
     if not shutil.which("tmux"):
         pytest.skip("tmux is not installed")
-    sock_base = Path("/tmp") / f"yoask-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    sock_base = short_temp_base() / f"yoask-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     control_dir = sock_base / "control"
     control_dir.mkdir(parents=True, exist_ok=True)
     _isolate_state(monkeypatch, tmp_path, control_dir)
@@ -155,7 +156,7 @@ def test_e2e_mock_prompt_reaches_structured_ask_payload(monkeypatch, tmp_path, a
 def test_e2e_mock_codex_sleep_10_uses_working_turn_without_approval(monkeypatch, tmp_path):
     if not shutil.which("tmux"):
         pytest.skip("tmux is not installed")
-    sock_base = Path("/tmp") / f"yoask-sleep-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    sock_base = short_temp_base() / f"yoask-sleep-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     control_dir = sock_base / "control"
     control_dir.mkdir(parents=True, exist_ok=True)
     _isolate_state(monkeypatch, tmp_path, control_dir)
@@ -195,7 +196,7 @@ def test_e2e_mock_codex_sleep_10_uses_working_turn_without_approval(monkeypatch,
 def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
     if not shutil.which("tmux"):
         pytest.skip("tmux is not installed")
-    sock_base = Path("/tmp") / f"yoyae2e-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    sock_base = short_temp_base() / f"yoyae2e-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     control_dir = sock_base / "control"
     control_dir.mkdir(parents=True, exist_ok=True)
     _isolate_state(monkeypatch, tmp_path, control_dir)
@@ -288,7 +289,7 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
 def test_e2e_yoagent_roster_job_sends_exact_command_once(monkeypatch, tmp_path):
     if not shutil.which("tmux"):
         pytest.skip("tmux is not installed")
-    sock_base = Path("/tmp") / f"yoroster-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    sock_base = short_temp_base() / f"yoroster-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     control_dir = sock_base / "control"
     control_dir.mkdir(parents=True, exist_ok=True)
     _isolate_state(monkeypatch, tmp_path, control_dir)
@@ -351,7 +352,7 @@ def test_e2e_yo_auto_approves_mock_yesno(monkeypatch, tmp_path, agent, steps):
         pytest.skip("tmux is not installed")
     # AF_UNIX sockets (tmux + the App control server) cap the path at ~108 chars, so keep them under a
     # SHORT /tmp dir rather than the long pytest tmp_path.
-    sock_base = Path("/tmp") / f"yoe2e-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    sock_base = short_temp_base() / f"yoe2e-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     control_dir = sock_base / "control"
     control_dir.mkdir(parents=True, exist_ok=True)
     _isolate_state(monkeypatch, tmp_path, control_dir)

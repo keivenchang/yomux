@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import fcntl
 import hashlib
 import importlib.util
@@ -98,6 +98,7 @@ except YomuxRootError as error:
 from tests import latency_calibration
 from tests.browser_helpers.webdriver_lease import process_start_key
 from tools import docker_image
+from tools import bazel_execution_contract
 from tools import static_build
 from yomux_lib.infra.atomic_file import atomic_write_text
 from yomux_lib.background_scheduler import pid_is_alive
@@ -118,6 +119,7 @@ from tools.test_plan import BAZEL_GO_BROWSER_TESTS
 from tools.test_plan import STEP_PHASES
 from tools.test_plan import StepId
 from tools.test_plan import resolved_lane_step_ids
+from tools.test_plan import lane_spec
 from tools.test_plan import validate_lane_specs
 from tools.tool_guard import TOOL_LOCK_OWNER_ENV
 from tools.tool_guard import tool_lock_owner_marker
@@ -519,7 +521,7 @@ def step_catalog(*, serial: bool = False, cpu_percent: int | None = None, run_de
         StepId.NODE_YOMUX_SYNTAX: Step("node --check static/yomux.js", ["node", "--check", "static/yomux.js"]),
         StepId.NODE_WALL_SYNTAX: Step("node --check static/tmux-wall.js", ["node", "--check", "static/tmux-wall.js"]),
         StepId.NODE_LAYOUT: Step("node tests/layout_url.test.js", ["node", "tests/layout_url.test.js", *NODE_LAYOUT_FILES]),
-        StepId.BAZEL_GO: Step("Bazel Go and Docker tests", ["tools/run_bazel_tests.sh", "--jobs", bazel_jobs, "--memory-mb", bazel_memory]),
+        StepId.BAZEL_GO: Step(lane_spec("bazel-go").label, ["tools/run_bazel_tests.sh", "--jobs", bazel_jobs, "--memory-mb", bazel_memory]),
         StepId.PYTEST_NONBROWSER: Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser", run_deprecated_python=run_deprecated_python), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not gate_serial and not e2e and not browser and not deprecated_python_server", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "0" if run_deprecated_python else "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), nonbrowser_memory))),
         StepId.PYTEST_GATE_SERIAL: Step("pytest timing-sensitive serial", ["python3", "-m", "pytest", *pytest_files("gate_serial", run_deprecated_python=run_deprecated_python), "-m", "gate_serial and not deprecated_python_server", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "0" if run_deprecated_python else "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), final_serial_memory))),
         StepId.PYTEST_BOOT: Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot", run_deprecated_python=run_deprecated_python), "-m", "boot and not deprecated_python_server", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "0" if run_deprecated_python else "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), parallel_single_worker_memory))),
@@ -581,6 +583,7 @@ def ambient_browser_capability_preflight() -> BrowserCapabilityDiagnostic:
         return BrowserCapabilityDiagnostic(False, "dependency", "Python package 'selenium' is unavailable")
 
     browser_candidates = (
+        shutil.which("chrome"),
         shutil.which("google-chrome"),
         shutil.which("chromium"),
         shutil.which("chromium-browser"),
@@ -706,9 +709,10 @@ def _terminate_lane_process_group(process: subprocess.Popen[str]) -> None:
             pass
 
 
-def run_lane_step(step: Step, *, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def run_lane_step(step: Step, *, environment: dict[str, str], timeout_seconds: float | None = None) -> subprocess.CompletedProcess[str]:
     """Run one lane step with a private process group and a bounded timeout."""
 
+    timeout_seconds = LANE_STEP_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     process = subprocess.Popen(
         step.args,
         cwd=REPO_ROOT,
@@ -720,7 +724,7 @@ def run_lane_step(step: Step, *, environment: dict[str, str]) -> subprocess.Comp
     )
     timed_out = False
     try:
-        stdout, stderr = process.communicate(timeout=LANE_STEP_TIMEOUT_SECONDS)
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired as error:
         timed_out = True
         initial_stdout = _process_output_text(error.output)
@@ -746,7 +750,7 @@ def run_lane_step(step: Step, *, environment: dict[str, str]) -> subprocess.Comp
     if timed_out:
         stderr = (
             f"{stderr.rstrip()}\n" if stderr else ""
-        ) + f"check step timed out after {LANE_STEP_TIMEOUT_SECONDS:.1f}s; process group terminated\n"
+        ) + f"check step timed out after {timeout_seconds:.1f}s; process group terminated\n"
     return subprocess.CompletedProcess(
         step.args,
         LANE_STEP_TIMEOUT_RETURN_CODE if timed_out else process.returncode,
@@ -904,7 +908,7 @@ def check_run_token_environment(token: str | None = None):
 
 def _tmp_only_path(path: Path, *, label: str) -> Path:
     resolved = path.resolve()
-    if not resolved.is_relative_to(Path("/tmp").resolve()):
+    if not path.is_absolute() or not resolved.is_relative_to(Path("/tmp").resolve()):
         raise ValueError(f"{label} must be under /tmp")
     return path
 
@@ -978,18 +982,62 @@ def retain_lane_output(output_root: Path, lane_name: str, output: str) -> LaneOu
     return LaneOutputArtifact(str(path), hashlib.sha256(encoded).hexdigest(), len(encoded))
 
 
+def native_lane_steps(lane):
+    requests = []
+    for step in lane.steps:
+        if step.args[:1] != ["tools/run_bazel_tests.sh"]:
+            continue
+        arguments = list(step.args[1:])
+        boundary = arguments.index("--") if "--" in arguments else len(arguments)
+        index = arguments.index("--execution", 0, boundary)
+        del arguments[index:index + 2]
+        arguments = [value for value in arguments if value != "--reuse-test-results"]
+        if "--rerun-tests" in arguments:
+            arguments.remove("--rerun-tests")
+            arguments[:0] = ["--reuse", "no"]
+        args = bazel_execution_contract.bazel_native.native_arguments(arguments, bazel_execution_contract)
+        requests.append({"target": args.target, "options": args.options, "jobs": args.jobs, "memory_mb": args.memory_mb,
+                         "cache": args.cache, "reuse": args.cache == "on" and args.reuse != "no"})
+    return requests
+
+
+def native_lane_step(lane, session_path, requests):
+    path = Path(session_path).parent / (lane.name + ".json")
+    path.write_bytes(json.dumps(requests).encode())
+    path.chmod(0o600)
+    return Step(lane.label, [sys.executable, str(REPO_ROOT / "tools/bazel_execution_contract.py"), "--qualified-native", "--",
+                            "--session", session_path, "--lane", str(path)])
+
+
 def run_lane(lane: Lane, *, output_root: Path | None = None) -> LaneResult:
     started = time.monotonic()
     chunks: list[str] = []
     step_results: list[StepResult] = []
     ok = True
-    for step in lane.steps:
+    session_path = os.environ.get(product_env_name("NATIVE_GATE_SESSION"))
+    requests = native_lane_steps(lane) if session_path else []
+    if requests and len(requests) != len(lane.steps):
+        raise ValueError("native lanes must separate host-only orchestration")
+    steps = (native_lane_step(lane, session_path, requests),) if requests else lane.steps
+    for step in steps:
         chunks.append(f"$ {command_text(step.args)}\n")
         step_started = time.monotonic()
         environment = {**os.environ, **dict(step.env)}
         apply_yomux_environment_assignments(environment, {CHECK_LANE_ENV: lane.name})
-        result = run_lane_step(step, environment=environment)
-        step_results.append(StepResult(step.label, command_text(step.args), time.monotonic() - step_started, result.returncode, pytest_duration_phases(result.stdout)))
+        if requests:
+            result = run_lane_step(step, environment=environment, timeout_seconds=LANE_STEP_TIMEOUT_SECONDS * (len(requests) + 2))
+        else:
+            result = run_lane_step(step, environment=environment)
+        if requests:
+            records = [json.loads(line.removeprefix("YOMUX_NATIVE_STEP ")) for line in result.stdout.splitlines() if line.startswith("YOMUX_NATIVE_STEP ")]
+            if result.returncode == 0 and [record["index"] for record in records] != list(range(len(requests))):
+                result = subprocess.CompletedProcess(result.args, 1, result.stdout, "native lane omitted required step results\n")
+            for original, record in zip(lane.steps, records):
+                step_results.append(StepResult(original.label, command_text(original.args), record["seconds"], record["returncode"], ()))
+            if result.returncode and (not records or records[-1]["returncode"] == 0):
+                step_results.append(StepResult(step.label, command_text(step.args), time.monotonic() - step_started, result.returncode, ()))
+        else:
+            step_results.append(StepResult(step.label, command_text(step.args), time.monotonic() - step_started, result.returncode, pytest_duration_phases(result.stdout)))
         if result.stdout:
             chunks.append(result.stdout)
             if not result.stdout.endswith("\n"):
@@ -1341,6 +1389,33 @@ def execution_failed(output: str) -> bool:
     return any(record.get("admission") == "failed" or record.get("failure_phase") for record in execution_evidence(output))
 
 
+def qualified_coverage_complete(available: list[Lane], results: list[LaneResult]) -> bool:
+    required = {lane.name for lane in available if lane.default}
+    measured = {result.name for result in results}
+    if not required.issubset(measured) or len(measured) != len(results):
+        return False
+    for result in results:
+        if not result.ok or execution_failed(result.output):
+            return False
+        steps = resolved_lane_step_ids(lane_spec(result.name))
+        expected = {"//:go_tests" if step == StepId.BAZEL_GO else "//:qualified_" + str(step).replace("-", "_")
+                    for step in steps if step != StepId.WHITESPACE}
+        admitted = {record.get("coverage_scope") for record in execution_evidence(result.output)
+                    if record.get("effective") == "qualified-native" and record.get("admission") == "passed"
+                    and isinstance(record.get("isolation"), dict)
+                    and record.get("platform") == platform.system()
+                    and all(record.get(key) == value for key, value in
+                            bazel_execution_contract.native_execution_scope(record["platform"]).items())}
+        if not expected.issubset(admitted):
+            return False
+    return True
+
+
+def bazel_execution_arguments(arguments, execution):
+    boundary = arguments.index("--") if "--" in arguments else len(arguments)
+    return [*arguments[:boundary], "--execution", execution, *arguments[boundary:]]
+
+
 def performance_report_payload(*, selected: list[Lane], results: list[LaneResult], serial: bool, elapsed: float, child_usage: dict[str, float | int | str], interrupted: bool = False, cpu_percent: int | None = None, certification: dict[str, object] | None = None, serial_lanes: bool = False) -> dict[str, object]:
     """Create stable opt-in machine output without adding noise to normal checks."""
 
@@ -1475,11 +1550,11 @@ def process_table() -> list[tuple[int, int, str]]:
     difference between measuring the gate and measuring the measurement.
     """
 
-    with subprocess.Popen(["ps", "-eo", "pid=,ppid=,command="], stdout=subprocess.PIPE, text=True) as probe:
+    with subprocess.Popen(["ps", "-eo", "pid=,ppid=,command="], stdout=subprocess.PIPE) as probe:
         stdout, _stderr = probe.communicate()
         probe_pid = probe.pid
     rows: list[tuple[int, int, str]] = []
-    for line in stdout.splitlines():
+    for line in os.fsdecode(stdout).splitlines():
         fields = line.split(None, 2)
         if len(fields) < 2 or not fields[0].isdigit() or not fields[1].isdigit():
             continue
@@ -1651,9 +1726,7 @@ def certification_evidence_dir(explicit: str | None = None) -> Path:
     """
 
     path = Path(explicit) if explicit else Path(product_env('TEST_ROOT', f"/tmp/yomux-test-{os.getpid()}-{os.getuid()}", environ=os.environ)) / "certification" / f"cert-{time.time_ns()}"
-    if not path.resolve().is_relative_to(Path("/tmp").resolve()):
-        raise ValueError("certification evidence dir must be under /tmp")
-    return path
+    return _tmp_only_path(path, label="certification evidence dir")
 
 
 def certification_step(evidence_dir: Path) -> Step:
@@ -1834,12 +1907,7 @@ def certification_verdict(
 def git_head_sha(repo_root: Path = REPO_ROOT) -> str | None:
     """The full 40-character HEAD SHA, or None when git cannot answer. Never the short form."""
 
-    try:
-        completed = subprocess.run(["git", "-C", str(repo_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
-    except OSError:
-        return None
-    sha = completed.stdout.strip()
-    return sha if completed.returncode == 0 and sha else None
+    return bazel_execution_contract.repository_head_sha(repo_root, declared=True)
 
 
 # Local, transient progress scratchpads: a STATUS-REPORT the agent keeps its own progress in, and the
@@ -1871,7 +1939,8 @@ def working_tree_clean_state(repo_root: Path = REPO_ROOT) -> dict[str, object]:
     """
 
     try:
-        completed = subprocess.run(["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=all"], capture_output=True, text=True, check=False)
+        completed = subprocess.run(["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=all"],
+            env=bazel_execution_contract.repository_git_environment(), capture_output=True, text=True, check=False)
     except OSError as exc:
         return {"observable": False, "clean": False, "reason": f"git status unavailable: {exc}", "tracked": [], "untracked": []}
     if completed.returncode != 0:
@@ -2048,6 +2117,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--certification-only", action="store_true", help="run only the exclusive latency-certification phase, skipping every functional lane")
     parser.add_argument("--certification-evidence-dir", default=None, metavar="/tmp/DIR", help="override the automatic certification evidence directory under /tmp")
     parser.add_argument("--run-deprecated-python", action="store_true", help="also run legacy Python backend and coexistence tests for explicit maintenance")
+    parser.add_argument("--execution", choices=bazel_execution_contract.EXECUTION_MODES, default="auto",
+                        help="execution backend; native is diagnostic, qualified-native requires a verified offline bundle")
     args = parser.parse_args(argv)
     # Capture children inherited from the invoking login shell before this runner creates any work.
     # Some desktop helpers survive `bash` -> Python exec and retain the runner PID as their parent.
@@ -2058,6 +2129,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.certification_only and args.lane:
         parser.error("--certification-only runs no lanes; drop --lane")
+    if args.execution == "qualified-native" and (args.certify or args.certification_only):
+        parser.error("qualified native functional gates do not yet admit latency certification")
 
     try:
         check_cpu_percent(args.cpu_percent)
@@ -2077,6 +2150,31 @@ def main(argv: list[str] | None = None) -> int:
 
     selected_names = set() if args.certification_only else set(args.lane or [lane.name for lane in available if lane.default])
     selected = slowest_first([lane for lane in available if lane.name in selected_names])
+    if args.execution == "qualified-native":
+        qualified = []
+        for lane in selected:
+            steps = []
+            for step_id, step in zip(resolved_lane_step_ids(lane_spec(lane.name)), lane.steps, strict=True):
+                if step.args[:1] == ["git"]:
+                    steps.append(step)
+                elif step.args[:1] == ["tools/run_bazel_tests.sh"]:
+                    steps.append(replace(step, args=bazel_execution_arguments(step.args, "qualified-native")))
+                else:
+                    target = "//:qualified_" + str(step_id).replace("-", "_")
+                    descriptor = json.dumps({"args": step.args, "env": step.env}, separators=(",", ":"))
+                    steps.append(replace(step, args=["tools/run_bazel_tests.sh", "--execution", "qualified-native", "--target", target,
+                                                    "--jobs", bazel_job_count(serial=args.serial, cpu_percent=args.cpu_percent),
+                                                    "--", "--test_arg=" + descriptor]))
+            qualified.append(replace(lane, steps=tuple(steps)))
+        selected = qualified
+    elif args.execution in {"native", "docker"}:
+        selected = [replace(lane, steps=tuple(
+            replace(step, args=bazel_execution_arguments(step.args, args.execution))
+            if step.args[:1] == ["tools/run_bazel_tests.sh"] else
+            replace(step, env=(*step.env, ("YOMUX_CHECK_CONTAINER", "0" if args.execution == "native" else "1")))
+            if step.args[:3] == ["python3", "-m", "pytest"] else step
+            for step in lane.steps
+        )) for lane in selected]
     if not selected and not args.certification_only:
         print("no lanes selected", file=sys.stderr)
         return 2
@@ -2109,7 +2207,7 @@ def main(argv: list[str] | None = None) -> int:
     # `expected_containers` records whether the lanes will actually route into Docker: only then is
     # an unobservable client at retirement a refusal rather than a clear, because only then could an
     # owned container still be draining.
-    expected_containers = docker_image.container_available(REPO_ROOT)[0]
+    expected_containers = args.execution != "qualified-native" and docker_image.container_available(REPO_ROOT)[0]
 
     started = time.monotonic()
     usage_before = child_usage_snapshot()
@@ -2120,8 +2218,8 @@ def main(argv: list[str] | None = None) -> int:
         # One run token, exported so docker/run-tests.sh stamps every container this run launches
         # with the owner label, and restored on exit so a later in-process run is never mistaken for
         # this one's owner.
-        with check_run_token_environment(), worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="test-gate"):
-            if not args.certification_only:
+        with check_run_token_environment(), worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="test-gate"), ExitStack() as native_cleanup:
+            if not args.certification_only and args.execution != "qualified-native":
                 generated = static_build.build_once(sorted(static_build.ASSETS))
                 if generated:
                     print("Generated static assets before checks: " + ", ".join(generated), flush=True)
@@ -2129,7 +2227,7 @@ def main(argv: list[str] | None = None) -> int:
                 functional_diagnostics = measure_functional_host(selected, evidence_dir=evidence_dir)
                 if functional_diagnostics is not None:
                     print("Functional host diagnostics (not admission): " + json.dumps(functional_diagnostics, sort_keys=True), flush=True)
-                if selected_needs_browser(selected):
+                if selected_needs_browser(selected) and args.execution != "qualified-native":
                     browser_capability = browser_capability_preflight()
                     if not browser_capability.available:
                         print(browser_capability.refusal_text(), file=sys.stderr, flush=True)
@@ -2140,6 +2238,18 @@ def main(argv: list[str] | None = None) -> int:
                         write_performance_report(report_path, payload)
                         print(f"Test runtime report: {report_path}", flush=True)
                         return EXIT_LANE_FAILED
+                if args.execution == "qualified-native":
+                    gate = native_cleanup.enter_context(bazel_execution_contract.bazel_native.NativeGateSession(
+                        ["--jobs", bazel_job_count(serial=args.serial, cpu_percent=args.cpu_percent)], bazel_execution_contract))
+                    gate.admit([request["target"] for lane in selected for request in native_lane_steps(lane)])
+                    previous_session = os.environ.get(product_env_name("NATIVE_GATE_SESSION"))
+                    def restore_native_session():
+                        if previous_session is None:
+                            os.environ.pop(product_env_name("NATIVE_GATE_SESSION"), None)
+                        else:
+                            os.environ[product_env_name("NATIVE_GATE_SESSION")] = previous_session
+                    native_cleanup.callback(restore_native_session)
+                    os.environ[product_env_name("NATIVE_GATE_SESSION")] = str(gate.path)
                 cross_lane_serial = args.serial or args.serial_lanes
                 mode = "serial" if args.serial else "serial lanes (xdist preserved)" if args.serial_lanes else "parallel plus final serial" if any(lane.run_last for lane in selected) else "parallel"
                 if selected:
@@ -2162,6 +2272,9 @@ def main(argv: list[str] | None = None) -> int:
     except worktree_writer.WorktreeWriterBusy as exc:
         print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
         return 3
+    except (ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
+        return EXIT_LANE_FAILED
     except ToolGuardBusy as exc:
         print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
         return 3
@@ -2181,6 +2294,16 @@ def main(argv: list[str] | None = None) -> int:
 
 
     failed = [result.label for result in results if not result.ok or execution_failed(result.output)]
+    if args.execution == "qualified-native":
+        records = [record for result in results for record in execution_evidence(result.output)
+                   if record.get("effective") == "qualified-native" and record.get("admission") == "passed"]
+        complete = qualified_coverage_complete(available, results)
+        admitted_selection = qualified_coverage_complete([replace(lane, default=True) for lane in selected], results)
+        isolation = [record["isolation"] for record in records if "isolation" in record]
+        bazel_execution_contract.execution_event(effective="qualified-native", result="failed" if failed or not admitted_selection else "passed",
+            coverage_complete=complete, lanes=[result.name for result in results], isolation=isolation,
+            **bazel_execution_contract.native_execution_scope(platform.system()),
+            linux_isolation_parity=bool(isolation) and all(all(guarantee.values()) for guarantee in isolation))
     print("\n" + ("=" * 40))
     if failed:
         # A failed lane is a definite product red and outranks "could not be measured"; the
@@ -2188,6 +2311,9 @@ def main(argv: list[str] | None = None) -> int:
         certification_note = f"; certification: {certification['result']}" if certification else ""
         print(f"CHECK FAILED in {elapsed:.2f}s: " + ", ".join(failed) + certification_note)
         return EXIT_LANE_FAILED
+    if args.execution == "qualified-native" and not admitted_selection:
+        print("CHECK REFUSED: selected native coverage lacks matching sandbox scope evidence", flush=True)
+        return EXIT_NOT_CERTIFIABLE
     if not certify:
         print(f"CHECK PASSED in {elapsed:.2f}s (development checks: NOT CERTIFIED, latency certification was not requested)")
         return 0

@@ -88,6 +88,200 @@ test('Window kill actions follow the stable row identity across index reuse', ()
   }
 });
 
+test('Recent updates dates in place and sorts the latest activity only every ten seconds', () => {
+  for (const mode of ['normal', 'advanced']) {
+    const api = loadYomux('', ['one', 'two']);
+    api.setTabberModeForTest(mode);
+    api.setFileExplorerModeForTest('tabber');
+    const groups = new TestElement('', 'div');
+    const update = (now, one, two) => {
+      api.setFileTreeRecencyNowForTest(now);
+      api.applyTabberActivityPayloadForTest({activity: {one: {active_recency_ts: one}, two: {active_recency_ts: two}},
+        session_order: ['one', 'two'], sessions: {one: {panes: []}, two: {panes: []}}});
+      api.renderTabberTreeForTest(groups);
+    };
+    const rows = () => groups.querySelectorAll('.file-tree-row[data-tabber-type="normal"]');
+    const order = () => rows().map(row => row.dataset.tabberSession);
+    update(1_000_000, 900, 800);
+    assert.deepEqual(order(), ['one', 'two']);
+    const second = rows()[1];
+    const oldDate = second.querySelector('.file-tree-date').textContent;
+    update(1_001_000, 900, 1001);
+    assert.deepEqual(order(), ['one', 'two'], mode);
+    assert.notEqual(second.querySelector('.file-tree-date').textContent, oldDate, 'dates stay live');
+    update(1_009_999, 900, 1009);
+    assert.deepEqual(order(), ['one', 'two']);
+    update(1_010_000, 900, 1010);
+    assert.deepEqual(order(), ['two', 'one'], 'the next interval uses the latest timestamps');
+    api.setFileExplorerTreeSortModeForTest('az');
+    api.renderTabberTreeForTest(groups);
+    assert.deepEqual(order(), ['one', 'two'], 'manual sort applies immediately');
+    api.setFileExplorerTreeSortModeForTest('newest');
+    api.renderTabberTreeForTest(groups);
+    assert.deepEqual(order(), ['two', 'one'], 'returning to Recent applies immediately');
+  }
+});
+
+test('shared status renderer uses transport shapes for one visible color and circles for mixed colors', () => {
+  const api = loadYomux('', ['one']);
+  const cases = [
+    ['working', [], 'play'], ['working', ['working', 'working'], 'play'],
+    ['cooldown', ['cooldown', 'cooldown'], 'pause'],
+    ['attention', ['attention'], 'stop'], ['blocked', ['attention', 'blocked', 'unavailable'], 'stop'],
+    ['unavailable', ['unavailable'], 'stop'],
+    ['working', ['working', 'attention'], ''], ['blocked', ['blocked', 'working'], ''],
+    ['cooldown', ['cooldown', 'blocked'], ''], ['attention', ['working', 'cooldown', 'attention'], ''],
+    ['cooldown', ['cooldown'], 'pause'], ['attention', ['attention'], 'stop'], ['working', ['working'], 'play'],
+  ];
+  for (const [state, aggregateTones, shape] of cases) {
+    const html = api.agentWindowStatusDotHtmlForTest({state, icon: '●', aggregateTones}, {label: 'Window status'});
+    for (const candidate of ['play', 'pause', 'stop']) assert.equal(html.includes(`agent-window-status-dot--${candidate}`), shape === candidate, html);
+    assert.equal(html.includes('agent-window-status-dot--segmented'), !shape, html);
+    assert.match(html, /aria-label="Window status"/);
+    if (!shape && aggregateTones.includes('blocked')) assert.match(html, /agent-window-status-dot--attention-(cooldown|working)/);
+  }
+});
+
+test('terminal input clocks survive in-flight snapshots and exclude passive or rejected input', () => {
+  const api = loadYomux('', ['one']);
+  const snapshot = timestamp => ({activity: {one: {active_recency_ts: timestamp, last_user_input_ts: timestamp}},
+    session_order: ['one'], sessions: {one: {panes: []}}});
+  api.applyTabberActivityPayloadForTest(snapshot(100));
+  const frames = [];
+  const socket = {readyState: 1, send(frame) { frames.push(JSON.parse(frame)); }};
+  api.registerTerminalForTest('one', {focus() {}, rows: 24, cols: 80}, socket);
+  for (const key of ['a', 'b', '\x00', '\x1b[1;2R']) {
+    api.noteTerminalExplicitInputForTest('one');
+    assert.equal(api.handleTerminalDataForTest('one', key), true);
+    assert.equal(frames.at(-1).user_input, true, 'native keyboard provenance includes Ctrl-Space and modified F3');
+  }
+  const local = api.tabberRecencyForTest('one');
+  assert.ok(local > 100);
+  api.applyTabberActivityPayloadForTest(snapshot(101));
+  assert.equal(api.tabberRecencyForTest('one'), local, 'an earlier input acknowledgement cannot clear the newest local input');
+  api.noteTerminalExplicitInputForTest('one');
+  api.handleTerminalDataForTest('one', '\x1b[<0;4;8M');
+  assert.equal(frames.at(-1).user_input, false);
+  assert.equal(api.tabberRecencyForTest('one'), local);
+  api.handleTerminalDataForTest('one', 'xterm-fallback');
+  assert.equal(frames.at(-1).user_input, true, 'printable xterm data is sufficient when the browser missed DOM key provenance');
+  assert.ok(api.tabberRecencyForTest('one') >= local, `the inferred input does not regress the immediate local date: ${local} -> ${api.tabberRecencyForTest('one')}`);
+  const inferred = api.tabberRecencyForTest('one');
+  api.handleTerminalDataForTest('one', '\x1b[<0;4;8M');
+  assert.equal(api.tabberRecencyForTest('one'), inferred, 'mouse tracking remains excluded from inferred activity');
+  socket.readyState = 0;
+  api.noteTerminalExplicitInputForTest('one');
+  assert.equal(api.handleTerminalDataForTest('one', 'offline'), false);
+  assert.equal(api.tabberRecencyForTest('one'), inferred, 'rejected offline input leaves the last accepted activity visible');
+  api.applyTabberActivityPayloadForTest(snapshot(local + 1));
+  assert.equal(api.tabberRecencyForTest('one'), local + 1, 'the server clock takes over after acknowledgement');
+});
+
+test('latest repeated editor and Repo Diff engagement survives reload inside the touch throttle', () => {
+  const url = '?layout=left&tabs=left:file%3A%2Ftmp%2F2026.md';
+  const api = loadYomux(url, ['one']);
+  const item = api.fileEditorItemFor('/tmp/2026.md');
+  const diff = api.gitDiffItemFor('/tmp/repo');
+  api.noteTabberItemActivityForTest(item);
+  api.noteTabberItemActivityForTest(diff);
+  api.noteTabberItemActivityForTest(item);
+  const stored = api.sessionStorageValueForTest('yomux-tabber-item-activity');
+  const latest = JSON.parse(stored).find(entry => entry[0] === item)[1];
+  const restored = loadYomux(url, ['one'], 'http:', 'Linux x86_64', 'admin', {
+    sessionStorage: {'yomux-tabber-item-activity': stored},
+  });
+  restored.setTabberActivityForTest({activity: {[item]: {active_recency_ts: latest - 2}}});
+  assert.equal(restored.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === item)?.mtime, latest);
+});
+
+testAsync('restoring an editor does not count as recent activity', async () => {
+  const api = loadYomux('?layout=left&tabs=left:file%3A%2Ftmp%2F2026.md', ['one'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+  const path = '/tmp/2026.md';
+  const item = api.fileEditorItemFor(path);
+  api.setOpenFileStateForTest(path, {kind: 'text', content: '# 2026', original: '# 2026', dirty: false, mtime: 1});
+  api.setFetchForTest(() => Promise.resolve(jsonResponse({path, content: '# 2026', size: 6, mtime: 1})));
+
+  api.loadFileEditorStateForTest(path, null, item);
+  await flushAsyncWork();
+  const editorEntry = () => api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === item);
+  assert.equal(editorEntry()?.mtime, 0, 'automatic disk loading after reload must not make an old editor recent');
+
+  api.noteTabberItemActivityForTest(item);
+  assert.ok(editorEntry()?.mtime > 0, 'an explicit editor interaction still records activity');
+});
+
+testAsync('editor and Repo Diff engagement updates the matching Tabber date', async () => {
+  const api = loadYomux('?layout=left&tabs=left:file%3A%2Ftmp%2F2026.md', ['one'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+  const touches = [];
+  api.setFetchForTest(async (url, options = {}) => {
+    if (String(url).endsWith('/api/activity/touch')) touches.push({url, options});
+    return jsonResponse({ok: true});
+  });
+  api.setTabberModeForTest('normal');
+  api.setFileTreeRecencyNowForTest(Date.now());
+  const editorItem = api.fileEditorItemFor('/tmp/2026.md');
+  let editorEntry = api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === editorItem);
+  assert.ok(editorEntry, 'the open editor is represented by a Tabber utility row');
+  assert.equal(editorEntry.mtime, 0, 'an untouched editor starts without local activity');
+  assert.equal(api.noteTabberItemActivityForTest(editorItem), true);
+  editorEntry = api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === editorItem);
+  assert.ok(editorEntry.mtime > 0, 'the editor gets its own local activity timestamp');
+  const editorRow = api.tabberRenderedRowsForTest().find(row => row.name === '2026.md');
+  assert.ok(editorRow?.date, 'the editor row displays its new activity date');
+
+  const diffItem = api.resolveLayoutItem(api.gitDiffItemFor('/tmp/repo'));
+  await api.toggleTabberNormalPaneForTest(diffItem);
+  api.setFileTreeRecencyNowForTest(Date.now());
+  assert.equal(api.noteTabberItemActivityForTest(diffItem), true);
+  const diffEntry = api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === diffItem);
+  assert.ok(diffEntry?.mtime > 0, 'Repo Diff gets a matching local activity timestamp');
+  await flushAsyncWork();
+  assert.deepEqual(touches.map(({options}) => JSON.parse(options.body).item), [editorItem, diffItem], `editor and Repo Diff activity is reported to the server for reload snapshots: ${JSON.stringify({touches, sentAt: [api.tabberItemActivityTouchSentAtForTest(editorItem), api.tabberItemActivityTouchSentAtForTest(diffItem)], errors: api.clientPerfSummaryForTest?.()})}`);
+
+  const restored = loadYomux('?layout=left&tabs=left:file%3A%2Ftmp%2F2026.md', ['one']);
+  restored.setTabberActivityForTest({activity: {[editorItem]: {active_recency_ts: 1700000000}}});
+  const restoredEntry = restored.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === editorItem);
+  assert.equal(restoredEntry?.mtime, 1700000000, 'the server activity snapshot restores the editor date after reload');
+});
+
+testAsync('editing file content reports activity through the shared editor change owner', async () => {
+  const path = '/tmp/typed.md';
+  const api = loadYomux(`?layout=left&tabs=left:${encodeURIComponent(`file:${path}`)}`, ['one'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+  const item = api.fileEditorItemFor(path);
+  const touches = [];
+  api.setFetchForTest(async (url, options = {}) => {
+    if (String(url).endsWith('/api/activity/touch')) touches.push(JSON.parse(options.body).item);
+    return jsonResponse({ok: true});
+  });
+  api.setOpenFileStateForTest(path, {kind: 'text', content: '# before', original: '# before', dirty: false});
+  const panel = new TestElement('typed-editor');
+  panel.dataset.layoutItem = item;
+  panel.dataset.filePath = path;
+  api.handleFileEditorContentChangedForTest(panel, path, '# after', {sourceSurface: 'text-editor'});
+  const entry = api.buildTabberNormalRowsForTest().find(row => row.tabber?.item === item);
+  assert.ok(entry?.mtime > 0, 'editing text immediately advances the editor Tabber date');
+  await flushAsyncWork();
+  assert.deepEqual(touches, [item], 'typing sends a server activity touch that is available after browser reload');
+
+  const previewPath = '/tmp/preview-typed.md';
+  const previewApi = loadYomux(`?layout=left&tabs=left:${encodeURIComponent(`file:${previewPath}`)}`, ['one'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+  const previewItem = previewApi.fileEditorItemFor(previewPath);
+  const previewTouches = [];
+  previewApi.setFetchForTest(async (url, options = {}) => {
+    if (String(url).endsWith('/api/activity/touch')) previewTouches.push(JSON.parse(options.body).item);
+    return jsonResponse({ok: true});
+  });
+  previewApi.setOpenFileStateForTest(previewPath, {kind: 'text', content: '# before', original: '# before', dirty: false});
+  const previewPanel = new TestElement('typed-preview');
+  previewPanel.dataset.layoutItem = previewItem;
+  previewPanel.dataset.filePath = previewPath;
+  previewApi.handleFileEditorContentChangedForTest(previewPanel, previewPath, '# edited in preview', {sourceSurface: 'markdown-preview'});
+  const previewEntry = previewApi.buildTabberNormalRowsForTest().find(row => row.tabber?.item === previewItem);
+  assert.ok(previewEntry?.mtime > 0, 'editing Markdown Preview advances its Tabber date through the same change owner');
+  await flushAsyncWork();
+  assert.deepEqual(previewTouches, [previewItem], 'Markdown Preview typing reaches the server-owned activity snapshot');
+});
+
 test('Advanced Tabber uses Normal window cards and keeps only its additional toolbar controls', () => {
   const api = loadYomux('', ['1']);
   api.setTranscriptInfoForTest('1', {
@@ -4465,6 +4659,33 @@ async function runTabberSuite() {
     }
   });
 
+  test('Tabber rows retain the status and repository badges shown on pane tabs', () => {
+    const api = loadYomux('', ['main-tag']);
+    api.setFileExplorerModeForTest('tabber');
+    const info = {
+      panes: [{window: '0', window_index: 0, pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude'}],
+      work_graph: {
+        version: 1,
+        tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, runtime_actors: {}, path_observations: {},
+        git_worktrees: {worktree: {id: 'worktree', root: '/repo', local_repository_id: 'local', current_branch_id: 'branch', git: {root: '/repo'}}},
+        local_repositories: {local: {id: 'local', local_branch_ids: ['branch']}},
+        hosted_repositories: {}, local_branches: {branch: {id: 'branch', name: 'main'}},
+        pull_requests: {}, linear_issues: {}, worktree_branch_activity: {},
+      },
+    };
+    api.setTranscriptInfoForTest('main-tag', info);
+    api.setAutoApproveStateForTest('main-tag', {agent_windows: [
+      {kind: 'claude', state: 'needs-input', window_index: 0, window_name: 'claude', current: true, window_active: true},
+    ]});
+    const paneTab = api.tmuxPaneTabHtml('main-tag', api.transcriptInfoForTest('main-tag'), null, false);
+    const row = api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.session === 'main-tag');
+
+    assert.match(paneTab, />ASK<\/span>/, 'the pane tab exposes its current question label');
+    assert.match(row?.tabber?.normalNameHtml || '', />ASK<\/span>/, 'the Tabber row mirrors the pane tab question label');
+    assert.match(paneTab, />MAIN<\/span>/, 'the pane tab exposes the current default-branch label');
+    assert.match(row?.tabber?.normalNameHtml || '', />MAIN<\/span>/, 'the Tabber row mirrors the pane tab default-branch label');
+  });
+
   test('Tabber window recency uses one timestamp for display, sorting, and parent bubbling', () => {
     const api = loadYomux('', ['4']);
     const beforeRender = Date.now() / 1000;
@@ -5160,6 +5381,7 @@ async function runTabberSuite() {
       observeTerminalTmuxPrefixWindowSwitches() { events.push('observe'); },
       acknowledgeTerminalAttentionFromTransportInput() { events.push('attention'); },
       terminalDataShouldAcknowledgeAttention() { return true; },
+      noteTabberTerminalInput() { events.push('activity'); },
       closeOtherSessionPopovers() { events.push('popover'); },
       commitTerminalExplicitInputOwnership() { events.push('ownership'); },
       localizedHtml(value) { return value; },
@@ -5169,8 +5391,8 @@ async function runTabberSuite() {
     vm.runInContext(`${filtering}\n${transport}\n${insertion}`, context);
     const bytes = "'/tmp/a b.png' \x1b[?1;2c\r";
     assert.equal(context.insertIntoTerminal('1', bytes), true);
-    assert.deepEqual(sent, [{type: 'input', data: "'/tmp/a b.png' \r"}]);
-    assert.deepEqual(events, ['send', 'observe', 'attention', 'popover', 'ownership', 'focus']);
+    assert.deepEqual(sent, [{type: 'input', data: "'/tmp/a b.png' \r", user_input: true}]);
+    assert.deepEqual(events, ['send', 'activity', 'observe', 'attention', 'popover', 'ownership', 'focus']);
     assert.equal(modifierCalls, 0, 'inserted paths and commands bypass latched mobile modifiers');
     assert.equal(item.lastInputSentAt, 10, 'insertion retains the shared echo timing owner');
 
@@ -5260,13 +5482,25 @@ test('Normal rows use distinct window descriptions and never inherit the session
 });
 
 test('Normal Tabber keeps utility tabs alphabetically at the bottom after recent conversations', () => {
-  const api = loadYomux('', ['z-last', '1']);
+  const api = loadYomux('?layout=left&tabs=left:file%3A%2Ftmp%2F2026.md', ['z-last', '1']);
   api.setTabberModeForTest('normal');
   api.setFileExplorerTreeSortModeForTest('newest');
   for (const session of ['z-last', '1']) {
     api.setTranscriptInfoForTest(session, {panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'bash', command: 'bash'}]});
   }
-  const rows = api.tabberRenderedRowsForTest();
+  const editorItem = api.fileEditorItemFor('/tmp/2026.md');
+  const groups = new TestElement('', 'div');
+  api.setFileExplorerModeForTest('tabber');
+  api.renderTabberTreeForTest(groups);
+  const initialUtilityRows = groups.querySelectorAll('.file-tree-row[data-tabber-type="tab"]');
+  const initialUtilityLabels = initialUtilityRows.map(row => row.querySelector('.file-tree-name')?.textContent || '');
+  assert.equal(api.noteTabberItemActivityForTest(editorItem), true, 'activity belongs to the registered editor utility item');
+  api.renderTabberTreeForTest(groups);
+  const rows = Array.from(groups.querySelectorAll('.file-tree-row')).map(row => ({
+    type: row.dataset.tabberType,
+    title: row.querySelector('.file-tree-name')?.textContent || '',
+    date: row.querySelector('.file-tree-date')?.textContent || '',
+  }));
   const conversationRows = rows.filter(row => row.type === 'normal');
   const utilityRows = rows.filter(row => row.type === 'tab');
   assert.ok(utilityRows.length > 0, 'the default roster includes utility tabs');
@@ -5276,6 +5510,8 @@ test('Normal Tabber keeps utility tabs alphabetically at the bottom after recent
   const utilityLabels = utilityRows.map(row => row.title.split('\n')[0]);
   const collator = new Intl.Collator(undefined, {numeric: true, sensitivity: 'base'});
   assert.deepEqual(utilityLabels, [...utilityLabels].sort((left, right) => collator.compare(left, right)), 'utility tabs sort alphabetically');
+  assert.deepEqual(utilityLabels, initialUtilityLabels, 'utility row order is preserved after real editor activity');
+  assert.ok(utilityRows.some(row => row.title === '2026.md' && row.date), 'the editor activity timestamp renders in the persistent Tabber container');
 
   api.setTabberActivityForTest({activity: {'z-last:0': {active_recency_ts: 500}, '1:0': {active_recency_ts: 900}}});
   const recentRows = api.tabberRenderedRowsForTest();

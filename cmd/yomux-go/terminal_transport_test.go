@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func terminalControlFixture(t *testing.T) (*server, string) {
@@ -23,8 +25,7 @@ func terminalControlFixture(t *testing.T) (*server, string) {
 	if err := syscall.Mkfifo(filepath.Join(root, "release"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	script := `#!/bin/sh
-case "$1" in
+	script := `case "$1" in
 list-clients) printf '/dev/other\tfixture\t180\t40\n';;
 refresh-client)
   printf '%s\n' "$*" >> "$TERMINAL_CONTROL_FIXTURE/commands"
@@ -35,13 +36,13 @@ refresh-client)
   : > "$TERMINAL_CONTROL_FIXTURE/completed"
   ;;
 attach-session)
-  /bin/stty size > "$TERMINAL_CONTROL_FIXTURE/dimensions"
+  stty size > "$TERMINAL_CONTROL_FIXTURE/dimensions"
   : > "$TERMINAL_CONTROL_FIXTURE/attached"
-  exec /bin/cat
+  exec cat
   ;;
 esac
 `
-	if err := os.WriteFile(filepath.Join(root, "tmux"), []byte(script), 0700); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "tmux"), []byte(testsupport.ShellScript(t, script)), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", root+":"+os.Getenv("PATH"))

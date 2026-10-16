@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func TestDarwinGitObjectSnapshotCacheReusesAndInvalidatesInventory(t *testing.T) {
@@ -873,8 +875,8 @@ func TestDarwinGitReadsPinnedSnapshotWhenLooseRefIsReplacedAndRestored(t *testin
 	backup := ref + ".snapshot-test-backup"
 	bin := t.TempDir()
 	wrapper := filepath.Join(bin, "git")
-	script := "#!/bin/sh\nset -u\nmv \"$YOLO_REF\" \"$YOLO_BACKUP\"\nprintf '%s\\n' \"$YOLO_REPLACEMENT\" > \"$YOLO_REF\"\nset +e\n\"$YOLO_REAL_GIT\" \"$@\"\nstatus=$?\nrm -f \"$YOLO_REF\"\nmv \"$YOLO_BACKUP\" \"$YOLO_REF\"\nexit \"$status\"\n"
-	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+	script := "set -u\nmv \"$YOLO_REF\" \"$YOLO_BACKUP\"\nprintf '%s\\n' \"$YOLO_REPLACEMENT\" > \"$YOLO_REF\"\nset +e\n\"$YOLO_REAL_GIT\" \"$@\"\nstatus=$?\nrm -f \"$YOLO_REF\"\nmv \"$YOLO_BACKUP\" \"$YOLO_REF\"\nexit \"$status\"\n"
+	if err := os.WriteFile(wrapper, []byte(testsupport.ShellScript(t, script)), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("YOLO_REF", ref)
@@ -944,8 +946,8 @@ func TestDarwinGitDiffDoesNotFollowSwappedWorktreePath(t *testing.T) {
 	}
 	bin := t.TempDir()
 	wrapper := filepath.Join(bin, "git")
-	script := "#!/bin/sh\nset -u\ncase \" $* \" in *\" diff \"*|*\" status \"*) ;; *) exec \"$YOLO_REAL_GIT\" \"$@\" ;; esac\nmv \"$YOLO_TREE\" \"$YOLO_TREE_BACKUP\" || exit 71\nln -s \"$YOLO_OUTSIDE\" \"$YOLO_TREE\" || { mv \"$YOLO_TREE_BACKUP\" \"$YOLO_TREE\"; exit 72; }\nln -s \"$YOLO_TREE_BACKUP/.git\" \"$YOLO_OUTSIDE/.git\" || exit 73\n\"$YOLO_REAL_GIT\" \"$@\"\nrm \"$YOLO_TREE\"\nmv \"$YOLO_TREE_BACKUP\" \"$YOLO_TREE\"\nexit 0\n"
-	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+	script := "set -u\ncase \" $* \" in *\" diff \"*|*\" status \"*) ;; *) exec \"$YOLO_REAL_GIT\" \"$@\" ;; esac\nmv \"$YOLO_TREE\" \"$YOLO_TREE_BACKUP\" || exit 71\nln -s \"$YOLO_OUTSIDE\" \"$YOLO_TREE\" || { mv \"$YOLO_TREE_BACKUP\" \"$YOLO_TREE\"; exit 72; }\nln -s \"$YOLO_TREE_BACKUP/.git\" \"$YOLO_OUTSIDE/.git\" || exit 73\n\"$YOLO_REAL_GIT\" \"$@\"\nrm \"$YOLO_TREE\"\nmv \"$YOLO_TREE_BACKUP\" \"$YOLO_TREE\"\nexit 0\n"
+	if err := os.WriteFile(wrapper, []byte(testsupport.ShellScript(t, script)), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1009,7 +1011,7 @@ func TestDarwinGitSnapshotIgnoresExternalIncludesAndHelpers(t *testing.T) {
 	external := t.TempDir()
 	helperMarker := filepath.Join(external, "helper-ran")
 	helper := filepath.Join(external, "fsmonitor")
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\ntouch \"$YOLO_HELPER_MARKER\"\nprintf '0 0\\n'\n"), 0o700); err != nil {
+	if err := os.WriteFile(helper, []byte(testsupport.ShellScript(t, "touch \"$YOLO_HELPER_MARKER\"\nprintf '0 0\\n'\n")), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(external, "included-config"), []byte("[core]\nfsmonitor = "+helper+"\n"), 0o600); err != nil {
@@ -1249,8 +1251,8 @@ func TestDarwinGitObjectReadDoesNotFollowSwappedObjectPath(t *testing.T) {
 	bin := t.TempDir()
 	wrapper := filepath.Join(bin, "git")
 	markerPath := filepath.Join(t.TempDir(), "swap-occurred")
-	script := "#!/bin/sh\nset -u\ncase \" $* \" in *\" cat-file -p $YOLO_EXTERNAL_OID \"*) /bin/mv \"$YOLO_OBJECTS\" \"$YOLO_OBJECTS_BACKUP\"; /bin/ln -s \"$YOLO_EXTERNAL_OBJECTS\" \"$YOLO_OBJECTS\"; : > \"$YOLO_SWAP_MARKER\";; esac\nset +e\n\"$YOLO_REAL_GIT\" \"$@\"\nstatus=$?\nif [ -L \"$YOLO_OBJECTS\" ]; then /bin/rm \"$YOLO_OBJECTS\"; /bin/mv \"$YOLO_OBJECTS_BACKUP\" \"$YOLO_OBJECTS\"; fi\nexit \"$status\"\n"
-	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+	script := "set -u\ncase \" $* \" in *\" cat-file -p $YOLO_EXTERNAL_OID \"*) mv \"$YOLO_OBJECTS\" \"$YOLO_OBJECTS_BACKUP\"; ln -s \"$YOLO_EXTERNAL_OBJECTS\" \"$YOLO_OBJECTS\"; : > \"$YOLO_SWAP_MARKER\";; esac\nset +e\n\"$YOLO_REAL_GIT\" \"$@\"\nstatus=$?\nif [ -L \"$YOLO_OBJECTS\" ]; then rm \"$YOLO_OBJECTS\"; mv \"$YOLO_OBJECTS_BACKUP\" \"$YOLO_OBJECTS\"; fi\nexit \"$status\"\n"
+	if err := os.WriteFile(wrapper, []byte(testsupport.ShellScript(t, script)), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))

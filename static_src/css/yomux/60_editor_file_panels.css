@@ -3506,6 +3506,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
 /* Tabber (Finder pane 3rd mode) rows reuse the .file-tree-row DOM; only the level-0 session label shape,
    the window/process detail, and the active-window emphasis are tabber-specific. */
 .file-tree-row.tabber-row {
+  --tabber-path-color: var(--text);
   --tabber-detail-color: var(--muted);
   --tabber-agent-icon-size: calc(var(--file-explorer-font-size) + 2px);
 }
@@ -3644,9 +3645,54 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   inline-size: var(--tabber-agent-icon-size);
   block-size: var(--tabber-agent-icon-size);
 }
+.file-tree-row.tabber-row[data-tabber-type="session"] > .file-tree-name {
+  display: contents;
+}
+.file-tree-row.tabber-row .tabber-session-tab {
+  flex: 1 1 auto;
+  inline-size: 100%;
+  max-inline-size: 100%;
+  height: auto;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+}
+.file-tree-row.tabber-row .tabber-session-tab .session-agent-activity-marker .agent-window-activity {
+  --agent-window-icon-size: var(--tabber-agent-icon-size);
+  --agent-window-activity-inline-size: var(--agent-window-icon-size);
+  --agent-window-activity-block-size: var(--agent-window-icon-size);
+}
+.file-tree-row.tabber-row.selected .tabber-session-tab {
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
+.file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
+  color: var(--tabber-level0-color);
+}
+.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected) > .file-tree-name {
+  color: var(--text);
+}
+.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
+  color: var(--tabber-level1-color);
+}
+.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected).tabber-active-window > .file-tree-name,
+.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected).tabber-active-window > .file-tree-icon:not(.ui-disclosure-triangle) {
+  color: var(--tabber-level1-color);
+}
+.file-tree-row.tabber-row[data-tabber-type="repo"]:not(.selected) > .file-tree-name,
+.file-tree-row.tabber-row[data-tabber-type="repo"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
+  color: var(--tabber-path-color);
+}
 .file-tree-row.tabber-row[data-tabber-type="tab"]:not(.selected) > .file-tree-name,
 .file-tree-row.tabber-row[data-tabber-type="tab"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-level0-color);
+}
+.file-tree-row.tabber-row[data-tabber-type="loading"]:not(.selected) > .file-tree-name,
+.file-tree-row.tabber-row[data-tabber-type="loading"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
+  color: var(--tabber-detail-color);
+  font-style: italic;
 }
 .file-tree-row:is(.tabber-active-window, .tabber-active-tab):not(.selected) .file-tree-name {
   font-weight: 800;

@@ -27,6 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from tools.product_environment import product_env
 from yomux_lib.approval import prompt_detector
 
 
@@ -36,11 +37,6 @@ TEST_MODELS = {
     "codex": "gpt-4o-mini",
     "claude": "claude-3-5-haiku-20241022",
     "opencode": "yolomux-fake/gpt-4o-mini",
-}
-MOUNTED_ARTIFACTS = {
-    "claude": "/usr/local/bin/claude",
-    "codex": "/usr/local/bin/codex",
-    "opencode": "/usr/local/bin/opencode",
 }
 SAFE_PROMPT = "Reply with exactly YOLOMUX_FAKE_OK and do nothing else."
 
@@ -138,18 +134,26 @@ SCENARIOS = (
 
 
 def _capability(client: str) -> tuple[bool, str]:
-    if os.environ.get("YOLOMUX_AGENT_DOCKER_E2E") != "1":
-        return False, f"{client}: real-client Docker E2E is disabled; set YOLOMUX_AGENT_DOCKER_E2E=1"
-    if not shutil.which(client):
-        return False, f"{client}: executable was not mounted into the opt-in test container"
-    artifact = MOUNTED_ARTIFACTS[client]
+    if product_env("AGENT_DOCKER_E2E") != "1":
+        return False, f"{client}: real-client E2E is disabled; set YOMUX_AGENT_DOCKER_E2E=1"
+    artifact = shutil.which(client)
+    if artifact is None:
+        return False, f"{client}: required executable is unavailable"
     if not os.path.exists(artifact):
-        return False, f"{client}: opt-in host client mount is unavailable ({artifact})"
+        return False, f"{client}: required client artifact is unavailable ({artifact})"
     if not os.environ.get("HOME") or not os.environ.get("XDG_CONFIG_HOME"):
         return False, f"{client}: isolated HOME/XDG configuration is unavailable"
     if client == "codex" and not os.environ.get("CODEX_HOME"):
         return False, "codex: isolated CODEX_HOME is unavailable"
     return True, ""
+
+
+def _require_capability(client: str) -> None:
+    capable, reason = _capability(client)
+    if not capable:
+        if product_env("AGENT_DOCKER_E2E") == "1":
+            pytest.fail(reason)
+        pytest.skip(reason)
 
 
 def _tmux(binary: str, socket_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -1015,12 +1019,9 @@ def _run_scenario(client: str, scenario: AgentScenario, tmp_path: Path, *, requi
 @pytest.mark.parametrize("client", CLIENTS)
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda item: item.name)
 def test_real_agent_status_scenarios(client: str, scenario: AgentScenario, tmp_path: Path):
-    capable, reason = _capability(client)
-    if not capable:
-        print(f"real-client capability [{client}]: SKIP: {reason}", file=sys.stderr)
-        pytest.skip(reason)
+    _require_capability(client)
     if scenario.ask_mode:
-        pytest.skip(f"{client}: real noninteractive Docker wrapper cannot hold an interactive approval prompt; mock ask coverage is explicit")
+        pytest.skip(f"{client}: noninteractive fixture cannot hold an interactive approval prompt; mock ask coverage is explicit")
     evidence = _run_scenario(client, scenario, tmp_path)
     assert evidence["request_count"] > 0
     assert evidence["state_claimed"] == scenario.expected_state
@@ -1046,9 +1047,7 @@ def test_real_agent_status_scenarios(client: str, scenario: AgentScenario, tmp_p
 @pytest.mark.parametrize("client", ("claude", "codex"))
 def test_real_agent_request_smoke(client: str, tmp_path: Path):
     """The real CLI must make one successful request to the fake provider."""
-    capable, reason = _capability(client)
-    if not capable:
-        pytest.skip(reason)
+    _require_capability(client)
     evidence = _run_scenario(client, SCENARIOS[1], tmp_path, require_match=False)
     assert evidence["request_count"] > 0, evidence
     assert evidence["scenario_evidence"]["durable_completion"], evidence
@@ -1146,9 +1145,7 @@ def test_scenario_matcher_requires_explicit_tool_and_approval_for_ask() -> None:
 @pytest.mark.parametrize("failure", ("hold", "disconnect", "error", "client-exit", "tmux-loss"))
 def test_real_agent_failure_recovery_and_isolation(client: str, failure: str, tmp_path: Path):
     """Opt-in real-client coverage for provider faults and a later successful query."""
-    capable, reason = _capability(client)
-    if not capable:
-        pytest.skip(reason)
+    _require_capability(client)
     evidence = _run_failure_recovery(client, failure, tmp_path)
     assert evidence["session_gone"] is True, evidence
     assert evidence["recovered"] is True, evidence
@@ -1161,3 +1158,21 @@ def test_real_agent_failure_recovery_and_isolation(client: str, failure: str, tm
         assert evidence.get("client_pane_pid", "").isdigit(), evidence
     if failure == "tmux-loss":
         assert evidence["tmux_lost"] is True, evidence
+
+
+def test_canonical_real_client_opt_in_is_admitted(monkeypatch):
+    monkeypatch.setenv("YOMUX_AGENT_DOCKER_E2E", "1")
+    monkeypatch.delenv("YOLOMUX_AGENT_DOCKER_E2E", raising=False)
+    monkeypatch.setenv("HOME", "/fixture/home")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/fixture/config")
+    monkeypatch.setenv("CODEX_HOME", "/fixture/codex")
+    monkeypatch.setattr(shutil, "which", lambda _name: "/fixture/client")
+    monkeypatch.setattr(os.path, "exists", lambda _name: True)
+    assert _capability("codex") == (True, "")
+
+
+def test_opted_in_missing_client_fails_instead_of_skipping(monkeypatch):
+    monkeypatch.setenv("YOMUX_AGENT_DOCKER_E2E", "1")
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    with pytest.raises(pytest.fail.Exception, match="required executable"):
+        _require_capability("codex")

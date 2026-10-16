@@ -21,14 +21,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import field
+import ctypes
 import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import threading
 import time
 from typing import Any
 from typing import Callable
+
+
+class DarwinProcessInfo(ctypes.Structure):
+    # proc_bsdinfo from the platform SDK: start timestamps follow its 120-byte
+    # BSD information prefix. Microseconds distinguish rapid PID reuse.
+    _fields_ = [("flags", ctypes.c_uint32), ("status", ctypes.c_uint32),
+                ("remaining", ctypes.c_ubyte * 112), ("start_seconds", ctypes.c_uint64),
+                ("start_microseconds", ctypes.c_uint64)]
+
+
+LIBPROC = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True) if sys.platform == "darwin" else None
 
 
 def process_start_key(pid: int | None) -> str | None:
@@ -36,7 +49,7 @@ def process_start_key(pid: int | None) -> str | None:
 
     Returns None when the PID is not alive, which is itself a proof of absence. On Linux the key is
     the kernel start time from /proc/<pid>/stat field 22; on a host without /proc (macOS) it is the
-    process start timestamp from `ps`. Two processes that reuse one PID get different keys, so a
+    process start timestamp from libproc. Two processes that reuse one PID get different keys, so a
     stale generation can never authorize a signal against the new occupant.
     """
 
@@ -62,11 +75,14 @@ def process_start_key(pid: int | None) -> str | None:
         if remaining[0] == "Z":
             return None
         return remaining[19]
-    completed = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, check=False)
-    if completed.returncode != 0:
+    if LIBPROC is None:
         return None
-    key = completed.stdout.strip()
-    return key or None
+    information = DarwinProcessInfo()
+    size = ctypes.sizeof(information)
+    copied = LIBPROC.proc_pidinfo(pid, 3, 0, ctypes.byref(information), size)
+    if copied != size or information.status == 5:
+        return None
+    return f"{information.start_seconds}.{information.start_microseconds:06d}"
 
 
 def chromedriver_pid(driver: Any) -> int | None:

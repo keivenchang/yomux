@@ -3965,7 +3965,7 @@ function insertIntoTerminal(session, text) {
     statusErr(localizedHtml('status.readOnlyTypeTerminals'));
     return false;
   }
-  if (!handleTerminalData(session, text, {bypassMobileAccessoryModifiers: true})) return false;
+  if (!handleTerminalData(session, text, {bypassMobileAccessoryModifiers: true, userInput: true})) return false;
   commitTerminalExplicitInputOwnership(session);
   if (autoFocusEnabled) terminals.get(session)?.term?.focus?.();
   return true;
@@ -4000,8 +4000,11 @@ function commitTerminalExplicitInputOwnership(session) {
   }
 }
 
-function terminalDataWithoutPassiveReports(data) {
-  return stripTerminalQueryResponses(String(data || ''))
+function terminalDataWithoutPassiveReports(data, options = {}) {
+  // Modified F3 shares its encoding with a cursor report. A native key/paste
+  // event disambiguates it; an unprompted terminal response has no such owner.
+  const text = options.explicitInput === true ? String(data || '').replace(/\x1b\[1;[2-8]R/g, 'key') : data;
+  return stripTerminalQueryResponses(String(text || ''))
     .replace(/\x1b\[\??\d+(?:;\d+)?[Rn]/g, '')
     .replace(/\x1b\[\??\d+;\d+\$y/g, '')
     .replace(/\x1b\[(?:4|6|8);\d+;\d+t/g, '')
@@ -4012,8 +4015,8 @@ function terminalDataWithoutPassiveReports(data) {
     .replace(/\x1b\[M[\s\S]{3}/g, '');
 }
 
-function terminalDataShouldAcknowledgeAttention(data) {
-  return terminalDataWithoutPassiveReports(data).length > 0;
+function terminalDataShouldAcknowledgeAttention(data, options = {}) {
+  return terminalDataWithoutPassiveReports(data, options).length > 0;
 }
 
 function acknowledgeTerminalAttentionFromTransportInput(session, data, options = {}) {
@@ -4409,8 +4412,17 @@ function handleTerminalDataMeasured(session, data, options = {}) {
     return false;
   }
   const sendPerf = clientPerfStart('wsSend');
-  socket.send(JSON.stringify({type: 'input', data: filtered}));
+  // Use printable xterm bytes as a fallback when the browser misses its DOM
+  // input event. The shared classifier removes mouse reports and terminal
+  // responses; explicit UI input and DOM key provenance retain control keys.
+  const hasTypedText = terminalDataShouldAcknowledgeAttention(filtered, {explicitInput})
+    && /[^\x00-\x1f\x7f-\x9f]/.test(filtered);
+  const userInput = options.userInput !== false
+    && (options.userInput === true || explicitInput || hasTypedText)
+    && terminalDataShouldAcknowledgeAttention(filtered, {explicitInput: explicitInput || options.userInput === true});
+  socket.send(JSON.stringify({type: 'input', data: filtered, user_input: userInput}));
   clientPerfEnd(sendPerf, {bytes: utf8ByteLength(filtered)});
+  if (userInput) noteTabberTerminalInput(session);
   current.lastInputSentAt = performanceNow();
   observeTerminalTmuxPrefixWindowSwitches(session, filtered);
   acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
@@ -5343,18 +5355,13 @@ function rollbackAutoApproveCommand(session, undo, error) {
 function applyAutoApproveCommandResult(session, payload) {
   const state = autoApproveStateWithSnapshotRevision(payload);
   applyAutoApproveCommandState(session, state);
-  showLayoutStatus(
-    payload.enabled
-      ? t('status.yoloEnabledFor', {session: sessionLabel(session)})
-      : t('status.yoloDisabledFor', {session: sessionLabel(session)}),
-    'advisory',
-  );
   return payload;
 }
 
 function autoApproveCommandRoute(session, enabled) {
   return commandRoute({
     ...COMMAND_ROUTES['auto-approve-toggle'],
+    clearStatusOnSuccess: true,
     pendingLabel: t('status.yoloLoading'),
     overdueLabel: 'Still working...',
     overdueMs: 250,
@@ -6005,6 +6012,7 @@ let selfUpdateAvailableTarget = '';
 const selfUpdateReloadState = {
   pending: false,
   target: '',
+  oldInstanceId: '',
   attempts: 0,
   timer: null,
   deferredToastShown: false,
@@ -6110,8 +6118,13 @@ async function pollSelfUpdateReload() {
   if (!selfUpdateReloadState.pending) return false;
   selfUpdateReloadState.attempts += 1;
   try {
-    await apiFetchJson(`/api/ping?selfUpdate=${Date.now()}`, {cache: 'no-store'});
-    return maybeReloadAfterSelfUpdate();
+    const ping = await apiFetchJson(`/api/ping?selfUpdate=${Date.now()}`, {cache: 'no-store'});
+    if (!ping?.version || (selfUpdateReloadState.target && ping.version !== selfUpdateReloadState.target) || !ping.instance_id || ping.instance_id === selfUpdateReloadState.oldInstanceId) {
+      // The previous listener may still answer after a failed restart. Keep the
+      // bounded timeout path below active for reachable but stale instances too.
+    } else {
+      return maybeReloadAfterSelfUpdate();
+    }
   } catch (_error) {
     // The old process may already be gone. Keep polling until the replacement server answers.
   }
@@ -6124,8 +6137,9 @@ async function pollSelfUpdateReload() {
   return false;
 }
 
-function startSelfUpdateReloadPolling(target = '') {
+function startSelfUpdateReloadPolling(target = '', oldInstanceId = '') {
   markSelfUpdateReloadPending(target);
+  selfUpdateReloadState.oldInstanceId = String(oldInstanceId || '');
   scheduleSelfUpdateReloadPoll(0);
 }
 
@@ -6411,6 +6425,7 @@ function applyTmuxRosterPayload(payload, envelope = {}) {
     renderSessionButtons();
   }
   renderPanels(previousActive);
+  if ((sessionsChanged || validRenames.length) && typeof refreshTabberPanels === 'function') refreshTabberPanels();
   if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
   return true;
 }

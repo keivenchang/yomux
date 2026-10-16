@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from tools.tmux_paths import short_temp_base, short_temp_prefix
 
 import pytest
 
@@ -51,7 +52,7 @@ def short_tmp_root():
     before the product appends ``runtime/control/<socket>``. The daemon then refuses to start, which
     from the parent is indistinguishable from a daemon that started and registered nothing.
     """
-    base = Path(tempfile.mkdtemp(prefix="ywd-", dir="/tmp"))
+    base = Path(tempfile.mkdtemp(prefix=short_temp_prefix("ywd-"), dir=short_temp_base()))
     try:
         yield base
     finally:

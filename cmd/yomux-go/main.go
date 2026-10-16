@@ -95,6 +95,10 @@ type server struct {
 	finderBulkJobs                      *work.Scheduler
 	finderStreamJobs                    *work.Scheduler
 	capabilities                        *capabilities.Catalog
+	updates                             *updateChecker
+	instanceID                          string
+	updateJobMu                         sync.Mutex
+	updateJobPath                       string
 	statsPath                           string
 	statsNow                            func() time.Time
 	attentionAckInitMu                  sync.Mutex
@@ -137,6 +141,8 @@ type server struct {
 
 	gitMetadataSnapshotFn func(string) (goGitSnapshot, bool)
 	terminalWriteTimeout  time.Duration
+	terminalActivity      terminalActivityState
+	tabberActivity        tabberActivityState
 	ignoreSizeMu          sync.Mutex
 	ignoreSizeChecked     bool
 	ignoreSizeSupported   bool
@@ -548,6 +554,17 @@ func useMachineTmuxForOperatorLaunch() {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--internal-self-update-supervisor" {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: yomux-go --internal-self-update-supervisor <spec.json>")
+			os.Exit(2)
+		}
+		if err := runSelfUpdateSupervisor(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	normalizeYomuxEnvironment()
 	useMachineTmuxForOperatorLaunch()
 	port := flag.Int("port", 7221, "HTTP port")
@@ -627,7 +644,7 @@ func main() {
 	if stateDir == "" {
 		stateDir = *configDir
 	}
-	s := &server{root: rootPath, host: *host, port: *port, dangerouslyYolo: *dangerouslyYolo, config: *configDir, state: stateDir, httpMode: *httpMode, statsPath: *statsPath, pricing: pricing, children: make(map[*exec.Cmd]struct{}), processEntriesFn: processEntries, childProcessEntriesFn: descendantProcessEntries, startedAt: time.Now(), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), finderJobs: newFinderJobScheduler(), finderBackgroundJobs: newFinderBackgroundJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler(), operationState:
+	s := &server{root: rootPath, host: *host, port: *port, dangerouslyYolo: *dangerouslyYolo, config: *configDir, state: stateDir, httpMode: *httpMode, statsPath: *statsPath, pricing: pricing, children: make(map[*exec.Cmd]struct{}), processEntriesFn: processEntries, childProcessEntriesFn: descendantProcessEntries, startedAt: time.Now(), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), updates: newUpdateChecker(rootPath, version, nil), instanceID: fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()), updateJobPath: filepath.Join(*configDir, "self-update-job.json"), finderJobs: newFinderJobScheduler(), finderBackgroundJobs: newFinderBackgroundJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler(), operationState:
 	// The Go server has no parent observer to retain lifecycle history. Keep the
 	// port-scoped ledger in the configured state directory so normal operator
 	// restarts expose measured restart/demand counters instead of zeros or an
@@ -662,6 +679,8 @@ func main() {
 	// Settings use the shared Python schema/serializer below, so the Go backend exposes the
 	// same validated payload and persistence contract as the Python backend.
 	s.capabilities.Set("core.settings.v1", capabilities.Entry{Available: true})
+	s.updates.readPref = s.updateNotifyPreference
+	s.capabilities.Set("core.updates.v1", capabilities.Entry{Available: true})
 	finderService, finderErr := finder.NewWithLimits(rootPath, func(kind string, payload map[string]any) error {
 		_, err := s.events.publish(kind, payload)
 		if err == nil && kind == "fs_changed" && payload["reason"] != "watch-roots-replaced" {
@@ -717,6 +736,9 @@ func main() {
 	mux.HandleFunc("/logout", s.logout)
 	mux.HandleFunc("/api/auth-setup", s.authSetup)
 	mux.Handle("/api/ping", s.protected(http.HandlerFunc(s.ping)))
+	mux.Handle("/api/update-status", s.protected(http.HandlerFunc(s.updateStatus)))
+	mux.Handle("/api/self-update", s.protected(http.HandlerFunc(s.selfUpdate)))
+	mux.Handle("/api/self-update/status", s.protected(http.HandlerFunc(s.selfUpdateStatus)))
 	mux.Handle("/api/capabilities", s.protected(http.HandlerFunc(s.capabilitySnapshot)))
 	mux.Handle("/api/client-events", s.protected(http.HandlerFunc(s.clientEvents)))
 	mux.Handle("/api/stats-agent-status", s.protected(http.HandlerFunc(s.statsAgentStatus)))
@@ -742,6 +764,7 @@ func main() {
 	// does not turn a boot identity probe into the generic unsupported response.
 	mux.Handle("/api/session-metadata", s.protected(http.HandlerFunc(s.sessionMetadata)))
 	mux.Handle("/api/activity", s.protected(http.HandlerFunc(s.activity)))
+	mux.Handle("/api/activity/touch", s.protected(http.HandlerFunc(s.activityTouch)))
 	mux.Handle("/api/auto-approve", s.protected(http.HandlerFunc(s.autoApprove)))
 	mux.Handle("/api/yolo-rules", s.protected(http.HandlerFunc(s.yoloRules)))
 	mux.Handle("/api/yolo-rules/open", s.protected(http.HandlerFunc(s.yoloRulesOpen)))
@@ -821,6 +844,7 @@ func main() {
 	signal.Notify(shutdownSignal, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(shutdownSignal)
 	shutdownContext, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	go s.runUpdateChecker(shutdownContext)
 	defer stopSignals()
 	s.serverCancel = stopSignals
 	s.startBackgroundWork(func() { s.reconcileFinderIndexes(shutdownContext) })
@@ -1050,6 +1074,8 @@ func main() {
 		scheme = "http"
 	}
 	slog.Info("YOmux Go backend", "version", version, "backend", "go", "addr", addr, "scheme", scheme)
+	s.recoverSelfUpdateJob()
+	_, _ = s.events.publish("update_available", map[string]any{"available": false, "version": version, "bundle_revision": "go:" + version, "instance_id": s.instanceID})
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpServer.Serve(listener) }()
 	select {
@@ -1408,11 +1434,11 @@ func (s *server) diagnosticsPerformance(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *server) health(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "backend": "go", "version": version})
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "backend": "go", "version": version, "instance_id": s.instanceID})
 }
 
 func (s *server) ping(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "backend": "go", "capabilities": s.capabilityEntries()})
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "backend": "go", "version": version, "instance_id": s.instanceID, "capabilities": s.capabilityEntries()})
 }
 
 func (s *server) capabilityEntries() map[string]any {
@@ -3944,7 +3970,7 @@ func (s *server) systemStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	process := metricsFn(now)
 	serverMetrics := goServerMetricsPayload(now, process)
-	serverBlock := map[string]any{"backend": "go", "version": version, "root": s.root, "pid": process.PID, "started_at": unixSeconds(process.StartedAt)}
+	serverBlock := map[string]any{"backend": "go", "version": version, "bundle_revision": "go:" + version, "instance_id": s.instanceID, "root": s.root, "pid": process.PID, "started_at": unixSeconds(process.StartedAt)}
 	if process.StartedAt.IsZero() {
 		serverBlock["started_at"] = unixSeconds(now)
 	}
@@ -4368,16 +4394,16 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 		for key, timestamp := range windowActivity {
 			activity[key] = map[string]any{
 				"active_recency_ts": timestamp,
-				// A tmux window activity timestamp is the only native Go
-				// signal available for non-agent panes. Keep the field names
-				// used by Python's activity ledger so Tabber's shared recency
-				// helper can sort every window consistently.
+				// Keep the tmux output clock separate from accepted input,
+				// using the existing activity fields consumed by Tabber.
 				"last_output_ts": timestamp,
 			}
 		}
 	} else {
 		activityErrors = append(activityErrors, err.Error())
 	}
+	s.mergeTerminalInputActivity(activity, sessions)
+	s.mergeTabberActivity(activity)
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"activity": activity, "agents": projection.agents, "agent_windows": projection.windows,
 		// The activity response is also a topology repair path. Python's cached
@@ -4396,6 +4422,28 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 		},
 		"backend": "go",
 	})
+}
+
+func (s *server) activityTouch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Item string `json:"item"`
+	}
+	if err := decodeJSONBody(r.Body, 8*1024, &body); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid activity item"})
+		return
+	}
+	item := strings.TrimSpace(body.Item)
+	validPrefix := strings.HasPrefix(item, "file:") || strings.HasPrefix(item, "gitdiff:")
+	if !validPrefix || len(item) <= strings.IndexByte(item, ':')+1 || len(item) > 4096 || strings.IndexFunc(item, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid activity item"})
+		return
+	}
+	s.recordTabberActivity(item)
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 const maxActivityHours = 24.0 * 365.0
@@ -5518,6 +5566,7 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 	var msg struct {
 		Type       string `json:"type"`
 		Data       string `json:"data"`
+		UserInput  *bool  `json:"user_input"`
 		Rows       int    `json:"rows"`
 		Cols       int    `json:"cols"`
 		Txn        int    `json:"txn"`
@@ -5529,7 +5578,9 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 	}
 	if json.Unmarshal(payload, &msg) != nil {
 		if writable {
-			s.writeTerminalInput(stdin, conn, payload)
+			if s.writeTerminalInput(stdin, conn, payload) && terminalInputIsActivity(payload) {
+				s.recordTerminalInput(session, pty)
+			}
 		}
 		return
 	}
@@ -5538,7 +5589,9 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 	}
 	switch msg.Type {
 	case "input":
-		s.writeTerminalInput(stdin, conn, []byte(msg.Data))
+		if s.writeTerminalInput(stdin, conn, []byte(msg.Data)) && (msg.UserInput == nil || *msg.UserInput) && terminalInputIsActivity([]byte(msg.Data), msg.UserInput != nil && *msg.UserInput) {
+			s.recordTerminalInput(session, pty)
+		}
 	case "resize":
 		if msg.Foreground != nil && !*msg.Foreground {
 			return
@@ -5566,7 +5619,7 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 }
 
 // Raw and JSON input share one bounded PTY write so a disconnected peer cannot strand the bridge.
-func (s *server) writeTerminalInput(stdin io.Writer, conn *wsConn, payload []byte) {
+func (s *server) writeTerminalInput(stdin io.Writer, conn *wsConn, payload []byte) bool {
 	timeout := s.terminalWriteTimeout
 	if timeout <= 0 {
 		timeout = terminalWriteTimeout
@@ -5576,7 +5629,7 @@ func (s *server) writeTerminalInput(stdin io.Writer, conn *wsConn, payload []byt
 			if conn != nil {
 				_ = conn.Close()
 			}
-			return
+			return false
 		}
 		defer writer.SetWriteDeadline(time.Time{})
 	}
@@ -5585,7 +5638,9 @@ func (s *server) writeTerminalInput(stdin io.Writer, conn *wsConn, payload []byt
 		if conn != nil {
 			_ = conn.Close()
 		}
+		return false
 	}
+	return n > 0
 }
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }

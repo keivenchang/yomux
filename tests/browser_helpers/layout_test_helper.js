@@ -1564,10 +1564,16 @@ globalThis.__layoutTestApi = {
   endFilePreviewPopoutScrollInputForTest: endFilePreviewPopoutScrollInput,
   scheduleFilePreviewPopoutApplyWhenIdleForTest: scheduleFilePreviewPopoutApplyWhenIdle,
   installPreviewScrollOwnershipCaptureForTest: installPreviewScrollOwnershipCapture,
+  bindPreviewScrollOwnershipCaptureForTest: bindPreviewScrollOwnershipCapture,
   previewScrollUserOwnershipGenerationForTest: previewScrollUserOwnershipGeneration,
+  previewScrollUserOwnsElementNowForTest: previewScrollUserOwnsElementNow,
+  activeElementScrollInputCountForTest: () => activeElementScrollInputs.size,
   expirePreviewScrollOwnershipForTest() {
-    previewScrollTraceState.active = null;
-    previewScrollTraceState.last = null;
+    for (const record of [previewScrollTraceState.active, previewScrollTraceState.last]) {
+      if (!record) continue;
+      record.startedAt = Date.now() - previewScrollGestureMaxActiveMs - 1;
+      record.endedAt = record.lastScrollAt = Date.now() - previewScrollRecentOwnershipMs - 1;
+    }
   },
   renderMermaidSourceIntoForTest: renderMermaidSourceInto,
   renderRawImagePreviewIntoForTest: renderRawImagePreviewInto,
@@ -1974,6 +1980,7 @@ globalThis.__layoutTestApi = {
   yoagentJobNotificationTitleForTest: yoagentJobNotificationTitle,
   yoagentJobNotificationBodyForTest: yoagentJobNotificationBody,
   applyUpdateAvailableForTest: applyUpdateAvailable,
+  checkForUpdateOnceForTest: checkForUpdateOnce,
   triggerSelfUpdateForTest: triggerSelfUpdate,
   maybeHandleServerVersionChangeForTest: maybeHandleServerVersionChange,
   startSelfUpdateReloadPollingForTest: startSelfUpdateReloadPolling,
@@ -1983,6 +1990,7 @@ globalThis.__layoutTestApi = {
     return {
       pending: selfUpdateReloadState.pending,
       target: selfUpdateReloadState.target,
+      oldInstanceId: selfUpdateReloadState.oldInstanceId,
       attempts: selfUpdateReloadState.attempts,
       deferredToastShown: selfUpdateReloadState.deferredToastShown,
       serverVersionReloadHandled,
@@ -3104,6 +3112,9 @@ globalThis.__layoutTestApi = {
   tabberWindowIsAgentForTest: tabberWindowIsAgent,
   tabberWindowRecencyForTest: tabberWindowRecency,
   tabberRecencyForTest: tabberRecency,
+  noteTabberItemActivityForTest(item) { return noteTabberItemActivity(item); },
+  tabberItemActivityTouchSentAtForTest(item) { return tabberItemActivityTouchSentAt.get(String(item || '')) || 0; },
+  handleFileEditorContentChangedForTest(panel, path, content, options) { return handleFileEditorContentChanged(panel, path, content, options); },
   tabMenuItems,
   sortTabItemsForMenu,
   tmuxPaneTabHtml,

@@ -1598,22 +1598,6 @@ body.theme-light .pane-tab-close {
   opacity: 0.92;
   background: var(--paint-dark-green-16);
 }
-/* Keep the compact minus glyph, but make its actual target reliable on touch. Narrow tab strips
-   are where an 18px desktop hit box is easiest to miss; this remains one shared tab-close owner. */
-body.app-topbar-touch-compact .pane-tab-close {
-  flex-basis: var(--pane-control-touch-target-size);
-  width: var(--pane-control-touch-target-size);
-  min-width: var(--pane-control-touch-target-size);
-  height: var(--pane-control-touch-target-size);
-  touch-action: manipulation;
-}
-body.app-topbar-touch-compact .tabs .pane-minimize {
-  touch-action: manipulation;
-}
-body.app-topbar-touch-compact .yomux-dockview .dv-tabs-and-actions-container,
-body.app-topbar-touch-compact .yomux-dockview .dv-right-actions-container {
-  min-height: max(var(--pane-tab-height), var(--pane-control-touch-target-size));
-}
 /* Keep this selector list in sync with platformCloseButtonClass() callers in yomux.js. */
 .file-explorer-close.pc-window-control,
 .file-explorer-panel-close.pc-window-control,
@@ -1937,8 +1921,8 @@ body.app-topbar-touch-compact .yomux-dockview .dv-right-actions-container {
   --subwindow-status-attention-fill: var(--danger-strong);
   --subwindow-status-cooldown-fill: var(--agent-status-cooldown);
   --subwindow-status-glyph-fill: currentColor;
-  --subwindow-status-glyph-border-color: color-mix(in srgb, var(--text) 84%, var(--bg) 16%);
-  --subwindow-status-glyph-border-color-active: var(--active-control-text);
+  --subwindow-status-glyph-border-color: var(--agent-status-ball-border);
+  --subwindow-status-glyph-border-color-active: var(--agent-status-ball-border);
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -1986,7 +1970,7 @@ body.app-topbar-touch-compact .yomux-dockview .dv-right-actions-container {
   inline-size: var(--subwindow-status-glyph-inline-size);
   block-size: var(--subwindow-status-glyph-block-size);
   background: var(--subwindow-status-glyph-border-color);
-  clip-path: polygon(8% 0, 100% 50%, 8% 100%);
+  clip-path: var(--agent-status-play-path);
 }
 .agent-window-activity--subwindow .agent-window-status-dot.status-indicator--working::after {
   content: "";
@@ -1996,7 +1980,7 @@ body.app-topbar-touch-compact .yomux-dockview .dv-right-actions-container {
   inline-size: var(--subwindow-status-glyph-inner-inline-size);
   block-size: var(--subwindow-status-glyph-inner-block-size);
   background: var(--subwindow-status-glyph-fill);
-  clip-path: polygon(8% 0, 100% 50%, 8% 100%);
+  clip-path: var(--agent-status-play-path);
   transform: translate(-50%, -50%);
 }
 .agent-window-activity--subwindow .agent-window-status-dot.status-indicator--attention::before,
@@ -2019,6 +2003,10 @@ body.app-topbar-touch-compact .yomux-dockview .dv-right-actions-container {
   border-radius: max(1px, calc(var(--agent-status-ball-size) * 0.06));
   background: var(--subwindow-status-glyph-fill, currentColor);
   filter: none;
+}
+.agent-window-activity--subwindow .agent-window-status-dot:is(.status-indicator--attention, .status-indicator--blocked, .status-indicator--cooldown)::before,
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::after {
+  box-shadow: 0 0 0 1px var(--agent-status-ball-border);
 }
 .agent-window-activity--subwindow .agent-window-status-dot.agent-window-status-dot--subwindow-pulse {
   /* The parent circle and child glyph deliberately animate this same element opacity. The child

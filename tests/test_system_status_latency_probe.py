@@ -49,6 +49,7 @@ from urllib.parse import urlencode
 from http.client import HTTPConnection
 import pytest
 
+from tools import bazel_execution_contract
 from tools import system_status_latency_probe
 from yomux_lib import common as common_module
 from yomux_lib.infra import listener_census
@@ -587,6 +588,33 @@ def test_acceptance_uses_nearest_rank_p99_against_the_budget() -> None:
     # Three values at/above the p99 rank fail acceptance; the mean would have hidden them.
     bad = [5.0] * 197 + [25.0, 25.5, 26.0]
     assert acceptance_outcome(bad)["ok"] is False and acceptance_outcome(bad)["p99_ms"] == 25.0
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+def test_listener_identity_uses_declared_revision_only_for_declared_checkout(monkeypatch, tmp_path, foreign):
+    declared_root = (tmp_path / "declared").resolve()
+    declared_root.mkdir()
+    monkeypatch.setattr(bazel_execution_contract, "ROOT", declared_root)
+    monkeypatch.setenv("YOMUX_BAZEL_EXECUTION", "qualified-native")
+    monkeypatch.setenv("YOMUX_BAZEL_CONTRACT", "fixture-policy")
+    monkeypatch.setenv("YOMUX_TEST_REVISION", "a" * 40)
+    listener_root = declared_root
+    if foreign:
+        listener_root = (tmp_path / "foreign").resolve()
+        listener_root.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(listener_root)],
+                       env=bazel_execution_contract.repository_git_environment(), check=True)
+        git_directory = listener_root / ".git"
+        (git_directory / "HEAD").write_text("ref: refs/heads/fixture\n")
+        (git_directory / "refs/heads/fixture").write_text("b" * 40 + "\n")
+    monkeypatch.setattr(system_status_latency_probe, "process_start_identity", lambda _pid: "proc:123")
+    monkeypatch.setattr(system_status_latency_probe, "process_cwd", lambda _pid: str(listener_root))
+
+    identity = system_status_latency_probe.process_identity(123)
+
+    assert not (declared_root / ".git").exists()
+    assert identity == {"pid": 123, "start_identity": "proc:123", "cwd": str(listener_root),
+                        "sha": ("b" if foreign else "a") * 40}
 
 
 def test_probe_error_report_preserves_the_cause_chain_and_errno():

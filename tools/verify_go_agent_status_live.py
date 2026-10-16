@@ -270,7 +270,7 @@ def main() -> int:
                 generated_version = root / "product_version_generated.go"
                 go_overlay = root / "go-overlay.json"
                 generate_go_version_overlay(
-                    REPO / "yomux_lib" / "version.py",
+                    REPO / "version.yaml",
                     generated_version,
                     go_overlay,
                     REPO / "cmd" / "yomux-go" / "product_version_generated.go",

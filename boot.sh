@@ -13,6 +13,7 @@ dev_mode="auto"
 backend="go"
 cert_path=""
 key_path=""
+http_mode=0
 print_command=0
 check_assets=0
 force_start=0
@@ -23,7 +24,7 @@ server_shell="${SHELL:-$(command -v bash)}"
 
 usage() {
   cat <<'EOF'
-Usage: boot.sh [--print-command|--check-assets] [--ignore-load (legacy no-op)] [--force] [--golang|--deprecated-python|--backend go] [--cert CERT --key KEY] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
+Usage: boot.sh [--print-command|--check-assets] [--ignore-load (legacy no-op)] [--force] [--golang|--deprecated-python|--backend go] [--http|--cert CERT --key KEY] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
 Restart this checkout's Go YOmux server. Use --deprecated-python to select the legacy Python backend. YOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOMUX_DEFAULT_PORT. Non-primary ports use --dev by default.
 
@@ -92,6 +93,10 @@ while [[ "$#" -gt 0 ]]; do
       host="$2"
       shift 2
       ;;
+    --http)
+      http_mode=1
+      shift
+      ;;
     --cert|--key)
       [[ "$#" -ge 2 ]] || die "$1 requires a path"
       if [[ "$1" == "--cert" ]]; then cert_path="$2"; else key_path="$2"; fi
@@ -133,6 +138,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 if [[ -n "$cert_path" || -n "$key_path" ]]; then
+  [[ "$http_mode" -eq 0 ]] || die "--http cannot be combined with --cert or --key"
   [[ -n "$cert_path" && -n "$key_path" ]] || die "--cert and --key must be supplied together"
   [[ -f "$cert_path" && -r "$cert_path" && -f "$key_path" && -r "$key_path" ]] || die "certificate and key must be readable files"
   # Detached launches change cwd to this checkout; retain the caller's paths.
@@ -211,7 +217,9 @@ server_args=()
 build_server_args() {
   local port="$1"
   server_args=(--host "$host" --port "$port" --dang)
-  if [[ -n "$cert_path" ]]; then
+  if [[ "$http_mode" -eq 1 ]]; then
+    server_args+=(--http)
+  elif [[ -n "$cert_path" ]]; then
     server_args+=(--cert "$cert_path" --key "$key_path")
   else
     server_args+=(--self-signed)
@@ -368,6 +376,15 @@ launch_process_is_alive() {
   [[ -n "$process_state" && "$process_state" != Z* ]]
 }
 
+probe_healthz() {
+  local port="$1"
+  local scheme="https"
+  if [[ "$http_mode" -eq 1 ]]; then
+    scheme="http"
+  fi
+  curl -sk -o /dev/null -w '%{http_code}' "${scheme}://localhost:${port}/healthz" 2>/dev/null || true
+}
+
 wait_for_port() {
   local port="$1"
   local forbidden_pids="${2:-}"
@@ -381,7 +398,7 @@ wait_for_port() {
       printf 'port %s launch process %s exited before readiness; see log: %s\n' "$port" "$launch_pid" "${log_path:-unavailable}" >&2
       return 1
     fi
-    code="$(curl -sk -o /dev/null -w '%{http_code}' "https://localhost:${port}/healthz" 2>/dev/null || true)"
+    code="$(probe_healthz "$port")"
     if [[ "$code" == "200" ]]; then
       listener_pid="$(port_listener_pids "$port")"
       if [[ -n "$listener_pid" && "$listener_pid" != *$'\n'* && "$listener_pid" != *[!0-9]* ]]; then
@@ -409,7 +426,7 @@ verify_port_stable() {
   for ((attempt = 0; attempt < 4; attempt++)); do
     sleep 1
     pids="$(port_listener_pids "$port")"
-    code="$(curl -sk -o /dev/null -w '%{http_code}' "https://localhost:${port}/healthz" 2>/dev/null || true)"
+    code="$(probe_healthz "$port")"
     if [[ -z "$pids" || "$pids" == *$'\n'* || "$pids" == *[!0-9]* || "$code" != "200" ]]; then
       printf 'port %s became unstable after readiness: listener=%s /healthz -> %s\n' "$port" "${pids:-none}" "${code:-curl failed}" >&2
       return 1

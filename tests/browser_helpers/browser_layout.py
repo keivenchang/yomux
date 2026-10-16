@@ -13,7 +13,6 @@ import os
 import re
 import shutil
 import socketserver
-import subprocess
 import sys
 import threading
 import time
@@ -363,6 +362,15 @@ class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802 - inherited HTTP handler API
         parsed = urlsplit(self.path)
+        if parsed.path == "/api/activity/touch":
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = b'{"ok":true}'
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if parsed.path != "/api/fs/batch":
             self.send_error(HTTPStatus.NOT_IMPLEMENTED, "Unsupported method (%s)" % self.command)
             return
@@ -1552,13 +1560,10 @@ def codemirror_bundle_fixture_html():
     """
 
 
-def git_show_text(rev_path, fallback_rev_paths=()):
-    for candidate in (rev_path, *fallback_rev_paths):
-        try:
-            return subprocess.check_output(["git", "show", candidate], cwd=REPO_ROOT, text=True, stderr=subprocess.DEVNULL)
-        except subprocess.CalledProcessError:
-            continue
-    raise subprocess.CalledProcessError(128, ["git", "show", rev_path])
+def frozen_source_text(rev_path):
+    # Preserve historical geometry as declared data, including in checkouts without Git metadata.
+    snapshots = json.loads(Path(__file__).with_name("frozen_diff_snapshots.json").read_text(encoding="utf-8"))
+    return snapshots[rev_path]
 
 
 def codemirror_todo_diff_overview_texts():
@@ -1570,7 +1575,7 @@ def codemirror_todo_diff_overview_texts():
     large-doc geometry the test asserts while removing the dependency on the moving ``docs/TODO.md``
     roadmap doc, whose edits had grown the diff from one chunk to many and broke the test.
     """
-    original = git_show_text("05f22a8646:TODO.md")
+    original = frozen_source_text("05f22a8646:TODO.md")
     original_lines = original.splitlines(keepends=True)
     # Keep the changed region near the top of the editor (a tiny common prefix) so the deleted-row
     # block widget renders inside the initial viewport. CodeMirror virtualizes the merge view's
@@ -1708,11 +1713,10 @@ def codemirror_file_explorer_diff_overview_fixture_html():
             "strings": {"en": strings},
         }
     )
-    # These source snapshots predate the source-directory rename, so their Git paths keep the
-    # historical directory name even though the current checkout uses static_src/js/yomux/.
+    # Snapshot keys retain the historical source-directory name.
     path = "static_src/js/yolomux/40_file_explorer_files.js"
-    original = subprocess.check_output(["git", "show", f"521bbfd:{path}"], cwd=REPO_ROOT, text=True)
-    current = subprocess.check_output(["git", "show", f"6a967aaa70:{path}"], cwd=REPO_ROOT, text=True)
+    original = frozen_source_text(f"521bbfd:{path}")
+    current = frozen_source_text(f"6a967aaa70:{path}")
     app_script = app_bundle_before_boot_script()
     original_json = json.dumps(original).replace("</script", "<\\/script")
     current_json = json.dumps(current).replace("</script", "<\\/script")

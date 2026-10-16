@@ -1,13 +1,20 @@
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load("//:tools/bazel_rules.bzl", "frontend_assets", "runtime_tree")
+load("//:tools/bazel_rules.bzl", "frontend_assets", "native_python_binary", "native_python_test", "runtime_tree")
 
 exports_files([
+    "version.yaml",
+    "tools/bazel_generate.py",
+    "tools/bazel_runtime_toolchain.bzl",
     "static_src/js/yomux/10_core_utils.js",
     "static_src/js/yomux/20_layout_state.js",
-    "tools/generate_go_version.py",
     "yomux_lib/version.py",
 ])
+
+toolchain_type(
+    name = "runtime_toolchain_type",
+    visibility = ["//visibility:public"],
+)
 
 alias(
     name = "yomux-go",
@@ -27,7 +34,10 @@ alias(
 
 filegroup(
     name = "python_runtime",
-    srcs = ["yomux.py"] + glob([
+    srcs = [
+        "version.yaml",
+        "yomux.py",
+    ] + glob([
         "yomux_lib/**/*.py",
         "yomux_lib/**/*.json",
     ]),
@@ -43,10 +53,19 @@ filegroup(
 )
 
 filegroup(
+    name = "execution_contract_inputs",
+    srcs = [
+        "tools/bazel_execution_contract.py",
+        "tools/bazel_native.py",
+        "tools/native_darwin_launcher.py",
+        ":native_execution_support",
+    ],
+)
+
+filegroup(
     name = "integration_python_tools",
     srcs = [
         "tools/auto_approve_tmux.py",
-        "tools/bazel_execution_contract.py",
         "tools/bazel_go_browser_e2e.py",
         "tools/docker_image.py",
         "tools/generate_go_version.py",
@@ -60,7 +79,9 @@ filegroup(
         "tools/tmux_paths.py",
         "tools/tool_guard.py",
         "tools/verify_go_agent_status_live.py",
+        ":execution_contract_inputs",
         ":pytest_collection_support",
+        "//tools/versiongen:main.go",
     ] + glob(["tools/mockers/**/*.py"]),
 )
 
@@ -76,7 +97,10 @@ filegroup(
 
 filegroup(
     name = "go_python_runtime",
-    srcs = ["yomux.py"] + glob(
+    srcs = [
+        "version.yaml",
+        "yomux.py",
+    ] + glob(
         [
             "yomux_lib/**/*.py",
             "yomux_lib/**/*.json",
@@ -101,6 +125,7 @@ filegroup(
         "tools/product_environment.py",
         "tools/product_namespace.json",
         "tools/tls_san.py",
+        "tools/tmux_paths.py",
     ],
 )
 
@@ -115,6 +140,7 @@ filegroup(
 runtime_tree(
     name = "go_cmd_test_support",
     srcs = [":go_cmd_test_support_inputs"],
+    runtime_groups = ["git_tmux"],
     visibility = ["//visibility:public"],
 )
 
@@ -130,6 +156,7 @@ filegroup(
 runtime_tree(
     name = "go_stats_test_support",
     srcs = [":go_stats_test_support_inputs"],
+    runtime_groups = ["git_tmux"],
     visibility = ["//visibility:public"],
 )
 
@@ -145,6 +172,7 @@ filegroup(
 runtime_tree(
     name = "testsupport_runfiles",
     srcs = [":testsupport_runfiles_inputs"],
+    runtime_groups = ["git_tmux"],
     visibility = ["//internal/testsupport:__pkg__"],
 )
 
@@ -191,6 +219,7 @@ filegroup(
         "tests/helpers/__init__.py",
         "tests/helpers/browser_boot.py",
         "tests/helpers/fixture_content_root.py",
+        "tests/helpers/fixture_tools.py",
         "tests/test_browser_stats_widen.py",
         "tests/tmux_runtime.py",
         ":browser_scenario_fixture_inputs",
@@ -211,6 +240,12 @@ runtime_tree(
     name = "stats_browser_runtime",
     srcs = [":browser_test_support"],
     frontend = ":frontend_assets",
+    runtime_groups = [
+        "node",
+        "git_tmux",
+        "browsers",
+        "xterm",
+    ],
 )
 
 filegroup(
@@ -230,6 +265,12 @@ runtime_tree(
     name = "go_browser_runtime",
     srcs = [":go_browser_runtime_inputs"],
     frontend = ":frontend_assets",
+    runtime_groups = [
+        "node",
+        "git_tmux",
+        "browsers",
+        "xterm",
+    ],
     visibility = ["//cmd/yomux-go:__pkg__"],
 )
 
@@ -242,7 +283,6 @@ filegroup(
         "tests/conftest.py",
         "tests/test_agent_status_docker.py",
         "tools/auto_approve_tmux.py",
-        "tools/bazel_execution_contract.py",
         "tools/docker_image.py",
         "tools/fake_llm_server.py",
         "tools/instance_isolation.py",
@@ -251,6 +291,8 @@ filegroup(
         "tools/tls_san.py",
         "tools/tool_guard.py",
         ":agent_status_prompt_fixtures",
+        ":execution_contract_inputs",
+        ":integration_python_tools",
         ":pytest_collection_support",
         ":python_runtime",
     ] + glob(["tools/mockers/**/*.py"]),
@@ -259,6 +301,10 @@ filegroup(
 runtime_tree(
     name = "agent_status_runtime",
     srcs = [":agent_status_test_support"],
+    runtime_groups = [
+        "git_tmux",
+        "clients",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -294,7 +340,7 @@ sh_test(
     size = "small",
     srcs = ["tools/bazel_source_check.sh"],
     args = [
-        "/usr/local/bin/buildifier",
+        "buildifier",
         "$(locations :bazel_build_sources)",
     ],
     data = [":bazel_build_sources"],
@@ -311,10 +357,12 @@ test_suite(
         "//internal/finder:finder_test",
         "//internal/mutablefs:mutablefs_test",
         "//internal/productenv:productenv_test",
+        "//internal/productversion:productversion_test",
         "//internal/stats:agent_status_integration_test",
         "//internal/stats:stats_test",
         "//internal/testsupport:testsupport_test",
         "//internal/work:work_test",
+        "//internal/yolo:yolo_test",
     ],
 )
 
@@ -332,6 +380,7 @@ test_suite(
         "//internal/stats:stats_race_test",
         "//internal/testsupport:testsupport_race_test",
         "//internal/work:work_race_test",
+        "//internal/yolo:yolo_race_test",
     ],
 )
 
@@ -343,6 +392,7 @@ test_suite(
         ":bazel_source_check_test",
         ":docker_runtime_contract_test",
         ":fake_llm_contract_test",
+        ":go_module_closure_test",
         ":go_race_tests",
         ":go_runtime_safety_e2e",
         ":go_unit_tests",
@@ -355,15 +405,7 @@ test_suite(
 
 test_suite(
     name = "go_native_tests",
-    tests = [
-        ":bazel_action_environment_test",
-        ":go_race_tests",
-        ":go_runtime_safety_e2e",
-        ":go_unit_tests",
-        ":yomux_go_browser_e2e",
-        ":yomux_go_contract_test",
-        ":yomux_go_stats_browser_docker_e2e",
-    ],
+    tests = [":go_tests"],
 )
 
 sh_test(
@@ -392,7 +434,11 @@ sh_test(
     timeout = "short",
     srcs = ["tools/docker_runtime_contract_test.sh"],
     args = ["$(location tools/product_environment.sh)"],
-    data = ["tools/product_environment.sh"],
+    data = [
+        "tools/bazel_native_probe.py",
+        "tools/bazel_test_common.sh",
+        "tools/product_environment.sh",
+    ],
 )
 
 sh_test(
@@ -478,6 +524,7 @@ runtime_tree(
         ":integration_python_tools",
         ":python_runtime",
     ],
+    runtime_groups = ["git_tmux"],
 )
 
 sh_test(
@@ -497,4 +544,177 @@ sh_test(
         ":yomux-go",
     ],
     tags = ["cpu:2"],
+)
+
+filegroup(
+    name = "native_execution_support",
+    srcs = [
+        "tests/browser_helpers/__init__.py",
+        "tests/browser_helpers/webdriver_lease.py",
+        "tools/bazel_test_entrypoint.sh",
+        "tools/instance_isolation.py",
+        "tools/native_process_scope.py",
+        "tools/product_environment.py",
+        "tools/product_namespace.json",
+        "tools/tmux_paths.py",
+        "yomux_lib/infra/filesystem_preflight.py",
+        "yomux_lib/infra/host_identity.py",
+        "yomux_lib/infra/transient_paths.py",
+    ],
+)
+
+native_python_binary(
+    name = "native_test_entrypoint",
+    data = [":native_execution_support"],
+    runtime_groups = [],
+    script = "tools/bazel_native_entrypoint.py",
+)
+
+native_python_test(
+    name = "native_runtime_admission",
+    size = "small",
+    timeout = "short",
+    data = [":native_execution_support"],
+    script = "tools/bazel_native_probe.py",
+    tags = ["manual"],
+)
+
+native_python_test(
+    name = "native_sandbox_admission",
+    size = "small",
+    timeout = "short",
+    data = [":native_execution_support"],
+    runtime_groups = [],
+    script = "tools/bazel_native_probe.py",
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "qualified_gate_sources",
+    srcs = glob(
+        [
+            "*.py",
+            "*.json",
+            "*.toml",
+            "*.ini",
+            "*.md",
+            "*.sh",
+            "*.mod",
+            "*.sum",
+            "tools/**",
+            "tests/**",
+            "yomux_lib/**",
+            "static_src/**",
+            "static/**",
+            "docs/**",
+            "docker/**",
+            "queues/**",
+            "Makefile",
+            "LICENSE",
+            ".gitignore",
+            ".dockerignore",
+            ".gitattributes",
+        ],
+        allow_empty = True,
+        exclude = [
+            "**/__pycache__/**",
+            "**/*.pyc",
+            "**/*.lock",
+            "**/*.md.lock",
+            "**/*.txt.lock",
+            "**/*.log",
+            "**/node_modules/**",
+            "queues/backlog/DOIT*.md",
+            "static/yomux.js",
+            "static/yomux.css",
+            "static/locales/**",
+        ],
+    ) + [
+        ".bazelversion",
+        "BUILD.bazel",
+        "MODULE.bazel",
+        "MODULE.bazel.lock",
+        "version.yaml",
+    ] + [
+        "//cmd/fake-llm:qualified_sources",
+        "//cmd/yomux-go:qualified_sources",
+        "//internal/atomicfile:qualified_sources",
+        "//internal/cache:qualified_sources",
+        "//internal/capabilities:qualified_sources",
+        "//internal/fakellm:qualified_sources",
+        "//internal/finder:qualified_sources",
+        "//internal/mutablefs:qualified_sources",
+        "//internal/productenv:qualified_sources",
+        "//internal/productversion:qualified_sources",
+        "//internal/stats:qualified_sources",
+        "//internal/testsupport:qualified_sources",
+        "//internal/tmuxcmd:qualified_sources",
+        "//internal/work:qualified_sources",
+        "//internal/yolo:qualified_sources",
+        "//tools/versiongen:qualified_sources",
+    ],
+)
+
+runtime_tree(
+    name = "qualified_gate_runtime",
+    srcs = [":qualified_gate_sources"],
+    frontend = ":frontend_assets",
+)
+
+native_python_test(
+    name = "go_module_closure_test",
+    size = "small",
+    timeout = "moderate",
+    script = "tools/bazel_go_module_closure.py",
+    tree = ":qualified_gate_runtime",
+)
+
+# This inventory covers every executable step in test_plan.StepId. Whitespace
+# and Git revision/dirty-state checks remain in the host orchestration layer.
+QUALIFIED_GATE_STEPS = [
+    "py-compile",
+    "static-build",
+    "textshape",
+    "architecture-budgets",
+    "local-service-types",
+    "node-yomux-syntax",
+    "node-wall-syntax",
+    "node-layout",
+    "pytest-nonbrowser",
+    "pytest-gate-serial",
+    "pytest-boot",
+    "pytest-browser",
+    "pytest-browser-golden",
+    "pytest-e2e",
+]
+
+[native_python_test(
+    name = "qualified_" + step.replace("-", "_"),
+    size = "large",
+    timeout = "long",
+    arguments = [step],
+    data = [":yomux-go"] if step.startswith("pytest-") else [],
+    runtime_groups = (["node"] if step.startswith("node-") else []) if not step.startswith("pytest-") else [
+        "node",
+        "go",
+        "git_tmux",
+        "browsers",
+        "clients",
+        "compiler",
+        "xterm",
+    ],
+    script = "tools/bazel_native_step.py",
+    tags = ["manual"],
+    tree = ":qualified_gate_runtime",
+) for step in QUALIFIED_GATE_STEPS]
+
+native_python_test(
+    name = "qualified_pytest_direct",
+    size = "large",
+    timeout = "long",
+    arguments = ["pytest-direct"],
+    data = [":yomux-go"],
+    script = "tools/bazel_native_step.py",
+    tags = ["manual"],
+    tree = ":qualified_gate_runtime",
 )

@@ -3895,7 +3895,7 @@ function routeTerminalScrollLines(session, term, container, signedLines, options
     const data = signedLines < 0 ? '\x1b\x19' : '\x1b\x05';
     const repeat = Math.max(1, Math.min(terminalWheelMaxLinesPerEvent, Math.ceil(Math.abs(signedLines))));
     noteTerminalExplicitInput(session);
-    return handleTerminalData(session, data.repeat(repeat), {bypassMobileAccessoryModifiers: true});
+    return handleTerminalData(session, data.repeat(repeat), {bypassMobileAccessoryModifiers: true, userInput: false});
   }
   const usesAppWheel = terminalUsesAppWheel(session, container);
   if (!options.forceTmuxScrollback && (sessionPaneIsAlternateScreen(session) || usesAppWheel)) {
@@ -3911,7 +3911,7 @@ function routeTerminalScrollLines(session, term, container, signedLines, options
     if (!command) return false;
     const data = terminalMobileAccessoryCursorData(session, command.action).repeat(command.repeat);
     noteTerminalExplicitInput(session);
-    return handleTerminalData(session, data, {bypassMobileAccessoryModifiers: true});
+    return handleTerminalData(session, data, {bypassMobileAccessoryModifiers: true, userInput: false});
   }
   altScreenWheelRemainder.delete(session);
   const item = terminals.get(session);

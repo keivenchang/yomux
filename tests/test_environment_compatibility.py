@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+from tests.helpers.fixture_tools import fixture_executable
 import os
 from pathlib import Path
 import subprocess
@@ -44,7 +45,7 @@ def test_shell_adapter_and_child_do_not_warn_for_generated_aliases(adapter, func
         pytest.skip('external launcher adapter not installed')
     env = {'PATH': '/usr/bin:/bin', 'HOME': '/tmp', 'YOMUX_FIXTURE': 'new'}
     script = 'source "$1"; "$2"; "$2"; bash -c \'source "$1"; "$2"\' child "$1" "$2"'
-    result = subprocess.run(['bash', '-c', script, 'probe', str(adapter), function], env=env, text=True, capture_output=True)
+    result = subprocess.run([fixture_executable("bash"), '-c', script, 'probe', str(adapter), function], env=env, text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
     assert result.stderr == ''
 
@@ -109,5 +110,5 @@ def test_clearing_assignment_retires_its_alias_provenance(capsys):
 def test_shell_handoff_preserves_python_alias_provenance():
     env = normalize_yomux_environment({'PATH': '/usr/bin:/bin', 'YOMUX_FIXTURE': 'original'})
     script = 'source "$1"; yomux_normalize_environment; export YOLOMUX_SECOND=private-value; yomux_normalize_environment; export YOMUX_FIXTURE=changed-canonical; yomux_normalize_environment; export YOLOMUX_FIXTURE=changed-legacy; yomux_normalize_environment'
-    result = subprocess.run(['bash', '-c', script, 'probe', str(ROOT / 'tools/product_environment.sh')], env=env, text=True, capture_output=True, check=True)
+    result = subprocess.run([fixture_executable("bash"), '-c', script, 'probe', str(ROOT / 'tools/product_environment.sh')], env=env, text=True, capture_output=True, check=True)
     assert result.stderr == 'WARNING: YOLOMUX_* environment names are deprecated; use YOMUX_*.\n' * 2

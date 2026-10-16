@@ -83,14 +83,15 @@ function capabilityNameForRequest(url, options = {}) {
   try { pathname = new URL(String(url || ''), globalThis.location?.href || 'http://localhost/').pathname; } catch (_) { pathname = String(url || '').split(/[?#]/, 1)[0]; }
   if (pathname === '/api/capabilities' || pathname === '/api/ping' || pathname === '/api/background/status' || pathname === '/api/system-status' || pathname === '/api/system-status/advanced' || pathname === '/api/logs' || pathname === '/api/client-events') return 'core.diagnostics.v1';
   if (pathname === '/api/settings') return 'core.settings.v1';
-  if (pathname === '/api/update-status' || pathname === '/api/watched-prs') return 'core.integrations.v1';
+  if (pathname === '/api/update-status' || pathname === '/api/self-update' || pathname === '/api/self-update/status') return 'core.updates.v1';
+  if (pathname === '/api/watched-prs') return 'core.integrations.v1';
   if (pathname === '/ws' || pathname === '/api/tmux' || pathname === '/api/tmux-session-exists') return 'terminal.websocket.v1';
   if (pathname === '/api/ensure-session' || pathname === '/api/create-session-plan' || pathname === '/api/create-session') return 'session.create.v1';
   if (pathname === '/api/kill-session') return 'session.kill.v1';
   if (pathname === '/api/rename-session') return 'session.rename.v1';
   if (pathname === '/api/session-metadata') return 'core.bootstrap.v1';
   if (pathname === '/api/transcripts') return 'core.bootstrap.v1';
-  if (pathname === '/api/activity' || pathname === '/api/activity-summary' || pathname === '/api/tabber-description' || pathname === '/api/tabber-view-session') return 'pane.tabber.v1';
+  if (pathname === '/api/activity' || pathname === '/api/activity/touch' || pathname === '/api/activity-summary' || pathname === '/api/tabber-description' || pathname === '/api/tabber-view-session') return 'pane.tabber.v1';
   if (pathname === '/api/auto-approve') return 'yolo.auto-approve.v1';
   if (pathname === '/api/yolo-rules' || pathname.startsWith('/api/yolo-rules/')) return 'yolo.auto-approve.v1';
   if (pathname.startsWith('/api/tmux-') || pathname === '/api/transcript' || pathname === '/api/context' || pathname === '/api/context-items' || pathname === '/api/context-stream' || pathname === '/api/events') return 'terminal.status.v1';
@@ -2330,6 +2331,7 @@ let openAppMenuReturnFocus = null;
 const fileExplorerSyncState = {
   publication: null,
   inFlightSignature: '',
+  renderTransaction: null,
   appliedPlanKey: '',
   generation: 0,
 };

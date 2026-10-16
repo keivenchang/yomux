@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Tests for the disposable Docker image identity."""
 
+from tests.helpers.fixture_tools import fixture_executable, fixture_script
 import copy
 import json
 import os
@@ -31,7 +32,7 @@ def test_test_container_shared_memory_uses_daemon_ram_or_fails_explicitly(capaci
         for key, value in os.environ.items()
         if key not in {*product_env_names("BAZEL_MEMORY_MB"), *product_env_names("TEST_MEMORY_MB")}
     }
-    result = subprocess.run(["bash", "-c", script, "shm-test", capacity, str(status)], capture_output=True, text=True, env=environment)
+    result = subprocess.run([fixture_executable("bash"), "-c", script, "shm-test", capacity, str(status)], capture_output=True, text=True, env=environment)
     assert (result.returncode == 0) is accepted
     if accepted:
         assert result.stdout == capacity
@@ -49,7 +50,7 @@ def test_test_container_cpu_limit_is_applied_or_rejected(cpu_count, accepted, ex
         if not key.startswith(("YOMUX_", "YOLOMUX_"))
     }
     environment["YOMUX_TEST_CPU_COUNT"] = cpu_count
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=environment)
+    result = subprocess.run([fixture_executable("bash"), "-c", script], capture_output=True, text=True, env=environment)
     assert (result.returncode == 0) is accepted
     if accepted:
         assert result.stdout == expected
@@ -277,15 +278,15 @@ def test_native_browser_resolution_requires_a_host_chromedriver_on_path(tmp_path
     binary_dir = tmp_path / "bin"
     binary_dir.mkdir()
     chrome = binary_dir / "chromium"
-    chrome.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    chrome.write_text(fixture_script("#!/bin/sh\nexit 0\n"), encoding="utf-8")
     chrome.chmod(0o755)
     driver = binary_dir / "chromedriver"
     if with_driver:
-        driver.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        driver.write_text(fixture_script("#!/bin/sh\nexit 0\n"), encoding="utf-8")
         driver.chmod(0o755)
     helper = Path(__file__).resolve().parents[1] / "tools/bazel_test_common.sh"
     result = subprocess.run(
-        ["/bin/bash", "-c", 'source "$1"; if bazel_native_browser_resolve; then printf "%s|%s" "$BAZEL_NATIVE_CHROME_BIN" "$BAZEL_NATIVE_CHROMEDRIVER_BIN"; else printf unavailable; fi', "native-browser-test", str(helper)],
+        [fixture_executable("bash"), "-c", 'source "$1"; if bazel_native_browser_resolve; then printf "%s|%s" "$BAZEL_NATIVE_CHROME_BIN" "$BAZEL_NATIVE_CHROMEDRIVER_BIN"; else printf unavailable; fi', "native-browser-test", str(helper)],
         capture_output=True,
         text=True,
         env={"PATH": str(binary_dir), "CHROME_BIN": str(chrome)},
@@ -329,7 +330,7 @@ def test_docker_admission_failure_does_not_launch_native_fallback():
     block = source[start:end]
     script = 'execution=docker\nrequested_execution=auto\nREPO_ROOT=/fixture\noriginal_args=()\n' + block.replace('"$REPO_ROOT/docker/run-tests.sh"', 'failed_docker')
     script = 'failed_docker() { return 78; }\n' + script
-    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, check=False)
+    result = subprocess.run([fixture_executable("bash"), '-c', script], capture_output=True, text=True, check=False)
     assert result.returncode == 78
     assert 'WARNING: HERMETIC DOCKER TESTING FAILED' in result.stderr
     assert 'selecting native' not in result.stderr
@@ -345,7 +346,7 @@ bazel_test_in_container() { return 1; }
 uname() { printf Linux; }
 docker() { return 1; }
 ''' + source[start:end]
-    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, check=False)
+    result = subprocess.run([fixture_executable("bash"), '-c', script], capture_output=True, text=True, check=False)
     assert result.returncode == 2
     assert 'WARNING: HERMETIC DOCKER TESTING FAILED' in result.stderr
     assert '--execution native' in result.stderr
@@ -361,7 +362,7 @@ def test_image_build_failure_reports_phase_and_retains_exit_status():
 docker() { return 17; }
 build_args=(); build_context_args=(); REPO_ROOT=/fixture; IMAGE=fixture
 ''' + source[start:end] + '\nexit "$build_status"\n'
-    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, check=False)
+    result = subprocess.run([fixture_executable("bash"), '-c', script], capture_output=True, text=True, check=False)
     assert result.returncode == 17
     assert '"failure_phase":"image-build"' in result.stdout
     assert 'WARNING: HERMETIC DOCKER TESTING FAILED' in result.stderr
@@ -415,7 +416,7 @@ argv_output="$2"
 docker() { python3 -c 'import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))' "$argv_output" "$@"; printf fixture; }
 '''
     script += source[label_start:label_end] + '\n' + source[create_start:create_end]
-    result = subprocess.run(['bash', '-c', script, 'label-test', str(root), str(capture)], capture_output=True, text=True, check=False)
+    result = subprocess.run([fixture_executable("bash"), '-c', script, 'label-test', str(root), str(capture)], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     argv = json.loads(capture.read_text())
     labels = [argv[index + 1] for index, value in enumerate(argv) if value == '--label']

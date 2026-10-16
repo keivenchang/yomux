@@ -23,7 +23,7 @@ import (
 // rendered tab while the actual metadata builder is held behind a channel.
 func TestAgentWindowMetadataRefreshBrowser(t *testing.T) {
 	root := testsupport.RepoRoot(t)
-	private, err := os.MkdirTemp("/tmp", "yw-")
+	private, err := testsupport.MkdirShortTemp("yw-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,16 +150,17 @@ func TestAgentWindowMetadataRefreshBrowser(t *testing.T) {
 }
 
 const workingBrowserScript = `
-import json, sys
+import json, os, sys
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 options=Options()
+options.binary_location=os.environ['CHROME_BIN']
 for flag in ('--headless=new','--no-sandbox','--disable-dev-shm-usage','--window-size=1400,900'):
  options.add_argument(flag)
 options.add_argument('--user-data-dir='+sys.argv[2]+'/chrome')
-driver=webdriver.Chrome(service=Service('/usr/bin/chromedriver'),options=options)
+driver=webdriver.Chrome(service=Service(os.environ['CHROMEDRIVER_BIN']),options=options)
 try:
  driver.get(sys.argv[1]+'/?tabs=working&layout=1')
  WebDriverWait(driver,15).until(lambda d:d.execute_script("return typeof applyAutoApprovePayload==='function' && typeof sessionAgentWindowStatusModel==='function' && document.querySelector('.pane-tab')!==null"))

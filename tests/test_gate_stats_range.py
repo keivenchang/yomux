@@ -31,10 +31,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import statistics
 import threading
 import time
 from pathlib import Path
+from tools.tmux_paths import short_temp_base
 from types import SimpleNamespace
 from urllib.parse import parse_qs
 from urllib.parse import urlparse
@@ -376,7 +378,7 @@ def test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete(bro
                 f"{values['decode_ms']:6.2f}  {values['cost_ms']:5.2f}  "
                 f"{values['encode_ms']:6.2f}  {values['decoded_buckets']:7d}"
             )
-        Path("/tmp/yolomux-g4b-ring-stages-yo7775.json").write_text(
+        (short_temp_base() / f"yolomux-g4b-ring-stages-{os.getpid()}.json").write_text(
             json.dumps(stage_breakdown, indent=2) + "\n",
             encoding="utf-8",
         )
@@ -626,7 +628,7 @@ def test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete(bro
             f"G4b completion guard: 1800/AUTO did not render before "
             f"{INJECTED_COMPLETION_TIMEOUT_MS}ms"
         ), result
-        Path("/tmp/yolomux-g4b-ring-yo7775.json").write_text(
+        (short_temp_base() / f"yolomux-g4b-ring-{os.getpid()}.json").write_text(
             json.dumps({"samples": SAMPLE_COUNT, "distribution_ms": distribution}, indent=2) + "\n",
             encoding="utf-8",
         )

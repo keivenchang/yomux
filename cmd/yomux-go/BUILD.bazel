@@ -1,5 +1,5 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
-load("//:tools/bazel_rules.bzl", "go_test_pair")
+load("//:tools/bazel_rules.bzl", "go_test_pair", "product_version")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -7,12 +7,8 @@ exports_files(["BUILD.bazel"])
 
 SQLITE = "@com_github_mattn_go_sqlite3//:go_default_library"
 
-genrule(
+product_version(
     name = "generate_product_version",
-    srcs = ["//:yomux_lib/version.py"],
-    outs = ["product_version_generated.go"],
-    cmd = "python3 \"$(location //:tools/generate_go_version.py)\" --source \"$(location //:yomux_lib/version.py)\" --output \"$@\"",
-    tools = ["//:tools/generate_go_version.py"],
 )
 
 go_library(
@@ -20,7 +16,7 @@ go_library(
     srcs = glob(
         ["*.go"],
         exclude = ["*_test.go"],
-    ) + [":product_version_generated.go"],
+    ) + [":generate_product_version"],
     importpath = "github.com/keivenchang/yomux/cmd/yomux-go",
     deps = [
         "//internal/atomicfile:atomicfile_lib",
@@ -29,6 +25,7 @@ go_library(
         "//internal/finder:finder_lib",
         "//internal/mutablefs:mutablefs_lib",
         "//internal/productenv:productenv_lib",
+        "//internal/productversion:productversion_lib",
         "//internal/stats:stats_lib",
         "//internal/tmuxcmd:tmuxcmd_lib",
         "//internal/work:work_lib",
@@ -90,4 +87,19 @@ go_test(
         "//internal/stats:stats_lib",
         "//internal/testsupport:testsupport_lib",
     ],
+)
+
+filegroup(
+    name = "qualified_sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/__pycache__/**",
+            "**/*.pyc",
+            "**/*.log",
+            "**/*.lock",
+            "product_version_generated.go",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
 )

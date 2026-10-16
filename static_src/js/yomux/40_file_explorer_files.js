@@ -2689,8 +2689,21 @@ function fileExplorerSyncTransactionStillCurrent(plan, signature, options = {}) 
     && fileExplorerSyncPlanTargetStillCurrent(plan, options);
 }
 
+function beginFileExplorerSync(signature, renderTransaction = null) {
+  fileExplorerSyncState.inFlightSignature = signature;
+  fileExplorerSyncState.renderTransaction = renderTransaction;
+  return ++fileExplorerSyncState.generation;
+}
+
+function finishFileExplorerSync(signature, generation) {
+  if (fileExplorerSyncState.generation !== generation || fileExplorerSyncState.inFlightSignature !== signature) return;
+  fileExplorerSyncState.inFlightSignature = '';
+  fileExplorerSyncState.renderTransaction = null;
+}
+
 function cancelPendingFileExplorerActiveSync(options = {}) {
   fileWorkspaceState.invalidateInteraction({invalidateOpen: options.invalidateOpen !== false});
+  finishFileExplorerSync(fileExplorerSyncState.inFlightSignature, fileExplorerSyncState.generation);
   fileExplorerSyncState.generation += 1;
   fileExplorerSyncState.inFlightSignature = '';
   fileExplorerSyncState.publication = null;
@@ -3000,13 +3013,12 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     scheduleFileTreeMetadataRefresh({highlightsOnly: true});
     return false;
   }
-  fileExplorerSyncState.inFlightSignature = signature;
-  const generation = ++fileExplorerSyncState.generation;
+  const renderTransaction = {epoch: ++fileTreeRenderEpoch, completed: true};
+  const generation = beginFileExplorerSync(signature, renderTransaction);
   const isCurrent = () => fileExplorerSyncState.generation === generation
     && fileExplorerSyncTransactionStillCurrent(plan, signature, options);
   const scrollOwner = createInputOwnedDeferredElementScrollOwner(...fileExplorerTreeContainers());
   let selectionOwner = null;
-  const renderTransaction = {epoch: ++fileTreeRenderEpoch, completed: true};
   let publicationPromise = null;
   let publicationStart = null;
   let publicationError = null;
@@ -3046,6 +3058,8 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     const normalizedRoot = normalizeDirectoryPath(plan.root);
     const fetchedListings = new Map();
     const renderListings = (entriesByDir, renderOptions) => {
+      // A push can advance a parent while this transaction still awaits a deeper listing.
+      if (entriesByDir === fetchedListings) entriesByDir = cachedFileExplorerSyncListings(entriesByDir.keys()) || entriesByDir;
       if (entriesByDir !== fetchedListings) {
         for (const [directory, entries] of entriesByDir) fetchedListings.set(directory, entries);
       }
@@ -3190,9 +3204,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     return completed;
   } finally {
     if (!retainPublication && fileExplorerSyncState.publication === publicationOwner) fileExplorerSyncState.publication = null;
-    if (fileExplorerSyncState.generation === generation && fileExplorerSyncState.inFlightSignature === signature) {
-      fileExplorerSyncState.inFlightSignature = '';
-    }
+    finishFileExplorerSync(signature, generation);
   }
 }
 
@@ -3203,14 +3215,11 @@ async function syncFileExplorerToActiveTab(preferredItem = null, options = {}) {
   if (!path || fileExplorerSyncState.inFlightSignature === path) return false;
   const root = currentFileExplorerRoot();
   if (!pathIsInsideDirectory(path, root) || path === root) return false;
-  fileExplorerSyncState.inFlightSignature = path;
-  const generation = ++fileExplorerSyncState.generation;
+  const generation = beginFileExplorerSync(path);
   try {
     return await expandFileExplorerTreesToPath(path, root, generation);
   } finally {
-    if (fileExplorerSyncState.generation === generation && fileExplorerSyncState.inFlightSignature === path) {
-      fileExplorerSyncState.inFlightSignature = '';
-    }
+    finishFileExplorerSync(path, generation);
   }
 }
 
@@ -3387,7 +3396,9 @@ document.addEventListener('pointerdown', event => {
 for (const type of ['wheel', 'pointermove', 'pointerup', 'pointercancel', 'touchstart', 'touchmove', 'touchend', 'touchcancel', 'keydown']) {
   document.addEventListener(type, claimFileExplorerScrollInputOwnership, {capture: true, passive: true});
 }
-window.addEventListener('blur', releaseActiveElementScrollInputs);
+for (const type of ['blur', 'pagehide']) {
+  window.addEventListener(type, () => releaseActiveElementScrollInputs(document));
+}
 document.addEventListener('scroll', event => {
   if (eventTargetIsFileExplorerSurface(event.target)) markFileExplorerInteraction();
 }, true);
@@ -3917,6 +3928,12 @@ function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortModeForVi
   return drainFileTreeRenderSteps(sortedFileTreeEntrySteps(entries, sortMode, options));
 }
 
+function tabberUtilityEntryCompare(left, right) {
+  const leftKey = left.sortName != null ? String(left.sortName) : String(left.name || '');
+  const rightKey = right.sortName != null ? String(right.sortName) : String(right.name || '');
+  return FILE_TREE_NAME_COLLATOR.compare(leftKey, rightKey);
+}
+
 function* sortedFileTreeEntrySteps(entries, sortMode, options = {}) {
   const includeHidden = options.includeHidden === true;
   let visible = [];
@@ -3960,6 +3977,7 @@ function fileTreeEntryComparator(sortMode, options = {}) {
       const utilityRank = entry => entry?.tabber?.type === 'tab' ? 1 : 0;
       const rankResult = utilityRank(left) - utilityRank(right);
       if (rankResult !== 0) return rankResult;
+      if (utilityRank(left) === 1) return tabberUtilityEntryCompare(left, right);
     }
     const deletedResult = deletedRank(left) - deletedRank(right);
     if (deletedResult !== 0) return deletedResult;
@@ -4700,6 +4718,11 @@ function* renderTreeChildrenSteps(container, parentPath, entries, depth, options
       remaining.delete(row.dataset.path);
     }
     visible = [...retained, ...remaining.values()];
+    if (renderOptions.tabberNormalOrder === true) {
+      const conversations = visible.filter(entry => entry?.tabber?.type !== 'tab');
+      const utilityTabs = visible.filter(entry => entry?.tabber?.type === 'tab').sort(tabberUtilityEntryCompare);
+      visible = [...conversations, ...utilityTabs];
+    }
   }
   const visiblePaths = new Map();
   for (const entry of visible) {
@@ -6671,13 +6694,72 @@ function tabberPathToken(value) {
   return readableParamComponent(value);
 }
 
-// Recency for a ledger key (session "6" or session:window "6:1") is derived by the backend once as active_recency_ts.
+const tabberPendingInput = new Map();
+const tabberItemActivityStorageKey = 'yomux-tabber-item-activity';
+const tabberStoredItemActivity = safeJsonParse(sessionStorageGet(tabberItemActivityStorageKey), []);
+const tabberLocalItemActivity = new Map((Array.isArray(tabberStoredItemActivity) ? tabberStoredItemActivity : [])
+  .filter(entry => Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string'
+    && /^(file|gitdiff):./.test(entry[0]) && Number.isFinite(entry[1]) && entry[1] > 0).slice(-256));
+const tabberItemActivityTouchSentAt = new Map();
+
+function sendTabberItemActivityTouch(item) {
+  const key = String(item || '');
+  if (!key || typeof apiFetchJson !== 'function' || !/^go(?:\s|$)/i.test(String(bootstrap?.backendLabel || bootstrap?.backend || '').trim())) return false;
+  const now = Date.now();
+  const lastSentAt = Number(tabberItemActivityTouchSentAt.get(key) || 0);
+  if (lastSentAt > 0 && now - lastSentAt < 5000) return false;
+  tabberItemActivityTouchSentAt.set(key, now);
+  while (tabberItemActivityTouchSentAt.size > 256) tabberItemActivityTouchSentAt.delete(tabberItemActivityTouchSentAt.keys().next().value);
+  void apiFetchJson('/api/activity/touch', {method: 'POST', body: JSON.stringify({item: key}), startupImmediate: true}).catch(() => {
+    if (tabberItemActivityTouchSentAt.get(key) === now) tabberItemActivityTouchSentAt.delete(key);
+  });
+  return true;
+}
+
+function noteTabberItemActivity(item) {
+  const activityItem = String(item || '');
+  if (!activityItem || (!isFileEditorItem(activityItem) && !gitDiffItemPath(activityItem))) return false;
+  tabberLocalItemActivity.set(activityItem, Date.now() / 1000);
+  while (tabberLocalItemActivity.size > 256) tabberLocalItemActivity.delete(tabberLocalItemActivity.keys().next().value);
+  // Retain the latest local edit even when the bounded server touch is throttled or still in flight.
+  sessionStorageSet(tabberItemActivityStorageKey, JSON.stringify([...tabberLocalItemActivity]));
+  sendTabberItemActivityTouch(activityItem);
+  if (itemInLayout(tabberItemId)) refreshTabberPanels();
+  return true;
+}
+
+// Keep an immediate input clock until the server acknowledges it. An HTTP snapshot
+// already in flight when the user types must not roll the displayed date back.
 function tabberRecency(key) {
   const rec = tabberActivityPayload?.activity?.[key];
-  if (!rec) return 0;
+  const pending = tabberPendingInput.get(key);
+  if (pending && (Date.now() > pending.expiresAt || pending.acknowledged)) {
+    tabberPendingInput.delete(key);
+  }
+  const localTs = tabberPendingInput.get(key)?.timestamp || 0;
+  if (!rec) return localTs;
   const derived = Number(rec.active_recency_ts || 0);
-  if (Number.isFinite(derived) && derived > 0) return derived;
-  return Math.max(Number(rec.last_user_input_ts || 0), Number(rec.last_agent_active_ts || 0), Number(rec.last_output_ts || 0));
+  if (Number.isFinite(derived) && derived > 0) return Math.max(localTs, derived);
+  return Math.max(localTs, Number(rec.last_user_input_ts || 0), Number(rec.last_agent_active_ts || 0), Number(rec.last_output_ts || 0));
+}
+
+function noteTabberTerminalInput(item) {
+  const view = tabberViewDescriptorForSession(item);
+  const session = view?.sourceSession || item;
+  const info = transcriptMetadataState.payload.sessions?.[session];
+  const windows = tmuxWindowRecords(info?.panes);
+  const active = windows.filter(record => tmuxWindowRecordIsActive(session, record));
+  const windowIndex = view ? view.windowIndex : active.length === 1 ? active[0].index : null;
+  const timestamp = Date.now() / 1000;
+  const keys = [session];
+  if (windowIndex !== null && windowIndex >= 0) keys.push(`${session}:${windowIndex}`);
+  for (const [key, pending] of tabberPendingInput) {
+    if (Date.now() > pending.expiresAt) tabberPendingInput.delete(key);
+  }
+  for (const key of keys) tabberPendingInput.set(key, {timestamp, expiresAt: Date.now() + 10_000,
+    minGeneration: tabberActivityState.requestGeneration + 1});
+  // Transport delivery stays ahead of row rendering on the key/paste path.
+  scheduleTabberTreeLayoutStateSync({refreshTree: true});
 }
 
 function tabberRecentAgents(payload = tabberActivityPayload) {
@@ -6831,6 +6913,10 @@ function applyTabberActivityPayload(payload, requestGeneration = 0) {
   if (typeof applyTmuxRosterRenames === 'function') applyTmuxRosterRenames(payload.renames, payload.session_order);
   mergeTabberActivitySessionMetadata(payload);
   tabberActivityPayload = payload;
+  for (const [key, pending] of tabberPendingInput) {
+    pending.acknowledged = generation >= pending.minGeneration
+      && Number(payload.activity?.[key]?.last_user_input_ts || 0) >= pending.timestamp;
+  }
   tabberActivityState.loaded = true;
   if (hasActivity && !refreshPlaceholder) tabberNormalPointerPreviewState.activityReady = true;
   // A refresh placeholder is not an authoritative snapshot. Let an older in-flight full response
@@ -7055,7 +7141,7 @@ function buildTabberNormalRows() {
     if (!advanced && [differItemId, chatItemId, yoagentItemId].includes(item)) continue;
     const label = itemLabel(item);
     rows.push({
-      name: tabberTabPath(item).slice(1), kind: 'file', mtime: 0, sortName: label,
+      name: tabberTabPath(item).slice(1), kind: 'file', mtime: Math.max(Number(tabberLocalItemActivity.get(item) || 0), tabberRecency(item)), sortName: label,
       tabber: {type: 'tab', item, label, icon: '◷', active: visibleItems.has(item), current: focusedItem === item,
         normalNameHtml: `<span class="tabber-normal-primary">${esc(label)}</span><span class="tabber-normal-description">&nbsp;</span>`},
     });
@@ -7086,8 +7172,20 @@ function renderTabberTree(groupsEl, options = {}) {
   }
   const advanced = tabberIsAdvanced();
   groupsEl.dataset.tabberMode = advanced ? 'advanced' : 'normal';
-  const preserveDisplayedOrder = options.preserveDisplayedOrder === true
-    || (options.reorder !== true && groupsEl.closest('.file-explorer-panel')?.__tabberPointerInside === true);
+  const sortMode = tabberSortMode();
+  const previousSort = container.__tabberSortState;
+  const nowMs = fileTreeRecencyNowMs();
+  const activityReady = tabberActivityState.loaded;
+  const explicitSort = previousSort && previousSort.mode !== sortMode;
+  const initialActivity = activityReady && previousSort && !previousSort.activityReady;
+  const sortDue = !previousSort || explicitSort || initialActivity || sortMode !== 'newest'
+    || nowMs - previousSort.sortedAt >= 10_000;
+  const interactionBlocked = Boolean(previousSort) && (options.preserveDisplayedOrder === true
+    || (options.reorder !== true && groupsEl.closest('.file-explorer-panel')?.__tabberPointerInside === true));
+  const preserveDisplayedOrder = !explicitSort && (!sortDue || interactionBlocked);
+  // Dates and status keep consuming fresh activity even when the row positions are retained.
+  // Hover defers a due sort without consuming its interval; leaving can apply the latest data.
+  if (!preserveDisplayedOrder) container.__tabberSortState = {mode: sortMode, sortedAt: nowMs, activityReady};
   const signature = JSON.stringify([tabberSortMode(), preserveDisplayedOrder, rows.map(entry => {
     const model = tabberTreeRowViewModel(null, `/${entry.name}`, entry, 0, {view: 'tabber'});
     return [model.path, model.kind, model.icon, model.label, model.paddingLeft, model.dataset, model.content, entry.mtime, entry.tabber?.normalSortMtime];
@@ -7144,8 +7242,13 @@ async function renameTabberDescription(session, windowIndex, windowId, descripti
 }
 
 function tabberNormalRowNameHtml(session, leadingHtml, description, windowIdentity = '') {
-  const title = tmuxPaneTabHtml(session, null, '', false, {
-    leadingHtml, showState: false, showBadges: false, showDetail: false,
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
+  const auto = autoApproveStates.get(session)?.enabled === true;
+  const state = sessionState(session, info);
+  const decorations = sessionTabStatusDecorations(session, info, auto, {state, toggle: false});
+  const title = tmuxPaneTabHtml(session, info, state, auto, {
+    leadingHtml: `${leadingHtml || ''}${decorations.stateMarker}${decorations.yoloHtml}`,
+    showState: true, showBadges: true, showDetail: false,
     windowIdentityHtml: windowIdentity ? `<span class="tabber-normal-window-identity">${esc(windowIdentity)}</span>` : '',
   });
   return tabberRowNameHtml(stripTitleAttrs(title), description);

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shlex
+import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,9 +31,17 @@ from tools.product_environment import PRODUCT_PREFIXES
 
 ROOT_KEYS = (product_env_name('RUNTIME_DIR'), product_env_name('CONFIG_DIR'), product_env_name('STATE_DIR'), product_env_name('CACHE_DIR'))
 PRODUCT_ROOT_ENV = product_env_name('ROOT')
+TEST_PROCESS_SCOPE_ENV = "YOMUX_BAZEL_PROCESS_SCOPE"
 GENERATED_PYTHON_CACHE_PREFIX_ENV = product_env_name('GENERATED_PYTHONPYCACHEPREFIX')
 
 _legacy_alias_warning_emitted = False
+
+
+def private_directory(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = path.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise ValueError("native execution directory must be user-owned mode 0700: " + str(path))
 
 
 PRODUCT_ROOT_SETTINGS = (
@@ -84,6 +93,9 @@ def synthetic_test_environment(overrides: Mapping[str, str] | None = None) -> di
     }
     environment["YOMUX_TEST_DISABLE_PRICING_REFRESH"] = "1"
     environment.update(overrides or {})
+    for protected in (TEST_PROCESS_SCOPE_ENV, "YOMUX_NATIVE_SHORT_TMPDIR"):
+        if protected in os.environ:
+            environment[protected] = os.environ[protected]
     return environment
 ROOTED_OVERRIDE_KEYS = (
     *ROOT_KEYS,

@@ -179,6 +179,7 @@ def test_job_client_does_not_retry_generic_busy_without_prehandler_provenance(tm
 def test_registry_retries_real_unix_socket_capacity_refusal(operation, tmp_path, monkeypatch):
     socket_path = tmp_path / "fixture.sock"
     stop_event = Event()
+    listener_ready = Event()
     holding = Event()
     release = Event()
     holder_failures = []
@@ -208,16 +209,11 @@ def test_registry_retries_real_unix_socket_capacity_refusal(operation, tmp_path,
             handle=handle,
             on_idle=lambda: False,
             on_client=lambda: None,
+            on_start=listener_ready.set,
             concurrent_handlers=1,
         ),
         daemon=True,
     )
-    worker.start()
-    deadline = time.monotonic() + 2.0
-    while not socket_path.exists() and time.monotonic() < deadline:
-        time.sleep(0.005)
-    assert socket_path.exists() is True
-
     holder = Thread(
         target=lambda: rpc.request(
             socket_path,
@@ -226,8 +222,6 @@ def test_registry_retries_real_unix_socket_capacity_refusal(operation, tmp_path,
         ),
         daemon=True,
     )
-    holder.start()
-    assert holding.wait(timeout=1.0) is True
     retry_waits = []
 
     def retry_sleep(seconds):
@@ -243,6 +237,11 @@ def test_registry_retries_real_unix_socket_capacity_refusal(operation, tmp_path,
         sleep=retry_sleep,
     )
     try:
+        worker.start()
+        assert listener_ready.wait(timeout=2.0) is True
+        assert socket_path.exists() is True
+        holder.start()
+        assert holding.wait(timeout=1.0) is True
         if operation == "ping":
             assert registry.healthy() is True
         elif operation == "status":
@@ -258,8 +257,10 @@ def test_registry_retries_real_unix_socket_capacity_refusal(operation, tmp_path,
     finally:
         release.set()
         stop_event.set()
-        holder.join(timeout=2.0)
-        worker.join(timeout=2.0)
+        if holder.ident is not None:
+            holder.join(timeout=2.0)
+        if worker.ident is not None:
+            worker.join(timeout=2.0)
     assert holder.is_alive() is False
     assert worker.is_alive() is False
     assert holder_failures == []

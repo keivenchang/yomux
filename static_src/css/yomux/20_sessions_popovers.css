@@ -132,6 +132,9 @@
   --agent-status-ball-fill: var(--pr-status-passing);
   --attention-ring-rgb: var(--agent-status-working-rgb);
 }
+.status-indicator--working {
+  --agent-status-play-path: polygon(8% 0, 100% 50%, 8% 100%);
+}
 .status-indicator--cooldown {
   color: var(--agent-status-cooldown);
   --agent-status-ball-fill: var(--agent-status-cooldown);
@@ -234,13 +237,16 @@
   flex: 0 0 auto;
   vertical-align: middle;
 }
+.session-agent-activity-marker,
+.agent-window-activity {
+  --agent-status-ball-border: var(--paint-black);
+}
 .agent-window-activity {
   --agent-window-icon-size: 18px;
   /* Canonical Tab status-ball diameter. Sub-window (per-window) balls derive from this so the
      two sizes stay in a single source — see .tmux-window-button .agent-window-activity. */
   --agent-status-ball-size-base: 14px;
   --agent-status-ball-size: var(--agent-status-ball-size-base);
-  --agent-status-ball-border: var(--paint-black);
   --agent-window-activity-inline-size: 24px;
   --agent-window-activity-block-size: var(--agent-window-icon-size);
   margin-inline-start: var(--space-2);
@@ -279,6 +285,28 @@
   color: transparent;
   filter: none;
   box-shadow: none;
+}
+.agent-window-status-dot--play {
+  --agent-status-shape-path: var(--agent-status-play-path);
+}
+.agent-window-status-dot--pause {
+  --agent-status-shape-path: polygon(12% 0, 38% 0, 38% 100%, 12% 100%, 12% 0, 62% 0, 88% 0, 88% 100%, 62% 100%, 62% 0);
+}
+.agent-window-status-dot--stop {
+  --agent-status-shape-path: inset(0);
+}
+.session-agent-activity-marker .agent-window-status-dot:is(.agent-window-status-dot--play, .agent-window-status-dot--pause, .agent-window-status-dot--stop) {
+  /* Keep the status slot and pulse while changing only its single-color silhouette. */
+  clip-path: var(--agent-status-shape-path);
+  border: 0;
+  border-radius: 0;
+}
+.session-agent-activity-marker:has(.agent-window-status-dot:is(.agent-window-status-dot--play, .agent-window-status-dot--pause, .agent-window-status-dot--stop)) {
+  /* Outline outside the clipped glyph so matching tab colors cannot hide its edges. */
+  filter: drop-shadow(1px 0 0 var(--agent-status-ball-border))
+    drop-shadow(-1px 0 0 var(--agent-status-ball-border))
+    drop-shadow(0 1px 0 var(--agent-status-ball-border))
+    drop-shadow(0 -1px 0 var(--agent-status-ball-border));
 }
 /* Parent Tabs summarize every visible child state with equal, crisp colors instead of averaging them
    into an unreadable brown. The child glyphs remain single-state symbols. */

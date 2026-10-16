@@ -23,6 +23,8 @@ import time
 
 import pytest
 
+from tests.helpers.fixture_tools import clear_fixture_settings
+
 from tests import gate_harness as gate_harness_module
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.gate_harness import gate_http_port  # noqa: F401
@@ -130,6 +132,7 @@ class _StubConfig:
 
 
 def test_pytest_cmdline_main_takes_the_flock_before_the_writer_lease(monkeypatch, pytestconfig):
+    clear_fixture_settings(monkeypatch, "BAZEL_EXECUTION", "BAZEL_CONTRACT")
     # The caller wiring is the actual F8 fix. Exercise pytest_cmdline_main directly so that reverting
     # its order (lease before flock) turns this test red; the manual-nesting concurrency test above
     # cannot catch a caller regression because it never calls the caller.

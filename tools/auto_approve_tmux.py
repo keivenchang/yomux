@@ -52,6 +52,7 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tools.tmux_paths import short_temp_base, short_temp_prefix
 from yomux_lib.tmux.agent_tui import AgentPaneState
 from yomux_lib.tmux.agent_tui import AgentTuiSendResult
 from yomux_lib.tmux.agent_tui import classify_agent_pane
@@ -297,7 +298,7 @@ def _self_test() -> bool:
     """Run the pytest coverage that replaced the old inline self-test."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     env = os.environ.copy()
-    with tempfile.TemporaryDirectory(prefix=f"yomux-test-{os.getpid()}-{os.getuid()}-", dir="/tmp") as raw_root:
+    with tempfile.TemporaryDirectory(prefix=short_temp_prefix(f"yomux-test-{os.getpid()}-{os.getuid()}-"), dir=short_temp_base()) as raw_root:
         test_root = Path(raw_root)
         test_root.chmod(0o700)
         env.setdefault("PYTHONPYCACHEPREFIX", str(test_root / "pyc"))

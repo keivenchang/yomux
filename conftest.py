@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -25,6 +26,7 @@ from tools.product_environment import clear_product_environment_assignments
 from tools.product_environment import product_env
 from tools.product_environment import product_env_name
 from tools.tool_guard import host_expensive_tool_lock_path
+from tools.tmux_paths import SHORT_TMPDIR_ENV, short_temp_base
 
 _HOST_ARTIFACTS = worktree_writer.configure_host_local_artifacts(REPO_ROOT)
 sys.dont_write_bytecode = _previous_dont_write_bytecode
@@ -76,8 +78,11 @@ def _install_fallback_environment() -> None:
     if inherited_test_root:
         test_root = Path(inherited_test_root)
         test_root.mkdir(parents=True, exist_ok=True)
+    elif SHORT_TMPDIR_ENV in os.environ:
+        test_root = short_temp_base()
+        apply_product_environment_assignments(os.environ, {"TEST_ROOT": str(test_root)})
     else:
-        test_root = Path(tempfile.mkdtemp(prefix=f"yomux-test-{os.getpid()}-{os.getuid()}-", dir="/tmp"))
+        test_root = Path(tempfile.mkdtemp(prefix=f"yomux-test-{os.getpid()}-{os.getuid()}-", dir=short_temp_base()))
         test_root.chmod(0o700)
         apply_product_environment_assignments(os.environ, {"TEST_ROOT": str(test_root)})
 
@@ -154,6 +159,32 @@ def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool 
 def pytest_cmdline_main(config: pytest.Config) -> int | None:
     """Re-run this pytest invocation inside Docker before host collection."""
 
+    if product_env("BAZEL_EXECUTION") == "qualified-native":
+        if product_env("BAZEL_CONTRACT"):
+            return None
+        working_directory = Path.cwd().resolve()
+        try:
+            relative_directory = working_directory.relative_to(REPO_ROOT)
+        except ValueError:
+            print("PYTEST REFUSED: native tests require a declared worktree directory", file=sys.stderr)
+            return 3
+        arguments = []
+        for argument in config.invocation_params.args:
+            path, separator, node = argument.partition("::")
+            if path.startswith("/"):
+                try:
+                    absolute = Path(path).resolve()
+                    absolute.relative_to(REPO_ROOT)
+                    path = os.path.relpath(absolute, working_directory)
+                except ValueError:
+                    print("PYTEST REFUSED: native tests require declared worktree inputs", file=sys.stderr)
+                    return 3
+            arguments.append(path + separator + node)
+        descriptor = json.dumps({"args": ["python3", "-m", "pytest", *arguments], "env": [],
+                                 "cwd": relative_directory.as_posix()}, separators=(",", ":"))
+        command = [str(REPO_ROOT / "tools/run_bazel_tests.sh"), "--execution", "qualified-native",
+                   "--target", "//:qualified_pytest_direct", "--", "--test_arg=" + descriptor]
+        return _run_delegated_pytest(config, command, dict(os.environ))
     available, reason = docker_image.container_available(REPO_ROOT)
     if not available:
         if docker_image.running_inside_container():
@@ -183,6 +214,10 @@ def pytest_cmdline_main(config: pytest.Config) -> int | None:
         *arguments,
     ]
     child_env = dict(os.environ)
+    return _run_delegated_pytest(config, command, child_env)
+
+
+def _run_delegated_pytest(config, command, child_env):
     # A collect-only run does no expensive work, and a launching check that already owns the flock
     # must not be serialized behind itself; both run directly. Every other direct run must serialize
     # on the tool flock BEFORE it takes the worktree writer lease, so a run queued behind another

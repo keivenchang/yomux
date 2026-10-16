@@ -311,7 +311,7 @@ async function triggerSelfUpdate(_event = null, ownerToast = null) {
     const title = data.ok ? (data.restarting ? t('update.installing') : t('update.softwareTitle')) : t('update.failed');
     emitNotification('update', {title, lines: [userMessageText(data, t(data.ok ? 'state.done' : 'update.seeServerLogs'))], coalesceKey: 'self-update-result'});
     if (data.ok && data.restarting) {
-      startSelfUpdateReloadPolling(data.target || data.version || target);
+      startSelfUpdateReloadPolling(data.target || data.version || target, data.instance_id || '');
     }
   } catch (error) {
     emitNotification('update', {title: t('update.failed'), lines: [userMessageText(error, t('update.seeServerLogs'))], coalesceKey: 'self-update-result'});
@@ -335,7 +335,7 @@ function applyUpdateAvailable(status) {
   const node = emitNotification('update', {
     title: t('update.availableTitle'),
     lines: [t('update.availableBody', {target: status.target ? ` (${status.target})` : ''})],
-    actions: [updateActionButton(t('update.now'), triggerSelfUpdate)],
+    actions: readOnlyMode ? [] : [updateActionButton(t('update.now'), triggerSelfUpdate)],
     countdownMs: 4 * 60 * 60 * 1000,  // keep the update cue up for 4 hours, not the default ~10s
     className: 'attention-alert toast toast-update',  // solid (opaque) background, not the translucent default
     coalesceKey: 'update-available',

@@ -10,6 +10,7 @@ import os
 import tempfile
 import zipfile
 from pathlib import Path
+from tools.tmux_paths import short_temp_base, short_temp_prefix
 
 import pytest
 
@@ -270,7 +271,7 @@ def _run_operation(operation: str, target: Path):
 @pytest.fixture
 def repoint_tree(monkeypatch):
     """A disposable allowed root and fake blocked target, both below /tmp."""
-    with tempfile.TemporaryDirectory(prefix="yofs-race-", dir="/tmp") as raw_root:
+    with tempfile.TemporaryDirectory(prefix=short_temp_prefix("yofs-race-"), dir=short_temp_base()) as raw_root:
         root = Path(raw_root)
         blocked = root / ".ssh"
         blocked.mkdir()

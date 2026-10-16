@@ -4269,6 +4269,9 @@ function applyUserInitiatedPanelFocus(item, previousItem, options = {}) {
   } else {
     setExplicitPaneFocusItem(item);
   }
+  if (isFileEditorItem(item) || gitDiffItemPath(item)) {
+    if (typeof noteTabberItemActivity === 'function') noteTabberItemActivity(item);
+  }
   if (isFileEditorItem(item)) {
     activeFile = fileItemPath(item);
     scheduleFileExplorerActiveFileReveal(activeFile, {explicit: true});
@@ -4697,12 +4700,17 @@ function claimElementScrollInputEvent(element, event) {
   }
 }
 
-function releaseActiveElementScrollInputs() {
+function releaseActiveElementScrollInputs(ownerDocument = null) {
+  const ownsRecord = record => !ownerDocument || record?.ownerDocument === ownerDocument;
   for (const [key, element] of activeElementScrollInputs) {
+    if (ownerDocument && element.ownerDocument !== ownerDocument) continue;
     elementScrollInputOwnership.get(element)?.activeInputs.delete(key);
     claimPreviewScrollUserOwnership(element);
+    activeElementScrollInputs.delete(key);
   }
-  activeElementScrollInputs.clear();
+  for (const key of ['active', 'last']) {
+    if (ownsRecord(previewScrollTraceState[key])) previewScrollTraceState[key] = null;
+  }
 }
 
 function deferredElementScrollExpectation(element) {
@@ -4725,6 +4733,15 @@ function createDeferredElementScrollOwner(...elements) {
   return state;
 }
 
+function previewScrollRecordIsCurrent(record) {
+  if (!record) return false;
+  if (record === previewScrollTraceState.active) {
+    return Date.now() - Number(record.startedAt || 0) <= previewScrollGestureMaxActiveMs;
+  }
+  return record.claimed === true
+    && Date.now() - Math.max(Number(record.endedAt || 0), Number(record.lastScrollAt || 0)) <= previewScrollRecentOwnershipMs;
+}
+
 function previewScrollUserOwnsElementNow(element) {
   const ownsElement = record => Boolean(
     record?.claimed
@@ -4735,13 +4752,8 @@ function previewScrollUserOwnsElementNow(element) {
       || element?.contains?.(record.traceElement)
     )
   );
-  const active = previewScrollTraceState.active;
-  if (ownsElement(active) && Date.now() - Number(active.startedAt || 0) <= previewScrollGestureMaxActiveMs) return true;
-  const ended = previewScrollTraceState.last;
-  return Boolean(
-    ownsElement(ended)
-    && Date.now() - Math.max(Number(ended.endedAt || 0), Number(ended.lastScrollAt || 0)) <= previewScrollRecentOwnershipMs
-  );
+  return [previewScrollTraceState.active, previewScrollTraceState.last]
+    .some(record => ownsElement(record) && previewScrollRecordIsCurrent(record));
 }
 
 function createPassiveDeferredElementScrollOwner(...elements) {
@@ -4868,15 +4880,27 @@ function recordPreviewScrollInputTrace(element, phase, event = null, details = {
 function bindPreviewScrollOwnershipCapture(ownerDocument, recordForTarget) {
   if (!ownerDocument?.addEventListener || previewScrollCaptureDocuments.has(ownerDocument)) return false;
   previewScrollCaptureDocuments.add(ownerDocument);
-  for (const type of ['wheel', 'keydown', 'pointerdown', 'pointerup', 'pointercancel']) {
+  for (const type of ['wheel', 'keydown', 'pointerdown']) {
     ownerDocument.addEventListener(type, event => {
       const record = recordForTarget(event.target);
-      if (type === 'wheel' && !event.deltaX && !event.deltaY) return;
+      if (!record || event.defaultPrevented) return;
+      if (type === 'wheel' && (event.ctrlKey || (!event.deltaX && !event.deltaY))) return;
+      if (type === 'keydown' && (event.target?.isContentEditable
+          || event.target?.closest?.('input, textarea, select, [contenteditable="true"]')
+          || (event.key === ' ' && event.target?.closest?.('summary, button, a')))) return;
       if (type === 'keydown' && (!['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)
           || (event.key === ' ' && event.target?.closest?.('summary')))) return;
       // Native scrollbar pointers target the scroller itself; content clicks can toggle layout.
       if (type === 'pointerdown' && event.target !== (record?.traceElement || record?.element)) return;
-      claimPreviewScrollRecord(record, event);
+      if (type === 'pointerdown' && event.button !== undefined && event.button !== 0) return;
+      const claimed = {...record, ownerDocument, claimed: true,
+        gesture: ++previewScrollTraceState.gestureSequence,
+        userGeneration: claimPreviewScrollRecord(record, event)};
+      if (type === 'pointerdown') {
+        previewScrollTraceState.active = {...claimed, pointerId: event.pointerId, startedAt: Date.now()};
+      } else {
+        previewScrollTraceState.last = {...claimed, endedAt: Date.now()};
+      }
     }, {capture: true, passive: true});
   }
   ownerDocument.addEventListener('touchstart', event => {
@@ -4886,6 +4910,7 @@ function bindPreviewScrollOwnershipCapture(ownerDocument, recordForTarget) {
     const gesture = ++previewScrollTraceState.gestureSequence;
     previewScrollTraceState.active = {
       ...record,
+      ownerDocument,
       gesture,
       identifier: touch?.identifier,
       startX: Number(touch?.clientX || 0),
@@ -4898,9 +4923,9 @@ function bindPreviewScrollOwnershipCapture(ownerDocument, recordForTarget) {
   }, {capture: true, passive: true});
   ownerDocument.addEventListener('touchmove', event => {
     const active = previewScrollTraceState.active;
-    if (!active) return;
+    if (!previewScrollRecordIsCurrent(active) || active.ownerDocument !== ownerDocument || active.pointerId !== undefined) return;
     const touches = Array.from(event?.touches || []);
-    const touch = touches.find(item => active.identifier === undefined || item.identifier === active.identifier) || touches[0] || null;
+    const touch = touches.find(item => active.identifier === undefined || item.identifier === active.identifier) || null;
     if (touch && !active.claimed) {
       const deltaX = Number(touch.clientX || 0) - active.startX;
       const deltaY = Number(touch.clientY || 0) - active.startY;
@@ -4917,7 +4942,16 @@ function bindPreviewScrollOwnershipCapture(ownerDocument, recordForTarget) {
   }, {capture: true, passive: true});
   const finish = phase => event => {
     const active = previewScrollTraceState.active;
-    if (!active) return;
+    if (!active || active.ownerDocument !== ownerDocument) return;
+    if (phase.startsWith('pointer') && active.pointerId !== event.pointerId) return;
+    if (phase.startsWith('touch') && active.pointerId !== undefined) return;
+    if (phase.startsWith('touch') && event.changedTouches?.length
+        && !Array.from(event.changedTouches).some(touch => touch.identifier === active.identifier)) return;
+    claimElementScrollInputEvent(null, phase === 'pointercancel' ? {...event, type: 'pointercancel', pointerId: event.pointerId} : event);
+    if (!previewScrollRecordIsCurrent(active)) {
+      previewScrollTraceState.active = null;
+      return;
+    }
     recordPreviewScrollRecord(active, phase, event, {gesture: active.gesture});
     previewScrollTraceState.last = {...active, endedAt: Date.now()};
     previewScrollTraceState.active = null;
@@ -4930,6 +4964,12 @@ function bindPreviewScrollOwnershipCapture(ownerDocument, recordForTarget) {
   };
   ownerDocument.addEventListener('touchend', finish('touchend'), {capture: true, passive: true});
   ownerDocument.addEventListener('touchcancel', finish('touchcancel'), {capture: true, passive: true});
+  ownerDocument.addEventListener('pointerup', finish('pointerup'), {capture: true, passive: true});
+  ownerDocument.addEventListener('pointercancel', finish('pointercancel'), {capture: true, passive: true});
+  ownerDocument.addEventListener('lostpointercapture', finish('pointercancel'), {capture: true, passive: true});
+  const retire = () => releaseActiveElementScrollInputs(ownerDocument);
+  ownerDocument.defaultView?.addEventListener?.('blur', retire);
+  ownerDocument.defaultView?.addEventListener?.('pagehide', retire);
   ownerDocument.addEventListener('scroll', event => {
     const resolved = recordForTarget(event.target);
     if (!resolved) return;
@@ -4937,10 +4977,11 @@ function bindPreviewScrollOwnershipCapture(ownerDocument, recordForTarget) {
       recordPreviewScrollRecord(resolved, 'owned-scroll', event);
       return;
     }
-    const record = previewScrollTraceRecordsMatch(previewScrollTraceState.active, resolved)
+    const record = previewScrollRecordIsCurrent(previewScrollTraceState.active) && previewScrollTraceRecordsMatch(previewScrollTraceState.active, resolved)
       ? previewScrollTraceState.active
-      : (previewScrollTraceRecordsMatch(previewScrollTraceState.last, resolved) ? previewScrollTraceState.last : resolved);
-    if (record && !record.claimed) {
+      : (previewScrollRecordIsCurrent(previewScrollTraceState.last) && previewScrollTraceRecordsMatch(previewScrollTraceState.last, resolved) ? previewScrollTraceState.last : resolved);
+    // Reflections and layout clamping also emit scroll. Only input can elect a user owner.
+    if (record === previewScrollTraceState.active && !record.claimed) {
       record.claimed = true;
       record.userGeneration = claimPreviewScrollRecord(record);
       recordPreviewScrollRecord(record, 'ownership-claimed', event, {
@@ -4949,7 +4990,7 @@ function bindPreviewScrollOwnershipCapture(ownerDocument, recordForTarget) {
         claimSource: 'native-scroll',
       });
     }
-    if (record?.claimed) record.lastScrollAt = Date.now();
+    if (record?.claimed && previewScrollRecordIsCurrent(record)) record.lastScrollAt = Date.now();
     if (record?.embeddedContainer) {
       record.embeddedContainer._previewEmbeddedScrollPosition = ownedElementScrollPosition(record.traceElement);
     }

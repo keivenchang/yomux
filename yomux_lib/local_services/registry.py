@@ -557,7 +557,6 @@ def bounded_process_table(*, require_complete: bool = False) -> dict[int, Proces
         completed = subprocess.run(
             ["ps", "-axww", "-o", "pid=,ppid=,pgid=,sess=,time=,command="],
             capture_output=True,
-            text=True,
             timeout=2,
             check=False,
         )
@@ -570,7 +569,7 @@ def bounded_process_table(*, require_complete: bool = False) -> dict[int, Proces
             raise ProcessTableUnavailable("process_table_read_failed")
         return {}
     table: dict[int, ProcessTableEntry] = {}
-    for line in str(getattr(completed, "stdout", "") or "").splitlines():
+    for line in os.fsdecode(completed.stdout).splitlines():
         fields = line.split(None, 5)
         if len(fields) < 5:
             continue

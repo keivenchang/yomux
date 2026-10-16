@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+from tests.helpers.fixture_tools import fixture_environment, fixture_executable, fixture_script
 import ast
 from contextlib import contextmanager
 import errno
@@ -10,6 +11,7 @@ import json
 import math
 import multiprocessing
 import os
+import platform
 import re
 import shlex
 import signal
@@ -20,6 +22,7 @@ import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
+from tools.tmux_paths import short_temp_base, short_temp_prefix
 from types import SimpleNamespace
 
 import pytest
@@ -55,6 +58,12 @@ def load_check_module():
     spec.loader.exec_module(module)
     return module
 
+
+
+@pytest.fixture
+def linux_reference_platform(monkeypatch):
+    """Recorded Linux populations must use their own kernel profile on every runner."""
+    monkeypatch.setattr(latency_calibration.platform, "system", lambda: "Linux")
 
 def test_python_imports_are_module_scoped():
     roots = [
@@ -489,7 +498,7 @@ def test_check_runner_shares_one_concurrent_cpu_budget_between_pytest_and_bazel(
     }
     for cores, counts in expected.items():
         monkeypatch.setattr(check.os, "cpu_count", lambda: 64)
-        monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid, cores=cores: set(range(cores)))
+        monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid, cores=cores: set(range(cores)), raising=False)
         assert check.pytest_worker_counts() == counts
 
     monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "5,3,1")
@@ -499,10 +508,10 @@ def test_check_runner_shares_one_concurrent_cpu_budget_between_pytest_and_bazel(
     monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
     monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(check.os, "cpu_count", lambda: 8)
-    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: set(range(8)))
+    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: set(range(8)), raising=False)
     assert check.pytest_worker_counts() == ("2", "1", "1")
 
-    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: (_ for _ in ()).throw(OSError("unavailable")))
+    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: (_ for _ in ()).throw(OSError("unavailable")), raising=False)
     assert check.pytest_worker_counts() == ("2", "1", "1")
 
 
@@ -512,7 +521,7 @@ def test_check_runner_cpu_percent_knob_tunes_the_worker_budget(monkeypatch):
     monkeypatch.delenv("YOLOMUX_CHECK_CPU_PERCENT", raising=False)
     monkeypatch.setattr(check.platform, "system", lambda: "Linux")
     monkeypatch.setattr(check.os, "cpu_count", lambda: 32)
-    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: set(range(32)))
+    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: set(range(32)), raising=False)
 
     # Explicit argument (the --cpu-percent flag path) wins.
     assert check.pytest_worker_counts(cpu_percent=50) == ("4", "2", "2")
@@ -673,20 +682,25 @@ def test_bazel_memory_limit_shares_the_test_budget_and_honors_override(monkeypat
         check.pytest_memory_limit_mb(6)
 
 
-def test_bazel_e2e_actions_install_private_agent_environment(tmp_path):
+@pytest.mark.parametrize("native", [False, True])
+def test_bazel_e2e_actions_install_private_agent_environment(tmp_path, request, native):
     """The shared Bazel helper must replace inherited client roots per action."""
     action_tmp = tmp_path / "bazel-test-tmp"
     action_tmp.mkdir()
     foreign_root = tmp_path / "foreign-host-root"
-    environment = {
-        **os.environ,
+    environment = fixture_environment(request, {
         "TEST_TMPDIR": str(action_tmp),
         "HOME": str(foreign_root / "home"),
         "XDG_CONFIG_HOME": str(foreign_root / "config"),
         "XDG_DATA_HOME": str(foreign_root / "data"),
         "XDG_STATE_HOME": str(foreign_root / "state"),
         "CODEX_HOME": str(foreign_root / "codex"),
-    }
+    }, native=native)
+    use_short_fixture = "YOMUX_NATIVE_SHORT_TMPDIR" in environment
+    assert not native or use_short_fixture
+    if use_short_fixture:
+        native_root = Path(environment["YOMUX_NATIVE_SHORT_TMPDIR"])
+        assert native_root.parent == short_temp_base()
     script = (
         "set -eu; . tools/bazel_test_common.sh; bazel_test_prepare_environment; "
         "printf '%s\\n' "
@@ -697,11 +711,11 @@ def test_bazel_e2e_actions_install_private_agent_environment(tmp_path):
         '"YOLOMUX_BAZEL_TEST=$YOLOMUX_BAZEL_TEST"'
     )
     completed = subprocess.run(
-        ["bash", "-c", script], cwd=REPO_ROOT, env=environment, capture_output=True, text=True, check=False
+        [fixture_executable("bash"), "-c", script], cwd=REPO_ROOT, env=environment, capture_output=True, text=True, check=False
     )
     assert completed.returncode == 0, completed.stderr
     values = dict(line.split("=", 1) for line in completed.stdout.splitlines())
-    expected_root = action_tmp / "yolomux-agent-environment"
+    expected_root = native_root if use_short_fixture else action_tmp / "yolomux-agent-environment"
     expected = {
         "HOME": expected_root / "home",
         "XDG_CONFIG_HOME": expected_root / "xdg-config",
@@ -715,7 +729,7 @@ def test_bazel_e2e_actions_install_private_agent_environment(tmp_path):
     assert {name: Path(value) for name, value in values.items() if name not in {"YOLOMUX_BAZEL_TEST", "TMPDIR", "YOLOMUX_BAZEL_TMPDIR"}} == expected
     assert values["TMPDIR"] == values["YOLOMUX_BAZEL_TMPDIR"]
     short_tmpdir = Path(values["TMPDIR"])
-    assert short_tmpdir.parent == Path("/tmp")
+    assert short_tmpdir.parent == (native_root if use_short_fixture else short_temp_base())
     assert len(os.fsencode(short_tmpdir)) < 80
     assert not short_tmpdir.exists(), "the action-owned short temp root must be removed at shell exit"
     assert values["YOLOMUX_BAZEL_TEST"] == "1"
@@ -724,8 +738,8 @@ def test_bazel_e2e_actions_install_private_agent_environment(tmp_path):
 
 
 @pytest.mark.parametrize("mode,reuse", [("native", "no"), ("native", "yes"), ("container", "no"), ("container", "yes")])
-def test_bazel_action_environment_contract_runs_in_each_mode(tmp_path, mode, reuse):
-    environment = {
+def test_bazel_action_environment_contract_runs_in_each_mode(tmp_path, request, mode, reuse):
+    environment = fixture_environment(request, {
         "PATH": os.environ["PATH"],
         "TEST_TMPDIR": str(tmp_path),
         "YOMUX_BAZEL_EXECUTION": mode,
@@ -735,7 +749,7 @@ def test_bazel_action_environment_contract_runs_in_each_mode(tmp_path, mode, reu
         "GOSUMDB": "sum.golang.org" if mode == "native" else "off",
         "YOMUX_TEST_CONTAINER": "0" if mode == "native" else "1",
         "GOPATH": "", "GOCACHE": "", "GOMODCACHE": "",
-    }
+    })
     if mode == "container":
         prefix = "/tmp/yomux-bazel-private"
         environment.update({
@@ -743,7 +757,7 @@ def test_bazel_action_environment_contract_runs_in_each_mode(tmp_path, mode, reu
             "GOCACHE": prefix + "/go-cache",
             "GOMODCACHE": "/opt/yomux-go-mod-cache",
         })
-    result = subprocess.run(["bash", "tools/bazel_action_environment_test.sh"], cwd=REPO_ROOT, env=environment, capture_output=True, text=True, check=False)
+    result = subprocess.run([fixture_executable("bash"), "tools/bazel_action_environment_test.sh"], cwd=REPO_ROOT, env=environment, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
 
 
@@ -791,7 +805,7 @@ def test_bazel_runner_removes_private_output_root_after_bazel_exits(tmp_path):
     probe_path = tmp_path / "bazel-root"
     fake_bazel = fake_bin / "bazel"
     fake_bazel.write_text(
-        "#!/bin/sh\n"
+        fixture_script("#!/bin/sh\n"
         'if [ "$1" = --version ]; then printf "bazel 9.2.0\\n"; exit 0; fi\n'
         "symlink_prefix=\"\"\n"
         "for argument in \"$@\"; do\n"
@@ -803,7 +817,7 @@ def test_bazel_runner_removes_private_output_root_after_bazel_exits(tmp_path):
         "mkdir -p \"$output_root/readonly/nested\"\n"
         "printf '%s\\n' generated >\"$output_root/readonly/nested/file\"\n"
         "chmod 0555 \"$output_root/readonly\"\n"
-        "exit 0\n",
+        "exit 0\n"),
         encoding="utf-8",
     )
     fake_bazel.chmod(0o700)
@@ -827,6 +841,37 @@ def test_bazel_runner_removes_private_output_root_after_bazel_exits(tmp_path):
     assert symlink_prefix.name == "bazel-"
     output_root = symlink_prefix.parent
     assert not output_root.exists(), completed.stdout
+
+
+@pytest.mark.parametrize("missing", ["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"])
+def test_native_wrapper_refuses_missing_identity_input_before_bazel_execution(tmp_path, missing):
+    checkout = tmp_path / "checkout"
+    tools = checkout / "tools"
+    tools.mkdir(parents=True)
+    for name in ("run_bazel_tests.sh", "bazel_test_common.sh", "product_environment.sh"):
+        shutil.copy2(REPO_ROOT / "tools" / name, tools / name)
+    for name in (".bazelversion", "MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"):
+        if name != missing:
+            (checkout / name).write_bytes((REPO_ROOT / name).read_bytes())
+    command_directory = tmp_path / "bin"
+    command_directory.mkdir()
+    bazel = command_directory / "bazel"
+    version = (checkout / ".bazelversion").read_text().strip()
+    bazel.write_text(fixture_script("#!/bin/sh\n"
+        'if [ "$1" = --version ]; then printf "bazel ' + version + '\\n"; exit 0; fi\n'
+        'printf "unexpected build\\n" > "$NATIVE_INPUT_BUILD_PROBE"\n'), encoding="utf-8")
+    bazel.chmod(0o700)
+    build_probe = tmp_path / "unexpected-build"
+    environment = dict(os.environ, PATH=str(command_directory) + ":" + os.environ["PATH"],
+        NATIVE_INPUT_BUILD_PROBE=str(build_probe), YOMUX_TEST_CONTAINER="0", YOLOMUX_TEST_CONTAINER="0")
+    wrapper = str(tools / "run_bazel_tests.sh")
+    help_result = subprocess.run([wrapper, "--help"], cwd=checkout, env=environment, capture_output=True, text=True)
+    assert help_result.returncode == 0, help_result.stderr
+    result = subprocess.run([wrapper, "--execution", "native", "--jobs", "1", "--target", "//:go_tests"],
+        cwd=checkout, env=environment, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert str(checkout / missing) in result.stderr
+    assert not build_probe.exists()
 
 
 def test_bazel_runner_uses_a_persistent_action_cache_and_private_output_roots():
@@ -1240,7 +1285,7 @@ def test_default_check_gate_exits_nonzero_when_exact_sha_is_not_admitted(monkeyp
 def test_focused_cheap_lane_skips_live_server_priority_work(monkeypatch):
     check = load_check_module()
     events = []
-    report_path = Path("/tmp") / f"yomux-check-runner-{os.getpid()}.json"
+    report_path = short_temp_base() / f"yomux-check-runner-{os.getpid()}.json"
 
     @contextmanager
     def fake_expensive_tool_lock(enabled=True, lock_path=check.DEFAULT_TOOL_LOCK_PATH):
@@ -1349,8 +1394,9 @@ def test_serial_and_serial_lanes_are_mutually_exclusive(monkeypatch):
     assert error.value.code == 2
 
 
-def test_performance_report_path_is_tmp_only(monkeypatch):
+def test_performance_report_path_is_tmp_only(monkeypatch, tmp_path):
     check = load_check_module()
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(check.os, "getpid", lambda: 4321)
     monkeypatch.setattr(check.time, "time_ns", lambda: 123456789)
 
@@ -1503,7 +1549,7 @@ def test_run_lane_retains_complete_private_output_with_hash_and_true_exit(
         f"raise SystemExit({returncode})\n",
         encoding="utf-8",
     )
-    output_root = check.lane_output_root(Path("/tmp") / f"check-retention-{tmp_path.name}.json")
+    output_root = check.lane_output_root(short_temp_base() / f"check-retention-{tmp_path.name}.json")
     lane = check.Lane("pytest-browser", "browser", (check.Step("probe", [sys.executable, str(probe)]),))
 
     result = check.run_lane(lane, output_root=output_root)
@@ -1555,7 +1601,7 @@ def test_run_lane_retains_primary_pytest_failure_and_teardown_gate_error(tmp_pat
         f"    raise AssertionError({primary_sentinel!r})\n",
         encoding="utf-8",
     )
-    output_root = check.lane_output_root(Path("/tmp") / f"check-teardown-{tmp_path.name}.json")
+    output_root = check.lane_output_root(short_temp_base() / f"check-teardown-{tmp_path.name}.json")
 
     result = check.run_lane(
         check.Lane(
@@ -1617,7 +1663,7 @@ def test_lane_output_root_is_isolated_under_tmp():
         "/tmp/report.artifacts.artifacts"
     )
     with pytest.raises(ValueError, match="under /tmp"):
-        check.lane_output_root(REPO_ROOT / "check.json")
+        check.lane_output_root(Path("/var/yomux-check.json"))
 
 
 @pytest.mark.parametrize(("child_returncode", "expected_main"), ((0, 0), (9, 1)))
@@ -1889,7 +1935,7 @@ def _forwarding_loop(allowlist: list[str], environ: dict[str, str]) -> list[str]
         + 'printf "%s\\n" "${test_env[@]:-}"\n'
     )
     completed = subprocess.run(
-        ["bash", "-c", script], capture_output=True, text=True, check=True,
+        [fixture_executable("bash"), "-c", script], capture_output=True, text=True, check=True,
         env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **environ},
     )
     return [line for line in completed.stdout.split("\n") if line]
@@ -2304,7 +2350,7 @@ def test_every_certification_unit_asks_the_shared_owner_before_it_measures():
     assert factory_modules == set(_certification_unit_modules()), factory_modules
 
 
-def test_require_qualified_host_refuses_instead_of_skipping_and_names_every_reason():
+def test_require_qualified_host_refuses_instead_of_skipping_and_names_every_reason(linux_reference_platform):
     """Negative control: an unqualified host reds the node with the literal and its evidence.
 
     A skip is the failure mode this whole phase exists to remove - it is a green a reader cannot
@@ -2337,7 +2383,7 @@ def test_require_qualified_host_refuses_instead_of_skipping_and_names_every_reas
     assert qualified["qualified"] is True and qualified["reasons"] == []
 
 
-def test_certification_host_qualification_requires_two_clean_windows_after_a_transient(monkeypatch):
+def test_certification_host_qualification_requires_two_clean_windows_after_a_transient(monkeypatch, linux_reference_platform):
     limits = latency_calibration.HOST_QUALIFICATION_LIMITS
     red = latency_calibration.host_qualification({signal: limit * 4 for signal, limit in limits.items()})
     green = latency_calibration.host_qualification({signal: limit / 4 for signal, limit in limits.items()})
@@ -2358,7 +2404,7 @@ def test_certification_host_qualification_requires_two_clean_windows_after_a_tra
     assert recovered["confirmation"]["maximum_windows"] == latency_calibration.HOST_QUALIFICATION_MAX_WINDOWS
 
 
-def test_certification_host_qualification_converges_after_the_observed_post_gate_red_green_red(monkeypatch):
+def test_certification_host_qualification_converges_after_the_observed_post_gate_red_green_red(monkeypatch, linux_reference_platform):
     limits = latency_calibration.HOST_QUALIFICATION_LIMITS
     red = latency_calibration.host_qualification({signal: limit * 4 for signal, limit in limits.items()})
     green = latency_calibration.host_qualification({signal: limit / 4 for signal, limit in limits.items()})
@@ -2381,7 +2427,7 @@ def test_certification_host_qualification_converges_after_the_observed_post_gate
         (False, False, True, False, True),
     ],
 )
-def test_certification_host_qualification_never_recovers_without_two_clean_confirmations(monkeypatch, sequence):
+def test_certification_host_qualification_never_recovers_without_two_clean_confirmations(monkeypatch, sequence, linux_reference_platform):
     limits = latency_calibration.HOST_QUALIFICATION_LIMITS
     red = latency_calibration.host_qualification({signal: limit * 4 for signal, limit in limits.items()})
     green = latency_calibration.host_qualification({signal: limit / 4 for signal, limit in limits.items()})
@@ -2395,7 +2441,7 @@ def test_certification_host_qualification_never_recovers_without_two_clean_confi
     assert [window["qualified"] for window in refused["confirmation"]["windows"]] == list(sequence)
 
 
-def test_certification_phase_fixture_skips_when_unasked_and_refuses_on_an_unqualified_host(monkeypatch):
+def test_certification_phase_fixture_skips_when_unasked_and_refuses_on_an_unqualified_host(monkeypatch, linux_reference_platform):
     """The two outcomes of the shared fixture are deliberately different, and neither is a pass."""
 
     class _Node:
@@ -2662,7 +2708,7 @@ def test_certification_evidence_dir_must_stay_under_tmp():
     assert check.certification_evidence_dir("/tmp/yomux-certification/explicit") == Path("/tmp/yomux-certification/explicit")
     assert str(check.certification_evidence_dir(None)).startswith(f"{os.environ['YOLOMUX_TEST_ROOT']}/certification/")
     with pytest.raises(ValueError):
-        check.certification_evidence_dir(str(REPO_ROOT / "docs"))
+        check.certification_evidence_dir("/var/yomux-certification")
 
 
 def test_certification_only_refuses_a_lane_selection():
@@ -2717,7 +2763,11 @@ def test_host_qualification_measures_this_host_with_windowed_and_instantaneous_s
     # Never "at least 2": the instantaneous samples are taken in whatever is left of the window
     # after the two work units, which is least when the host is busiest. A 2026-08-08 probe under
     # 96-worker saturation came back with ONE procs_running sample and reported its p75 from it.
-    assert measurement["procs_running_samples"] >= latency_calibration.HOST_INSTANT_SAMPLE_MINIMUM, measurement
+    if platform.system() == "Linux":
+        assert measurement["procs_running_samples"] >= latency_calibration.HOST_INSTANT_SAMPLE_MINIMUM, measurement
+    else:
+        assert measurement["procs_running_samples"] == 0, measurement
+        assert latency_calibration.host_qualification(measurement)["qualified"] is False
     assert len(measurement["cpu_work_samples_ms"]) == latency_calibration.HOST_CPU_WORK_SAMPLES
     assert len(measurement["storage_work_samples_ms"]) == latency_calibration.HOST_STORAGE_WORK_SAMPLES
     assert measurement["cpu_work_median_ms"] == round(latency_calibration.work_unit_statistic(measurement["cpu_work_samples_ms"]), 3)
@@ -2734,8 +2784,12 @@ def test_host_qualification_measures_this_host_with_windowed_and_instantaneous_s
         assert signal in measurement, (signal, sorted(measurement))
         assert signal not in latency_calibration.HOST_QUALIFICATION_LIMITS, signal
         assert reason and reason.split(":")[0].isidentifier(), (signal, reason)
-    assert measurement["disk_in_flight_p75"] is not None and measurement["disk_in_flight_samples"] >= latency_calibration.HOST_INSTANT_SAMPLE_MINIMUM
-    assert measurement["disk_in_flight_p75"] <= measurement["disk_in_flight_max"], measurement
+    if platform.system() == "Linux":
+        assert measurement["disk_in_flight_p75"] is not None and measurement["disk_in_flight_samples"] >= latency_calibration.HOST_INSTANT_SAMPLE_MINIMUM
+    else:
+        assert measurement["disk_in_flight_p75"] is None and measurement["disk_in_flight_samples"] == 0
+    if measurement["disk_in_flight_p75"] is not None:
+        assert measurement["disk_in_flight_p75"] <= measurement["disk_in_flight_max"], measurement
     assert set(measurement["disk_in_flight_max_per_device"]) == set(measurement["disk_devices"]), measurement
 
     # And a qualification carries the same reasons, so one artifact is enough to audit the drop.
@@ -2830,7 +2884,7 @@ def test_no_host_qualifier_statistic_is_moved_by_a_minority_of_its_samples():
     assert latency_calibration.outliers_required_to_move(7, math.ceil(7 * 0.75) - 1) == 2
 
 
-def test_the_instantaneous_sample_floor_still_terminates_when_the_kernel_exposes_nothing(monkeypatch):
+def test_the_instantaneous_sample_floor_still_terminates_when_the_kernel_exposes_nothing(monkeypatch, linux_reference_platform):
     """Fail closed, and above all do not hang: the floor counts READS, not collected values.
 
     `HOST_INSTANT_SAMPLE_MINIMUM` keeps `procs_running_p75` an actual p75 when the work units eat
@@ -2849,7 +2903,7 @@ def test_the_instantaneous_sample_floor_still_terminates_when_the_kernel_exposes
     assert {"signal": "procs_running_p75", "measured": None, "limit": unavailable_limit, "reason": "signal_unavailable"} in refusal["reasons"], refusal["reasons"]
 
 
-def test_recorded_baseline_samples_qualify_while_recorded_saturated_samples_still_refuse():
+def test_recorded_baseline_samples_qualify_while_recorded_saturated_samples_still_refuse(linux_reference_platform):
     """Red before green, on the exact raw samples that were measured on this box on 2026-08-08.
 
     The first vector is the certification-phase refusal the user hit: five rounds clustered near
@@ -2878,7 +2932,7 @@ def test_recorded_baseline_samples_qualify_while_recorded_saturated_samples_stil
     assert refused["reasons"][0]["reason"] == "over_limit"
 
 
-def test_recorded_post_lane_refusals_now_qualify_while_a_recorded_saturated_probe_still_refuses():
+def test_recorded_post_lane_refusals_now_qualify_while_a_recorded_saturated_probe_still_refuses(linux_reference_platform):
     """Red before green on whole measurements, not one signal at a time.
 
     The first vector is verbatim the probe that refused
@@ -3461,7 +3515,7 @@ def test_run_tests_sh_rejects_a_workdir_that_escapes_the_source_mount(tmp_path):
 
     fake_docker = tmp_path / "docker"
     fake_docker.write_text(
-        "#!/bin/sh\n"
+        fixture_script("#!/bin/sh\n"
         "case \"$1\" in\n"
         "  info) case \"$*\" in *MemTotal*) printf '%s\\n' 8589934592 ;; *) printf '%s\\n' '[]' ;; esac ;;\n"
         "  image) exit 0 ;;\n"
@@ -3469,7 +3523,7 @@ def test_run_tests_sh_rejects_a_workdir_that_escapes_the_source_mount(tmp_path):
             "    if printf '%s\\n' \"$*\" | grep -q -- 'python3 -c'; then exit 0; fi\n"
             "    echo 'docker run must not be reached' >&2; exit 99 ;;\n"
         "  *) echo \"unexpected docker command: $*\" >&2; exit 99 ;;\n"
-        "esac\n",
+        "esac\n"),
         encoding="utf-8",
     )
     fake_docker.chmod(0o700)
@@ -3491,12 +3545,13 @@ def test_run_tests_sh_rejects_a_workdir_that_escapes_the_source_mount(tmp_path):
     assert "docker run must not be reached" not in completed.stderr, completed.stderr
 
 
-def test_run_tests_sh_rejects_a_symlinked_test_root_before_creating_outside_it(tmp_path):
+@pytest.mark.parametrize("root_suffix", ["/created-by-wrapper", "/", "////", "/./"])
+def test_run_tests_sh_rejects_a_symlinked_test_root_before_creating_outside_it(tmp_path, root_suffix):
     """A symlinked parent must not receive test state before /tmp containment is proven."""
 
     fake_docker = tmp_path / "docker"
     fake_docker.write_text(
-        "#!/bin/sh\n"
+        fixture_script("#!/bin/sh\n"
         "case \"$1\" in\n"
         "  info) case \"$*\" in *MemTotal*) printf '%s\\n' 8589934592 ;; *) printf '%s\\n' '[]' ;; esac ;;\n"
         "  image) exit 0 ;;\n"
@@ -3504,21 +3559,22 @@ def test_run_tests_sh_rejects_a_symlinked_test_root_before_creating_outside_it(t
         "    if printf '%s\\n' \"$*\" | grep -q -- 'python3 -c'; then exit 0; fi\n"
         "    echo 'docker run must not be reached' >&2; exit 99 ;;\n"
         "  *) echo \"unexpected docker command: $*\" >&2; exit 99 ;;\n"
-        "esac\n",
+        "esac\n"),
         encoding="utf-8",
     )
     fake_docker.chmod(0o700)
     outside = tmp_path / "outside-target"
     outside.mkdir()
+    outside_mode = outside.stat().st_mode
     try:
         escaped_parent = tmp_path / "escaped-parent"
         escaped_parent.symlink_to(outside, target_is_directory=True)
-        test_root = escaped_parent / "created-by-wrapper"
+        test_root = str(escaped_parent) + root_suffix
         environment = {
             **os.environ,
             "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
             "YOMUX_TEST_IMAGE": "yomux-test:contract",
-            "YOMUX_TEST_ROOT": str(test_root),
+            "YOMUX_TEST_ROOT": test_root,
             "YOMUX_E2E_EVIDENCE_DIR": "",
             "YOMUX_BAZEL_CACHE": "off",
         }
@@ -3537,7 +3593,8 @@ def test_run_tests_sh_rejects_a_symlinked_test_root_before_creating_outside_it(t
 
         assert completed.returncode == 2, completed.stderr
         assert "must not contain a symlink" in completed.stderr, completed.stderr
-        assert not test_root.exists(), "validation created state through a symlinked parent"
+        assert not list(outside.iterdir()), "validation created state through a symlinked parent"
+        assert outside.stat().st_mode == outside_mode, "validation changed a symlink target's mode"
         assert not (outside / "created-by-wrapper").exists(), "validation escaped its intended root"
         assert "docker run must not be reached" not in completed.stderr, completed.stderr
     finally:
@@ -3550,7 +3607,7 @@ def test_run_tests_sh_retains_auto_evidence_only_after_a_failed_container(tmp_pa
 
     fake_docker = tmp_path / "docker"
     fake_docker.write_text(
-        "#!/bin/sh\n"
+        fixture_script("#!/bin/sh\n"
         "case \"$1\" in\n"
         "  info) case \"$*\" in *MemTotal*) printf '%s\\n' 8589934592 ;; *) printf '%s\\n' '[]' ;; esac ;;\n"
         "  image) exit 0 ;;\n"
@@ -3578,14 +3635,14 @@ def test_run_tests_sh_retains_auto_evidence_only_after_a_failed_container(tmp_pa
         f"    exit {docker_status}\n"
         "    ;;\n"
         "  *) exit 99 ;;\n"
-        "esac\n",
+        "esac\n"),
         encoding="utf-8",
     )
     fake_docker.chmod(0o700)
     # tmp_path may be backed by a host bind mount whose numeric owner differs from the image runner.
     # Use a container-local root so this contract tests evidence cleanup rather than the wrapper's
     # deliberate ownership refusal for an explicitly foreign directory.
-    with tempfile.TemporaryDirectory(prefix="run-tests-evidence-", dir="/tmp") as temporary_root:
+    with tempfile.TemporaryDirectory(prefix=short_temp_prefix("run-tests-evidence-"), dir=short_temp_base()) as temporary_root:
         test_root = Path(temporary_root)
         environment = {
             **os.environ,
@@ -3624,7 +3681,7 @@ def test_run_tests_sh_fails_when_successful_run_evidence_cleanup_fails(tmp_path)
 
     fake_docker = tmp_path / "docker"
     fake_docker.write_text(
-        "#!/bin/sh\n"
+        fixture_script("#!/bin/sh\n"
         "case \"$1\" in\n"
         "  info) case \"$*\" in *MemTotal*) printf '%s\\n' 8589934592 ;; *) printf '%s\\n' '[]' ;; esac ;;\n"
         "  image) exit 0 ;;\n"
@@ -3642,11 +3699,11 @@ def test_run_tests_sh_fails_when_successful_run_evidence_cleanup_fails(tmp_path)
         "    exit 0\n"
         "    ;;\n"
         "  *) exit 99 ;;\n"
-        "esac\n",
+        "esac\n"),
         encoding="utf-8",
     )
     fake_docker.chmod(0o700)
-    with tempfile.TemporaryDirectory(prefix="run-tests-cleanup-", dir="/tmp") as temporary_root:
+    with tempfile.TemporaryDirectory(prefix=short_temp_prefix("run-tests-cleanup-"), dir=short_temp_base()) as temporary_root:
         test_root = Path(temporary_root)
         environment = {
             **os.environ,
@@ -3743,7 +3800,7 @@ def test_bazel_go_race_declares_every_runtime_fixture_root():
     python_runtime_block = root_text.split('name = "python_runtime"', 1)[1].split("\n)\n\n", 1)[0]
     stats_pair = stats_text.split('name = "stats",', 1)[1].split("\n)", 1)[0]
     assert '"tests/fixtures/current_model_usage/**/*.jsonl"' in fixture_block
-    assert '"tools/generate_go_version.py"' in tool_block
+    assert '"//tools/versiongen:main.go"' in tool_block
     assert 'tools/**/*.py' not in tool_block
     assert '"tools/static_build.py"' in tool_block
     assert '"yomux_lib/**/*.py"' in python_runtime_block
@@ -3807,7 +3864,9 @@ def test_go_gate_excludes_deprecated_backend_comparison():
     native_suite = (REPO_ROOT / "BUILD.bazel").read_text().split('name = "go_native_tests"', 1)[1].split("\n)\n\n", 1)[0]
     assert "external_parity" not in native_suite
     assert "external_parity" not in integration
-    assert ":yomux_go_stats_browser_docker_e2e" in native_suite
+    assert 'tests = [":go_tests"]' in native_suite
+    complete_suite = (REPO_ROOT / "BUILD.bazel").read_text().split('name = "go_tests"', 1)[1].split("\n)\n\n", 1)[0]
+    assert ":yomux_go_stats_browser_docker_e2e" in complete_suite
     stats_browser_target = (REPO_ROOT / "BUILD.bazel").read_text().split('name = "yomux_go_stats_browser_docker_e2e"', 1)[1].split("\n)\n\n", 1)[0]
     assert '"requires_chrome"' in stats_browser_target
     assert test_plan.BAZEL_GO_BROWSER_TESTS == (
@@ -3918,7 +3977,7 @@ def test_linux_cpu_budget_is_the_same_number_in_code_help_text_and_docs(monkeypa
     monkeypatch.delenv("YOLOMUX_CHECK_CPU_PERCENT", raising=False)
     monkeypatch.setattr(check.platform, "system", lambda: "Linux")
     monkeypatch.setattr(check.os, "cpu_count", lambda: 32)
-    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: set(range(24)))
+    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: set(range(24)), raising=False)
 
     percent = check.check_cpu_percent()
     counts = check.pytest_worker_counts()
@@ -4293,7 +4352,7 @@ def test_bazel_source_root_keeps_runfiles_path_before_resolving_symlinks(tmp_pat
     }
     environment["RUNFILES_DIR"] = str(runfiles_root)
     completed = subprocess.run(
-        ["bash", "-c", ". tools/bazel_test_common.sh; bazel_test_source_root \"$1\"", "bash", str(script)],
+        [fixture_executable("bash"), "-c", ". tools/bazel_test_common.sh; bazel_test_source_root \"$1\"", "bash", str(script)],
         cwd=REPO_ROOT,
         env=environment,
         capture_output=True,
@@ -4314,7 +4373,7 @@ def test_bazel_source_root_materializes_symlinked_docker_context(tmp_path):
     (logical_root / "docker" / "Dockerfile.test").symlink_to(REPO_ROOT / "docker" / "Dockerfile.test")
     (logical_root / "docker" / "run-tests.sh").symlink_to(REPO_ROOT / "docker" / "run-tests.sh")
     script = logical_root / "tools" / "runner.sh"
-    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    script.write_text(fixture_script("#!/usr/bin/env bash\n"), encoding="utf-8")
     environment = {
         key: value
         for key, value in os.environ.items()
@@ -4324,7 +4383,7 @@ def test_bazel_source_root_materializes_symlinked_docker_context(tmp_path):
     environment["TEST_TMPDIR"] = str(tmp_path / "test-tmp")
     Path(environment["TEST_TMPDIR"]).mkdir()
     completed = subprocess.run(
-        ["bash", "-c", ". tools/bazel_test_common.sh; bazel_test_source_root \"$1\"", "bash", str(script)],
+        [fixture_executable("bash"), "-c", ". tools/bazel_test_common.sh; bazel_test_source_root \"$1\"", "bash", str(script)],
         cwd=REPO_ROOT,
         env=environment,
         capture_output=True,
@@ -4342,6 +4401,38 @@ def test_bazel_source_root_materializes_symlinked_docker_context(tmp_path):
     run_tests = materialized / "docker" / "run-tests.sh"
     assert run_tests.is_file()
     assert os.access(run_tests, os.X_OK)
+
+
+def test_check_runner_splits_one_concurrent_budget_between_pytest_and_bazel(monkeypatch):
+    check = load_check_module()
+    monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
+    monkeypatch.delenv("YOLOMUX_CHECK_CPU_PERCENT", raising=False)
+    monkeypatch.setattr(check.platform, "system", lambda: "Linux")
+
+    # Pytest and Bazel split the configured budget evenly by default.
+    expected = {
+        4: ("1", "1", "1"),
+        10: ("2", "1", "2"),
+        14: ("3", "2", "2"),
+        32: ("8", "5", "3"),
+    }
+    for cores, counts in expected.items():
+        monkeypatch.setattr(check.os, "cpu_count", lambda: 64)
+        monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid, cores=cores: set(range(cores)), raising=False)
+        assert check.pytest_worker_counts() == counts
+
+    monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "5,3,1")
+    assert check.pytest_worker_counts() == ("5", "3", "1")
+
+    # The platform no longer changes the shared-box default.
+    monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
+    monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(check.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: set(range(8)), raising=False)
+    assert check.pytest_worker_counts() == ("2", "1", "1")
+
+    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: (_ for _ in ()).throw(OSError("unavailable")), raising=False)
+    assert check.pytest_worker_counts() == ("2", "1", "1")
 
 
 @pytest.mark.parametrize("canonical_empty", [False, True])
@@ -4517,3 +4608,79 @@ def test_execution_report_preserves_admission_and_malformed_failures():
     assert events[0]['failure_phase'] == 'image-preparation'
     assert events[1]['admission'] == 'failed'
     assert events[1]['hermetic'] is False
+
+
+def test_complete_native_coverage_requires_each_scope_and_success():
+    check = load_check_module()
+    available = check.lanes()
+    results = []
+    for lane in available:
+        if not lane.default:
+            continue
+        scopes = ["//:go_tests" if step == check.StepId.BAZEL_GO else "//:qualified_" + str(step).replace("-", "_")
+                  for step in check.resolved_lane_step_ids(check.lane_spec(lane.name)) if step != check.StepId.WHITESPACE]
+        output = "\n".join("YOMUX_EXECUTION " + json.dumps({"effective": "qualified-native", "admission": "passed",
+            "coverage_scope": scope, "platform": check.platform.system(),
+            **check.bazel_execution_contract.native_execution_scope(check.platform.system()),
+            "isolation": {"external_network_blocked": True}}) for scope in scopes)
+        results.append(check.LaneResult(lane.name, lane.label, True, 0, output))
+    assert check.qualified_coverage_complete(available, results)
+    assert not check.qualified_coverage_complete(available, results[:-1])
+    first = results[0]
+    assert not check.qualified_coverage_complete(available, [check.LaneResult(first.name, first.label, True, 0, ""), *results[1:]])
+    assert not check.qualified_coverage_complete(available, [check.LaneResult(first.name, first.label, False, 0, first.output), *results[1:]])
+
+
+@pytest.mark.parametrize("field,value", [("sandbox_scope", "invocation"), ("setup_os_sandboxed", True),
+                                        ("non_test_actions_os_sandboxed", True), ("platform", "Other")])
+def test_qualified_coverage_refuses_mismatched_scope(monkeypatch, field, value):
+    check = load_check_module()
+    monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
+    lane = check.lane_spec("bazel-go")
+    record = {"effective": "qualified-native", "admission": "passed", "platform": "Darwin",
+              "coverage_scope": "//:go_tests", "isolation": {},
+              **check.bazel_execution_contract.native_execution_scope("Darwin")}
+    record[field] = value
+    result = check.LaneResult(lane.name, lane.label, True, 0, "YOMUX_EXECUTION " + json.dumps(record))
+    assert not check.qualified_coverage_complete([lane], [result])
+
+
+def test_qualified_coverage_refuses_other_platform(monkeypatch):
+    check = load_check_module()
+    monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
+    lane = check.lane_spec("bazel-go")
+    record = {"effective": "qualified-native", "admission": "passed", "platform": "Linux",
+              "coverage_scope": "//:go_tests", "isolation": {},
+              **check.bazel_execution_contract.native_execution_scope("Linux")}
+    result = check.LaneResult(lane.name, lane.label, True, 0, "YOMUX_EXECUTION " + json.dumps(record))
+    assert not check.qualified_coverage_complete([lane], [result])
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_native_main_requires_scope_evidence_for_selected_lane(monkeypatch, tmp_path, capsys, matching):
+    monkeypatch.setenv("YOMUX_NATIVE_BUNDLE", str(tmp_path / "bundle"))
+    check = load_check_module()
+    lane = check.lane_spec("node-syntax")
+    steps = check.resolved_lane_step_ids(lane)
+    record = {"effective": "qualified-native", "admission": "passed", "platform": platform.system(),
+              "isolation": {}, **check.bazel_execution_contract.native_execution_scope(platform.system())}
+    if not matching:
+        record["sandbox_scope"] = "obsolete"
+    output = "\n".join("YOMUX_EXECUTION " + json.dumps(dict(record,
+        coverage_scope="//:qualified_" + str(step).replace("-", "_"))) for step in steps)
+
+    @contextmanager
+    def admitted_gate(*_args):
+        yield SimpleNamespace(path=tmp_path / "session.json", admit=lambda _targets: None)
+
+    monkeypatch.setattr(check.bazel_execution_contract.bazel_native, "NativeGateSession", admitted_gate)
+    monkeypatch.setattr(check, "measure_functional_host", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(check, "admit_inotify_capacity", lambda _selected: None)
+    monkeypatch.setattr(check, "active_yomux_server_records", lambda: [])
+    monkeypatch.setattr(check, "run_functional_lanes", lambda *_args, **_kwargs:
+                        [check.LaneResult(lane.name, lane.label, True, 0, output)])
+    result = check.main(["--execution", "qualified-native", "--lane", lane.name, "--no-tool-guard",
+                         "--performance-report", str(tmp_path / "report.json")])
+    assert result == (0 if matching else check.EXIT_NOT_CERTIFIABLE)
+    text = capsys.readouterr().out
+    assert ("CHECK PASSED" in text) is matching

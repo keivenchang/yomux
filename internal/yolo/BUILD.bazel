@@ -7,13 +7,34 @@ exports_files(["BUILD.bazel"])
 
 go_library(
     name = "yolo_lib",
-    srcs = ["policy.go", "prompt.go"],
+    srcs = [
+        "policy.go",
+        "prompt.go",
+    ],
     importpath = "github.com/keivenchang/yomux/internal/yolo",
     deps = ["@in_gopkg_yaml_v3//:go_default_library"],
 )
 
 go_test_pair(
     name = "yolo",
-    srcs = ["policy_test.go", "prompt_test.go"],
+    srcs = [
+        "policy_test.go",
+        "prompt_test.go",
+    ],
     embed = [":yolo_lib"],
+)
+
+filegroup(
+    name = "qualified_sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/__pycache__/**",
+            "**/*.pyc",
+            "**/*.log",
+            "**/*.lock",
+            "product_version_generated.go",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
 )

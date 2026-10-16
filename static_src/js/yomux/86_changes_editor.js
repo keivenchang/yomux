@@ -15,7 +15,9 @@ function scheduleFileEditorPreviewPropagation(panel, path) {
 function handleFileEditorContentChanged(panel, path, content, options = {}) {
   const state = fileEditorPanelState(panel);
   if (!state || state.kind !== 'text' || state.historical === true) return;
-  state.content = String(content ?? '');
+  const nextContent = String(content ?? '');
+  if (nextContent !== state.content) noteTabberItemActivity(fileEditorPanelItem(panel));
+  state.content = nextContent;
   state.contentOwnerPanel = panel;
   const dirty = state.content !== state.original;
   const dirtyChanged = dirty !== state.dirty;
@@ -367,6 +369,7 @@ function createFileEditorPanel(item) {
     },
   });
   panel.addEventListener('click', event => {
+    if (event.target?.closest?.('[data-editor-surface], .file-editor-image-panel')) noteTabberItemActivity(item);
     if (event.defaultPrevented) return;
     if (event.target?.closest?.('button, a, input, textarea, select, [data-diff-ref-input]')) return;
     scheduleFileExplorerActiveFileReveal(path, {explicit: true});
@@ -376,6 +379,7 @@ function createFileEditorPanel(item) {
     'editor-save': () => saveFileEditor(path, panel),
     'editor-reload': () => {
       if (fileEditorPanelState(panel)?.historical === true) return false;
+      noteTabberItemActivity(item);
       return reloadOpenFileFromDisk(path);
     },
     'editor-upload': () => openFileUploadChooserForEditor(panel, path),

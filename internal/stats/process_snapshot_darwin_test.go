@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func TestDarwinMachTicksConvertThroughThePlatformTimebase(t *testing.T) {
@@ -36,7 +38,8 @@ func TestDarwinNativeSnapshotIncludesCurrentProcessAndOpenFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("/bin/cat")
+	cat := testsupport.ToolPath(t, "cat")
+	command := exec.Command(cat)
 	command.Stdin = reader
 	if err := command.Start(); err != nil {
 		_ = reader.Close()
@@ -74,8 +77,8 @@ func TestDarwinNativeSnapshotIncludesCurrentProcessAndOpenFiles(t *testing.T) {
 			break
 		}
 	}
-	if child == nil || !strings.Contains(child.Command, "/bin/cat") {
-		t.Fatalf("one-argument process command snapshot = %#v, want /bin/cat", child)
+	if child == nil || !strings.Contains(child.Command, cat) {
+		t.Fatalf("one-argument process command snapshot = %#v, want %s", child, cat)
 	}
 	if self.Identity == "" || self.Executable == "" || self.StartedAt <= 0 || self.RSSBytes == 0 || self.CPUSeconds < 0 {
 		t.Fatalf("current process snapshot is incomplete: %#v", *self)
@@ -131,7 +134,7 @@ func TestDarwinCodexRolloutsFollowTheirOwnOpenProcessFiles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		command := exec.Command("/bin/sleep", "30")
+		command := exec.Command(testsupport.ToolPath(t, "sleep"), "30")
 		command.ExtraFiles = []*os.File{file}
 		if err := command.Start(); err != nil {
 			_ = file.Close()

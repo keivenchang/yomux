@@ -38,4 +38,20 @@ go_test_pair(
     embed = [":finder_lib"],
     race_shard_count = 2,
     shard_count = 2,
+    deps = ["//internal/testsupport:testsupport_lib"],
+)
+
+filegroup(
+    name = "qualified_sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/__pycache__/**",
+            "**/*.pyc",
+            "**/*.log",
+            "**/*.lock",
+            "product_version_generated.go",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
 )
