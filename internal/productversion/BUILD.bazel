@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "productversion_lib",
+    srcs = ["version.go"],
+    importpath = "github.com/keivenchang/yomux/internal/productversion",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "productversion_test",
+    srcs = ["version_test.go"],
+    embed = [":productversion_lib"],
+)
+
+filegroup(
+    name = "qualified_sources",
+    srcs = glob(["**"], exclude = ["**/*.lock", "**/*.log"]),
+    visibility = ["//:__pkg__"],
+)

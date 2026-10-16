@@ -7,10 +7,10 @@ COMMON="$REPO_ROOT/tools/bazel_test_common.sh"
 
 usage() {
   printf '%s\n' \
-    "usage: $0 [--jobs N] [--memory-mb N] [--target LABEL] [--cache=on|off] [--reuse-test-results|--rerun-tests] [--execution auto|native|docker] [-- <bazel test arguments>]" \
-    "Docker reuses passing tests by default; --rerun-tests or --cache=off forces execution. Native reuse is opt-in." \
-    "--execution native uses the host toolchain; Docker remains the canonical Linux lane." \
-    "Trailing Bazel arguments override generated options; explicit --jobs and --memory-mb override runner budgets." >&2
+    "usage: $0 [--jobs N] [--memory-mb N] [--target LABEL] [--cache=on|off] [--reuse-test-results|--rerun-tests] [--execution auto|native|qualified-native|docker] [-- <bazel test arguments>]" \
+    "Docker and qualified-native reuse passing tests after admission; --rerun-tests or --cache=off forces execution." \
+    "--execution native provides host-toolchain diagnostics. Qualified native requires a prepared, verified bundle." \
+    "Qualified native rejects execution-policy overrides. Explicit --jobs and --memory-mb set runner budgets." >&2
   exit "${1:-2}"
 }
 
@@ -78,8 +78,14 @@ case "$execution" in
       execution=docker
     fi
     ;;
+  qualified-native)
+    native_args=(--target "$target" --cache "$cache" --reuse "$reuse_test_results")
+    [ -z "$jobs" ] || native_args+=(--jobs "$jobs")
+    [ -z "$memory_mb" ] || native_args+=(--memory-mb "$memory_mb")
+    exec python3 "$REPO_ROOT/tools/bazel_execution_contract.py" --qualified-native -- "${native_args[@]}" -- "$@"
+    ;;
   native|docker) ;;
-  *) echo "--execution must be auto, native, or docker: $execution" >&2; exit 2 ;;
+  *) echo "--execution must be auto, native, qualified-native, or docker: $execution" >&2; exit 2 ;;
 esac
 if [ "$execution" = native ] && bazel_test_in_container; then
   echo "Native execution requires a host shell; use auto or docker inside the isolated test container" >&2
@@ -188,7 +194,11 @@ if [ "$execution" = native ] && ! bazel_test_in_container; then
     echo "native execution requires Bazel $expected_bazel_version from .bazelversion; found ${actual_bazel_version:-unknown}" >&2
     exit 2
   fi
-  native_run_root="$(mktemp -d /tmp/yomux-bazel-native.XXXXXX)"
+  if [ -n "${YOMUX_NATIVE_SHORT_TMPDIR:-}" ]; then
+    native_run_root="$(mktemp -d "$YOMUX_NATIVE_SHORT_TMPDIR/n.XXXXXX")"
+  else
+    native_run_root="$(mktemp -d /tmp/yomux-bazel-native.XXXXXX)"
+  fi
   native_cleanup() {
     local status="$?"
     trap - EXIT
@@ -206,9 +216,12 @@ if [ "$execution" = native ] && ! bazel_test_in_container; then
   trap native_cleanup EXIT
   native_uid="$(id -u)"
   native_platform="$(uname -s)-$(uname -m)"
-  native_workspace_id="$(printf '%s' "$REPO_ROOT" | shasum -a 256 | cut -c1-12)"
-  native_identity="$(cat "$REPO_ROOT/.bazelversion" "$REPO_ROOT/MODULE.bazel" "$REPO_ROOT/MODULE.bazel.lock" "$REPO_ROOT/go.mod" "$REPO_ROOT/go.sum" | shasum -a 256 | cut -c1-16)"
-  native_cache_root="/tmp/yomux-bazel-cache-$native_uid/$native_platform-$native_workspace_id-$native_identity"
+  native_workspace_id="$(product_env_fingerprint "$REPO_ROOT")"
+  native_workspace_id="${native_workspace_id:0:12}"
+  native_identity_inputs="$(cat "$REPO_ROOT/.bazelversion" "$REPO_ROOT/MODULE.bazel" "$REPO_ROOT/MODULE.bazel.lock" "$REPO_ROOT/go.mod" "$REPO_ROOT/go.sum")"
+  native_identity="$(product_env_fingerprint "$native_identity_inputs")"
+  native_identity="${native_identity:0:16}"
+  native_cache_root="${YOMUX_NATIVE_SHORT_TMPDIR:-/tmp}/yomux-bazel-cache-$native_uid/$native_platform-$native_workspace_id-$native_identity"
   native_persistent_output_root=no
   if [ "$reuse_test_results" = yes ] && [ "$cache" = on ]; then
     native_persistent_output_root=yes
@@ -267,6 +280,7 @@ PY_NATIVE_CACHE
     --action_env=GOPROXY=https://proxy.golang.org,direct
     --action_env=GOSUMDB=sum.golang.org
     --repo_env=GOPATH="$native_run_root/go-path"
+    --repo_env=YOMUX_DIAGNOSTIC_PYTHON="$(command -v python3)"
     --repo_env=GOMODCACHE="$native_run_root/go-module-cache"
     --repo_env=GOPROXY=https://proxy.golang.org,direct
     --repo_env=GOSUMDB=sum.golang.org
@@ -292,10 +306,14 @@ fi
 # Docker invocations with caching use one locked stable Bazel output root per free slot; cache-off
 # and native invocations keep private output roots. Dependency seeds and the compiled action
 # cache remain in their host-local partitions.
-bazel_run_root="$(mktemp -d /tmp/yomux-bazel-run.XXXXXX)"
-test_gopath=/tmp/yomux-bazel-private/go-path
-test_gocache=/tmp/yomux-bazel-private/go-cache
-go_module_cache=/tmp/yomux-bazel-private/go-module-cache
+if [ -n "${YOMUX_NATIVE_SHORT_TMPDIR:-}" ]; then
+  bazel_run_root="$(mktemp -d "$YOMUX_NATIVE_SHORT_TMPDIR/b.XXXXXX")"
+else
+  bazel_run_root="$(mktemp -d /tmp/yomux-bazel-run.XXXXXX)"
+fi
+test_gopath="${YOMUX_NATIVE_SHORT_TMPDIR:-/tmp}/yomux-bazel-private/go-path"
+test_gocache="${YOMUX_NATIVE_SHORT_TMPDIR:-/tmp}/yomux-bazel-private/go-cache"
+go_module_cache="${YOMUX_NATIVE_SHORT_TMPDIR:-/tmp}/yomux-bazel-private/go-module-cache"
 gomodcache="$go_module_cache"
 mkdir -p -- "$test_gopath" "$test_gocache" "$gomodcache"
 bazel_run_cleanup() {
@@ -327,38 +345,6 @@ if ! \cp -a /opt/yomux-go-mod-cache/. "$go_module_cache/"; then
 fi
 find "$go_module_cache" -type d -exec chmod u+rwx {} +
 find "$go_module_cache" -type f -exec chmod u+rw {} +
-go_tidy_root="$bazel_run_root/go-tidy-source"
-mkdir -p -- "$go_tidy_root"
-if ! tar -C "$REPO_ROOT" --exclude=.git --exclude='*.agent-edit.lock*' --exclude='*.md.lock' --exclude='*.txt.lock' -cf - . | tar -C "$go_tidy_root" -xf -; then
-  echo "could not prepare a lock-free source snapshot for Go module validation" >&2
-  exit 2
-fi
-if ! (
-  cd "$go_tidy_root"
-  GOMODCACHE="$go_module_cache" \
-    GOPATH="$bazel_run_root/go-path" \
-    GOCACHE="$bazel_run_root/go-cache" \
-    GOPROXY=off \
-    GOSUMDB=off \
-    GOWORK=off \
-    GOTOOLCHAIN=local \
-    /usr/local/go/bin/go mod tidy
-); then
-  echo "Go module dependency closure could not be resolved from the immutable image seed" >&2
-  exit 1
-fi
-if ! cmp -s "$REPO_ROOT/go.mod" "$go_tidy_root/go.mod"; then
-  diff -u "$REPO_ROOT/go.mod" "$go_tidy_root/go.mod" >&2 || true
-  echo "go.mod is not tidy; run go mod tidy with the pinned SDK" >&2
-  exit 1
-fi
-missing_go_sums="$(comm -23 <(sort "$go_tidy_root/go.sum") <(sort "$REPO_ROOT/go.sum"))"
-if [ -n "$missing_go_sums" ]; then
-  printf 'go.sum is missing checksums required by the Go package graph:\n%s\n' "$missing_go_sums" >&2
-  echo "run go mod tidy with the pinned SDK, then preserve additional sums required by Bzlmod" >&2
-  exit 1
-fi
-
 # The image seed is immutable, but Bazel 9's repository-content cache needs to
 # create lock metadata. Materialize it in this invocation's private writable root.
 repository_cache="$bazel_run_root/repository-cache"

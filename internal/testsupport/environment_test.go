@@ -2,11 +2,37 @@ package testsupport
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestExecutableFixturesUseTheSelectedRuntimeShell(t *testing.T) {
+	shell := ToolPath(t, "sh")
+	bin := t.TempDir()
+	selected := filepath.Join(bin, "sh")
+	if err := os.Symlink(shell, selected); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	if got := ToolPath(t, "sh"); got != selected {
+		t.Fatalf("fixture executable = %q, want PATH-selected %q", got, selected)
+	}
+	script := filepath.Join(t.TempDir(), "fixture")
+	source := ShellScript(t, "printf 'selected-runtime-shell\\n'\n")
+	if !strings.HasPrefix(source, "#!"+selected+"\n") {
+		t.Fatalf("fixture interpreter does not use the selected runtime: %q", source)
+	}
+	if err := os.WriteFile(script, []byte(source), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command(script).CombinedOutput()
+	if err != nil || string(output) != "selected-runtime-shell\n" {
+		t.Fatalf("fixture through selected shell = %q, %v", output, err)
+	}
+}
 
 func TestDeprecatedPythonBackendRequiresExplicitAdmission(t *testing.T) {
 	for _, value := range []string{"", "0", "true", "1"} {
@@ -80,8 +106,16 @@ func TestPrivateTestEnvironmentKeepsNestedTmuxSocketPathsShort(t *testing.T) {
 	})
 
 	tempDir := os.Getenv("TMPDIR")
-	if !strings.HasPrefix(tempDir, "/tmp/ym-") {
-		t.Fatalf("private TMPDIR = %q, want a short private path under /tmp", tempDir)
+	base, err := ShortTempBase()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedPrefix := filepath.Join(base, "ym-")
+	if os.Getenv("YOMUX_NATIVE_SHORT_TMPDIR") != "" {
+		expectedPrefix = filepath.Join(base, "f")
+	}
+	if !strings.HasPrefix(tempDir, expectedPrefix) {
+		t.Fatalf("private TMPDIR = %q, want a short private path under %q", tempDir, base)
 	}
 	if _, present := os.LookupEnv("YOMUX_TMUX_SOCKET"); present {
 		t.Fatal("private tmux default retained an ambient canonical override")
@@ -90,6 +124,11 @@ func TestPrivateTestEnvironmentKeepsNestedTmuxSocketPathsShort(t *testing.T) {
 		t.Fatalf("private tmux socket = %q, want %q", got, want)
 	}
 	socket := filepath.Join(tempDir, "TestActivityRouteIncludesEveryGlobalTmuxSession2333904820", "001", "tmux.sock")
+	if os.Getenv("YOMUX_NATIVE_SHORT_TMPDIR") != "" {
+		// Native tests allocate socket roots through the explicit short-path owner.
+		// testing.T.TempDir adds arbitrary test names and is not a socket path contract.
+		socket = filepath.Join(ShortTempDir(t), "tmux.sock")
+	}
 	if len(socket) > 104 {
 		t.Fatalf("representative nested tmux socket path is %d bytes (%q), want at most 104", len(socket), socket)
 	}
@@ -213,5 +252,51 @@ func TestSyntheticEnvironmentDropsInheritedProviderCredentials(t *testing.T) {
 	}
 	if !overrideSeen {
 		t.Fatal("synthetic environment omitted an explicit fixture-owned credential override")
+	}
+}
+
+func TestShortTempBaseRejectsNonPrivateOrRelativeRoots(t *testing.T) {
+	// Keep all fixture writes inside the admitted root even when testing bad inputs.
+	directory, err := os.MkdirTemp(os.TempDir(), "short-base-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	for _, value := range []string{"relative", directory} {
+		if value == directory {
+			if err := os.Chmod(directory, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Setenv("YOMUX_NATIVE_SHORT_TMPDIR", value)
+		if _, err := ShortTempBase(); err == nil {
+			t.Fatalf("accepted invalid root %q", value)
+		}
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("YOMUX_NATIVE_SHORT_TMPDIR", directory)
+	if got, err := ShortTempBase(); err != nil || got != directory {
+		t.Fatalf("private root = %q, %v", got, err)
+	}
+}
+
+func TestSyntheticEnvironmentPreservesProtectedOwnershipAgainstOverrides(t *testing.T) {
+	for _, key := range []string{"YOMUX_NATIVE_SHORT_TMPDIR", "YOMUX_BAZEL_PROCESS_SCOPE"} {
+		t.Setenv(key, "owned")
+		count := 0
+		for _, entry := range SyntheticEnvironment(key+"=foreign", key+"=second") {
+			name, value, _ := strings.Cut(entry, "=")
+			if name == key {
+				count++
+				if value != "owned" {
+					t.Fatalf("ownership %s replaced with %q", key, value)
+				}
+			}
+		}
+		if count != 1 {
+			t.Fatalf("ownership %s appears %d times", key, count)
+		}
 	}
 }

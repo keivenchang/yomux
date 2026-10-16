@@ -17,3 +17,18 @@ go_binary(
     testonly = True,
     embed = [":fake_llm_lib"],
 )
+
+filegroup(
+    name = "qualified_sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/__pycache__/**",
+            "**/*.pyc",
+            "**/*.log",
+            "**/*.lock",
+            "product_version_generated.go",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)

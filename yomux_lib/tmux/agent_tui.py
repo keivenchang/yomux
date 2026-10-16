@@ -309,12 +309,21 @@ def composer_text_is_idle_placeholder(text: str, *, prompt_suggestion: bool = Fa
 def _composer_text_is_template_placeholder(text: str) -> bool:
     candidate = " ".join(str(text or "").split()).strip()
     return bool(
-        re.fullmatch(r'Try\s+(?:"[^"\n]{1,200}"|“[^“”\n]{1,200}”)', candidate)
+        candidate == "Ask Codex to do anything"
+        or re.fullmatch(r'Try\s+(?:"[^"\n]{1,200}"|“[^“”\n]{1,200}”)', candidate)
         or re.fullmatch(r"Implement\s+\{[^{}\n]{1,80}\}", candidate)
     )
 
 
-_COMPOSER_FOOTER_PREFIXES = ("▶▶", "⏵⏵", "⏸", "⏺", "gpt-", "claude ")
+_COMPOSER_SYMBOL_FOOTER_PREFIXES = ("▶▶", "⏵⏵", "⏸", "⏺")
+_COMPOSER_TEXT_FOOTER_PREFIXES = ("gpt-", "claude ")
+
+
+def _is_composer_footer(text: str) -> bool:
+    stripped = text.strip()
+    return stripped.startswith(_COMPOSER_SYMBOL_FOOTER_PREFIXES) or stripped.casefold().startswith(
+        _COMPOSER_TEXT_FOOTER_PREFIXES
+    )
 
 
 def _composer_candidate(visible_text: str) -> tuple[str, bool, str, int]:
@@ -323,8 +332,7 @@ def _composer_candidate(visible_text: str) -> tuple[str, bool, str, int]:
     lines = [line.replace("\xa0", " ") for line in plain_raw_lines]
     footer_index = -1
     for index in range(len(lines) - 1, -1, -1):
-        stripped = lines[index].strip()
-        if stripped.startswith(_COMPOSER_FOOTER_PREFIXES):
+        if _is_composer_footer(lines[index]):
             footer_index = index
             break
     if footer_index < 0:
@@ -355,7 +363,7 @@ def _composer_candidate(visible_text: str) -> tuple[str, bool, str, int]:
         stripped = line.strip()
         if re.match(r"^[─━╌╍]{3,}$", stripped):
             break
-        if stripped.startswith((*_COMPOSER_FOOTER_PREFIXES, "new task?")):
+        if _is_composer_footer(stripped) or stripped.casefold().startswith("new task?"):
             break
         if stripped.startswith(("●", "✻", "⎿", "⤷")) or re.match(r"^(Ran|Bash|Write|Read|Edit|Update|Search)\b", stripped):
             return "", False, "", 0

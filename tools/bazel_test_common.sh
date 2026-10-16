@@ -27,6 +27,13 @@ bazel_test_assert_tool_environment() {
   bazel_assert_value GO111MODULE on
   bazel_assert_value GOTOOLCHAIN local
   case "$(product_env_print BAZEL_EXECUTION "container")" in
+    qualified-native)
+      bazel_assert_value GOPROXY off
+      bazel_assert_value GOSUMDB off
+      bazel_assert_value "$(product_env_name TEST_CONTAINER)" 0
+      [ -d "$GOMODCACHE" ] || { echo "verified native Go seed is absent" >&2; return 2; }
+      return
+      ;;
     native)
       bazel_assert_value GOPROXY https://proxy.golang.org,direct
       bazel_assert_value GOSUMDB sum.golang.org
@@ -198,6 +205,11 @@ raise SystemExit(f"required Bazel runfile is missing: {name}")
 PY_RLOCATION
 }
 
+bazel_test_fixture_root() {
+  # Native entrypoints allocate the short action fixture before installing the policy.
+  printf '%s\n' "${YOMUX_NATIVE_SHORT_TMPDIR:-$TEST_TMPDIR/yolomux-agent-environment}"
+}
+
 bazel_test_prepare_environment() {
   local test_root="${TEST_TMPDIR:-}"
   if [ -z "$test_root" ]; then
@@ -205,7 +217,8 @@ bazel_test_prepare_environment() {
     return 2
   fi
 
-  local root="$test_root/yolomux-agent-environment"
+  local root
+  root="$(bazel_test_fixture_root)"
   local short_tmpdir
   local directory
   local variable
@@ -226,7 +239,7 @@ bazel_test_prepare_environment() {
         ;;
     esac
     case "$product_setting" in
-      BAZEL_CONTRACT|BAZEL_IMAGE_ID|BAZEL_APPARMOR_SHA256|BAZEL_EXECUTION|TEST_CONTAINER|TEST_SOURCE_ROOT|TEST_IMAGE|TEST_IMAGE_REBUILD|IMAGE_RUNNER_UID|IMAGE_RUNNER_GID|GO_BINARY|GO_STATS_BROWSER_TEST|WORKTREE_WRITER_SLOT)
+      E2E_EVIDENCE_DIR|NATIVE_SHORT_TMPDIR|BAZEL_CONTRACT|BAZEL_IMAGE_ID|BAZEL_APPARMOR_SHA256|BAZEL_EXECUTION|BAZEL_PROCESS_SCOPE|TEST_CONTAINER|TEST_SOURCE_ROOT|TEST_REVISION|TEST_RELEASE_CONTEXT|XTERM_PACKAGE_ROOT|TEST_IMAGE|TEST_IMAGE_REBUILD|IMAGE_RUNNER_UID|IMAGE_RUNNER_GID|GO_BINARY|GO_STATS_BROWSER_TEST|WORKTREE_WRITER_SLOT)
         continue
         ;;
       ?*)
@@ -245,9 +258,9 @@ bazel_test_prepare_environment() {
   done < <(compgen -e)
 
   # Native actions use their declared runfiles directly; routing pytest to Docker would require undeclared inputs.
-  if [ "$(product_env_print BAZEL_EXECUTION "container")" = native ]; then
-    product_env_assign "CHECK_CONTAINER=0"
-  fi
+  case "$(product_env_print BAZEL_EXECUTION "container")" in
+    native|qualified-native) product_env_assign "CHECK_CONTAINER=0" ;;
+  esac
 
   # Bazel gives every test action its own TEST_TMPDIR. Do not point parallel actions at shared
   # client state; the remaining client roots are fixture-owned below.
@@ -265,7 +278,11 @@ bazel_test_prepare_environment() {
   # this writable root unique and private per action while giving Unix-socket-backed tools a short
   # lexical path. The outer Docker container is disposable, and the EXIT trap removes this exact
   # mktemp-created directory after the wrapper has reaped its children.
-  short_tmpdir="$(mktemp -d /tmp/yolomux-bazel-tmp.XXXXXX)"
+  if [[ -n "${YOMUX_NATIVE_SHORT_TMPDIR:-}" ]]; then
+    short_tmpdir="$(mktemp -d "$YOMUX_NATIVE_SHORT_TMPDIR/t.XXXXXX")"
+  else
+    short_tmpdir="$(mktemp -d /tmp/yolomux-bazel-tmp.XXXXXX)"
+  fi
   chmod 700 "$short_tmpdir"
   product_env_assign "BAZEL_TMPDIR=$short_tmpdir"
   bazel_test_cleanup() {

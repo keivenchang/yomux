@@ -1106,6 +1106,7 @@ async function refreshFileExplorerTreesInPlace(options = {}) {
     setFileExplorerPathDisplay(root);
     renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {
       entriesByDir,
+      renderTransaction: options.renderTransaction || fileExplorerSyncState.renderTransaction,
       view: 'finder',
       deferSessionFilesDiff: options.deferSessionFilesDiff === true,
     });

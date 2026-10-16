@@ -19,3 +19,18 @@ go_test_pair(
     srcs = ["scheduler_test.go"],
     embed = [":work_lib"],
 )
+
+filegroup(
+    name = "qualified_sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/__pycache__/**",
+            "**/*.pyc",
+            "**/*.log",
+            "**/*.lock",
+            "product_version_generated.go",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)

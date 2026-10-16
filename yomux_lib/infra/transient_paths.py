@@ -113,7 +113,7 @@ def _write_manifest(path: Path, manifest: dict[str, Any]) -> None:
             os.close(descriptor)
 
 
-def _remove_tree_at(parent_fd: int, name: str, *, expected: os.stat_result | None = None) -> None:
+def _remove_tree_at(parent_fd: int, name: str, *, expected: os.stat_result | None = None, make_owner_writable: bool = False) -> None:
     """Remove one directory tree using directory descriptors and no symlink following."""
 
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -124,11 +124,17 @@ def _remove_tree_at(parent_fd: int, name: str, *, expected: os.stat_result | Non
             raise TransientPathError(f"transient child is not a directory: {name}")
         if expected is not None and (child_stat.st_dev, child_stat.st_ino) != (expected.st_dev, expected.st_ino):
             raise TransientPathError(f"transient root identity changed: {name}")
+        if make_owner_writable:
+            if child_stat.st_uid != os.geteuid():
+                raise TransientPathError(f"transient directory has another owner: {name}")
+            # Frozen fixture directories need write access for unlink, while
+            # file modes must stay intact because files can share bundle inodes.
+            os.fchmod(child_fd, stat.S_IMODE(child_stat.st_mode) | stat.S_IRWXU)
         for entry in os.scandir(child_fd):
             if entry.is_symlink():
                 os.unlink(entry.name, dir_fd=child_fd)
             elif entry.is_dir(follow_symlinks=False):
-                _remove_tree_at(child_fd, entry.name)
+                _remove_tree_at(child_fd, entry.name, make_owner_writable=make_owner_writable)
             else:
                 os.unlink(entry.name, dir_fd=child_fd)
     finally:
@@ -136,7 +142,7 @@ def _remove_tree_at(parent_fd: int, name: str, *, expected: os.stat_result | Non
     os.rmdir(name, dir_fd=parent_fd)
 
 
-def _remove_exact_root(root: Path) -> None:
+def remove_exact_tree(root: Path, *, make_owner_writable: bool = False) -> None:
     """Remove the validated root without following a replacement or descendant symlink."""
 
     parent = root.parent
@@ -145,7 +151,7 @@ def _remove_exact_root(root: Path) -> None:
         expected = root.lstat()
         if not stat.S_ISDIR(expected.st_mode) or stat.S_ISLNK(expected.st_mode):
             raise TransientPathError(f"transient root is unsafe: {root}")
-        _remove_tree_at(parent_fd, root.name, expected=expected)
+        _remove_tree_at(parent_fd, root.name, expected=expected, make_owner_writable=make_owner_writable)
     finally:
         os.close(parent_fd)
 
@@ -201,7 +207,7 @@ def create_run_root(
         _write_manifest(root / MANIFEST_NAME, manifest)
     except Exception:
         try:
-            _remove_exact_root(root)
+            remove_exact_tree(root)
         except OSError:
             pass
         raise
@@ -302,7 +308,7 @@ def remove_run_root(
         raise TransientPathError(f"transient root owner does not match: {run_root.path}")
     _validate_child_claims(run_root.path, identity=owner)
     try:
-        _remove_exact_root(run_root.path)
+        remove_exact_tree(run_root.path)
     except OSError as error:
         raise TransientPathError(f"failed to remove transient root: {run_root.path}") from error
 
@@ -328,6 +334,6 @@ def recover_stale_run_root(
         )
     _validate_child_claims(Path(root), identity=current)
     try:
-        _remove_exact_root(Path(root))
+        remove_exact_tree(Path(root))
     except OSError as error:
         raise TransientPathError(f"failed to recover transient root: {root}") from error

@@ -22,6 +22,7 @@ import uuid
 
 import pytest
 from tools.product_environment import product_env
+from tools.tmux_paths import short_temp_base
 from tools.product_environment import product_env_name
 from tools.product_environment import product_env_names
 
@@ -79,7 +80,7 @@ if _inherited_test_root:
     _test_run_root = None
     _test_process_root = Path(_inherited_test_root) / f"p{os.getpid()}"
 else:
-    _test_run_root = create_run_root(namespace="test", owner_role="pytest-controller", temporary_base=Path("/tmp"))
+    _test_run_root = create_run_root(namespace="test", owner_role="pytest-controller", temporary_base=short_temp_base().resolve())
     _test_process_root = _test_run_root.child("pytest")
     os.environ[product_env_name("TEST_ROOT")] = str(_test_run_root.path)
 _test_config_dir = _test_process_root / "config"

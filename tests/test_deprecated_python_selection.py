@@ -10,6 +10,8 @@ import sys
 
 import pytest
 
+from tests.helpers.fixture_tools import clear_fixture_settings
+
 from tools import check
 from tools import test_catalog
 from tools.instance_isolation import synthetic_test_environment
@@ -119,6 +121,7 @@ def test_check_opt_in_preserves_phase_filters_and_docker_arguments():
 
 
 def test_docker_forwards_maintenance_admission(monkeypatch, request):
+    clear_fixture_settings(monkeypatch, "BAZEL_EXECUTION", "BAZEL_CONTRACT")
     config_module = request.config.pluginmanager.get_plugin(str(REPO_ROOT / "conftest.py"))
     assert config_module is not None
     captured = []

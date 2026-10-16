@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from tools.tmux_paths import short_temp_base, short_temp_prefix
 
 import pytest
 
@@ -148,7 +149,7 @@ def test_exec_launched_server_passes_the_real_session_probe_and_tears_down_by_pi
     mode, verify its tmux session with the real launcher probe (reusing the exact
     same captured plan file), tear down by exact process identity, and confirm
     nothing survives."""
-    root = Path(tempfile.mkdtemp(prefix="y-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix=short_temp_prefix("y-"), dir=short_temp_base()))
     paths = build_paths(root)
     tmux_runtime = start_isolated_tmux_runtime(monkeypatch, root, session_count=1)
 

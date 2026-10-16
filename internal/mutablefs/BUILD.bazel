@@ -20,3 +20,18 @@ go_test_pair(
     srcs = glob(["*_test.go"]),
     embed = [":mutablefs_lib"],
 )
+
+filegroup(
+    name = "qualified_sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/__pycache__/**",
+            "**/*.pyc",
+            "**/*.log",
+            "**/*.lock",
+            "product_version_generated.go",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)

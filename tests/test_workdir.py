@@ -1,5 +1,7 @@
+from tests.helpers.fixture_tools import fixture_script
 import logging
 import os
+from tools.tmux_paths import short_fixture_path
 import subprocess
 
 import pytest
@@ -71,11 +73,12 @@ def test_numeric_session_workdir_prefers_canonical_checkout_when_both_names_exis
 
 
 def test_yomux_working_directory_identity_matches_only_product_checkout_names(monkeypatch, tmp_path):
-    legacy = "/home/test/dev/yolomux.dev8002/src"
-    canonical = "/home/test/dev/yomux.dev8002/src"
+    legacy = str(tmp_path / "dev/yolomux.dev8002/src")
+    canonical = str(tmp_path / "dev/yomux.dev8002/src")
 
     assert canonical_yomux_working_directory(legacy) == canonical_yomux_working_directory(canonical)
-    assert canonical_yomux_working_directory("/home/test/dev/yolomux-project") == "/home/test/dev/yolomux-project"
+    ordinary = tmp_path / "dev/yolomux-project"
+    assert canonical_yomux_working_directory(str(ordinary)) == str(ordinary.resolve())
     monkeypatch.chdir(tmp_path)
     assert canonical_yomux_working_directory("") == str(tmp_path)
 
@@ -117,7 +120,7 @@ def test_codex_runtime_env_defaults_to_user_codex_home(monkeypatch, tmp_path):
 
 
 def test_rooted_codex_runtime_reuses_user_credentials_without_creating_instance_home(monkeypatch, tmp_path):
-    root = common.Path(f"/tmp/yolomux-auth-runtime-{os.getpid()}")
+    root = short_fixture_path(f"yolomux-auth-runtime-{os.getpid()}")
     user_home = tmp_path / "user"
     auth_file = user_home / ".codex" / "auth.json"
     auth_file.parent.mkdir(parents=True)
@@ -135,7 +138,7 @@ def test_rooted_codex_runtime_reuses_user_credentials_without_creating_instance_
 
 
 def test_rooted_codex_auth_probe_uses_existing_user_login_without_creating_instance_home(monkeypatch, tmp_path):
-    root = common.Path(f"/tmp/yolomux-auth-probe-{os.getpid()}")
+    root = short_fixture_path(f"yolomux-auth-probe-{os.getpid()}")
     user_home = tmp_path / "user"
     auth_file = user_home / ".codex" / "auth.json"
     auth_file.parent.mkdir(parents=True)
@@ -242,7 +245,7 @@ def test_server_path_self_heal_finds_home_local_bin_agent(monkeypatch, tmp_path)
     local_bin = tmp_path / ".local" / "bin"
     local_bin.mkdir(parents=True)
     claude = local_bin / "claude"
-    claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    claude.write_text(fixture_script("#!/bin/sh\nexit 0\n"), encoding="utf-8")
     claude.chmod(0o700)
     bare_bin = tmp_path / "bin"
     bare_bin.mkdir()
@@ -287,7 +290,7 @@ def test_missing_agent_path_warning_skips_resolvable_agent(monkeypatch, tmp_path
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     claude = bin_dir / "claude"
-    claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    claude.write_text(fixture_script("#!/bin/sh\nexit 0\n"), encoding="utf-8")
     claude.chmod(0o700)
     monkeypatch.setenv("PATH", str(bin_dir))
     monkeypatch.setattr(common.Path, "home", lambda: tmp_path)

@@ -15,6 +15,7 @@ import uuid
 
 import pytest
 
+from tests.helpers.fixture_tools import fixture_command
 from tools.product_environment import apply_yomux_environment_assignments
 from tools.product_environment import product_env
 from tools.product_environment import product_env_names
@@ -248,7 +249,7 @@ def start_isolated_tmux_runtime(
                 session,
                 columns=columns,
                 rows=rows,
-                command=command if command is not None else "exec /bin/bash --noprofile --norc",
+                command=command if command is not None else "exec " + fixture_command("bash", "--noprofile", "--norc"),
             )
             if command is None:
                 run_isolated_tmux(runtime, "send-keys", "-t", f"{session}:", f"printf 'isolated {session}\\n'", "Enter", timeout=5)
@@ -288,7 +289,7 @@ def start_isolated_default_tmux_runtime(monkeypatch, tmp_path: Path, session_cou
                 session,
                 columns=columns,
                 rows=rows,
-                command="exec /bin/bash --noprofile --norc",
+                command="exec " + fixture_command("bash", "--noprofile", "--norc"),
             )
         return runtime
     except Exception:

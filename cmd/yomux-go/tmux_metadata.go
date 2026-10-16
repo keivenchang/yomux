@@ -83,6 +83,7 @@ func (s *server) sessionMetadata(w http.ResponseWriter, r *http.Request) {
 		responseErrors = appendMetadataErrorValues(responseErrors, published["errors"])
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{
+		"server_version": version, "bundle_revision": "go:" + version, "instance_id": s.instanceID,
 		"sessions": metadataSessions, "session_order": sessions, "session_scope": "all",
 		"metadata_generation": servedGeneration, "metadata_identity": map[string]any{"epoch": s.metadataEpoch(), "generation": servedGeneration},
 		"topology_generation": topology.generation, "errors": responseErrors, "cache": cache,

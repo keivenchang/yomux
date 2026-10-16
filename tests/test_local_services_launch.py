@@ -10,6 +10,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from tools.tmux_paths import short_fixture_path
 from threading import Event
 from types import SimpleNamespace
 
@@ -634,7 +635,7 @@ def test_registry_spawn_rebases_only_generated_artifacts_outside_current_root(tm
         def poll(self):
             return None
 
-    root = Path("/tmp") / f"yls-{os.getpid()}"
+    root = short_fixture_path(f"yls-{os.getpid()}")
     generated_prefix = str(tmp_path / "bootstrap-python-cache")
     for key in (
         "YOMUX_CONFIG_DIR",

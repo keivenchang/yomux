@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from tools.tmux_paths import short_temp_base, short_fixture_path
 
 from yomux_lib import cli
 from tools.instance_isolation import EARLY_PORT_ENV
@@ -27,7 +28,7 @@ from tools.instance_isolation import scan_port
 from tools.instance_isolation import synthetic_test_environment
 from yomux_lib.infra.root_paths import YomuxRoots
 
-SHORT_TEMP_ROOT = Path("/tmp/yi")
+SHORT_TEMP_ROOT = short_temp_base() if "YOMUX_NATIVE_SHORT_TMPDIR" in os.environ else short_temp_base() / "yi"
 
 
 def test_yomux_environment_alias_precedence_and_warning(monkeypatch, capsys):
@@ -135,7 +136,7 @@ def test_one_instance_descriptor_owns_port_and_managed_capability(tmp_path: Path
 def test_macos_managed_instance_uses_short_default_socket_root():
     resolution = resolve_instance_environment(8881, {}, platform="darwin")
 
-    assert resolution.environment[PRODUCT_ROOT_ENV] == f"/tmp/y{os.getuid()}/p8881"
+    assert resolution.environment[PRODUCT_ROOT_ENV] == str((Path("/tmp") / f"y{os.getuid()}/p8881").resolve())
 
 
 def test_clean_row_environment_strips_inherited_and_resolves_the_row(tmp_path: Path):
@@ -322,7 +323,7 @@ def test_explicit_root_preflight_rejects_outside_overrides_and_deep_socket_paths
 
 
 def test_explicit_root_ignores_ambient_relative_xdg_bases(tmp_path: Path):
-    root = Path("/tmp") / f"yolomux-explicit-xdg-{os.getpid()}"
+    root = short_fixture_path(f"yolomux-explicit-xdg-{os.getpid()}")
     values = {
         PRODUCT_ROOT_ENV: str(root),
         "XDG_CONFIG_HOME": "relative-config",
@@ -338,7 +339,7 @@ def test_explicit_root_ignores_ambient_relative_xdg_bases(tmp_path: Path):
 
 
 def test_explicit_root_preserves_contained_artifact_and_python_cache_overrides():
-    root = SHORT_TEMP_ROOT / f"explicit-{os.getpid()}"
+    root = short_fixture_path(f"explicit-{os.getpid()}")
     values = {
         PRODUCT_ROOT_ENV: str(root),
         "YOLOMUX_HOST_ARTIFACT_DIR": str(root / "artifacts"),
@@ -354,8 +355,8 @@ def test_explicit_root_preserves_contained_artifact_and_python_cache_overrides()
 
 
 def test_auto_root_ignores_ambient_artifact_cache_codex_and_xdg_values_and_uses_mapped_tmpdir(tmp_path: Path):
-    temp_root = Path("/tmp/yolomux-configured-temp")
-    managed_root = temp_root / f"y{os.getuid()}" / "p7111"
+    temp_root = short_temp_base() if "YOMUX_NATIVE_SHORT_TMPDIR" in os.environ else short_fixture_path("yo-config")
+    managed_root = temp_root.resolve() / f"y{os.getuid()}" / "p7111"
     values = {
         "TMPDIR": str(temp_root),
         "YOLOMUX_CODEX_HOME": str(managed_root / "codex"),

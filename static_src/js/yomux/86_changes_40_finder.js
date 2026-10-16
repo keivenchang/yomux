@@ -166,6 +166,7 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   }
   renderTreeChildren(treeEl, root, entries, 0, {
     entriesByDir: options.entriesByDir,
+    renderTransaction: options.renderTransaction || fileExplorerSyncState.renderTransaction,
     view: 'finder',
     deferSessionFilesDiff: options.deferSessionFilesDiff === true,
   });

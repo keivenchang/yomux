@@ -13,6 +13,16 @@ import (
 )
 
 func TestMain(main *testing.M) {
+	if os.Getenv("YOMUX_SELF_UPDATE_TEST_WORKER") == "1" {
+		// Test workers dispatch before testing.Main applies Bazel's shard-specific
+		// -test.run filter, like the production binary's supervisor entrypoint.
+		fmt.Fprintln(os.Stderr, "self-update subprocess helper entered")
+		if err := runSelfUpdateSupervisor(os.Getenv("YOMUX_SELF_UPDATE_TEST_SPEC")); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	cleanup, err := testsupport.NewPrivateTestEnvironment()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "create private test environment:", err)

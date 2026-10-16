@@ -404,6 +404,7 @@ function pruneGitDiffShaState(state, shas) {
 async function refreshGitDiffHistory(item, options = {}) {
   const state = ensureGitDiffTabState(item);
   if (!state) return false;
+  const firstLoad = state.loadAttempted !== true;
   const append = options.append === true;
   if (append && (!state.nextCursor || state.loading || state.loadingOlder)) return false;
   state.historyController?.abort?.();
@@ -484,6 +485,7 @@ async function refreshGitDiffHistory(item, options = {}) {
     state.truncationReason = String(payload.truncation_reason || '');
     state.loaded = true;
     state.error = null;
+    if (!append && firstLoad) noteTabberItemActivity(item);
     scheduleGitDiffHistoryRefresh(item);
     renderPaneTabStrips();
     refreshPaneTabLabel(item);
@@ -1643,7 +1645,10 @@ function createGitDiffPanel(item) {
   const heading = gitDiffTextNode('git-diff-heading', t('contextmenu.showDiff'));
   const path = gitDiffTextNode('git-diff-path');
   path.replaceChildren(gitDiffTextNode('git-diff-pathname'));
-  const refresh = makeButton({className: 'git-diff-refresh', label: t('common.refresh'), ariaLabel: t('common.refresh'), onClick: () => void refreshGitDiffHistory(item, {refresh: true})});
+  const refresh = makeButton({className: 'git-diff-refresh', label: t('common.refresh'), ariaLabel: t('common.refresh'), onClick: () => {
+    noteTabberItemActivity(item);
+    void refreshGitDiffHistory(item, {refresh: true});
+  }});
   toolbar.append(heading, path, refresh);
   const meta = document.createElement('div');
   meta.className = 'git-diff-meta';
@@ -1651,6 +1656,7 @@ function createGitDiffPanel(item) {
   body.className = 'git-diff-panel-body';
   body.dataset.dockviewRegion = 'content';
   body.setAttribute('aria-label', gitDiffTabLabel(item));
+  body.addEventListener('click', () => noteTabberItemActivity(item));
   bindGitDiffHistoryInfiniteScroll(item, body);
   panel.append(toolbar, meta, body);
   const state = ensureGitDiffTabState(item);

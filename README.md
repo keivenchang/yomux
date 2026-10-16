@@ -18,7 +18,7 @@ Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPM
 
 * Linux full-gate hosts: `fs.inotify.max_user_instances=1024`, `fs.inotify.max_user_watches=1048576`, and `fs.inotify.max_queued_events=65536`; see the development guide for the persistent `sysctl` setup.
 
-* Go builds: Bazel 9.2.0; Linux uses Docker for the isolated Go/Bazel/Chromium gate, and macOS uses the native Bazel wrapper. Bazel selects Go 1.27.1 on Linux and macOS; a host Go installation is not required for the canonical build.
+* Go builds: Bazel 9.2.0. The full gate provides Docker and prepared qualified native execution with the same coverage inventory. macOS applies one Seatbelt policy to each test command and its descendants. Setup and non-test build actions run without OS sandbox enforcement. See the development guide for preparation and isolation guarantees. Bazel selects Go 1.27.1 on both platforms; a host Go installation is not required for the canonical build.
 
 ## Quickstart
 
@@ -61,7 +61,7 @@ The Go process generates and reuses its own self-signed certificate under `${TMP
 
 `YOMUX_*` is the canonical environment prefix. Legacy `YOLOMUX_*` inputs remain accepted with a deprecation warning; when both forms are present, `YOMUX_*` wins, including an explicitly empty value. Legacy environment support is reviewed separately and remains while supported callers need it. The `yolomux` command and `yolomux.py` entrypoint remain compatibility aliases for 30 days after fleet cutover.
 
-Automated Go validation runs inside isolated Docker state with fixture-owned test ports and Chromium. Port 7221 is reserved for a manual smoke after those checks. Automated checks never connect to the operator runtime on port 7220; use the managed operator workflow for an explicitly requested live restart or smoke.
+Automated Go validation uses the Docker or qualified native backend with fixture-owned test ports and Chromium. Port 7221 is reserved for a manual smoke after those checks. Automated checks never connect to the operator runtime on port 7220; use the managed operator workflow for an explicitly requested live restart or smoke.
 
 Contributors should use `make dev`. Its `dev` extra installs `mypy`, `pillow`, `pytest`, `pytest-timeout`, `pytest-xdist`, and `selenium` for the Python gate. Browser lanes additionally require Chrome or Chromium plus a compatible chromedriver; the xterm provenance check requires Node.js and npm. [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) lists the development checks and Go test lane.
 

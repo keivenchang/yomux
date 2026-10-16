@@ -50,6 +50,6 @@ include = ["tools*", "yomux_lib*"]
 yomux_lib = ["data/*.json"]
 tools = ["product_namespace.json"]
 
-# Single source of truth for the version: read YOMUX_VERSION from yomux_lib/version.py.
+# Package metadata reads the product version from version.yaml through the compatibility module.
 [tool.setuptools.dynamic]
 version = { attr = "yomux_lib.version.YOMUX_VERSION" }

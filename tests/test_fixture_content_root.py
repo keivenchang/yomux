@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -18,6 +19,35 @@ from tests.helpers.fixture_content_root import FixtureContentRoot
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_frozen_diff_fixtures_preserve_historical_bytes_without_git(monkeypatch, tmp_path):
+    snapshot_path = Path(browser_layout.__file__).with_name("frozen_diff_snapshots.json")
+    declared_snapshot = tmp_path / snapshot_path.name
+    declared_snapshot.write_bytes(snapshot_path.read_bytes())
+    monkeypatch.setattr(browser_layout, "__file__", str(tmp_path / "browser_layout.py"))
+    monkeypatch.chdir(tmp_path)
+
+    def refuse_git(*args, **kwargs):
+        raise AssertionError("frozen browser fixtures must not execute Git")
+
+    monkeypatch.setattr(subprocess, "check_output", refuse_git)
+    expected = {
+        "05f22a8646:TODO.md": "9c70ce51cf7d2f32e9a899c44d279ee989f6a4aff217566003446c8ef7cae9f4",
+        "521bbfd:static_src/js/yolomux/40_file_explorer_files.js": "08c94b14805180fe5a2ddf079a8df3473f0d5c19587880230916440527d668e8",
+        "6a967aaa70:static_src/js/yolomux/40_file_explorer_files.js": "ece03ebc37dea4917d19e7e2b9e99a8cf7dd8c41c04f96e03ce9bde10fd7d22b",
+    }
+    for source, digest in expected.items():
+        assert hashlib.sha256(browser_layout.frozen_source_text(source).encode("utf-8")).hexdigest() == digest
+    original, current = browser_layout.codemirror_todo_diff_overview_texts()
+    assert original == browser_layout.frozen_source_text("05f22a8646:TODO.md")
+    assert len(current.splitlines()) == 124
+    pages = [browser_layout.codemirror_todo_diff_overview_fixture_html(),
+             browser_layout.codemirror_file_explorer_diff_overview_fixture_html()]
+    for source in expected:
+        encoded = json.dumps(browser_layout.frozen_source_text(source)).replace("</script", "<\\/script")
+        assert any(encoded in page for page in pages)
+    assert not (tmp_path / ".git").exists()
 
 
 def test_identical_worker_sequence_and_name_are_isolated_by_process_root(tmp_path):

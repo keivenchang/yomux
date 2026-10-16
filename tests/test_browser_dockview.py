@@ -1975,7 +1975,13 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
             " && runtimeIntervalDiagnostics('auto-approve')[0].lastStartedAtMs > state.pollBefore"
             " && tabberActivityState.request === state.request;"
         ))
-        browser.execute_script("window.__tabSwitchActivity.releaseStatus();")
+        status_published = browser.execute_async_script("""
+            const done = arguments[arguments.length - 1];
+            const request = loadAutoStatuses.request;
+            window.__tabSwitchActivity.releaseStatus();
+            Promise.resolve(request).then(() => done(true), error => done({error: String(error)}));
+        """)
+        assert status_published is True, status_published
         setup = browser.execute_script(
             """
             clearClientPerfCounters();
@@ -2655,6 +2661,66 @@ def test_dockview_tabs_keep_yolomux_active_inactive_style(browser, tmp_path):
     inactive_matches, inactive_samples = sampled_background_matches(inactive["rect"], rgb_tuple(inactive["bg"]))
     assert active_matches >= 4, {"bg": active["bg"], "samples": active_samples}
     assert inactive_matches >= 4, {"bg": inactive["bg"], "samples": inactive_samples}
+
+
+def test_single_color_transport_shapes_and_mixed_status_keep_spacing_in_both_themes(browser, tmp_path):
+    panes = [{"target": f"%{index + 1}", "window": index, "window_name": "codex", "active": True, "window_active": index == 0, "process_label": "codex"} for index in range(3)]
+    load_dockview_runtime_boot_fixture(
+        browser, tmp_path,
+        "?sessions=tabber,1&layout=row@30(side,main)&tabs=side:@side-left,tabber;main:1",
+        sessions=["1"], transcript_sessions={"1": {"panes": panes}},
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("return typeof applyAutoApprovePayload === 'function' && typeof refreshTabberPanels === 'function'"))
+    for theme in ["dark", "light"]:
+        set_browser_visual_profile(browser, theme=theme)
+        sizes = []
+        for states in [["working"], ["working", "working", "working"], ["idle"], ["idle", "idle"], ["needs-input"], ["needs-input", "blocked"], ["blocked"], ["working", "needs-input"], ["working", "idle"], ["needs-input", "idle"], ["working", "blocked", "idle"], ["idle"], ["needs-input"], ["working"]]:
+            data = browser.execute_script("""
+              const states = arguments[0];
+              const now = Date.now() / 1000;
+              applyAutoApprovePayload({topology_generation: tmuxTopologyGeneration, session_order: ['1'], sessions: {'1': {target: '1', enabled: false,
+                agent_windows: states.map((state, window_index) => ({kind: 'codex', state, window_index,
+                  window_label: `${window_index}:codex`, working_stopped_ts: state === 'idle' ? now - 1 : 0,
+                  attention_key: state === 'needs-input' ? `shape-test-${window_index}` : ''}))}}, rules: {rules: [], errors: []}});
+              refreshTabberPanels();
+              const read = dot => {
+                if (!dot) return null;
+                const style = getComputedStyle(dot);
+                const before = getComputedStyle(dot, '::before');
+                const rect = dot.getBoundingClientRect();
+                return {shape: ['play', 'pause', 'stop'].find(shape => dot.classList.contains('agent-window-status-dot--' + shape)) || '',
+                  segmented: dot.classList.contains('agent-window-status-dot--segmented'),
+                  clip: style.clipPath, beforeClip: before.clipPath, gradient: style.backgroundImage,
+                  outline: getComputedStyle(dot.closest('.session-agent-activity-marker') || dot.parentElement).filter, beforeShadow: before.boxShadow,
+                  afterShadow: getComputedStyle(dot, '::after').boxShadow,
+                  width: rect.width, height: rect.height, animation: style.animationName,
+                  label: dot.closest('[aria-label]')?.getAttribute('aria-label')};
+              };
+              return {tab: read(document.querySelector('.pane-tab[data-pane-tab="1"] .session-agent-activity-marker .agent-window-status-dot')),
+                row: read(document.querySelector('#panel-__tabber__ .file-tree-row[data-tabber-session="1"][data-tabber-window="0"] .agent-window-status-dot'))};
+            """, states)
+            shapes = {"working": "play", "idle": "pause", "needs-input": "stop", "blocked": "stop"}
+            mixed = len({shapes[state] for state in states}) > 1
+            assert data["tab"] and data["row"], data
+            assert data["tab"]["shape"] == ("" if mixed else shapes[states[0]]), data
+            assert data["tab"]["segmented"] is mixed, data
+            assert ("conic-gradient" in data["tab"]["gradient"]) is mixed, data
+            assert (data["tab"]["clip"] != "none") is not mixed, data
+            assert ("drop-shadow" in data["tab"]["outline"]) is not mixed, data
+            if states[0] != "working":
+                assert data["row"]["beforeShadow"] != "none", data
+                if states[0] == "idle":
+                    assert data["row"]["afterShadow"] != "none", data
+            assert data["row"]["shape"] == shapes[states[0]], data
+            if states[0] == "working":
+                assert "polygon" in data["row"]["beforeClip"], data
+            if "working" in states or "idle" in states:
+                assert data["tab"]["animation"] == "agent-status-opacity-pulse", data
+            assert data["tab"]["label"] and data["row"]["label"], data
+            assert data["tab"]["width"] > 0 and data["row"]["width"] > 0, data
+            sizes.append((data["tab"]["width"], data["tab"]["height"], data["row"]["width"], data["row"]["height"]))
+        assert all(size == sizes[0] for size in sizes), sizes
 
 
 def test_dockview_tab_status_and_numeric_session_spacing_stays_compact(browser, tmp_path):
@@ -4635,7 +4701,7 @@ def test_dockview_red_window_ball_xterm_data_acknowledges_after_delay(browser, t
         """
     )
     assert ack_body == {"keys": [attention_key]}
-    assert sent_frame == {"type": "input", "data": "a"}
+    assert sent_frame == {"type": "input", "data": "a", "user_input": True}
 
 
 @pytest.mark.skip(reason="window selectors no longer render polling-driven agent or state glyphs")
@@ -11644,10 +11710,12 @@ def test_dockview_tabber_normal_shows_recency_for_agent_and_bash_windows(browser
     assert "error" not in result, result
     assert result["rows"] == 2 and result["labels"] == ["AI screen", "Shell"], result
     assert result["newestFirst"] is True, result
-    assert result["dates"][0]["primary"].endswith("0:codex") and result["dates"][1]["primary"].endswith("1:bash"), result
+    assert "0:codex" in result["dates"][0]["primary"] and "MAIN" in result["dates"][0]["primary"], result
+    assert "1:bash" in result["dates"][1]["primary"] and "MAIN" in result["dates"][1]["primary"], result
     assert result["dates"][0]["text"] != result["dates"][1]["text"], result
     assert all(date["text"] and not date["hidden"] and date["width"] > 0 and date["display"] != "none" for date in result["dates"]), result
-    assert [row["primary"].split()[-1] for row in result["undated"]] == ["0:codex", "1:bash"] and all(not row["date"] for row in result["undated"]), result
+    assert all(token in row["primary"] for row, token in zip(result["undated"], ["0:codex", "1:bash"]))
+    assert all("MAIN" in row["primary"] and not row["date"] for row in result["undated"]), result
 
 
 def test_dockview_tabber_native_click_selects_numbered_sessions(browser, tmp_path):

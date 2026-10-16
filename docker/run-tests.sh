@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Run a command in a throwaway YOmux test container with its own HOME.
 set -euo pipefail
 
@@ -90,7 +90,7 @@ image_lock_root="/tmp/yomux-image-build-$(id -u)"
 [ ! -L "$image_lock_root" ] || { echo "image lock root must not be a symlink" >&2; exit 2; }
 mkdir -p -m 700 "$image_lock_root"
 [ -O "$image_lock_root" ] && [ "$(stat -c %a "$image_lock_root")" = 700 ] || { echo "image lock root must be user-owned and mode 700" >&2; exit 2; }
-image_lock_key="$(printf '%s' "$IMAGE" | sha256sum | cut -d ' ' -f 1)"
+image_lock_key="$(product_env_fingerprint "$IMAGE")"
 exec {image_build_lock_fd}>"$image_lock_root/$image_lock_key.lock"
 flock -x "$image_build_lock_fd"
 if [ "$do_build" = 1 ] || [ "$(product_env_print TEST_IMAGE_REBUILD "0")" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
@@ -424,18 +424,24 @@ fi
 validate_tmp_directory() {
   local candidate="$1"
   local label="$2"
+  local temporary_base lexical_base
+  while [[ "$candidate" == */ ]]; do
+    candidate="${candidate%/}"
+  done
+  temporary_base="$(realpath -e -- /tmp)"
   case "$candidate" in
-    /tmp/*) ;;
+    /tmp/*) lexical_base=/tmp ;;
+    "$temporary_base"/*) lexical_base="$temporary_base" ;;
     *) echo "$label must be a child of /tmp: $candidate" >&2; exit 2 ;;
   esac
   local normalized
   normalized="$(realpath -m -- "$candidate")"
   case "$normalized" in
-    /tmp/*) ;;
+    "$temporary_base"/*) ;;
     *) echo "$label resolves outside /tmp: $normalized" >&2; exit 2 ;;
   esac
   local component="$candidate"
-  while [ "$component" != "/tmp" ]; do
+  while [ "$component" != "$lexical_base" ]; do
     if [ -L "$component" ]; then
       echo "$label must not contain a symlink: $component" >&2
       exit 2
@@ -449,7 +455,7 @@ validate_tmp_directory() {
   fi
   candidate="$(realpath -e -- "$candidate")"
   case "$candidate" in
-    /tmp/*) ;;
+    "$temporary_base"/*) ;;
     *) echo "$label resolves outside /tmp: $candidate" >&2; exit 2 ;;
   esac
   if [ ! -O "$candidate" ]; then

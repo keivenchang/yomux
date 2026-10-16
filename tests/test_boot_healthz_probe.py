@@ -386,9 +386,12 @@ def test_missing_and_wrong_credentials_both_still_record_authentication_errors(p
 
 def test_boot_sh_probes_only_the_public_liveness_route():
     """Keep the shell supervisor and the server's public set from drifting apart."""
+    probe = boot_shell_function("probe_healthz")
+    assert f"{LIVENESS_PATH}\"" in probe, probe
+    assert PROTECTED_PROBE_PATH not in probe, probe
     for name in ("wait_for_port", "verify_port_stable"):
         source = boot_shell_function(name)
-        assert f"{LIVENESS_PATH}\"" in source, source
+        assert 'probe_healthz "$port"' in source, source
         assert PROTECTED_PROBE_PATH not in source, source
         assert "401" not in source, source
         assert "200" in source, source

@@ -14,10 +14,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func TestTabberViewSessionsKeepTmuxWindowsIndependentAndHidden(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "tmux.sock")
+	socket := filepath.Join(testsupport.ShortTempDir(t), "tmux.sock")
 	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
 	root := t.TempDir()
 	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "source", "-c", root).CombinedOutput(); err != nil {

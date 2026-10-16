@@ -19275,8 +19275,8 @@ def _fake_update_git(remote_version="0.3.25", remote_sha="remoteabcdef1"):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args == ["rev-parse", "--short=12", "origin/main"]:
             return SimpleNamespace(returncode=0, stdout=f"{remote_sha}\n", stderr="")
-        if args == ["show", "origin/main:yomux_lib/version.py"]:
-            return SimpleNamespace(returncode=0, stdout=f'YOLOMUX_VERSION = "{remote_version}"\n', stderr="")
+        if args == ["show", "origin/main:version.yaml"]:
+            return SimpleNamespace(returncode=0, stdout=f'version: "{remote_version}"\n', stderr="")
         raise AssertionError(f"unexpected git args: {args}")
     return fake_git
 

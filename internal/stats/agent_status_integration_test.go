@@ -45,7 +45,7 @@ func TestAgentStatusWithSyntheticInventoryAndMockClient(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, ".GlobalProtect"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	socketRoot, err := os.MkdirTemp("/tmp", "ym-")
+	socketRoot, err := testsupport.MkdirShortTemp("ym-")
 	if err != nil {
 		t.Fatal(err)
 	}

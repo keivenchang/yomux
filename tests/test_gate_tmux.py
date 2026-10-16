@@ -20,6 +20,7 @@ from urllib.parse import urlencode
 
 import pytest
 
+from tests.helpers.fixture_tools import fixture_command
 from tests import gate_harness
 from tests import latency_calibration
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
@@ -149,7 +150,7 @@ def test_gate_d5_kill_session_only_affects_registered_tmux_socket(monkeypatch, t
     socket_two = socket_root / "d5-two.sock"
     session = f"yt-{uuid.uuid4().hex[:12]}"
     for socket_path in (socket_one, socket_two):
-        created = _tmux(socket_path, "new-session", "-d", "-s", session, "exec /bin/bash --noprofile --norc")
+        created = _tmux(socket_path, "new-session", "-d", "-s", session, "exec " + fixture_command("bash", "--noprofile", "--norc"))
         assert created.returncode == 0, created.stderr or created.stdout
     patch_isolated_product_environment(monkeypatch, {
         "YOMUX_TMUX_SOCKET": str(socket_one),
@@ -199,7 +200,7 @@ def test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session(mo
         pytest.skip("tmux is not installed")
     socket_path = Path(os.environ["YOLOMUX_TEST_ROOT"]) / "d7.sock"
     session = f"yt-{uuid.uuid4().hex[:12]}"
-    created = _tmux(socket_path, "new-session", "-d", "-s", session, "exec /bin/bash --noprofile --norc")
+    created = _tmux(socket_path, "new-session", "-d", "-s", session, "exec " + fixture_command("bash", "--noprofile", "--norc"))
     assert created.returncode == 0, created.stderr or created.stdout
     patch_isolated_product_environment(monkeypatch, {
         "YOMUX_TMUX_SOCKET": str(socket_path),

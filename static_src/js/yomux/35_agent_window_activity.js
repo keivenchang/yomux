@@ -14,6 +14,10 @@ function agentWindowVisibleTone(value) {
   return AGENT_WINDOW_VISIBLE_TONES.includes(value);
 }
 
+function agentWindowStatusColorTone(tone) {
+  return ['blocked', 'unavailable'].includes(tone) ? 'attention' : tone;
+}
+
 function agentWindowPathEntries(agent) {
   const entries = [];
   const seen = new Set();
@@ -1368,12 +1372,14 @@ function agentWindowStatusDotHtml(item, options = {}) {
   const acknowledgementShapeClass = acknowledging && agentWindowVisibleTone(item.state)
     ? `status-indicator--${acknowledgementShapeTone}`
     : '';
-  const aggregateTones = Array.isArray(item.aggregateTones)
-    ? item.aggregateTones.filter(agentWindowVisibleTone).slice(0, AGENT_WINDOW_VISIBLE_TONES.length)
-    : [];
-  const allAggregateTones = Array.isArray(item.allAggregateTones)
-    ? item.allAggregateTones.filter(agentWindowVisibleTone)
-    : aggregateTones;
+  const allAggregateTones = (Array.isArray(item.allAggregateTones) ? item.allAggregateTones
+    : Array.isArray(item.aggregateTones) ? item.aggregateTones : []).filter(agentWindowVisibleTone);
+  const visibleColors = new Set(allAggregateTones.map(agentWindowStatusColorTone));
+  const aggregateTones = ['attention', 'cooldown', STATE_KEY.working].filter(color => visibleColors.has(color));
+  const shapeTone = agentWindowStatusColorTone(acknowledging ? item.state : tone);
+  const shape = aggregateTones.length <= 1
+    ? {working: 'play', cooldown: 'pause', attention: 'stop'}[shapeTone] || ''
+    : '';
   const aggregateToneClasses = aggregateTones.length > 1
     ? [
       'agent-window-status-dot--segmented',
@@ -1395,6 +1401,7 @@ function agentWindowStatusDotHtml(item, options = {}) {
     alwaysWorkingPulse ? 'heartbeat-pulse' : '',
     subwindowGlyphPulse ? 'agent-window-status-dot--subwindow-pulse' : '',
     aggregateToneClasses,
+    shape ? `agent-window-status-dot--${shape}` : '',
     tone === 'unavailable' ? 'status-indicator--blocked' : '',
     {pulse},
   );

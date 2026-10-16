@@ -6,6 +6,19 @@ set -euo pipefail
 
 source "$1"
 
+case "$(product_env_print BAZEL_EXECUTION docker)" in
+  native|qualified-native)
+    source "$(dirname "$1")/bazel_test_common.sh"
+    bazel_test_prepare_environment
+    if [ "$(product_env_print BAZEL_EXECUTION)" = qualified-native ]; then
+      exec python3 "$(dirname "$1")/bazel_native_probe.py" --test-action
+    fi
+    # Diagnostics still exercise the shared private-fixture owner, but have no
+    # certified sandbox guarantees. Qualification uses the probe above.
+    exit 0
+    ;;
+esac
+
 fail() {
   echo "Docker runtime contract failed: $1" >&2
   exit 1

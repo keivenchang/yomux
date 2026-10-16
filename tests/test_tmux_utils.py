@@ -1,9 +1,11 @@
+from tests.helpers.fixture_tools import fixture_executable
 import os
 import shutil
 import subprocess
 import tempfile
 import uuid
 from pathlib import Path
+from tools.tmux_paths import short_temp_base, short_temp_prefix
 
 import pytest
 
@@ -104,7 +106,7 @@ def test_startup_common_operator_launch_clears_inherited_tmux(monkeypatch):
 
     result = subprocess.run(
         [
-            "bash",
+            fixture_executable("bash"),
             "-c",
             "source tools/startup_common.sh; yomux_normalize_environment; yomux_use_machine_tmux; printf '%s|%s|%s|%s|%s|%s' "
             '"${TMUX-unset}" "${TMUX_PANE-unset}" "${YOMUX_TMUX_SOCKET-unset}" "${YOLOMUX_TMUX_SOCKET-unset}" "${YOMUX_TMUX_ALLOW_DEFAULT_SERVER-unset}" "${YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER-unset}"',
@@ -132,7 +134,7 @@ def test_startup_environment_normalization_does_not_rewarn_for_generated_aliases
     environment = {name: value for name, value in os.environ.items() if not name.startswith(("YOMUX_", "YOLOMUX_"))}
     environment.update(inputs)
     result = subprocess.run(
-        ["bash", "-c", 'source tools/startup_common.sh; yomux_normalize_environment; yomux_normalize_environment; yomux_normalize_environment; printf "%s\\0%s" "$YOMUX_GO_BINARY" "$YOLOMUX_GO_BINARY"'],
+        [fixture_executable("bash"), "-c", 'source tools/startup_common.sh; yomux_normalize_environment; yomux_normalize_environment; yomux_normalize_environment; printf "%s\\0%s" "$YOMUX_GO_BINARY" "$YOLOMUX_GO_BINARY"'],
         cwd=Path(__file__).resolve().parents[1],
         env=environment,
         check=True,
@@ -148,7 +150,7 @@ def test_startup_environment_normalization_reapplies_canonical_changes():
     environment = {name: value for name, value in os.environ.items() if not name.startswith(("YOMUX_", "YOLOMUX_"))}
     environment["YOMUX_GO_BINARY"] = "/fixture/first"
     result = subprocess.run(
-        ["bash", "-c", 'source tools/startup_common.sh; yomux_normalize_environment; export YOMUX_GO_BINARY=; yomux_normalize_environment; printf "%s\\0%s" "$YOMUX_GO_BINARY" "$YOLOMUX_GO_BINARY"'],
+        [fixture_executable("bash"), "-c", 'source tools/startup_common.sh; yomux_normalize_environment; export YOMUX_GO_BINARY=; yomux_normalize_environment; printf "%s\\0%s" "$YOMUX_GO_BINARY" "$YOLOMUX_GO_BINARY"'],
         cwd=Path(__file__).resolve().parents[1],
         env=environment,
         check=True,
@@ -216,7 +218,7 @@ def test_launchers_declare_the_default_server_intent_for_control_mode(monkeypatc
     root = Path(__file__).resolve().parents[1]
     clear_isolated_product_environment(monkeypatch, "TMUX_ALLOW_DEFAULT_SERVER")
     optin = subprocess.run(
-        ["bash", "-c", "source tools/startup_common.sh; yomux_default_server_optin"],
+        [fixture_executable("bash"), "-c", "source tools/startup_common.sh; yomux_default_server_optin"],
         cwd=root,
         capture_output=True,
         text=True,
@@ -224,21 +226,21 @@ def test_launchers_declare_the_default_server_intent_for_control_mode(monkeypatc
     ).stdout
     assert optin == "YOMUX_TMUX_ALLOW_DEFAULT_SERVER=1"
     assert f'export PATH="$launch_path"' in subprocess.run(
-        ["bash", "-c", "source tools/startup_common.sh; yomux_macos_server_launcher"],
+        [fixture_executable("bash"), "-c", "source tools/startup_common.sh; yomux_macos_server_launcher"],
         cwd=root,
         capture_output=True,
         text=True,
         check=True,
     ).stdout
     assert "YOMUX_TMUX_ALLOW_DEFAULT_SERVER" in subprocess.run(
-        ["bash", "-c", "source tools/startup_common.sh; yomux_macos_server_launcher"],
+        [fixture_executable("bash"), "-c", "source tools/startup_common.sh; yomux_macos_server_launcher"],
         cwd=root,
         capture_output=True,
         text=True,
         check=True,
     ).stdout
     launcher = subprocess.run(
-        ["bash", "-c", "source tools/startup_common.sh; yomux_macos_server_launcher"],
+        [fixture_executable("bash"), "-c", "source tools/startup_common.sh; yomux_macos_server_launcher"],
         cwd=root,
         capture_output=True,
         text=True,
@@ -448,7 +450,7 @@ def test_default_server_kill_server_is_refused_in_every_optin_mode(monkeypatch, 
 def test_exact_target_cannot_kill_a_prefix_named_sibling_session(monkeypatch, tmp_path):
     if shutil.which("tmux") is None:
         pytest.skip("tmux is not installed")
-    socket_dir = Path(tempfile.mkdtemp(prefix=f"yoexact-{os.getpid()}-", dir="/tmp"))
+    socket_dir = Path(tempfile.mkdtemp(prefix=short_temp_prefix(f"yoexact-{os.getpid()}-"), dir=short_temp_base()))
     socket_path = str(socket_dir / "s")
     sibling = f"yt-{uuid.uuid4().hex[:8]}-sibling"
     prefix = sibling[: sibling.index("-sibling")]

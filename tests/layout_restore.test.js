@@ -4003,6 +4003,126 @@ async function runLayoutRestoreSuite() {
     );
   });
 
+  test('Preview reflections and layout clamping do not claim user input', () => {
+    const api = loadYomux('?debug=1', ['1']);
+    const preview = new TestElement('preview-layout-owner');
+    preview.className = 'file-editor-preview-pane-panel markdown-body';
+    api.installPreviewScrollOwnershipCaptureForTest();
+    api.writeOwnedElementScrollForTest(preview, {top: 2745}, 'preview-split-reflection');
+    api.dispatchDocumentEventForTest('scroll', {target: preview});
+    preview.scrollTop = 1173;
+    api.dispatchDocumentEventForTest('scroll', {target: preview});
+    assert.equal(api.previewScrollUserOwnershipGenerationForTest(preview), 0, 'neither an owned reflection nor a native layout clamp is user intent');
+    assert.equal(api.jsDebugEventsForTest().some(event => event.phase === 'ownership-claimed'), false);
+  });
+
+  test('explicit Preview scroll inputs cancel deferred work without requiring geometry changes', () => {
+    for (const input of [
+      {type: 'wheel', deltaY: 1},
+      {type: 'keydown', key: 'PageDown'},
+      {type: 'pointerdown', button: 0, pointerType: 'mouse', pointerId: 1},
+    ]) {
+      const frames = [];
+      const api = loadYomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+      });
+      const preview = new TestElement(`preview-${input.type}-owner`);
+      preview.className = 'file-editor-preview-pane-panel markdown-body';
+      preview.clientHeight = 100;
+      preview.scrollHeight = 1000;
+      api.restoreElementScrollPositionForTest(preview, 100, 0, {previewSurface: 'markdown'});
+      api.installPreviewScrollOwnershipCaptureForTest();
+      api.clearJsDebugEventsForTest();
+      api.dispatchDocumentEventForTest(input.type, {...input, target: preview});
+      frames.shift()();
+      assert.equal(api.previewScrollUserOwnershipGenerationForTest(preview), 1, input.type);
+      assert.equal(api.jsDebugEventsForTest().some(event => event.phase === 'owned-write'), false, `${input.type} cancels the older write`);
+      api.expirePreviewScrollOwnershipForTest();
+      api.dispatchDocumentEventForTest('scroll', {target: preview});
+      assert.equal(api.previewScrollUserOwnershipGenerationForTest(preview), 1, 'a later bare scroll cannot revive expired input');
+    }
+  });
+
+  test('content clicks and editing keys do not claim Preview scrolling', () => {
+    const api = loadYomux('', ['1']);
+    const preview = new TestElement('preview-nonscroll-input');
+    preview.className = 'file-editor-preview-pane-panel markdown-body';
+    preview.clientHeight = 100;
+    preview.scrollHeight = 1000;
+    const summary = new TestElement('', 'SUMMARY');
+    preview.append(summary);
+    api.installPreviewScrollOwnershipCaptureForTest();
+    api.dispatchDocumentEventForTest('pointerdown', {type: 'pointerdown', target: summary, button: 0});
+    for (const tag of ['SUMMARY', 'BUTTON', 'A']) {
+      const control = new TestElement('', tag);
+      preview.append(control);
+      api.dispatchDocumentEventForTest('keydown', {type: 'keydown', target: control, key: ' '});
+    }
+    api.dispatchDocumentEventForTest('wheel', {type: 'wheel', target: preview, ctrlKey: true, deltaY: 1});
+    api.dispatchDocumentEventForTest('keydown', {type: 'keydown', target: preview, key: 'Enter'});
+    api.dispatchDocumentEventForTest('keydown', {type: 'keydown', target: preview, key: 'PageDown', defaultPrevented: true});
+    preview.isContentEditable = true;
+    api.dispatchDocumentEventForTest('keydown', {type: 'keydown', target: preview, key: 'ArrowDown'});
+    assert.equal(api.previewScrollUserOwnershipGenerationForTest(preview), 0);
+  });
+
+  test('Preview input retirement is scoped to the owning document', () => {
+    const api = loadYomux('?debug=1', ['1']);
+    const makeDocument = () => {
+      const inputs = new Map();
+      const lifecycle = new Map();
+      return {inputs, lifecycle, addEventListener(type, listener) { inputs.set(type, listener); },
+        defaultView: {addEventListener(type, listener) { lifecycle.set(type, listener); }}};
+    };
+    const first = makeDocument();
+    const embedded = makeDocument();
+    const preview = new TestElement('preview-pointer-retirement');
+    preview.className = 'file-editor-preview-pane-panel markdown-body';
+    preview.clientHeight = 100;
+    preview.scrollHeight = 1000;
+    const container = new TestElement('embedded-preview-retirement');
+    const scroller = new TestElement('embedded-native-retirement');
+    preview.ownerDocument = first;
+    container.ownerDocument = first;
+    scroller.ownerDocument = embedded;
+    api.bindPreviewScrollOwnershipCaptureForTest(first, () => ({element: preview, traceElement: preview}));
+    api.bindPreviewScrollOwnershipCaptureForTest(embedded, () => ({element: container, traceElement: scroller}));
+    first.inputs.get('pointerdown')({type: 'pointerdown', target: preview, button: 0, pointerId: 3});
+    embedded.inputs.get('wheel')({type: 'wheel', target: scroller, deltaY: 1});
+    assert.equal(api.previewScrollUserOwnershipGenerationForTest(container), 1);
+    assert.equal(api.previewScrollUserOwnershipGenerationForTest(scroller), 1, 'embedded input claims both shared owners');
+    embedded.inputs.get('pointerup')({type: 'pointerup', pointerId: 3});
+    embedded.inputs.get('touchend')({type: 'touchend', changedTouches: [{identifier: 42}]});
+    first.inputs.get('touchend')({type: 'touchend', changedTouches: [{identifier: 42}]});
+    assert.equal(api.previewScrollUserOwnsElementNowForTest(preview), true, 'another document cannot retire this pointer');
+    embedded.lifecycle.get('blur')();
+    assert.equal(api.previewScrollUserOwnsElementNowForTest(container), false);
+    assert.equal(api.previewScrollUserOwnsElementNowForTest(scroller), false);
+    assert.equal(api.previewScrollUserOwnsElementNowForTest(preview), true, 'another document keeps its active pointer owner');
+    first.inputs.get('lostpointercapture')({type: 'lostpointercapture', pointerId: 3});
+    assert.equal(api.activeElementScrollInputCountForTest(), 0, 'lost capture releases the shared strong input record');
+    embedded.inputs.get('pointerdown')({type: 'pointerdown', target: scroller, button: 0, pointerId: 4});
+    assert.equal(api.activeElementScrollInputCountForTest(), 1);
+    embedded.inputs.get('pointerup')({type: 'pointerup', pointerId: 4});
+    assert.equal(api.activeElementScrollInputCountForTest(), 0, 'embedded release retires the shared input owner');
+    embedded.inputs.get('pointerdown')({type: 'pointerdown', target: scroller, button: 0, pointerId: 5});
+    embedded.lifecycle.get('pagehide')();
+    assert.equal(api.activeElementScrollInputCountForTest(), 0, 'frame disposal releases the shared input owner');
+    first.lifecycle.get('pagehide')();
+    assert.equal(api.previewScrollUserOwnsElementNowForTest(preview), false, 'lost pointer release cannot hold passive work after pagehide');
+    first.inputs.get('touchstart')({target: preview, touches: [{identifier: 9, clientX: 0, clientY: 0}]});
+    const beforeTouch = api.previewScrollUserOwnershipGenerationForTest(preview);
+    first.inputs.get('touchmove')({target: preview, touches: [{identifier: 42, clientX: 0, clientY: 20}]});
+    assert.equal(api.previewScrollUserOwnershipGenerationForTest(preview), beforeTouch, 'another finger cannot claim this gesture');
+    first.inputs.get('touchmove')({target: preview, touches: [{identifier: 9, clientX: 0, clientY: 20}]});
+    assert.equal(api.previewScrollUserOwnershipGenerationForTest(preview), beforeTouch + 1);
+    api.clearJsDebugEventsForTest();
+    first.inputs.get('touchend')({type: 'touchend', changedTouches: [{identifier: 42}]});
+    assert.equal(api.jsDebugEventsForTest().some(event => event.phase === 'touchend'), false, 'another finger cannot end this gesture');
+    first.inputs.get('touchend')({type: 'touchend', changedTouches: [{identifier: 9}]});
+    assert.equal(api.jsDebugEventsForTest().some(event => event.phase === 'touchend'), true);
+  });
+
   test('a native vertical Preview gesture invalidates deferred writes before geometry moves', () => {
     const frames = [];
     const api = loadYomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {

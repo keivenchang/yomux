@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from tests.helpers.fixture_tools import fixture_script
 import json
 import os
 from pathlib import Path
@@ -57,7 +58,7 @@ def _write_mock_agent_wrapper(path: Path, agent: str) -> None:
     auth_args = ["auth", "status"] if agent in {"claude", "opencode"} else ["login", "status"]
     auth_output = json.dumps({"loggedIn": True}) if agent == "claude" else "Logged in"
     path.write_text(
-        "\n".join(
+        fixture_script("\n".join(
             (
                 "#!/usr/bin/env python3",
                 "from __future__ import annotations",
@@ -69,7 +70,7 @@ def _write_mock_agent_wrapper(path: Path, agent: str) -> None:
                 f"os.execv(sys.executable, [sys.executable, {str(mock_path)!r}, '--mock', *sys.argv[1:]])",
                 "",
             )
-        ),
+        )),
         encoding="utf-8",
     )
     path.chmod(0o700)

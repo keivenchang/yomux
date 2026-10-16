@@ -233,7 +233,7 @@ func checkStatsProductionPythonAndGoReceiveTheSameHTTPFixture(t *testing.T, bina
 	}
 	markFixtureMigrationReconciled(t, fixturePath, len(observations), len(coverage), len(atoms))
 
-	goRoot, err := os.MkdirTemp("/tmp", "yostats-go-")
+	goRoot, err := testsupport.MkdirShortTemp("yostats-go-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func checkStatsProductionPythonAndGoReceiveTheSameHTTPFixture(t *testing.T, bina
 	goURL, stopGo := startExternalGoStatsServer(t, binaryPath, goRoot, goConfig, goDatabase)
 	defer stopGo()
 
-	pythonRoot, err := os.MkdirTemp("/tmp", "yostats-py-")
+	pythonRoot, err := testsupport.MkdirShortTemp("yostats-py-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +484,7 @@ func checkStatsProductionPythonAndGoReceiveTheSameHTTPFixture(t *testing.T, bina
 // status/header drift, writer readiness, duplicate receipts, or persistence
 // differences between the two serving processes.
 func checkStatsProductionPythonAndGoObservationBoundaryParity(t *testing.T, binaryPath string) {
-	root, err := os.MkdirTemp("/tmp", "yostats-observation-")
+	root, err := testsupport.MkdirShortTemp("yostats-observation-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,7 +499,7 @@ func checkStatsProductionPythonAndGoObservationBoundaryParity(t *testing.T, bina
 	}
 	markFixtureMigrationReconciled(t, fixturePath, 0, 0, 0)
 
-	goRoot, err := os.MkdirTemp("/tmp", "yostats-observation-go-")
+	goRoot, err := testsupport.MkdirShortTemp("yostats-observation-go-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +518,7 @@ func checkStatsProductionPythonAndGoObservationBoundaryParity(t *testing.T, bina
 	goURL, stopGo := startExternalGoStatsServer(t, binaryPath, goRoot, goConfig, goDatabase)
 	defer stopGo()
 
-	pythonRoot, err := os.MkdirTemp("/tmp", "yostats-observation-py-")
+	pythonRoot, err := testsupport.MkdirShortTemp("yostats-observation-py-")
 	if err != nil {
 		t.Fatal(err)
 	}

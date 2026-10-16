@@ -328,7 +328,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATIC_DIR = PROJECT_ROOT / "static"
 TERMINAL_QUERY_RESPONSE_RE = re.compile(r"(?:\x1b\[[?>]?[0-9;]*c|\x1bP[>|!][^\x1b]*(?:\x1b\\|\x9c))")
 LINEAR_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:DIS|DGH|DYN|OPS|INFRA)-\d{1,6}(?![A-Za-z0-9])")
-YOMUX_VERSION_ASSIGNMENT_RE = re.compile(r"^\s*(?:YOMUX|YOLOMUX)_VERSION\s*=\s*['\"]([^'\"]+)['\"]\s*$", re.MULTILINE)
+YOMUX_VERSION_ASSIGNMENT_RE = re.compile(r'^version: "((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"$')
 SEMVER_RE = re.compile(r"^\s*v?(\d+)\.(\d+)\.(\d+)(?:\D.*)?$")
 
 
@@ -1087,7 +1087,10 @@ def git_ahead_behind_counts(cwd: str, left: str, right: str = "HEAD") -> tuple[i
 
 
 def parse_yomux_version_source(source: str) -> str | None:
-    match = YOMUX_VERSION_ASSIGNMENT_RE.search(source)
+    lines = [line.strip() for line in source.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    if len(lines) != 1:
+        return None
+    match = YOMUX_VERSION_ASSIGNMENT_RE.fullmatch(lines[0])
     return match.group(1).strip() if match else None
 
 
@@ -1121,7 +1124,7 @@ def update_notify_level_allows(change_level: Any, notify_level: Any) -> bool:
 
 
 def git_yomux_version_at_ref(cwd: str, ref: str) -> tuple[str | None, str | None]:
-    source_paths = ("yomux_lib/version.py", "yolomux_lib/version.py")
+    source_paths = ("version.yaml",)
     errors = []
     for source_path in source_paths:
         result = git(["show", f"{ref}:{source_path}"], cwd)
@@ -1131,7 +1134,7 @@ def git_yomux_version_at_ref(cwd: str, ref: str) -> tuple[str | None, str | None
         version = parse_yomux_version_source(result.stdout or "")
         if version:
             return version, None
-        return None, f"YOMUX_VERSION not found in {ref}:{source_path}"
+        return None, f"version field not found in {ref}:{source_path}"
     return None, errors[-1] if errors else f"version source not found in {ref}"
 
 
@@ -1156,7 +1159,7 @@ def yomux_version_is_newer(target: str, current: str) -> bool:
 def update_check_status(cwd: str, branch: str = "main", dryrun: bool = False, fetch: bool = True) -> dict[str, Any]:
     """Whether `origin/<branch>` has a newer YOMUX_VERSION than the running checkout.
 
-    Reads `yomux_lib/version.py` from the remote ref via git on the local checkout (reusing its
+    Reads `version.yaml` from the remote ref via git on the local checkout (reusing its
     existing credentials, so this works for private repos with no GitHub token). SHA and ahead/behind
     counts stay in the payload for diagnostics only; they do not decide whether to notify.
     """

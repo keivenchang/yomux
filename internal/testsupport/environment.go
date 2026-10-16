@@ -1,16 +1,44 @@
 package testsupport
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
-	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/keivenchang/yomux/internal/productenv"
 )
+
+// ToolPath keeps executable fixtures on the declared runtime PATH in Bazel actions.
+func ToolPath(t testing.TB, name string) string {
+	t.Helper()
+	path, err := exec.LookPath(name)
+	if err != nil {
+		t.Fatalf("required fixture executable %q: %v", name, err)
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("absolute fixture executable %q: %v", name, err)
+	}
+	return path
+}
+
+// ShellScript pins generated script interpreters as well as their PATH-resolved commands.
+func ShellScript(t testing.TB, body string) string {
+	t.Helper()
+	shell := ToolPath(t, "sh")
+	if strings.ContainsAny(shell, " \t\r\n") {
+		t.Fatalf("fixture shell cannot be represented in a shebang: %q", shell)
+	}
+	return "#!" + shell + "\n" + body
+}
 
 // Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 func RequireDeprecatedPythonBackend(t *testing.T) {
@@ -25,6 +53,21 @@ func RequireDeprecatedPythonBackend(t *testing.T) {
 // value explicitly; overrides are deduplicated so the child cannot retain an
 // earlier inherited value for the same key.
 func SyntheticEnvironment(overrides ...string) []string {
+	// Process and fixture ownership are inherited capabilities, not caller configuration.
+	for _, protected := range []string{"YOMUX_NATIVE_SHORT_TMPDIR", "YOMUX_BAZEL_PROCESS_SCOPE"} {
+		value, present := os.LookupEnv(protected)
+		if !present {
+			continue
+		}
+		filtered := make([]string, 0, len(overrides)+1)
+		for _, entry := range overrides {
+			key, _, _ := strings.Cut(entry, "=")
+			if key != protected {
+				filtered = append(filtered, entry)
+			}
+		}
+		overrides = append(filtered, protected+"="+value)
+	}
 	overrideKeys := make(map[string]struct{}, len(overrides))
 	for _, entry := range overrides {
 		key, _, ok := strings.Cut(entry, "=")
@@ -54,7 +97,7 @@ func SyntheticEnvironment(overrides ...string) []string {
 	environment := make([]string, 0, len(os.Environ())+len(overrides))
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
-		if !ok || ambientSyntheticInputKey(key) {
+		if !ok || (ambientSyntheticInputKey(key) && key != "YOMUX_NATIVE_SHORT_TMPDIR" && key != "YOMUX_BAZEL_PROCESS_SCOPE") {
 			continue
 		}
 		if _, overridden := overrideKeys[key]; overridden {
@@ -85,14 +128,7 @@ func NewPrivateTestEnvironment() (func(), error) {
 		}
 		pythonUserBase = filepath.Join(originalHome, ".local")
 	}
-	tempRoot := os.TempDir()
-	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
-		// Bazel and macOS can provide deeply nested temp roots. Test tmux sockets
-		// are often created below testing.T.TempDir, so keep this private prefix
-		// short enough for the Unix-domain socket path limit on both platforms.
-		tempRoot = "/tmp"
-	}
-	root, err := os.MkdirTemp(tempRoot, "ym-")
+	root, err := MkdirShortTemp("ym-")
 	if err != nil {
 		return nil, err
 	}
@@ -143,11 +179,57 @@ var privateTestDirectories = map[string]string{
 	"XDG_RUNTIME_DIR":   "xdg-runtime",
 }
 
+// ShortTempBase is the single owner for socket-safe fixture allocation.
+// The native wrapper supplies an already private action root; diagnostics retain /tmp.
+func ShortTempBase() (string, error) {
+	root, present := os.LookupEnv("YOMUX_NATIVE_SHORT_TMPDIR")
+	if !present {
+		return "/tmp", nil
+	}
+	if !filepath.IsAbs(root) {
+		return "", errors.New("native short fixture root must be absolute")
+	}
+	metadata, err := os.Lstat(root)
+	if err != nil {
+		return "", err
+	}
+	owner, ok := metadata.Sys().(*syscall.Stat_t)
+	if !ok || !metadata.IsDir() || metadata.Mode().Perm() != 0o700 || owner.Uid != uint32(os.Getuid()) {
+		return "", errors.New("native short fixture root must be user-owned mode 0700 (uid " + strconv.Itoa(os.Getuid()) + ")")
+	}
+	return root, nil
+}
+
+// MkdirShortTemp preserves caller prefixes under the shared socket-safe base.
+func MkdirShortTemp(prefix string) (string, error) {
+	base, err := ShortTempBase()
+	if err != nil {
+		return "", err
+	}
+	if os.Getenv("YOMUX_NATIVE_SHORT_TMPDIR") == "" {
+		return os.MkdirTemp(base, prefix)
+	}
+	for {
+		var token [3]byte
+		if _, err := rand.Read(token[:]); err != nil {
+			return "", err
+		}
+		directory := filepath.Join(base, "f"+hex.EncodeToString(token[:]))
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return "", err
+		}
+		return directory, nil
+	}
+}
+
 // ShortTempDir keeps private fixture paths short enough for Unix-domain sockets
 // when Bazel supplies a deeply nested per-test temporary directory.
 func ShortTempDir(t testing.TB) string {
 	t.Helper()
-	directory, err := os.MkdirTemp("/tmp", "ym-")
+	directory, err := MkdirShortTemp("ym-")
 	if err != nil {
 		t.Fatalf("create short private temporary directory: %v", err)
 	}

@@ -54,7 +54,7 @@ export NGC_API_KEY=host-ngc-key
 export OPENAI_API_KEY=host-openai-key
 export YOLOMUX_CHECK_CONTAINER=host-container-routing
 bazel_test_prepare_environment
-if [ "$(product_env_print BAZEL_EXECUTION container)" = native ]; then
+if [[ "$(product_env_print BAZEL_EXECUTION container)" = *native ]]; then
   bazel_assert_value YOLOMUX_CHECK_CONTAINER 0
 else
   bazel_assert_value YOLOMUX_CHECK_CONTAINER ""
@@ -65,14 +65,15 @@ for name in YOMUX_ROOT YOMUX_TMUX_SOCKET YOLOMUX_ROOT YOLOMUX_OPENCODE_DATABASE 
     exit 1
   fi
 done
-if [ "$HOME" != "$TEST_TMPDIR/yolomux-agent-environment/home" ] || \
-  [ "$XDG_CONFIG_HOME" != "$TEST_TMPDIR/yolomux-agent-environment/xdg-config" ] || \
-  [ "$XDG_DATA_HOME" != "$TEST_TMPDIR/yolomux-agent-environment/xdg-data" ] || \
-  [ "$XDG_STATE_HOME" != "$TEST_TMPDIR/yolomux-agent-environment/xdg-state" ] || \
-  [ "$XDG_CACHE_HOME" != "$TEST_TMPDIR/yolomux-agent-environment/xdg-cache" ] || \
-  [ "$CODEX_HOME" != "$TEST_TMPDIR/yolomux-agent-environment/codex-home" ] || \
-  [ "$CLAUDE_CONFIG_DIR" != "$TEST_TMPDIR/yolomux-agent-environment/claude-config" ] || \
-  [ "$XDG_RUNTIME_DIR" != "$TEST_TMPDIR/yolomux-agent-environment/xdg-runtime" ] || \
+environment_root="$(bazel_test_fixture_root)"
+if [ "$HOME" != "$environment_root/home" ] || \
+  [ "$XDG_CONFIG_HOME" != "$environment_root/xdg-config" ] || \
+  [ "$XDG_DATA_HOME" != "$environment_root/xdg-data" ] || \
+  [ "$XDG_STATE_HOME" != "$environment_root/xdg-state" ] || \
+  [ "$XDG_CACHE_HOME" != "$environment_root/xdg-cache" ] || \
+  [ "$CODEX_HOME" != "$environment_root/codex-home" ] || \
+  [ "$CLAUDE_CONFIG_DIR" != "$environment_root/claude-config" ] || \
+  [ "$XDG_RUNTIME_DIR" != "$environment_root/xdg-runtime" ] || \
   [ "$TMPDIR" != "$(product_env_print BAZEL_TMPDIR)" ]; then
   echo "Bazel test HOME/XDG/TMPDIR roots are not synthetic and action-owned" >&2
   exit 1

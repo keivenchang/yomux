@@ -290,7 +290,7 @@ async function runGitDiffHistorySuite() {
     assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
     await new Promise(resolve => setTimeout(resolve, 0));
     await flushAsyncWork();
-    assert.deepStrictEqual(requests.filter(request => request.searchParams.get('worktree') !== 'only').map(request => ({path: request.pathname, limit: request.searchParams.get('limit'), batchSizes: request.searchParams.get('batch_sizes'), cursor: request.searchParams.get('cursor')})), [
+    assert.deepStrictEqual(requests.filter(request => request.pathname !== '/api/activity/touch' && request.searchParams.get('worktree') !== 'only').map(request => ({path: request.pathname, limit: request.searchParams.get('limit'), batchSizes: request.searchParams.get('batch_sizes'), cursor: request.searchParams.get('cursor')})), [
       {path: '/api/fs/git-history', limit: '2', batchSizes: null, cursor: null},
       {path: '/api/fs/git-history-stats-stream', limit: null, batchSizes: '1', cursor: 'snapshot-zero'},
     ], 'the first stats request asks for only the top SHA');

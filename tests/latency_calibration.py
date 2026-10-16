@@ -31,6 +31,7 @@ from typing import Any
 import pytest
 
 from tools.instance_isolation import normalize_yomux_environment
+from tools.native_process_scope import action_writable_directories
 
 
 CALIBRATION_SAMPLE_COUNT = 7
@@ -1024,8 +1025,9 @@ def calibration_pressure_verdict(
 def _latency_evidence_root(explicit_root: Path | None = None) -> Path:
     root = explicit_root or Path(normalize_yomux_environment(os.environ).get("YOMUX_E2E_EVIDENCE_DIR", "/tmp/yolomux-latency-evidence"))
     resolved = root.resolve()
-    if not resolved.is_relative_to(Path("/tmp").resolve()):
-        raise ValueError(f"latency evidence root must stay under /tmp: {root}")
+    allowed = {Path("/tmp").resolve(), *action_writable_directories(os.environ)}
+    if not any(resolved.is_relative_to(directory) for directory in allowed):
+        raise ValueError(f"latency evidence root must stay under /tmp or declared action directories: {root}")
     return root / "latency-calibration"
 
 

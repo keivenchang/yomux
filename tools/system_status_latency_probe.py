@@ -10,6 +10,7 @@ import errno
 import hashlib
 import json
 import math
+import os
 import platform
 from pathlib import Path
 import secrets
@@ -39,6 +40,7 @@ from yomux_lib.infra.root_paths import resolved_product_path
 from yomux_lib.local_services.registry import darwin_process_environment
 from yomux_lib.tmux.sessions import process_cwd
 from tools.product_environment import product_env, product_env_name
+from tools.bazel_execution_contract import repository_head_sha
 from tools.instance_isolation import normalize_yomux_environment
 from tools.instance_isolation import resolve_instance_environment
 
@@ -73,14 +75,13 @@ def process_command(pid: int) -> str:
         completed = subprocess.run(
             ["ps", "-o", "command=", "-p", str(pid)],
             capture_output=True,
-            text=True,
             timeout=3,
             check=False,
         )
-        return completed.stdout.strip() if completed.returncode == 0 else ""
+        return os.fsdecode(completed.stdout).strip() if completed.returncode == 0 else ""
     try:
-        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8").strip()
-    except (OSError, UnicodeDecodeError):
+        return os.fsdecode(Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ")).strip()
+    except OSError:
         return ""
 
 
@@ -112,8 +113,7 @@ def process_environment(pid: int) -> dict[str, str]:
 def process_identity(pid: int) -> dict[str, object]:
     start_identity = process_start_identity(pid)
     cwd = process_cwd(pid)
-    sha_result = subprocess.run(["git", "-C", cwd, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5, check=False)
-    sha = sha_result.stdout.strip() if sha_result.returncode == 0 else ""
+    sha = repository_head_sha(Path(cwd), declared=True) or ""
     identity = {"pid": pid, "start_identity": start_identity, "cwd": cwd, "sha": sha}
     if any(value in (None, "") for value in identity.values()):
         raise RuntimeError(f"listener identity is incomplete: {identity}")

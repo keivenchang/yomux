@@ -5053,6 +5053,9 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
             """
             const path = '/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py';
             const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            const leafDirectory = dirnameOf(path);
+            const leafListing = cachedFileExplorerFsResourceValue('list', leafDirectory);
+            const treeContainers = fileExplorerTreeContainers();
             return {
               root: document.querySelector('.file-explorer-path-inline')?.value || '',
               mode: fileExplorerRootModeValue(),
@@ -5063,6 +5066,39 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
               explicitSyncTarget: fileExplorerExplicitSyncSessionTarget(),
               fileVisible: Boolean(tree?.querySelector(`.file-tree-row[data-path="${path}"]`)),
               expanded: Array.from(fileExplorerExpanded),
+              browser: {
+                viewport: {width: innerWidth, height: innerHeight, visualWidth: visualViewport?.width, visualHeight: visualViewport?.height},
+                userAgent: navigator.userAgent,
+                maxTouchPoints: navigator.maxTouchPoints,
+                coarsePointer: matchMedia('(pointer: coarse)').matches,
+              },
+              layout: {
+                activeItems: activePaneItems(),
+                finderInLayout: itemInLayout(finderItemId),
+                finderPanelCount: document.querySelectorAll('.panel.file-explorer-panel').length,
+              },
+              render: {
+                epoch: fileTreeRenderEpoch,
+                transaction: fileExplorerSyncState.renderTransaction
+                  ? {epoch: fileExplorerSyncState.renderTransaction.epoch, completed: fileExplorerSyncState.renderTransaction.completed}
+                  : null,
+                trees: treeContainers.map(container => {
+                  const rect = container.getBoundingClientRect();
+                  const owner = fileTreeRenderOwners.get(container);
+                  return {
+                    className: String(container.className || ''),
+                    connected: container.isConnected,
+                    visible: clientElementIsVisible(container),
+                    rect: {width: rect.width, height: rect.height},
+                    childCount: container.childElementCount,
+                    hasTarget: Boolean(container.querySelector(`.file-tree-row[data-path="${path}"]`)),
+                    owner: owner ? {epoch: owner.epoch, renderOwner: String(owner.renderOwner || '')} : null,
+                  };
+                }),
+                leafListing: Array.isArray(leafListing)
+                  ? leafListing.map(entry => ({name: entry.name, kind: entry.kind}))
+                  : null,
+              },
               listings: window.__bootFetches.filter(item => ['/api/fs/list', '/api/fs/fast/list', '/api/fs/batch'].includes(item.path))
                 .map(item => ({path: item.path, search: item.search || '', body: item.body || null})),
               errors: jsDebugFailureEvents('error'),

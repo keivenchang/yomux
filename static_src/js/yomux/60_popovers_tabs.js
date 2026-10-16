@@ -928,7 +928,7 @@ function sessionTabLeadingActivityContainerHtml(session, info, auto, options = {
   return `<span class="session-tab-leading-activity">${sessionTabLeadingActivityHtml(session, info, auto, options)}</span>`;
 }
 
-function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
+function sessionTabStatusDecorations(session, info, auto, options = {}) {
   const payload = options.payload || autoApproveStates.get(session);
   const state = Object.prototype.hasOwnProperty.call(options, 'state') ? options.state : sessionState(session, info);
   const attentionEvent = sessionAttentionEvent(session, info, payload);
@@ -938,6 +938,11 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const yoloHtml = offerYolo
     ? yoloMarkerHtml(session, auto, {...options, enabledOnly: false, yoloWorking: false, payload})
     : '';
+  return {payload, state, attentionEvent, stateMarker, offerYolo, yoloHtml};
+}
+
+function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
+  const {payload, state, attentionEvent, stateMarker, offerYolo, yoloHtml} = sessionTabStatusDecorations(session, info, auto, options);
   const statusSummary = sessionAgentWindowStatusSummary(session, info, payload);
   if (statusSummary?.agent) {
     const statusAgent = statusSummary.agent;

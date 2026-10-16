@@ -4723,7 +4723,7 @@ func TestCodexForkRepairDiscoveryKeepsOverDepthTreeIncomplete(t *testing.T) {
 		t.Skip("macOS rejects this many nested path components before the fixture reaches the discovery bound")
 	}
 
-	rootBase, err := os.MkdirTemp("/tmp", "ym-")
+	rootBase, err := testsupport.MkdirShortTemp("ym-")
 	if err != nil {
 		t.Fatal(err)
 	}

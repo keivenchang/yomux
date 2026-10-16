@@ -184,6 +184,7 @@ def test_read_composer_state_distinguishes_empty_draft_and_ghost():
     draft = read_composer_state(claude_composer("❯ Write tests for @filename"))
     ghost = read_composer_state(claude_composer("❯\xa0commit the DYN_PARSER_DEBUG change"))
     codex_ghost = read_composer_state(codex_composer("\x1b[0;1m›\x1b[0m \x1b[2mSummarize recent commits"))
+    codex_placeholder = read_composer_state(codex_composer("› Ask Codex to do anything"))
 
     assert empty.key == "empty"
     assert empty.accepting is True
@@ -192,6 +193,25 @@ def test_read_composer_state_distinguishes_empty_draft_and_ghost():
     assert ghost.key == "ghost"
     assert ghost.accepting is True
     assert codex_ghost.key == "ghost"
+    assert codex_placeholder.key == "ghost"
+
+
+def test_read_composer_state_detects_uppercase_codex_footer_and_wrapped_handoff():
+    visible = "\n".join([
+        "• Previous response finished.",
+        "",
+        "› original draft <subagent2:/tmp/agent-comm/briefs/agent-dyn-tps-report-to-",
+        "  422-v1-cases-daily-log-2026-10-15-abc123.md>",
+        "",
+        "  GPT-6.1-Sol medium · ~/dev/yomux/yo7110",
+    ])
+
+    state = read_composer_state(visible)
+    compact_text = "".join(state.detected_text.split())
+
+    assert state.key == "draft"
+    assert "originaldraft" in compact_text
+    assert "<subagent2:/tmp/agent-comm/briefs/agent-dyn-tps-report-to-422-v1-cases-daily-log-2026-10-15-abc123.md>" in compact_text
 
 
 def test_read_composer_state_treats_claude_nbsp_text_as_draft_when_cursor_advanced():

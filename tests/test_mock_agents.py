@@ -1,3 +1,4 @@
+from tests.helpers.fixture_tools import fixture_executable
 import io
 import os
 from pathlib import Path
@@ -3156,7 +3157,7 @@ def test_tmux_claude_startup_cwd_survives_first_mock_submit(visual_tmux):
 def test_tmux_claude_shell_launch_scrolls_history_instead_of_clobbering(visual_tmux):
     session = visual_tmux.launch(
         "claude-shell-launch",
-        ["bash", "--noprofile", "--norc"],
+        [fixture_executable("bash"), "--noprofile", "--norc"],
         width=160,
         height=8,
     )

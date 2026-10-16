@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Retained YO!stats range-transition regressions."""
 
+from tests.helpers.fixture_tools import fixture_script
 import copy
 import json
 import os
@@ -508,7 +509,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
         generated_version = tmp_path / "product_version_generated.go"
         go_overlay = tmp_path / "go-overlay.json"
         generate_go_version_overlay(
-            source_root / "yomux_lib" / "version.py",
+            source_root / "version.yaml",
             generated_version,
             go_overlay,
             source_root / "cmd" / "yomux-go" / "product_version_generated.go",
@@ -1043,12 +1044,12 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                 resolution: generation.resolution_seconds,
                 buckets: generation.buckets.length,
                 }, stream: {events: streamEvents, ack, snapshotBuckets: snapshot.buckets.length, ready}, charts, requiredSeries, snapshotSeriesValues, tokenRates, costReport, warnings, warningsBeforeProbe, fiveMinute: {status: fiveMinuteSnapshotResponse.status, resolution: fiveMinuteSnapshot.resolution_seconds, memoryValues: fiveMinuteMemoryValues, geometry: fiveMinuteMemoryGeometry}});
-                })().catch(error => done({error: String(error?.stack || error), streamEvents, streamReadyState: stream?.readyState ?? null, readiness: globalThis.jsDebugHistoryReadinessSnapshot?.(), routeCounts: globalThis.__yomuxStatsRouteCounts || null, serverEvents: globalThis.__yomuxStatsStreamEvents?.slice(-32) || []}));
+                })().catch(error => done({error: String(error?.stack || error), streamEvents, streamReadyState: stream?.readyState ?? null, readiness: jsDebugHistoryReadinessSnapshot(), streamEvidence: jsDebugCurrentStatsStreamEvidence(), selection: jsDebugCurrentStatsClientState.client?.controller?.()?.selection?.(), generationRange: jsDebugCurrentStatsClientState.client?.controller?.()?.generation?.()?.range_seconds, selectionKey: jsDebugCurrentStatsClientState.selectionKey, pendingGenerationKey: jsDebugCurrentStatsClientState.pendingGenerationKey, documentVisibility: document.visibilityState, routeCounts: globalThis.__yomuxStatsRouteCounts || null, serverEvents: globalThis.__yomuxStatsStreamEvents?.slice(-32) || []}));
             """.replace("__GO_STATS_SERIES__", json.dumps(GO_STATS_SERIES)).replace(
                 "__GO_STATS_SNAPSHOT_SERIES__", json.dumps(GO_STATS_SNAPSHOT_SERIES)
             )
         )
-        assert result.get("error") is None, result
+        assert result.get("error") is None, json.dumps(result)
         assert result["status"] == 200, result
         assert result["warnings"] == result["warningsBeforeProbe"], result
         for row in result["exact"]:
@@ -1159,7 +1160,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
         generated_version = tmp_path / "product_version_generated.go"
         go_overlay = tmp_path / "go-overlay.json"
         generate_go_version_overlay(
-            source_root / "yomux_lib" / "version.py",
+            source_root / "version.yaml",
             generated_version,
             go_overlay,
             source_root / "cmd" / "yomux-go" / "product_version_generated.go",
@@ -1513,7 +1514,7 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
             build_environment.update({"GOMODCACHE": str(image_module_cache), "GOPROXY": "off", "GOSUMDB": "off", "GOCACHE": str(tmp_path / "go-cache"), "GOPATH": str(tmp_path / "go-path")})
         generated_version = tmp_path / "product_version_generated.go"
         go_overlay = tmp_path / "go-overlay.json"
-        generate_go_version_overlay(source_root / "yomux_lib" / "version.py", generated_version, go_overlay, source_root / "cmd" / "yomux-go" / "product_version_generated.go")
+        generate_go_version_overlay(source_root / "version.yaml", generated_version, go_overlay, source_root / "cmd" / "yomux-go" / "product_version_generated.go")
         subprocess.run([go_binary, "build", "-buildvcs=false", "-overlay", str(go_overlay), "-o", str(binary), "./cmd/yomux-go"], cwd=source_root, check=True, env=build_environment)
 
     config_dir = tmp_path / "config"
@@ -1527,7 +1528,7 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
     attention_state_file.write_text("attention", encoding="ascii")
     screen_driver = tmp_path / "codex"
     screen_driver.write_text(
-        "#!/usr/bin/env python3\n"
+        fixture_script("#!/usr/bin/env python3\n"
         "import pathlib, sys, time\n"
         "state = pathlib.Path(sys.argv[1])\n"
         "screens = {\n"
@@ -1539,7 +1540,7 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
         " text = screens.get(state.read_text(encoding='ascii').strip(), 'Codex status unavailable')\n"
         " sys.stdout.write('\\x1b[2J\\x1b[H' + text + '\\n')\n"
         " sys.stdout.flush()\n"
-        " time.sleep(0.1)\n",
+        " time.sleep(0.1)\n"),
         encoding="utf-8",
     )
     screen_driver.chmod(0o700)
@@ -1673,6 +1674,7 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
           const marker = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] [data-action="pane-tab-auto-approve"]`);
           return marker && marker.classList.contains('inactive');
         """, codex_session))
+        status_before_yolo_enable = browser.execute_script("return statusEl.textContent")
         # The sibling tab can deliver SSE while WebDriver holds an element handle. Query and click
         # the current control in one task so a legitimate rerender cannot stale the click target.
         browser.execute_script("""
@@ -1693,6 +1695,10 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
             response: window.__goLifecycleYoloResponses.at(-1), event: window.__goLifecycleYoloEvents.at(-1)};
         """, codex_session)
         assert yolo_enable["response"]["body"]["enabled"] is True and "active" in yolo_enable["marker"], yolo_enable
+        enabled_status = browser.execute_script("""
+          return statusEl.textContent;
+        """)
+        assert enabled_status == status_before_yolo_enable, enabled_status
         browser.switch_to.window(second_tab)
         try:
             WebDriverWait(browser, 10, poll_frequency=0.1).until(lambda _driver: browser.execute_script("""

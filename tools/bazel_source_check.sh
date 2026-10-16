@@ -29,13 +29,13 @@ fi
 # rules_go is a Bazel module and also supplies the Go runfiles package imported
 # by the test helpers. Keep the unavoidable Go module mirror tied to the module
 # declaration that owns the Bazel rule version.
-mapfile -t bazel_rules_go_versions < <(sed -nE 's/^bazel_dep\(name = "rules_go", version = "([^"]+)"\)$/\1/p' "$module_file")
-mapfile -t go_rules_go_versions < <(sed -nE 's/^[[:space:]]*github\.com\/bazelbuild\/rules_go v([^[:space:]]+).*$/\1/p' "$go_mod_file")
-if [ "${#bazel_rules_go_versions[@]}" -ne 1 ] || [ "${#go_rules_go_versions[@]}" -ne 1 ]; then
+bazel_rules_go_version="$(sed -nE 's/^bazel_dep\(name = "rules_go", version = "([^"]+)"\)$/\1/p' "$module_file")"
+go_rules_go_version="$(sed -nE 's/^[[:space:]]*github\.com\/bazelbuild\/rules_go v([^[:space:]]+).*$/\1/p' "$go_mod_file")"
+if [ -z "$bazel_rules_go_version" ] || [ -z "$go_rules_go_version" ] || [[ "$bazel_rules_go_version$go_rules_go_version" == *$'\n'* ]]; then
   echo "expected one rules_go version in MODULE.bazel and go.mod" >&2
   exit 1
 fi
-if [ "${bazel_rules_go_versions[0]}" != "${go_rules_go_versions[0]}" ]; then
-  echo "rules_go version drift: MODULE.bazel=${bazel_rules_go_versions[0]} go.mod=${go_rules_go_versions[0]}" >&2
+if [ "$bazel_rules_go_version" != "$go_rules_go_version" ]; then
+  echo "rules_go version drift: MODULE.bazel=$bazel_rules_go_version go.mod=$go_rules_go_version" >&2
   exit 1
 fi

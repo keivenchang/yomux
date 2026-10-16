@@ -49,7 +49,8 @@ def test_writer_detection_ignores_mentions_in_unrelated_commands(command: str) -
     assert not migration.is_writer_command(command)
 
 
-def test_missing_process_census_fails_closed(tmp_path: Path) -> None:
+def test_missing_process_census_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(migration.sys, "platform", "linux")
     assert migration.active_writer_processes(tmp_path / "no-proc") == [
         {"pid": None, "command": f"process census unavailable at {tmp_path / 'no-proc'}; refusing migration"}
     ]

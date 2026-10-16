@@ -126,7 +126,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
         separators=(",", ":"),
     )
     path = str(REPO_ROOT / "README.md")
-    original = subprocess.check_output(["git", "show", "HEAD:README.md"], cwd=REPO_ROOT, text=True)
+    original = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     original_lines = original.splitlines(keepends=True)
     original_lines[0] = original_lines[0].rstrip("\n") + " -- YOmux Deterministic test-only README diff line.\n"
     current = "".join(original_lines)
@@ -1994,9 +1994,14 @@ def test_markdown_prosemirror_typing_defers_autosave_until_after_pause(browser, 
             renderFileEditorPanel(panel, item);
             await window.__yomuxTestWaitFor(() => panel._pmView && panel._cmView);
             const writes = [];
+            const activityTouches = [];
             const originalFetch = window.fetch.bind(window);
             window.fetch = async (input, options = {}) => {
               const url = new URL(String(input), window.location.href);
+              if (url.pathname === '/api/activity/touch') {
+                activityTouches.push(JSON.parse(String(options.body || '{}')));
+                return new Response(JSON.stringify({ok: true}), {status: 200, headers: {'Content-Type': 'application/json'}});
+              }
               if (url.pathname === '/api/fs/write') {
                 writes.push(JSON.parse(String(options.body || '{}')));
                 return new Response(JSON.stringify({path, size: 1, mtime: 2}), {status: 200, headers: {'Content-Type': 'application/json'}});
@@ -2005,12 +2010,13 @@ def test_markdown_prosemirror_typing_defers_autosave_until_after_pause(browser, 
             };
             const view = panel._pmView;
             view.dispatch(view.state.tr.insertText(' now'));
+            await window.__yomuxTestWaitFor(() => activityTouches.length === 1);
             await new Promise(resolve => setTimeout(resolve, 2500));
             const settledSource = fileEditorPanelState(panel).content;
             const writesBeforeAutosave = writes.length;
             view.someProp('handleKeyDown', handler => handler(view, new KeyboardEvent('keydown', {key: 's', ctrlKey: true})));
             await window.__yomuxTestWaitFor(() => writes.length === 1);
-            done({settledSource, writesBeforeAutosave, saved: writes[0]?.content || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+            done({settledSource, writesBeforeAutosave, saved: writes[0]?.content || '', activityTouches, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           } catch (error) {
             done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
@@ -2021,6 +2027,7 @@ def test_markdown_prosemirror_typing_defers_autosave_until_after_pause(browser, 
     assert metrics["settledSource"] == " nowBefore typing", metrics
     assert metrics["writesBeforeAutosave"] == 0, metrics
     assert metrics["saved"] == " nowBefore typing", metrics
+    assert metrics["activityTouches"] == [{"item": "file:/home/test/yolomux.dev/DEFERRED.md"}], metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
@@ -4375,6 +4382,8 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
             let brightContrast = null;
             try {
               if (typeof setFileEditorPreviewDisplayMode === 'function') {
+                await waitFor(() => !previewScrollUserOwnsElementNow(panel.querySelector('.file-editor-preview-pane-panel')),
+                  {description: 'Mermaid pan ownership release before theme change'});
                 setFileEditorPreviewDisplayMode('vanilla');
                 const bp = panel.querySelector('.file-editor-preview-pane-panel');
                 renderEditorPreviewPane(bp, path, mermaidSource, {context: 'split'});
@@ -5272,7 +5281,6 @@ def test_markdown_split_viewedit_scroll_sync_tracks_source_lines_with_tall_image
         (async () => {
           try {
             const {frame} = window.__yomuxTestHelpers;
-            const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
             const canvas = document.createElement('canvas');
             canvas.width = 120;
             canvas.height = 720;
@@ -5335,11 +5343,16 @@ def test_markdown_split_viewedit_scroll_sync_tracks_source_lines_with_tall_image
             const details = preview.querySelector('details');
             const summary = details?.querySelector('summary');
             const maxScroll = element => Math.max(0, Number(element.scrollHeight || 0) - Number(element.clientHeight || 0));
-            const settle = async (ms = 40) => {
+            // Each next layout mutation starts after both scroll owners release stable coordinates.
+            const settle = () => window.__yomuxTestWaitFor(async () => {
+              const editorTop = editorScroller.scrollTop;
+              const previewTop = preview.scrollTop;
               await frame();
               await frame();
-              await delay(ms);
-            };
+              return !panel._splitScrollFrame && !fileEditorScrollSyncBlocked(panel)
+                && panel._splitScrollBottomConvergence == null
+                && editorScroller.scrollTop === editorTop && preview.scrollTop === previewTop;
+            });
             const centerDelta = () => {
               const previewBox = preview.getBoundingClientRect();
               const headingBox = targetHeading.getBoundingClientRect();
@@ -5360,21 +5373,21 @@ def test_markdown_split_viewedit_scroll_sync_tracks_source_lines_with_tall_image
             });
             const centerEditorOnTarget = async () => {
               panel._cmView.dispatch({effects: panel._cmView.constructor.scrollIntoView(panel._cmView.state.doc.line(targetLine).from, {y: 'start', yMargin: editorScroller.clientHeight / 4})});
-              await settle(80);
+              await settle();
               editorScroller.dispatchEvent(new Event('scroll', {bubbles: true}));
               await settle();
               return snapshot();
             };
             if (details.open) summary.click();
-            await settle(80);
+            await settle();
             const afterClosedEditorDrive = await centerEditorOnTarget();
             summary.click();
-            await settle(80);
+            await settle();
             for (let attempt = 0; attempt < 120; attempt += 1) {
               if (details.open && tall.complete && tall.naturalHeight > 0 && tall.getBoundingClientRect().height > preview.clientHeight) break;
               await frame();
             }
-            await settle(80);
+            await settle();
             const afterOpenToggle = snapshot();
             const nativeRaf = window.requestAnimationFrame;
             const originalLayoutSync = scheduleFileEditorPreviewLayoutSync;

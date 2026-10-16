@@ -114,11 +114,11 @@ def find_chrome() -> str:
 def service_pid_for_socket(socket_path: str) -> int:
     """Resolve a daemon only when its command line names the exact service socket."""
     try:
-        result = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, check=False, timeout=2.0)
+        result = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, check=False, timeout=2.0)
     except (OSError, subprocess.TimeoutExpired):
         return 0
     marker = f"--socket {socket_path}"
-    for line in result.stdout.splitlines():
+    for line in os.fsdecode(result.stdout).splitlines():
         pid_text, _separator, command = line.strip().partition(" ")
         if pid_text.isdigit() and marker in command:
             return int(pid_text)
@@ -1609,7 +1609,6 @@ def chrome_renderer_cpu_snapshot(chromedriver_pid: int) -> dict[str, object]:
                 completed = subprocess.run(
                     ["ps", "-p", str(pid), "-o", "command="],
                     capture_output=True,
-                    text=True,
                     check=False,
                     timeout=2.0,
                 )
@@ -1617,7 +1616,7 @@ def chrome_renderer_cpu_snapshot(chromedriver_pid: int) -> dict[str, object]:
                 continue
             if completed.returncode != 0:
                 continue
-            command = completed.stdout
+            command = os.fsdecode(completed.stdout)
         if "--type=renderer" not in command:
             continue
         elapsed = process_cpu_seconds(pid)

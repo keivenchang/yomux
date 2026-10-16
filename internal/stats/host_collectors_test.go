@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func hostFactContext() HostFactContext {
@@ -224,7 +226,7 @@ func TestLinuxSystemLogicalCPUsUsesInjectedOnlineList(t *testing.T) {
 func TestRunBoundedPSUsesStableSyntheticLocale(t *testing.T) {
 	root := t.TempDir()
 	ps := filepath.Join(root, "ps")
-	if err := os.WriteFile(ps, []byte("#!/bin/sh\nprintf '%s\\n' \"$LC_ALL\"\n"), 0o700); err != nil {
+	if err := os.WriteFile(ps, []byte(testsupport.ShellScript(t, "printf '%s\\n' \"$LC_ALL\"\n")), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))

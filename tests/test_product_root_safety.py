@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+from tests.helpers.fixture_tools import fixture_executable
 import os
 from pathlib import Path
+from tools.tmux_paths import short_temp_base, short_fixture_path
 import shutil
 import subprocess
 import sys
@@ -62,7 +64,7 @@ def test_relative_product_root_is_refused_with_or_without_yolomux_root(
     key: str,
     rooted: bool,
 ) -> None:
-    cwd = Path("/tmp") / f"yr{os.getpid()}"
+    cwd = short_fixture_path(f"yr{os.getpid()}")
     cwd.mkdir(exist_ok=True)
     monkeypatch.chdir(cwd)
     relative_value = f"relative-{key.lower()}"
@@ -229,7 +231,7 @@ def test_instance_resolution_rejects_unsafe_explicit_roots(key: str, value: str,
 
 
 def test_rooted_instance_ignores_ambient_codex_home() -> None:
-    root = Path("/tmp") / f"yc{os.getpid()}"
+    root = short_fixture_path(f"yc{os.getpid()}")
     resolution = resolve_instance_environment(
         7111,
         {"YOLOMUX_ROOT": str(root), "CODEX_HOME": "relative-codex"},
@@ -247,7 +249,7 @@ def test_rooted_instance_ignores_ambient_codex_home() -> None:
 
 @pytest.mark.parametrize("rooted", (False, True))
 def test_explicit_yolomux_codex_home_ignores_ambient_codex_home(tmp_path: Path, rooted: bool) -> None:
-    root = Path("/tmp") / f"ye{os.getpid()}"
+    root = short_fixture_path(f"ye{os.getpid()}")
     explicit_codex_home = root / "codex" if rooted else tmp_path / "codex"
     values = {
         "YOLOMUX_CODEX_HOME": str(explicit_codex_home),
@@ -520,7 +522,7 @@ def test_shared_start_lock_rejects_unsafe_root_before_writing(tmp_path: Path) ->
         }
         result = subprocess.run(
             [
-                "bash",
+                fixture_executable("bash"),
                 "-c",
                 'source "$1"; repo_root="$2"; python_bin="$3"; yomux_acquire_start_lock',
                 "startup-lock-invalid-root",
@@ -786,7 +788,7 @@ def test_setup_tls_rejects_relative_environment_state_before_product_import(tmp_
 
 
 def test_setup_tls_rooted_dry_run_refuses_outside_cli_state_without_writing(tmp_path: Path) -> None:
-    root = Path("/tmp") / ("x" * 100)
+    root = short_temp_base() / ("x" * 100)
     outside = tmp_path / "outside"
     env = dict(os.environ)
     for key in ("YOLOMUX_ROOT", *PRODUCT_ROOT_KEYS, "CODEX_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "PYTHONPYCACHEPREFIX", "TMPDIR"):

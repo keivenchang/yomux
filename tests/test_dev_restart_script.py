@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.helpers.fixture_tools import clear_fixture_settings, fixture_executable, fixture_script
 import json
 import os
 import platform
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from tools.tmux_paths import short_temp_base, short_temp_prefix
 
 import pytest
 
@@ -20,6 +22,11 @@ from tools.product_environment import product_env_names
 
 ROOT = Path(__file__).resolve().parents[1]
 STARTUP_COMMON = ROOT / "tools" / "startup_common.sh"
+
+
+@pytest.fixture(autouse=True)
+def private_launcher_settings(monkeypatch):
+    clear_fixture_settings(monkeypatch, "GO_BINARY")
 
 
 def _copy_product_environment_owner(tools_dir: Path) -> None:
@@ -34,7 +41,7 @@ def printable_command_text(output: str) -> str:
 def test_startup_load_wait_compatibility_helper_is_nonblocking():
     env = {**os.environ, "YOMUX_START_LOAD_WAIT_SECONDS": "0"}
     result = subprocess.run(
-        ["bash", "-c", 'source "$1"; yomux_wait_for_system_capacity false', "bash", str(STARTUP_COMMON)],
+        [fixture_executable("bash"), "-c", 'source "$1"; yomux_wait_for_system_capacity false', "bash", str(STARTUP_COMMON)],
         capture_output=True,
         text=True,
         env=env,
@@ -50,6 +57,33 @@ def boot_function_source(name: str) -> str:
     start = lines.index(f"{name}() {{")
     end = next(index for index in range(start + 1, len(lines)) if lines[index] == "}")
     return "\n".join(lines[start : end + 1])
+
+
+@pytest.mark.parametrize("http_mode,scheme", [(0, "https"), (1, "http")])
+def test_boot_readiness_and_stability_probe_the_selected_protocol(tmp_path, http_mode, scheme):
+    probes = tmp_path / "probes.log"
+    functions = "\n".join(boot_function_source(name) for name in (
+        "probe_healthz", "listener_pid_is_forbidden", "wait_for_port", "verify_port_stable",
+    ))
+    script = f"set -eu\nhttp_mode={http_mode}\n" + functions + r'''
+port_listener_pids() { printf '12345\n'; }
+sleep() { :; }
+curl() {
+  local url="${@: -1}"
+  printf '%s\n' "$url" >> "$PROBE_LOG"
+  if [[ "$url" == "$EXPECTED_PROBE_URL" ]]; then printf 200; else printf 000; fi
+}
+wait_for_port 48123
+verify_port_stable 48123
+'''
+    expected_url = f"{scheme}://localhost:48123/healthz"
+    result = subprocess.run(
+        [fixture_executable("bash"), "-c", script],
+        env={**os.environ, "PROBE_LOG": str(probes), "EXPECTED_PROBE_URL": expected_url},
+        capture_output=True, text=True, timeout=5, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert probes.read_text().splitlines() == [expected_url] * 5
 
 
 def test_boot_print_command_preserves_explicit_certificate_pair(tmp_path):
@@ -217,7 +251,7 @@ def test_boot_print_command_selects_the_executable_bazel_wrapper(tmp_path, relat
     binary = checkout / relative_binary
     binary.parent.mkdir(parents=True)
     shutil.copy2(sys.executable, binary)
-    with tempfile.TemporaryDirectory(prefix="yomux-launch-", dir="/tmp") as instance_root:
+    with tempfile.TemporaryDirectory(prefix=short_temp_prefix("yomux-launch-"), dir=short_temp_base()) as instance_root:
         environment = synthetic_test_environment({"PYTHON": sys.executable, "HOME": str(tmp_path / "home"), "YOMUX_ROOT": instance_root})
         result = subprocess.run(
             [str(checkout / "boot.sh"), "--print-command", "48127"],
@@ -377,8 +411,8 @@ def test_boot_asset_check_uses_only_tracked_vendor_files_without_package_tools(t
 
     command_dir = tmp_path / "commands"
     command_dir.mkdir()
-    for name, target in (("bash", "/bin/bash"), ("dirname", "/usr/bin/dirname"), ("uname", "/usr/bin/uname")):
-        (command_dir / name).symlink_to(target)
+    for name in ("bash", "dirname", "uname"):
+        (command_dir / name).symlink_to(fixture_executable(name))
     env = {
         "HOME": str(tmp_path / "home"),
         "PATH": str(command_dir),
@@ -471,7 +505,7 @@ def test_boot_refuses_an_existing_listener_before_detached_launch():
     listener.listen(1)
     port = listener.getsockname()[1]
     try:
-        with tempfile.TemporaryDirectory(prefix="yolo-boot-", dir="/tmp") as workspace:
+        with tempfile.TemporaryDirectory(prefix=short_temp_prefix("yolo-boot-"), dir=short_temp_base()) as workspace:
             workspace_path = Path(workspace)
             root = workspace_path / "root"
             temp_dir = workspace_path / "tmp"
@@ -527,7 +561,7 @@ def test_boot_refuses_an_existing_listener_before_detached_launch():
 
 
 def test_boot_surfaces_same_root_duplicate_without_waiting_for_port_timeout():
-    with tempfile.TemporaryDirectory(prefix="yolo-boot-root-", dir="/tmp") as workspace:
+    with tempfile.TemporaryDirectory(prefix=short_temp_prefix("yolo-boot-root-"), dir=short_temp_base()) as workspace:
         workspace_path = Path(workspace)
         root = workspace_path / "root"
         ready = workspace_path / "ready"
@@ -650,7 +684,7 @@ def test_boot_never_waits_for_resource_pressure():
 ports=(7220 7221)
 restart_port() { printf 'restart %s\\n' "$1"; }
 """ + launch_loop
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
+    result = subprocess.run([fixture_executable("bash"), "-c", script], capture_output=True, text=True, check=True)
     lines = result.stdout.splitlines()
     assert [line for line in lines if line.startswith("restart ")] == ["restart 7220", "restart 7221"]
 
@@ -670,7 +704,7 @@ def test_startup_listener_boundary_returns_the_exact_owned_listener_pid(tmp_path
     assert not 7110 <= port <= 7113, port
     try:
         result = subprocess.run(
-            ["/bin/bash", "-c", f'source "$1"; yomux_port_listener_pids {port}',
+            [fixture_executable("bash"), "-c", f'source "$1"; yomux_port_listener_pids {port}',
              "listener-probe", str(STARTUP_COMMON)],
             env={**{key: value for key, value in os.environ.items() if not key.startswith("YOLOMUX_") and key != "YOMUX_ENVIRONMENT_LEGACY_INPUT"}, "PYTHON": sys.executable},
             text=True,
@@ -694,7 +728,7 @@ def test_startup_unique_listener_gate_propagates_the_exact_owner(tmp_path):
     assert not 7110 <= port <= 7113, port
     try:
         result = subprocess.run(
-            ["/bin/bash", "-c", f'source "$1"; yomux_unique_listener_pid {port}',
+            [fixture_executable("bash"), "-c", f'source "$1"; yomux_unique_listener_pid {port}',
              "listener-probe", str(STARTUP_COMMON)],
             env={**os.environ, "PYTHON": sys.executable},
             text=True,
@@ -717,7 +751,7 @@ def test_startup_listener_boundary_propagates_an_absent_listener_exactly(tmp_pat
     assert not 7110 <= free_port <= 7113, free_port
 
     result = subprocess.run(
-        ["/bin/bash", "-c", f'source "$1"; yomux_unique_listener_pid {free_port}',
+        [fixture_executable("bash"), "-c", f'source "$1"; yomux_unique_listener_pid {free_port}',
          "listener-probe", str(STARTUP_COMMON)],
         env={**os.environ, "PYTHON": sys.executable},
         text=True,
@@ -748,25 +782,25 @@ def test_startup_listener_boundary_uses_selected_interpreter_and_checkout_module
     command_dir = tmp_path / "commands"
     command_dir.mkdir()
     scanner = command_dir / "ss"
-    scanner.write_text("#!/bin/sh\n" + scanner_body, encoding="utf-8")
+    scanner.write_text(fixture_script("#!/bin/sh\n" + scanner_body), encoding="utf-8")
     scanner.chmod(0o755)
     listener_census = command_dir / "lsof"
-    listener_census.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    listener_census.write_text(fixture_script("#!/bin/sh\nexit 1\n"), encoding="utf-8")
     listener_census.chmod(0o755)
-    (command_dir / "dirname").symlink_to("/usr/bin/dirname")
+    (command_dir / "dirname").symlink_to(fixture_executable("dirname"))
     record = tmp_path / "interpreter-record"
     wrapper = tmp_path / "selected-python"
     wrapper.write_text(
-        "#!/bin/sh\n"
+        fixture_script("#!/bin/sh\n"
         "printf 'cwd=%s\\n' \"$PWD\" > \"$WRAPPER_RECORD\"\n"
         "for arg in \"$@\"; do printf 'arg=%s\\n' \"$arg\" >> \"$WRAPPER_RECORD\"; done\n"
-        "exec \"$REAL_PYTHON\" \"$@\"\n",
+        "exec \"$REAL_PYTHON\" \"$@\"\n"),
         encoding="utf-8",
     )
     wrapper.chmod(0o755)
 
     result = subprocess.run(
-        ["/bin/bash", "-c", 'source "$1"; yomux_port_listener_pids 48124', "probe", str(STARTUP_COMMON)],
+        [fixture_executable("bash"), "-c", 'source "$1"; yomux_port_listener_pids 48124', "probe", str(STARTUP_COMMON)],
         cwd=tmp_path,
         env={
             **os.environ,
@@ -833,7 +867,7 @@ def test_macos_submit_accepts_legacy_six_fields_and_server_options(tmp_path):
         "TEST_TMUX_STUB": str(tmux_stub),
     })
     result = subprocess.run([
-        "bash", "-c",
+        fixture_executable("bash"), "-c",
         'source "$1"; yomux_macos_server_tmux() { "$TEST_INTERPRETER" "$TEST_TMUX_STUB" "$@"; }; '
         'yomux_submit_macos_server "$2" "$3" /bin/bash "$PATH" 48125 "$4" --host 127.0.0.1 --port 48125 --backend go',
         "legacy-submit", str(STARTUP_COMMON), str(checkout), sys.executable, str(tmp_path / "server.log"),
@@ -941,7 +975,7 @@ subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], ch
     try:
         launch = subprocess.run(
             [
-                "bash",
+                fixture_executable("bash"),
                 "-c",
                 'source "$1"; test_socket="$2"; yomux_macos_server_tmux() { env -u TMUX -u TMUX_PANE tmux -L "$test_socket" "$@"; }; '
                 'export YOLOMUX_ROW_PLAN_FILE="$3"; '
@@ -956,7 +990,7 @@ subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], ch
                 str(fresh_plan_path),
                 str(checkout),
                 sys.executable,
-                os.environ.get("SHELL", "/bin/bash"),
+                os.environ.get("SHELL", fixture_executable("bash")),
                 os.environ["PATH"],
                 str(tmp_path / "server.log"),
                 str(result_path),
@@ -985,7 +1019,7 @@ subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], ch
         result_path.unlink()
         launch_without_go = subprocess.run(
             [
-                "bash",
+                fixture_executable("bash"),
                 "-c",
                 'source "$1"; test_socket="$2"; yomux_macos_server_tmux() { env -u TMUX -u TMUX_PANE tmux -L "$test_socket" "$@"; }; '
                 'export YOLOMUX_ROW_PLAN_FILE="$3"; '
@@ -996,7 +1030,7 @@ subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], ch
                 str(fresh_plan_path),
                 str(checkout),
                 sys.executable,
-                os.environ.get("SHELL", "/bin/bash"),
+                os.environ.get("SHELL", fixture_executable("bash")),
                 os.environ["PATH"],
                 str(tmp_path / "server.log"),
                 str(result_path),
@@ -1036,7 +1070,7 @@ def test_instance_preflight_uses_the_direct_plan_not_ambient_tmpdir():
         env.pop(key, None)
     result = subprocess.run(
         [
-            "bash",
+            fixture_executable("bash"),
             "-c",
             'source "$1"; yomux_validate_instance_isolation "$2" "$3" 8881',
             "instance-preflight",
@@ -1067,7 +1101,7 @@ def _run_instance_preflight(row_plan_file, port=8881):
         env["YOLOMUX_ROW_PLAN_FILE"] = str(row_plan_file)
     return subprocess.run(
         [
-            "bash",
+            fixture_executable("bash"),
             "-c",
             f'source "$1"; yomux_validate_instance_isolation "$2" "$3" {port}',
             "instance-preflight",
@@ -1131,7 +1165,7 @@ def test_shared_start_lock_rejects_concurrent_launcher_and_releases_cleanly(tmp_
     lock_dir = tmp_path / "start.lock"
     holder = subprocess.Popen(
         [
-            "bash",
+            fixture_executable("bash"),
             "-c",
             'source "$1"; export YOMUX_START_LOCK_DIR="$2"; trap yomux_release_start_lock EXIT; yomux_acquire_start_lock; echo ready; read -r _',
             "startup-lock-holder",
@@ -1148,7 +1182,7 @@ def test_shared_start_lock_rejects_concurrent_launcher_and_releases_cleanly(tmp_
 
     contender = subprocess.run(
         [
-            "bash",
+            fixture_executable("bash"),
             "-c",
             'source "$1"; export YOMUX_START_LOCK_DIR="$2"; yomux_acquire_start_lock',
             "startup-lock-contender",
@@ -1174,7 +1208,7 @@ def test_shared_start_lock_recovers_dead_owner(tmp_path):
 
     result = subprocess.run(
         [
-            "bash",
+            fixture_executable("bash"),
             "-c",
             'source "$1"; export YOMUX_START_LOCK_DIR="$2"; yomux_acquire_start_lock; yomux_release_start_lock',
             "startup-lock-stale",
@@ -1210,7 +1244,7 @@ fi
 test "$(cat "$2/pid")" = "$$"
 '''
     result = subprocess.run(
-        ["bash", "-c", probe, "startup-lock-reentry", str(STARTUP_COMMON), str(lock_dir)],
+        [fixture_executable("bash"), "-c", probe, "startup-lock-reentry", str(STARTUP_COMMON), str(lock_dir)],
         text=True, capture_output=True,
     )
     assert result.returncode == 0, result.stderr
@@ -1222,7 +1256,7 @@ def test_legacy_startup_admission_helpers_are_nonblocking():
     startup_common = STARTUP_COMMON.read_text(encoding="utf-8")
     result = subprocess.run(
         [
-            "bash",
+            fixture_executable("bash"),
             "-c",
             'source "$1"; yomux_wait_for_system_capacity "$2"; yomux_system_load_snapshot "$2"',
             "startup-capacity",
@@ -1242,7 +1276,7 @@ def test_legacy_startup_admission_helpers_are_nonblocking():
 def test_default_start_lock_is_shared_outside_process_specific_tmpdir(tmp_path):
     rooted = tmp_path / "root"
     result = subprocess.run(
-        ["bash", "-c", 'source "$1"; TMPDIR="$2" yomux_start_lock_path', "startup-lock-path", str(STARTUP_COMMON), str(tmp_path)],
+        [fixture_executable("bash"), "-c", 'source "$1"; TMPDIR="$2" yomux_start_lock_path', "startup-lock-path", str(STARTUP_COMMON), str(tmp_path)],
         text=True,
         capture_output=True,
         check=True,
