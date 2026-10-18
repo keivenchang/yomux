@@ -5172,8 +5172,8 @@ function renderTransportWarning() {
   httpsWarning.hidden = secure;
   if (secure) return;
   const port = location.port || '9998';
-  const selfSigned = `python3 yomux.py --port ${port} --self-signed`;
-  const cert = `python3 yomux.py --port ${port} --cert /path/fullchain.pem --key /path/privkey.pem`;
+  const selfSigned = `./boot.sh --force ${port}`;
+  const cert = `./boot.sh --force ${port} --cert /path/fullchain.pem --key /path/privkey.pem`;
   httpsWarning.dataset.tip = t('app.noHttpsDetail', {selfSigned, cert});
   httpsWarning.setAttribute('aria-label', httpsWarning.dataset.tip);
   httpsWarning.tabIndex = 0;
@@ -7796,6 +7796,10 @@ function terminalKeyScrollIntent(event) {
 function terminalHasMouseTracking(term) {
   const mode = term?.modes?.mouseTrackingMode;
   return mode === 'x10' || mode === 'vt200' || mode === 'drag' || mode === 'any';
+}
+
+function terminalUsesNativeScrollInput(session, term, container) {
+  return terminalHasMouseTracking(term) && !terminalUsesAppWheel(session, container);
 }
 
 function handleTerminalTmuxHistoryNavigationKeydown(session, term, event) {

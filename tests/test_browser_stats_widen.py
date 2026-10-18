@@ -28,7 +28,6 @@ from tests.browser_helpers.browser_console import acknowledge_and_consume_only_e
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.gate_harness import wait_for_fixture_api_quiescence
 from tests.gate_harness import HttpPortLease
-from yomux_lib.stats_current import http as stats_current_http
 from yomux_lib.stats_current import storage
 from tests.tmux_runtime import stop_isolated_tmux_runtime
 from tests.tmux_runtime import start_isolated_tmux_runtime
@@ -342,12 +341,12 @@ _STATS_ROUTE_INSTRUMENTATION = r"""
         let path = '';
         try { path = new URL(String(args[0] || ''), location.href).pathname; } catch (_) {}
         if (path !== '/api/stats-stream') return source;
-        for (const eventName of ['ack', 'snapshot', 'ready', 'delta', 'unavailable', 'error']) {
+        for (const eventName of ['ack', 'snapshot', 'ready', 'delta', 'pending', 'unavailable', 'error']) {
           source.addEventListener(eventName, event => {
             globalThis.__yomuxStatsStreamEvents.push({
               event: eventName,
               readyState: source.readyState,
-              data: String(event?.data || '').slice(0, 240),
+              data: String(event?.data || '').slice(0, eventName === 'pending' ? 4096 : 240),
             });
             if (globalThis.__yomuxStatsStreamEvents.length > 64) globalThis.__yomuxStatsStreamEvents.shift();
           });
@@ -498,7 +497,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
     # The Go server only needs these runtime roots. Copying the whole checkout makes this
     # non-root Docker test depend on unrelated developer-owned files (for example mode-600
     # locks), and it needlessly enlarges the private server fixture.
-    for relative in ("static", "tools", "yomux_lib"):
+    for relative in ("static", "tools", "yomux_lib", "assets"):
         shutil.copytree(source_root / relative, private_source_root / relative)
     configured_binary = os.environ.get("YOLOMUX_GO_BINARY", "").strip()
     binary = Path(configured_binary) if configured_binary else tmp_path / "yolomux-go"
@@ -1049,6 +1048,42 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                 "__GO_STATS_SNAPSHOT_SERIES__", json.dumps(GO_STATS_SNAPSHOT_SERIES)
             )
         )
+        if result.get("error") is not None:
+            # Read only this fixture's owners before teardown; a client pending state
+            # alone cannot distinguish a cold product from failed materialization.
+            result["serverDiagnostics"] = browser.execute_async_script(
+                """
+                const done = arguments[arguments.length - 1];
+                Promise.all(['/ready', '/api/stats-snapshot?range_seconds=300&resolution=AUTO&client_id=browser-go-diagnostic'].map(async path => {
+                  try {
+                    const response = await fetch(path, {cache: 'no-store', signal: AbortSignal.timeout(3000)});
+                    const body = await response.json();
+                    return {path, status: response.status, body: path === '/ready' || response.status !== 200 ? body : {
+                      source_generation: body.source_generation, cache_generation: body.cache_generation,
+                      range_seconds: body.range_seconds, resolution_seconds: body.resolution_seconds,
+                      window_start: body.window_start, window_end: body.window_end, buckets: body.buckets?.length,
+                    }};
+                  } catch (error) {
+                    return {path, error: String(error)};
+                  }
+                })).then(done, error => done({error: String(error)}));
+                """
+            )
+            with sqlite3.connect(f"file:{tmp_path / 'stats.sqlite3'}?mode=ro", uri=True, timeout=3) as diagnostic_database:
+                diagnostic_database.row_factory = sqlite3.Row
+                end = int(time.time()) + 1
+                result["databaseDiagnostics"] = {
+                    "schema": [dict(row) for row in diagnostic_database.execute("SELECT * FROM schema_meta")],
+                    "publication": [dict(row) for row in diagnostic_database.execute("SELECT * FROM aggregate_publication")],
+                    "rings": [dict(row) for row in diagnostic_database.execute("SELECT * FROM aggregate_rings")],
+                    "recentFineSlots": [dict(row) for row in diagnostic_database.execute(
+                        "SELECT bucket_start, complete, source_generation, ring_generation, published_at FROM aggregate_ring_slots WHERE resolution_seconds=1 AND bucket_start>=? AND bucket_start<? ORDER BY bucket_start", (end - 301, end)
+                    )],
+                    "pendingByResolution": [dict(row) for row in diagnostic_database.execute(
+                        "SELECT resolution_seconds, COUNT(*) AS cells, MIN(bucket_start) AS first_bucket, MAX(bucket_start) AS last_bucket, MIN(source_generation) AS first_generation, MAX(source_generation) AS last_generation FROM ring_invalidations WHERE applied_at IS NULL GROUP BY resolution_seconds"
+                    )],
+                }
+            result["serverLog"] = server_log_path.read_text(encoding="utf-8")[-12000:]
         assert result.get("error") is None, json.dumps(result)
         assert result["status"] == 200, result
         assert result["warnings"] == result["warningsBeforeProbe"], result
@@ -1132,7 +1167,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
             continue
         expected_disk_mounts.append({"mountpoint": match.group(3), "highUse": int(match.group(2)) > 80})
     private_source_root = tmp_path / "source-root"
-    for relative in ("static", "tools", "yomux_lib"):
+    for relative in ("static", "tools", "yomux_lib", "assets"):
         shutil.copytree(source_root / relative, private_source_root / relative)
     configured_binary = os.environ.get("YOLOMUX_GO_BINARY", "").strip()
     binary = Path(configured_binary) if configured_binary else tmp_path / "yolomux-go"
@@ -1183,7 +1218,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
     monkeypatch.setenv("YOLOMUX_OPENCODE_DATABASE", str(opencode_database))
     monkeypatch.setenv("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT", str(home / "claude" / "projects"))
     monkeypatch.setenv("YOLOMUX_CODEX_TRANSCRIPT_ROOT", str(home / "codex" / "sessions"))
-    monkeypatch.setenv("YOLOMUX_PRICING_CATALOG", str(private_source_root / "yomux_lib" / "data" / "model_pricing.json"))
+    monkeypatch.setenv("YOLOMUX_PRICING_CATALOG", str(private_source_root / "assets" / "runtime" / "model_pricing.json"))
     prefix = f"yt-collector-{os.getpid()}"
     session_commands = {
         f"{prefix}-claude": f"exec -a claude {sys.executable} {source_root / 'tools/mockers/claude.py'} --mock",
@@ -1220,7 +1255,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
                 "YOLOMUX_OPENCODE_DATABASE": str(opencode_database),
                 "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": str(home / "claude" / "projects"),
                 "YOLOMUX_CODEX_TRANSCRIPT_ROOT": str(home / "codex" / "sessions"),
-                "YOLOMUX_PRICING_CATALOG": str(private_source_root / "yomux_lib" / "data" / "model_pricing.json"),
+                "YOLOMUX_PRICING_CATALOG": str(private_source_root / "assets" / "runtime" / "model_pricing.json"),
                 "YOLOMUX_TMUX_SOCKET": str(tmux_runtime.socket_path),
                 "PYTHONPATH": str(private_source_root),
             })
@@ -1500,7 +1535,7 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
     """Exercise collector, Go activity API, SSE acknowledgement, and shared UI together."""
     source_root = Path(__file__).resolve().parents[1]
     private_source_root = tmp_path / "source-root"
-    for relative in ("static", "tools", "yomux_lib"):
+    for relative in ("static", "tools", "yomux_lib", "assets"):
         shutil.copytree(source_root / relative, private_source_root / relative)
     configured_binary = os.environ.get("YOLOMUX_GO_BINARY", "").strip()
     binary = Path(configured_binary) if configured_binary else tmp_path / "yolomux-go"
@@ -1645,7 +1680,47 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
         def activity_has_working_codex(_driver):
             latest_activity.update(get_activity())
             return latest_activity.get("status") == 200 and any(row.get("state") == "working" for row in latest_activity.get("payload", {}).get("agent_windows", {}).get(codex_session, []))
-        WebDriverWait(browser, 45, poll_frequency=0.5).until(activity_has_working_codex)
+        try:
+            WebDriverWait(browser, 45, poll_frequency=0.5).until(activity_has_working_codex)
+        except TimeoutException as error:
+            pane_roster = subprocess.run(
+                [tmux_runtime.tmux_binary, "-S", str(tmux_runtime.socket_path), "list-panes", "-s", "-t", codex_session, "-F", "#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{pane_dead}"],
+                capture_output=True, text=True, check=False, timeout=8,
+            )
+            pane_evidence = []
+            for row in pane_roster.stdout.splitlines():
+                target, pid_text, command, dead = row.split("\t")
+                capture = subprocess.run(
+                    [tmux_runtime.tmux_binary, "-S", str(tmux_runtime.socket_path), "capture-pane", "-p", "-J", "-t", target],
+                    capture_output=True, text=True, check=False, timeout=8,
+                )
+                process_evidence = {"pid": int(pid_text), "pane_command": command, "pane_dead": dead}
+                try:
+                    process_root = Path("/proc") / pid_text
+                    process_command = process_root.joinpath("cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace")
+                    owns_driver = str(screen_driver) in process_command
+                    process_evidence["matches_fixture_driver"] = owns_driver
+                    if owns_driver:
+                        process_evidence["command"] = process_command
+                        process_evidence["start_ticks"] = process_root.joinpath("stat").read_text().rsplit(") ", 1)[1].split()[19]
+                except OSError as process_error:
+                    process_evidence["read_error"] = type(process_error).__name__
+                pane_evidence.append({"pane": target, "process": process_evidence, "capture_exit": capture.returncode, "capture": capture.stdout})
+            with sqlite3.connect(f"file:{tmp_path / 'stats.sqlite3'}?mode=ro", uri=True) as diagnostic_database:
+                collector_rows = diagnostic_database.execute(
+                    "SELECT observed_at, payload_json FROM observations WHERE family = ? ORDER BY observed_at DESC LIMIT 3",
+                    ("agent_status",),
+                ).fetchall()
+            collector_evidence = []
+            for observed_at, payload_json in collector_rows:
+                collector_payload = json.loads(payload_json)
+                collector_evidence.append({"observed_at": observed_at, "counts": collector_payload.get("counts"), "agents": [row for row in collector_payload.get("agents", []) if row.get("session") == codex_session]})
+            raise AssertionError(json.dumps({
+                "error": "fixture Codex never reached the working activity state",
+                "activity": latest_activity, "pane_roster_exit": pane_roster.returncode,
+                "pane_roster_error": pane_roster.stderr, "panes": pane_evidence,
+                "collector": collector_evidence,
+            }, sort_keys=True)) from error
         initial = latest_activity
         initial_rows = initial.get("payload", {}).get("agent_windows", {}).get(codex_session, [])
         assert any(row.get("state") == "working" for row in initial_rows), initial
@@ -2935,562 +3010,10 @@ def _wait_for_stats_warning(harness: Any) -> dict[str, Any] | bool:
     return state if state["warnings"] else False
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_real_stats_cleanup_settles_start_and_stops_before_final_flush(authenticated_e2e_browser: Any) -> None:
-    wait_for_fixture_api_quiescence(authenticated_e2e_browser.driver, timeout=20)
-    _open_real_stats_graph(authenticated_e2e_browser, include_finder=False)
-    wait_for_fixture_api_quiescence(authenticated_e2e_browser.driver, timeout=20)
-    _flush_and_stop_real_stats_graph(authenticated_e2e_browser, require_client=True)
-    authenticated_e2e_browser.driver.execute_script(
-        """
-        globalThis.__statsCleanupFixture = {
-          client: jsDebugCurrentStatsClientState.client,
-          startPromise: jsDebugCurrentStatsClientState.startPromise,
-          flush: flushJsDebugCurrentObservations,
-          markers: [],
-        };
-        jsDebugCurrentStatsClientState.client = {
-          stop() { globalThis.__statsCleanupFixture.markers.push('stop'); },
-          controller() { return null; },
-        };
-        jsDebugCurrentStatsClientState.startPromise = {
-          then(_resolve, reject) {
-            globalThis.__statsCleanupFixture.markers.push('start-rejected');
-            reject(new Error('pending start rejection'));
-          },
-        };
-        flushJsDebugCurrentObservations = () => {
-          globalThis.__statsCleanupFixture.markers.push('flush-rejected');
-          return Promise.reject(new Error('final flush rejection'));
-        };
-        """
-    )
-    try:
-        with pytest.raises(AssertionError) as cleanup_error:
-            _flush_and_stop_real_stats_graph(authenticated_e2e_browser, require_client=True)
-        assert "pending start rejection" in str(cleanup_error.value), cleanup_error.value
-        assert "final flush rejection" in str(cleanup_error.value), cleanup_error.value
-        markers = authenticated_e2e_browser.driver.execute_script(
-            "return [...globalThis.__statsCleanupFixture.markers];"
-        )
-        assert markers == ["start-rejected", "stop", "flush-rejected"], markers
-    finally:
-        authenticated_e2e_browser.driver.execute_script(
-            """
-            jsDebugCurrentStatsClientState.client = globalThis.__statsCleanupFixture.client;
-            jsDebugCurrentStatsClientState.startPromise = globalThis.__statsCleanupFixture.startPromise;
-            flushJsDebugCurrentObservations = globalThis.__statsCleanupFixture.flush;
-            delete globalThis.__statsCleanupFixture;
-            """
-        )
-    _flush_and_stop_real_stats_graph(authenticated_e2e_browser, require_client=True)
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_hidden_stats_panel_receives_push_then_opens_from_cached_generation(
-    authenticated_e2e_browser: Any,
-    request: pytest.FixtureRequest,
-) -> None:
-    runtime = authenticated_e2e_browser.runtime
-    client = runtime.app.stats_current_client
-    assert client.ensure_started() is True
-    _flush_and_stop_real_stats_graph(authenticated_e2e_browser, require_client=True)
-    _wait_for_ring_publication(authenticated_e2e_browser, 0)
-    request.addfinalizer(
-        lambda: _flush_and_stop_real_stats_graph(authenticated_e2e_browser, require_client=True)
-    )
-    _register_stats_route_instrumentation(authenticated_e2e_browser)
-    authenticated_e2e_browser.driver.execute_script(
-        "localStorage.setItem('yolomux.stats.ui_preferences.v1', "
-        "JSON.stringify({rangeSeconds: 300, resolutionOverrideSeconds: 1}));"
-    )
-    session = str(runtime.tmux.sessions[0])
-    authenticated_e2e_browser.driver.get(
-        f"{authenticated_e2e_browser.base_url}/?sessions={session}&layout=left&tabs=left:__debug__,{session}"
-    )
-    WebDriverWait(authenticated_e2e_browser.driver, 12, poll_frequency=0.05).until(
-        lambda driver: driver.execute_script(
-            "return document.readyState === 'complete' "
-            "&& typeof syncJsDebugCurrentStatsClient === 'function' "
-            "&& document.querySelector('#grid') !== null;"
-        )
-    )
-    authenticated_e2e_browser.switch_session(session)
-    hidden = WebDriverWait(authenticated_e2e_browser.driver, 12, poll_frequency=0.05).until(
-        lambda driver: driver.execute_script(
-            """
-            const controller = jsDebugCurrentStatsClientState?.client?.controller?.();
-            const generation = controller?.generation?.();
-            if (!generation || jsDebugStatsPanelVisible()) return false;
-            return {
-              cacheGeneration: generation.cache_generation,
-              sourceGeneration: generation.source_generation,
-              rangeSeconds: generation.range_seconds,
-              resolutionSeconds: generation.resolution_seconds,
-              paintedGenerationKey: jsDebugCurrentStatsClientState.paintedGenerationKey,
-              requestCounts: {...globalThis.__yomuxStatsRouteCounts},
-            };
-            """
-        )
-    )
-    assert hidden["rangeSeconds"] == 300 and hidden["resolutionSeconds"] == 1, hidden
-    assert hidden["requestCounts"]["/api/stats-capabilities"] == 1, hidden
-    assert hidden["requestCounts"]["/api/stats-snapshot"] == 0, hidden
-    assert hidden["requestCounts"]["/api/stats-retry"] == 0, hidden
-    assert hidden["requestCounts"]["/api/stats-stream"] == 1, hidden
-    observed_at = int(time.time())
-    cadence_started = time.monotonic()
-    appended = client.append(observations=(storage.Observation(
-        f"hidden-panel-push-{observed_at}",
-        "cpu",
-        "hidden-panel-push",
-        observed_at,
-        "hidden-panel-push",
-        1,
-        {"process_percent": 19.0, "system_percent": 29.0},
-    ),))
-    assert appended.get("ok") is True, appended
-    pushed = WebDriverWait(authenticated_e2e_browser.driver, 6, poll_frequency=0.05).until(
-        lambda driver: driver.execute_script(
-            """
-            const generation = jsDebugCurrentStatsClientState?.client?.controller?.()?.generation?.();
-            if (!generation || generation.source_generation < arguments[0]) return false;
-            return {
-              cacheGeneration: generation.cache_generation,
-              sourceGeneration: generation.source_generation,
-              paintedGenerationKey: jsDebugCurrentStatsClientState.paintedGenerationKey,
-            };
-            """,
-            int(appended["source_generation"]),
-        )
-    )
-    assert pushed["paintedGenerationKey"] == hidden["paintedGenerationKey"], pushed
-    assert _stats_route_counts(authenticated_e2e_browser) == hidden["requestCounts"], pushed
-
-    hidden_updates = [pushed]
-    for offset in range(1, 4):
-        append_deadline = cadence_started + (offset * 1.05)
-        WebDriverWait(authenticated_e2e_browser.driver, 5, poll_frequency=0.05).until(
-            lambda _driver, deadline=append_deadline: time.monotonic() >= deadline
-        )
-        appended = client.append(observations=(storage.Observation(
-            f"hidden-panel-push-{observed_at + offset}",
-            "cpu",
-            "hidden-panel-push",
-            observed_at + offset,
-            "hidden-panel-push",
-            1,
-            {
-                "process_percent": 19.0 + offset,
-                "system_percent": 29.0 + offset,
-            },
-        ),))
-        assert appended.get("ok") is True, appended
-        previous = hidden_updates[-1]
-        advanced = WebDriverWait(
-            authenticated_e2e_browser.driver,
-            6,
-            poll_frequency=0.05,
-        ).until(
-            lambda driver: driver.execute_script(
-                """
-                const generation = jsDebugCurrentStatsClientState?.client?.controller?.()?.generation?.();
-                if (!generation
-                    || generation.source_generation < arguments[0]
-                    || generation.cache_generation <= arguments[1]) return false;
-                return {
-                  cacheGeneration: generation.cache_generation,
-                  sourceGeneration: generation.source_generation,
-                  paintedGenerationKey: jsDebugCurrentStatsClientState.paintedGenerationKey,
-                  panelVisible: jsDebugStatsPanelVisible(),
-                };
-                """,
-                int(appended["source_generation"]),
-                previous["cacheGeneration"],
-            )
-        )
-        assert advanced["paintedGenerationKey"] == hidden["paintedGenerationKey"], advanced
-        assert advanced["panelVisible"] is False, advanced
-        assert _stats_route_counts(authenticated_e2e_browser) == hidden["requestCounts"], advanced
-        hidden_updates.append(advanced)
-
-    continued = authenticated_e2e_browser.driver.execute_script(
-        """
-        const generation = jsDebugCurrentStatsClientState?.client?.controller?.()?.generation?.();
-        const stalls = jsDebugEvents.filter(event =>
-          String(event?.route || '') === '/api/stats-stream'
-          && /YO!stats (stream|data).*(stalled|missing|unavailable)/i.test(String(event?.message || '')));
-        return {
-          cacheGeneration: generation?.cache_generation || 0,
-          paintedGenerationKey: jsDebugCurrentStatsClientState.paintedGenerationKey,
-          panelVisible: jsDebugStatsPanelVisible(),
-          stalls: stalls.map(event => String(event.message || '')),
-          requestCounts: {...globalThis.__yomuxStatsRouteCounts},
-        };
-        """
-    )
-    assert [update["cacheGeneration"] for update in hidden_updates] == sorted({
-        update["cacheGeneration"] for update in hidden_updates
-    }), hidden_updates
-    assert continued["cacheGeneration"] == hidden_updates[-1]["cacheGeneration"], continued
-    assert continued["paintedGenerationKey"] == hidden["paintedGenerationKey"], continued
-    assert continued["panelVisible"] is False, continued
-    assert continued["stalls"] == [], continued
-    assert continued["requestCounts"] == hidden["requestCounts"], continued
-    before_open_counts = _stats_route_counts(authenticated_e2e_browser)
-
-    authenticated_e2e_browser.switch_session("__debug__")
-    opened = WebDriverWait(authenticated_e2e_browser.driver, 12, poll_frequency=0.05).until(
-        lambda driver: driver.execute_script(
-            """
-            const controller = jsDebugCurrentStatsClientState?.client?.controller?.();
-            const generation = controller?.generation?.();
-            const expected = jsDebugCurrentStatsGenerationKey(generation);
-            if (!jsDebugStatsPanelVisible() || !expected || jsDebugCurrentStatsClientState.paintedGenerationKey !== expected) return false;
-            return {
-              cacheGeneration: generation.cache_generation,
-              sourceGeneration: generation.source_generation,
-              paintedGenerationKey: jsDebugCurrentStatsClientState.paintedGenerationKey,
-              requestCounts: {...globalThis.__yomuxStatsRouteCounts},
-            };
-            """
-        )
-    )
-    assert opened["cacheGeneration"] == continued["cacheGeneration"], opened
-    assert opened["sourceGeneration"] >= pushed["sourceGeneration"], opened
-    assert opened["requestCounts"] == before_open_counts, opened
-    _flush_and_stop_real_stats_graph(authenticated_e2e_browser, require_client=True)
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_stats_stream_failure_is_durable_latched_and_recovers_only_after_a_real_push(
-    authenticated_e2e_browser: Any,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = authenticated_e2e_browser.runtime
-    client = runtime.app.stats_current_client
-    assert client.ensure_started() is True
-    original_capabilities = runtime.app.stats_current_http.capabilities
-    original_delta_stream = runtime.app.stats_current_http.delta_stream
-
-    def invalid_capabilities() -> dict[str, object]:
-        payload = dict(original_capabilities())
-        payload["invalid_review_field"] = True
-        return payload
-
-    monkeypatch.setattr(runtime.app.stats_current_http, "capabilities", invalid_capabilities)
-    _register_stats_route_instrumentation(authenticated_e2e_browser)
-    session = str(runtime.tmux.sessions[0])
-    authenticated_e2e_browser.driver.execute_script(
-        "localStorage.setItem('yolomux.stats.ui_preferences.v1', "
-        "JSON.stringify({rangeSeconds: 300, resolutionOverrideSeconds: 1}));"
-    )
-    install_live_runtime_boot_error_tracker(authenticated_e2e_browser.driver)
-    authenticated_e2e_browser.driver.get(
-        f"{authenticated_e2e_browser.base_url}/?sessions={session}&layout=left&tabs=left:files,__debug__,{session}"
-    )
-    WebDriverWait(authenticated_e2e_browser.driver, 12, poll_frequency=0.05).until(
-        lambda driver: driver.execute_script(
-            "return document.readyState === 'complete' "
-            "&& typeof syncJsDebugCurrentStatsClient === 'function' "
-            "&& document.querySelector('#grid') !== null;"
-        )
-    )
-
-    failed = WebDriverWait(authenticated_e2e_browser.driver, 12, poll_frequency=0.05).until(
-        lambda driver: driver.execute_script(
-            """
-            const failures = jsDebugEvents.filter(event => event?.type === 'stats_history'
-              && event?.level === 'warning' && event?.route === '/api/stats-stream'
-              && String(event?.message || '').includes('stats capabilities fields are not exact'));
-            const capabilities = globalThis.__yomuxStatsRouteCounts?.['/api/stats-capabilities'] || 0;
-            if (failures.length !== 1 || capabilities < 2) return false;
-            const event = failures[0];
-            return {
-              count: failures.length,
-              signature: event.signature,
-              source: event.route,
-              message: event.message,
-              marked: Object.prototype.hasOwnProperty.call(event, 'provenance'),
-              capabilities,
-              streamEvidence: event.streamEvidence ?? null,
-              liveEvidenceKeys: Object.keys(
-                jsDebugCurrentStatsClientState?.client?.streamEvidence?.() || {}
-              ).sort(),
-            };
-            """
-        )
-    )
-    assert failed["source"] == "/api/stats-stream", failed
-    assert failed["marked"] is False, failed
-    # A retained stream failure that records only its message string cannot be classified
-    # afterwards. The transport samples its own first-transition observables at report time,
-    # so the retained record must carry that whole snapshot, not a hand-picked subset.
-    assert isinstance(failed["streamEvidence"], dict), failed
-    assert sorted(failed["streamEvidence"]) == failed["liveEvidenceKeys"], failed
-    assert failed["streamEvidence"]["running"] is True, failed
-    assert isinstance(failed["streamEvidence"]["deliverySequence"], int), failed
-    assert isinstance(failed["streamEvidence"]["streamEpoch"], int), failed
-
-    receipt = WebDriverWait(authenticated_e2e_browser.driver, 18, poll_frequency=0.2).until(
-        lambda driver: driver.execute_async_script(
-            """
-            const done = arguments[arguments.length - 1];
-            Promise.resolve(typeof flushJsDebugCurrentObservations === 'function'
-              ? flushJsDebugCurrentObservations() : undefined).then(() => {
-                const barrier = jsDebugCurrentObservationReceiptBarrier();
-                done(barrier.quiescent && barrier.accepted > 0 ? barrier : false);
-              }, () => done(false));
-            """
-        )
-    )
-    assert receipt["quiescent"] is True and receipt["accepted"] > 0, receipt
-
-    retained = WebDriverWait(authenticated_e2e_browser.driver, 18, poll_frequency=0.2).until(
-        lambda _driver: _browser_failure_fingerprint(client, failed["signature"], 1)
-    )
-    assert retained["fingerprint"]["signature"] == failed["signature"], retained
-    assert retained["fingerprint"]["kind"] == "warning", retained
-    assert retained["fingerprint"]["provenance"] == "unknown", retained
-
-    def ready_only_delta_stream(
-        _raw_query: str,
-        *,
-        authenticated_username: str,
-    ) -> stats_current_http.DeltaStreamResult:
-        assert authenticated_username
-        return stats_current_http.DeltaStreamResult(
-            HTTPStatus.NOT_MODIFIED,
-            {"ok": True, "not_modified": True, "cache_generation": 0},
-        )
-
-    # A prior test may have left a publishable generation in the fixture-owned
-    # service. Hold this stream at a validated ready heartbeat so the assertion
-    # below proves snapshot readiness cannot clear the latch; the test injects
-    # its accepted push explicitly after taking the stream base.
-    monkeypatch.setattr(
-        runtime.app.stats_current_http,
-        "delta_stream",
-        ready_only_delta_stream,
-    )
-    monkeypatch.setattr(runtime.app.stats_current_http, "capabilities", original_capabilities)
-    healthy = WebDriverWait(authenticated_e2e_browser.driver, 12, poll_frequency=0.05).until(
-        lambda driver: driver.execute_script(
-            """
-            const generation = jsDebugCurrentStatsClientState?.client?.controller?.()?.generation?.();
-            return generation ? {
-              sourceGeneration: generation.source_generation,
-              rangeSeconds: generation.range_seconds,
-              resolutionSeconds: generation.resolution_seconds,
-              failureLatched: jsDebugCurrentStatsClientState.failureLatched,
-            } : false;
-            """
-        )
-    )
-    assert healthy["rangeSeconds"] == 300 and healthy["resolutionSeconds"] == 1, healthy
-    assert healthy["failureLatched"] is True, healthy
-    healthy_counts = _stats_route_counts(authenticated_e2e_browser)
-    assert set(healthy_counts) == {
-        "/api/stats-capabilities", "/api/stats-snapshot", "/api/stats-retry", "/api/stats-stream",
-    }, healthy_counts
-    assert healthy_counts["/api/stats-capabilities"] >= 2, healthy_counts
-    assert healthy_counts["/api/stats-snapshot"] == 0, healthy_counts
-    assert healthy_counts["/api/stats-retry"] == 0, healthy_counts
-    assert healthy_counts["/api/stats-stream"] >= 1, healthy_counts
-    stream_base = authenticated_e2e_browser.driver.execute_script(
-        """
-        const client = jsDebugCurrentStatsClientState?.client;
-        const controller = client?.controller?.();
-        const generation = controller?.generation?.();
-        const presentation = controller?.presentation?.();
-        const evidence = client?.streamEvidence?.();
-        return generation && presentation ? {
-          generation: structuredClone(generation),
-          revision: presentation.delta_revision,
-          streamEpoch: evidence?.streamEpoch,
-        } : null;
-        """
-    )
-    assert stream_base and stream_base["generation"]["buckets"], stream_base
-    generation = stream_base["generation"]
-    streamed_cache_generation = int(generation["cache_generation"]) + 1
-    streamed_source_generation = int(generation["source_generation"]) + 1
-    streamed_revision = int(stream_base["revision"]) + 1
-    streamed_delta = json.dumps({
-        "protocol_version": 2,
-        "range_seconds": generation["range_seconds"],
-        "resolution_seconds": generation["resolution_seconds"],
-        "source_generation": streamed_source_generation,
-        "base_cache_generation": generation["cache_generation"],
-        "cache_generation": streamed_cache_generation,
-        "revision": streamed_revision,
-        "buckets": [generation["buckets"][-1]],
-        "no_data": [],
-        "tombstones": [],
-        "cost_report": generation["cost_report"],
-    }, separators=(",", ":")).encode("utf-8")
-    streamed = False
-
-    def accepted_delta_stream(
-        _raw_query: str,
-        *,
-        authenticated_username: str,
-    ) -> stats_current_http.DeltaStreamResult:
-        nonlocal streamed
-        assert authenticated_username
-        if not streamed:
-            streamed = True
-            return stats_current_http.DeltaStreamResult(
-                HTTPStatus.OK,
-                {
-                    "ok": True,
-                    "content_type": "application/json",
-                    "base_cache_generation": generation["cache_generation"],
-                    "cache_generation": streamed_cache_generation,
-                    "revision": streamed_revision,
-                },
-                streamed_delta,
-            )
-        return stats_current_http.DeltaStreamResult(
-            HTTPStatus.NOT_MODIFIED,
-            {"ok": True, "not_modified": True, "cache_generation": streamed_cache_generation},
-        )
-
-    monkeypatch.setattr(runtime.app.stats_current_http, "delta_stream", accepted_delta_stream)
-    accepted_push = WebDriverWait(authenticated_e2e_browser.driver, 8, poll_frequency=0.05).until(
-        lambda driver: driver.execute_script(
-            """
-            const client = jsDebugCurrentStatsClientState?.client;
-            const controller = client?.controller?.();
-            const generation = controller?.generation?.();
-            const evidence = client?.streamEvidence?.();
-            if (generation?.source_generation !== arguments[0] || evidence?.acceptedDeltaSequence < 1) return false;
-            return {
-              accepted: true,
-              sourceGeneration: generation.source_generation,
-              failureLatched: jsDebugCurrentStatsClientState.failureLatched,
-              streamEpoch: evidence.streamEpoch,
-              lastDeliveryEmitMs: evidence.lastDeliveryEmitMs,
-              lastDeliveryAtMs: evidence.lastDeliveryAtMs,
-            };
-            """,
-            streamed_source_generation,
-        )
-    )
-    assert accepted_push["accepted"] is True, accepted_push
-    assert accepted_push["sourceGeneration"] == streamed_source_generation, accepted_push
-    assert accepted_push["failureLatched"] is False, accepted_push
-    assert accepted_push["streamEpoch"] == stream_base["streamEpoch"], accepted_push
-    # The server's emit clock rides the SSE `id:` line, so a real Chrome EventSource surfaces it
-    # as `event.lastEventId`. Without it the browser knows only when a frame arrived, and a stall
-    # artifact cannot separate "the server never sent it" from "it arrived late".
-    assert isinstance(accepted_push["lastDeliveryEmitMs"], int), accepted_push
-    assert accepted_push["lastDeliveryEmitMs"] > 0, accepted_push
-    assert accepted_push["lastDeliveryAtMs"] > 0, accepted_push
-    accepted_failures = authenticated_e2e_browser.driver.execute_script(
-        """
-            const generation = jsDebugCurrentStatsClientState?.client?.controller?.()?.generation?.();
-            const failures = jsDebugEvents.filter(event => event?.type === 'stats_history'
-              && event?.level === 'warning' && event?.route === '/api/stats-stream');
-            return {
-              sourceGeneration: generation.source_generation,
-              failureLatched: jsDebugCurrentStatsClientState.failureLatched,
-              failures: failures.map(event => ({
-                signature: event.signature,
-                message: event.message,
-                source: event.route,
-                marked: Object.prototype.hasOwnProperty.call(event, 'provenance'),
-              })),
-            };
-        """
-    )
-    assert accepted_failures["failureLatched"] is False, accepted_failures
-
-    def unavailable_delta_stream(
-        _raw_query: str,
-        *,
-        authenticated_username: str,
-    ) -> stats_current_http.DeltaStreamResult:
-        assert authenticated_username
-        return stats_current_http.DeltaStreamResult(
-            HTTPStatus.FAILED_DEPENDENCY,
-            {"ok": False, "status": "unavailable", "reason": "forced graph stream failure"},
-        )
-
-    monkeypatch.setattr(runtime.app.stats_current_http, "delta_stream", unavailable_delta_stream)
-    authenticated_e2e_browser.driver.execute_script(
-        "void jsDebugCurrentStatsClientState.client.start();"
-    )
-    recovered = WebDriverWait(authenticated_e2e_browser.driver, 12, poll_frequency=0.05).until(
-        lambda driver: driver.execute_script(
-            """
-            const generation = jsDebugCurrentStatsClientState?.client?.controller?.()?.generation?.();
-            const failures = jsDebugEvents.filter(event => event?.type === 'stats_history'
-              && event?.level === 'warning' && event?.route === '/api/stats-stream');
-            const later = [...failures].reverse().find(event => event.message !== arguments[0]);
-            if (!generation || !later) return false;
-            return {
-              sourceGeneration: generation.source_generation,
-              failureLatched: jsDebugCurrentStatsClientState.failureLatched,
-              later: {
-                signature: later.signature,
-                message: later.message,
-                source: later.route,
-                marked: Object.prototype.hasOwnProperty.call(later, 'provenance'),
-              },
-            };
-            """,
-            failed["message"],
-        )
-    )
-    monkeypatch.setattr(runtime.app.stats_current_http, "delta_stream", original_delta_stream)
-    assert recovered["later"]["source"] == "/api/stats-stream", recovered
-    assert recovered["later"]["marked"] is False, recovered
-    assert recovered["failureLatched"] is True, recovered
-    recovered_receipt = WebDriverWait(authenticated_e2e_browser.driver, 18, poll_frequency=0.2).until(
-        lambda driver: driver.execute_async_script(
-            """
-            const done = arguments[arguments.length - 1];
-            Promise.resolve(flushJsDebugCurrentObservations()).then(() => {
-              const barrier = jsDebugCurrentObservationReceiptBarrier();
-              done(barrier.quiescent ? barrier : false);
-            }, () => done(false));
-            """
-        )
-    )
-    assert recovered_receipt["quiescent"] is True, recovered_receipt
-    expected_failures = authenticated_e2e_browser.driver.execute_script(
-        """
-        return jsDebugEvents.filter(event => event?.type === 'stats_history'
-          && event?.level === 'warning' && event?.route === '/api/stats-stream');
-        """,
-    )
-    assert [
-        {
-            "signature": event["signature"],
-            "source": event["route"],
-            "message": event["message"],
-            "marked": "provenance" in event,
-        }
-        for event in expected_failures
-    ] == [
-        {"signature": failed["signature"], "source": failed["source"], "message": failed["message"], "marked": False},
-        {"signature": recovered["later"]["signature"], "source": recovered["later"]["source"], "message": recovered["later"]["message"], "marked": False},
-    ]
-    retired = acknowledge_and_consume_only_expected_js_debug_failures(
-        authenticated_e2e_browser.driver,
-        expected_failures,
-    )
-    assert len(retired) == 2
-    chrome_entries = read_browser_console_log(authenticated_e2e_browser.driver)
-    chrome_failures = [
-        entry for entry in chrome_entries
-        if str(entry.get("level") or "").upper() in {"WARNING", "SEVERE"}
-    ]
-    assert chrome_failures == [], chrome_failures
 
 
 def _select_one_second_five_minute_graph(harness: Any) -> None:
@@ -3511,137 +3034,3 @@ def _select_one_second_five_minute_graph(harness: Any) -> None:
         """
     )
     assert result == {"ok": True}, result
-
-
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_real_stats_cpu_value_round_trips_through_rpc_and_rendered_svg(
-    authenticated_e2e_browser: Any,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = authenticated_e2e_browser.runtime
-    _flush_and_stop_real_stats_graph(authenticated_e2e_browser, require_client=True)
-    runtime.app.stats_current_runtime.stop()
-    client = runtime.app.stats_current_client
-    assert client.ensure_started() is True
-    now = int(time.time())
-    first_observed_at = now - CPU_GRAPH_SAMPLE_COUNT - 2
-    source = "cpu:positive-graph-gate"
-    epoch = "positive-graph-gate"
-    appended = client.append(
-        observations=tuple(
-            storage.Observation(
-                f"positive-graph-{index}",
-                "cpu",
-                source,
-                first_observed_at + index,
-                epoch,
-                1,
-                {"process_percent": 11.0, "system_percent": CPU_GRAPH_PERCENT},
-            )
-            for index in range(CPU_GRAPH_SAMPLE_COUNT)
-        ),
-        coverage_epochs=(storage.CoverageEpoch(
-            "cpu",
-            source,
-            epoch,
-            first_observed_at,
-            None,
-            1,
-            1,
-        ),),
-    )
-    assert appended.get("ok") is True, appended
-    assert int(appended.get("accepted") or 0) == CPU_GRAPH_SAMPLE_COUNT + 1, appended
-    _wait_for_ring_publication(authenticated_e2e_browser, int(appended["source_generation"]))
-
-    _open_real_stats_graph(authenticated_e2e_browser)
-    _select_one_second_five_minute_graph(authenticated_e2e_browser)
-    positive = WebDriverWait(authenticated_e2e_browser.driver, 12, poll_frequency=0.05).until(
-        lambda _driver: _wait_for_cpu_points(authenticated_e2e_browser)
-    )
-    _assert_seeded_cpu_graph(positive)
-
-    original_capabilities = runtime.app.stats_current_http.capabilities
-
-    def capabilities_with_unknown_field() -> dict[str, object]:
-        payload = dict(original_capabilities())
-        payload["negative_control_unknown"] = True
-        return payload
-
-    monkeypatch.setattr(runtime.app.stats_current_http, "capabilities", capabilities_with_unknown_field)
-    session = str(runtime.tmux.sessions[0])
-    authenticated_e2e_browser.driver.get(
-        f"{authenticated_e2e_browser.base_url}/?sessions={session}&layout=left&tabs=left:files,__debug__,{session}"
-    )
-    WebDriverWait(authenticated_e2e_browser.driver, 12, poll_frequency=0.05).until(
-        lambda driver: driver.execute_script(
-            "return document.readyState === 'complete' "
-            "&& typeof syncJsDebugCurrentStatsClient === 'function' "
-            "&& document.querySelector('#grid') !== null;"
-        )
-    )
-    authenticated_e2e_browser.switch_session("__debug__")
-    negative = WebDriverWait(authenticated_e2e_browser.driver, 12, poll_frequency=0.05).until(
-        lambda _driver: _wait_for_stats_warning(authenticated_e2e_browser)
-    )
-    assert negative["lineCount"] == 0, negative
-    assert any("stats capabilities fields are not exact" in warning for warning in negative["warnings"]), negative
-    monkeypatch.setattr(runtime.app.stats_current_http, "capabilities", original_capabilities)
-    authenticated_e2e_browser.driver.get(
-        f"{authenticated_e2e_browser.base_url}/?sessions={session}&layout=left&tabs=left:__debug__,{session}"
-    )
-    WebDriverWait(authenticated_e2e_browser.driver, 12, poll_frequency=0.05).until(
-        lambda driver: driver.execute_script(
-            "return document.readyState === 'complete' "
-            "&& typeof syncJsDebugCurrentStatsClient === 'function' "
-            "&& document.querySelector('#grid') !== null;"
-        )
-    )
-    assert_live_runtime_boot_healthy(
-        authenticated_e2e_browser.driver,
-        authenticated_e2e_browser.test_id,
-        timeout=12,
-    )
-    _flush_and_stop_real_stats_graph(authenticated_e2e_browser)
-
-
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_real_stats_interval_options_return_after_range_round_trip_and_reload(authenticated_e2e_browser: Any) -> None:
-    client = authenticated_e2e_browser.runtime.app.stats_current_client
-    assert client.ensure_started() is True
-    observed_at = int(time.time())
-    appended = client.append(observations=(storage.Observation(
-        "stats-interval-real-browser",
-        "cpu",
-        "stats-interval-fixture",
-        observed_at,
-        "stats-interval-fixture",
-        1,
-        {"process_percent": 17.0, "system_percent": 23.0},
-    ),))
-    assert appended.get("ok") is True, appended
-
-    _open_real_stats_graph(authenticated_e2e_browser)
-    round_trip = _exercise_real_stats_interval_round_trip(authenticated_e2e_browser)
-    assert round_trip.get("error") is None, round_trip
-    assert round_trip["before"]["options"] == round_trip["expected"], round_trip
-    assert round_trip["before"]["selected"] == "1", round_trip
-    assert "1" not in round_trip["widened"]["options"], round_trip
-    assert round_trip["widened"]["selected"] == "0", round_trip
-    assert round_trip["widened"]["generation"]["requested_resolution"] == "AUTO", round_trip
-    assert round_trip["widened"]["generation"]["resolution_seconds"] == 300, round_trip
-    assert round_trip["returned"]["options"] == round_trip["before"]["options"], round_trip
-    assert round_trip["returned"]["selected"] == "0", round_trip
-    assert round_trip["returned"]["generation"]["requested_resolution"] == "AUTO", round_trip
-    assert round_trip["returned"]["generation"]["resolution_seconds"] == 1, round_trip
-    assert round_trip["returned"]["generation"]["buckets"] == 300, round_trip
-
-    _open_real_stats_graph(authenticated_e2e_browser, include_finder=False)
-    persisted = _real_stats_picker_state(authenticated_e2e_browser)
-    assert persisted["range_seconds"] == 300, persisted
-    assert persisted["options"] == round_trip["expected"], {"round_trip": round_trip, "persisted": persisted}
-    assert persisted["selected"] == "0", persisted
-    assert persisted["resolution_seconds"] == 1 and persisted["buckets"] == 300, persisted
-    _flush_and_stop_real_stats_graph(authenticated_e2e_browser)

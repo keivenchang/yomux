@@ -2,14 +2,13 @@ package stats
 
 import (
 	"context"
-	"encoding/json"
+
 	"errors"
 	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
-	"reflect"
-	"sort"
+
 	"testing"
 	"time"
 
@@ -325,78 +324,6 @@ func TestPricingCatalogInfersOnlyPythonReviewedModelSuffixes(t *testing.T) {
 	}
 }
 
-func TestPricingCatalogPackagedMergeMatchesPythonForEveryModelAndRate(t *testing.T) {
-	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-	testsupport.RequireDeprecatedPythonBackend(t)
-	scriptPath := filepath.Join(t.TempDir(), "pricing-catalog-oracle.py")
-	const oracle = `import json
-from yomux_lib.observability.pricing_catalog import load_packaged_seed
-
-catalog = load_packaged_seed()
-rate_keys = ("direction", "modality", "cache_role", "unit", "profile", "service_tier", "scale", "usd", "effective_from")
-models = []
-for model in catalog["models"]:
-    rates = [{key: rate[key] for key in rate_keys} for rate in model["rates"]]
-    rates.sort(key=lambda item: tuple(str(item[key]) for key in rate_keys))
-    models.append({"provider": model["provider"], "model": model["model"], "aliases": sorted(model["aliases"]), "rates": rates})
-models.sort(key=lambda item: (item["provider"], item["model"]))
-print(json.dumps({"catalog_revision": catalog["catalog_revision"], "models": models}, sort_keys=True, separators=(",", ":")))
-`
-	if err := os.WriteFile(scriptPath, []byte(oracle), 0600); err != nil {
-		t.Fatal(err)
-	}
-	expectedRaw := runPython(t, pythonExecutable(t), scriptPath)
-	var expected any
-	if err := json.Unmarshal([]byte(expectedRaw), &expected); err != nil {
-		t.Fatalf("decode Python pricing catalog oracle: %v\n%s", err, expectedRaw)
-	}
-	catalog, err := LoadRepositoryPricingCatalog(testsupport.RepoRoot(t), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	models := make([]map[string]any, 0, len(catalog.Models))
-	for _, model := range catalog.Models {
-		aliases := append([]string(nil), model.Aliases...)
-		sort.Strings(aliases)
-		rates := make([]map[string]any, 0, len(model.Rates))
-		for _, rate := range model.Rates {
-			rates = append(rates, map[string]any{
-				"direction": rate.Direction, "modality": rate.Modality, "cache_role": rate.CacheRole,
-				"unit": rate.Unit, "profile": rate.Profile, "service_tier": rate.ServiceTier,
-				"scale": rate.Scale, "usd": rate.USD, "effective_from": rate.EffectiveFrom,
-			})
-		}
-		sort.Slice(rates, func(i, j int) bool {
-			for _, key := range []string{"direction", "modality", "cache_role", "unit", "profile", "service_tier", "scale", "usd", "effective_from"} {
-				left, right := fmt.Sprint(rates[i][key]), fmt.Sprint(rates[j][key])
-				if left != right {
-					return left < right
-				}
-			}
-			return false
-		})
-		models = append(models, map[string]any{"provider": model.Provider, "model": model.Model, "aliases": aliases, "rates": rates})
-	}
-	sort.Slice(models, func(i, j int) bool {
-		left, right := models[i], models[j]
-		if left["provider"] != right["provider"] {
-			return fmt.Sprint(left["provider"]) < fmt.Sprint(right["provider"])
-		}
-		return fmt.Sprint(left["model"]) < fmt.Sprint(right["model"])
-	})
-	gotRaw, err := json.Marshal(map[string]any{"catalog_revision": catalog.CatalogRevision, "models": models})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got any
-	if err := json.Unmarshal(gotRaw, &got); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(got, expected) {
-		t.Fatalf("full packaged pricing catalog mismatch\nGo: %s\nPython: %s", gotRaw, expectedRaw)
-	}
-}
-
 func TestPricingResolverMatchesPythonRoutedAndSubscriptionCases(t *testing.T) {
 	catalog, err := LoadRepositoryPricingCatalog(testsupport.RepoRoot(t), "")
 	if err != nil {
@@ -423,74 +350,6 @@ func TestPricingResolverMatchesPythonRoutedAndSubscriptionCases(t *testing.T) {
 				t.Fatalf("resolved pricing = marginal=%d api=%d evidence=%+v ok=%t err=%v", marginal, api, evidence, ok, err)
 			}
 		})
-	}
-}
-
-func TestPricingResolverProjectionMatchesPythonOnOneSharedFixture(t *testing.T) {
-	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-	testsupport.RequireDeprecatedPythonBackend(t)
-	root := t.TempDir()
-	fixturePath := filepath.Join(root, "pricing-fixture.json")
-	scriptPath := filepath.Join(root, "pricing-oracle.py")
-	fixture := map[string]any{
-		"event_id":    "pricing-oracle",
-		"direction":   "output",
-		"modality":    "text",
-		"cache_role":  "none",
-		"unit":        "tokens",
-		"observed_at": float64(1783728000),
-		"payload": map[string]any{
-			"quantity": float64(480000), "provider": "inferencehub",
-			"model": "openai/openai/gpt-5.6-luna", "agent_id": "agent-a",
-			"pricing_profile": "default", "telemetry_complete": true,
-		},
-	}
-	data, err := json.Marshal(fixture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(fixturePath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	const oracle = `import json, sys
-from pathlib import Path
-from yomux_lib.observability.pricing_catalog import PricingCatalog
-from yomux_lib.stats_current import pricing, storage, usage
-item = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-atom = storage.UsageAtom(item["event_id"], item["direction"], item["modality"], item["cache_role"], item["unit"], item["observed_at"], item["payload"])
-projected = pricing.UsagePriceProjector(PricingCatalog(Path(sys.argv[2])))(usage.normalize_usage_atom(atom))
-print(json.dumps({"micro_usd": projected.micro_usd, "api_list_micro_usd": projected.api_list_micro_usd, "priced": projected.priced, "catalog_model": projected.evidence.catalog_model if projected.evidence else None, "catalog_revision": projected.evidence.catalog_revision if projected.evidence else None}, sort_keys=True, separators=(",", ":")))
-`
-	if err := os.WriteFile(scriptPath, []byte(oracle), 0600); err != nil {
-		t.Fatal(err)
-	}
-	expectedRaw := runPython(t, pythonExecutable(t), scriptPath, fixturePath, filepath.Join(root, "python-pricing-cache"))
-	var expected map[string]any
-	if err := json.Unmarshal([]byte(expectedRaw), &expected); err != nil {
-		t.Fatalf("decode Python pricing oracle: %v\n%s", err, expectedRaw)
-	}
-	catalog, err := LoadRepositoryPricingCatalog(testsupport.RepoRoot(t), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	item := fixture
-	atom := UsageAtom{EventID: item["event_id"].(string), Direction: item["direction"].(string), Modality: item["modality"].(string), CacheRole: item["cache_role"].(string), Unit: item["unit"].(string), ObservedAt: item["observed_at"].(float64), Payload: item["payload"].(map[string]any)}
-	micro, api, evidence, priced, err := PricingResolver(catalog)(atom)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := map[string]any{"micro_usd": micro, "api_list_micro_usd": api, "priced": priced, "catalog_model": evidence.CatalogModel, "catalog_revision": evidence.CatalogRevision}
-	gotRaw, _ := json.Marshal(got)
-	var gotJSON any
-	if err := json.Unmarshal(gotRaw, &gotJSON); err != nil {
-		t.Fatal(err)
-	}
-	var expectedJSON any
-	if err := json.Unmarshal([]byte(expectedRaw), &expectedJSON); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(gotJSON, expectedJSON) {
-		t.Fatalf("Go/Python pricing projection mismatch\nGo: %s\nPython: %s", gotRaw, expectedRaw)
 	}
 }
 
@@ -650,7 +509,7 @@ func TestLoadRepositoryPricingCatalogIgnoresMissingFallbackAfterConfiguredCatalo
 
 func TestLoadRepositoryPricingCatalogPreservesConfiguredModelOverInternalFallback(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "yomux_lib", "data"), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "assets", "runtime"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	configured := filepath.Join(dir, "configured.json")
@@ -659,7 +518,7 @@ func TestLoadRepositoryPricingCatalogPreservesConfiguredModelOverInternalFallbac
 	if err := os.WriteFile(configured, []byte(configuredFixture), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "yomux_lib", "data", "internal_model_pricing.json"), []byte(internalFixture), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "assets", "runtime", "internal_model_pricing.json"), []byte(internalFixture), 0600); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := LoadRepositoryPricingCatalog(dir, configured)
@@ -674,7 +533,7 @@ func TestLoadRepositoryPricingCatalogPreservesConfiguredModelOverInternalFallbac
 
 func TestLoadRepositoryPricingCatalogMergesInternalLunaForPartialConfiguredCatalog(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "yomux_lib", "data"), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "assets", "runtime"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	configured := filepath.Join(dir, "configured.json")
@@ -683,7 +542,7 @@ func TestLoadRepositoryPricingCatalogMergesInternalLunaForPartialConfiguredCatal
 	if err := os.WriteFile(configured, []byte(configuredFixture), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "yomux_lib", "data", "internal_model_pricing.json"), []byte(internalFixture), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "assets", "runtime", "internal_model_pricing.json"), []byte(internalFixture), 0600); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := LoadRepositoryPricingCatalog(dir, configured)
@@ -698,7 +557,7 @@ func TestLoadRepositoryPricingCatalogMergesInternalLunaForPartialConfiguredCatal
 
 func TestPricingCatalogRefreshPreservesRepositoryFallbackMerge(t *testing.T) {
 	dir := t.TempDir()
-	dataDir := filepath.Join(dir, "yomux_lib", "data")
+	dataDir := filepath.Join(dir, "assets", "runtime")
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -745,7 +604,7 @@ func TestPricingCatalogRefreshPreservesRepositoryFallbackMerge(t *testing.T) {
 
 func TestLoadRepositoryPricingCatalogTreatsConfiguredLunaAliasAsOwnership(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "yomux_lib", "data"), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "assets", "runtime"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	configured := filepath.Join(dir, "configured.json")
@@ -754,7 +613,7 @@ func TestLoadRepositoryPricingCatalogTreatsConfiguredLunaAliasAsOwnership(t *tes
 	if err := os.WriteFile(configured, []byte(configuredFixture), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "yomux_lib", "data", "internal_model_pricing.json"), []byte(internalFixture), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "assets", "runtime", "internal_model_pricing.json"), []byte(internalFixture), 0600); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := LoadRepositoryPricingCatalog(dir, configured)

@@ -16,49 +16,59 @@ yomux_use_machine_tmux() {
   product_env_assign TMUX_SOCKET= TMUX_ALLOW_DEFAULT_SERVER=1
 }
 
-# Route startup through the same fail-closed Python census as runtime probes.
-yomux_port_listener_pids() {
-  local port="$1"
-  local listener_python="$(product_env_print PYTHON "${python_bin:-${PYTHON:-python3}}")"
-  local startup_repo_root
-  startup_repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)" || return 2
-  (cd -- "$startup_repo_root" && "$listener_python" -m yomux_lib.infra.listener_census "$port")
+# Native executable selection is shared by operator and managed launches.
+yomux_go_binary() {
+  local checkout="$1" configured candidate
+  configured="$(product_env_print GO_BINARY "")"
+  if [[ -n "$configured" ]]; then
+    [[ -f "$configured" && -x "$configured" ]] || { printf 'ERROR: Go binary is missing or unexecutable: %s\n' "$configured" >&2; return 2; }
+    printf '%s' "$configured"
+    return
+  fi
+  for candidate in "$checkout/bazel-bin/cmd/yomux-go/yomux-go_/yomux-go" "$checkout/bazel-bin/yomux-go" "$checkout/yomux-go"; do
+    if [[ -f "$candidate" && -x "$candidate" ]]; then printf '%s' "$candidate"; return; fi
+  done
+  printf 'ERROR: Go binary is unavailable in %s; run tools/build_go.sh\n' "$checkout" >&2
+  return 2
 }
 
-# Require EXACTLY one listener on a port and print its pid. The managed owner
-# probe binds its ownership assertion to this unique pid; more than one (or none)
-# is a hard failure, never a silent pick.
+yomux_validate_backend() {
+  local name value
+  for name in "${PRODUCT_ENV_CANONICAL_PREFIX}BACKEND" "${PRODUCT_ENV_LEGACY_PREFIXES[0]}BACKEND"; do
+    value="${!name-}"
+    case "$value" in ""|go|auto) ;; *) printf 'ERROR: %s=%s is unsupported; the Python server is retired\n' "$name" "$value" >&2; return 2 ;; esac
+  done
+}
+
+yomux_port_listener_pids() {
+  local checkout binary
+  checkout="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)" || return
+  binary="$(yomux_go_binary "$checkout")" || return
+  "$binary" --operator listeners --port "$1"
+}
+
 yomux_unique_listener_pid() {
-  local port="$1" pids count
-  pids="$(yomux_port_listener_pids "$port")" || return 2
-  count="$(printf '%s\n' "$pids" | grep -c '[0-9]')"
-  if [ "$count" -ne 1 ]; then
-    printf 'port %s must have exactly one listener; found %s\n' "$port" "$count" >&2
-    return 1
-  fi
-  printf '%s\n' "$pids" | grep '[0-9]'
+  local pids
+  pids="$(yomux_port_listener_pids "$1")" || return
+  [[ "$pids" =~ ^[0-9]+$ ]] || { printf 'ERROR: expected one listener on port %s\n' "$1" >&2; return 1; }
+  printf '%s' "$pids"
 }
 
 yomux_validate_instance_isolation() {
-  yomux_normalize_environment
-  local repo_root="$1"
-  local python_bin="$2"
-  local port="$3"
+  local checkout="$1" binary
+  binary="$(yomux_go_binary "$checkout")" || return
   if [[ -n "$(product_env_print ROW_PLAN_FILE "")" ]]; then
-    "$python_bin" "$repo_root/tools/instance_isolation.py" exec --plan-file "$(product_env_print ROW_PLAN_FILE)" -- \
-      "$python_bin" "$repo_root/tools/instance_isolation.py" validate-roots >/dev/null
-    return
+    "$binary" --operator validate-roots --root "$checkout" --plan-file "$(product_env_print ROW_PLAN_FILE)"
+  else
+    "$binary" --operator plan-direct --root "$checkout" --port "$3" >/dev/null
   fi
-  "$python_bin" "$repo_root/tools/instance_isolation.py" plan-direct --port "$port" >/dev/null
 }
 
 yomux_validate_root_environment() {
-  local requested_repo_root="${1:-${repo_root:-}}"
-  local requested_python_bin="${2:-${python_bin:-python3}}"
-  if [[ -z "$requested_repo_root" ]]; then
-    requested_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-  fi
-  "$requested_python_bin" "$requested_repo_root/tools/instance_isolation.py" validate-roots >/dev/null
+  local checkout="${1:-${repo_root:-}}" binary
+  [[ -n "$checkout" ]] || checkout="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+  binary="$(yomux_go_binary "$checkout")" || return
+  "$binary" --operator validate-roots --root "$checkout"
 }
 
 yomux_start_lock_path() {
@@ -89,7 +99,12 @@ yomux_release_start_lock() {
 
 yomux_acquire_start_lock() {
   yomux_normalize_environment
-  local lock_dir owner_pid
+  local lock_dir owner_pid inherited_path inherited_pid
+  inherited_path="$(product_env_print INHERITED_START_LOCK_PATH "")"
+  inherited_pid="$(product_env_print INHERITED_START_LOCK_PID "")"
+  # Consume the capability here; terminal and worker descendants never inherit it.
+  product_env_unset INHERITED_START_LOCK_PATH
+  product_env_unset INHERITED_START_LOCK_PID
   if ! yomux_validate_root_environment; then
     printf 'ERROR: startup root validation failed before lock acquisition\n' >&2
     return 1
@@ -106,6 +121,11 @@ yomux_acquire_start_lock() {
   # A cutover can source boot.sh in the shell that already holds this guard.
   # An inherited marker in another process never grants ownership.
   if [[ "${start_lock_acquired:-0}" -eq 1 && "$owner_pid" == "$BASHPID" ]]; then
+    return 0
+  fi
+  # A direct child may borrow its live launcher's exact guard, never release it.
+  if [[ "$inherited_path" == "$lock_dir" && "$inherited_pid" =~ ^[0-9]+$ && "$inherited_pid" == "$PPID" && "$owner_pid" == "$inherited_pid" ]] && kill -0 "$inherited_pid" 2>/dev/null; then
+    start_lock_acquired=0
     return 0
   fi
   if [[ "$owner_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$owner_pid" 2>/dev/null; then
@@ -183,13 +203,13 @@ yomux_macos_server_launcher() {
   # The plan JSON is a positional argument, not inherited state: a long-lived
   # tmux server cannot substitute a stale root or stale plan-file path. Both the
   # direct boot path and supported multi-row launcher use this same exec path.
-  printf '%s' 'repo=$1; launch_path=$2; shell_bin=$3; python_bin=$4; script=$5; log_path=$6; plan_json=$7; env_count=$8; shift 8; cd "$repo" || exit 2; export PATH="$launch_path" SHELL="$shell_bin" PYTHONUNBUFFERED=1 TERM=xterm-256color MALLOC_ARENA_MAX=2 || exit 2; unset TMUX TMUX_PANE; source "$repo/tools/product_environment.sh" || exit 2; for env_suffix in GO_BINARY GO_START_REASON CLAUDE_TRANSCRIPT_ROOT CODEX_TRANSCRIPT_ROOT OPENCODE_DATABASE TEST_AUTH_BYPASS TMUX_SOCKET TMUX_ALLOW_DEFAULT_SERVER; do product_env_unset "$env_suffix"; done; export '"$(yomux_default_server_optin)"' || exit 2; case "$env_count" in ""|*[!0-9]*) exit 2 ;; esac; for ((env_index=0; env_index<env_count; env_index++)); do assignment=$1; shift; case "$assignment" in *=*) ;; *) exit 2 ;; esac; env_name=${assignment%%=*}; if [[ ! "$env_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then exit 2; fi; export "$assignment" || exit 2; done; source "$repo/tools/startup_common.sh" || exit 2; yomux_normalize_environment; exec "$python_bin" "$repo/tools/instance_isolation.py" exec --plan-json "$plan_json" -- "$python_bin" -u "$script" "$@" >> "$log_path" 2>&1'
+  printf '%s' 'repo=$1; launch_path=$2; shell_bin=$3; native_binary=$4; script=$5; log_path=$6; plan_json=$7; env_count=$8; shift 8; cd "$repo" || exit 2; export PATH="$launch_path" SHELL="$shell_bin" TERM=xterm-256color MALLOC_ARENA_MAX=2 || exit 2; unset TMUX TMUX_PANE; source "$repo/tools/product_environment.sh" || exit 2; for env_suffix in GO_BINARY GO_START_REASON CLAUDE_TRANSCRIPT_ROOT CODEX_TRANSCRIPT_ROOT OPENCODE_DATABASE TEST_AUTH_BYPASS TMUX_SOCKET TMUX_ALLOW_DEFAULT_SERVER; do product_env_unset "$env_suffix"; done; export '"$(yomux_default_server_optin)"' || exit 2; case "$env_count" in ""|*[!0-9]*) exit 2 ;; esac; for ((env_index=0; env_index<env_count; env_index++)); do assignment=$1; shift; case "$assignment" in *=*) ;; *) exit 2 ;; esac; env_name=${assignment%%=*}; if [[ ! "$env_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then exit 2; fi; export "$assignment" || exit 2; done; source "$repo/tools/startup_common.sh" || exit 2; yomux_normalize_environment; exec "$native_binary" --operator exec --root "$repo" --plan-json "$plan_json" -- "$native_binary" --launch --launch-plan-json "$plan_json" --root "$repo" "$@" >> "$log_path" 2>&1'
 }
 
 yomux_submit_macos_server() {
   yomux_normalize_environment
   local repo_root="$1"
-  local python_bin="$2"
+  local native_binary="$2"
   local shell_bin="$3"
   local launch_path="$4"
   local port="$5"
@@ -217,8 +237,8 @@ yomux_submit_macos_server() {
   if [[ -n "$(product_env_print ROW_PLAN_FILE "")" ]]; then
     plan_json="$(< "$(product_env_print ROW_PLAN_FILE)")"
   else
-    plan_json="$("$python_bin" "$repo_root/tools/instance_isolation.py" plan-direct --port "$port")" || return
+    plan_json="$("$native_binary" --operator plan-direct --root "$repo_root" --port "$port")" || return
   fi
   yomux_macos_server_tmux new-session -d -s "$session_name" -c "$repo_root" \
-    /bin/bash -c "$launcher" bash "$repo_root" "$launch_path" "$shell_bin" "$python_bin" "$repo_root/yomux.py" "$log_path" "$plan_json" "$env_count" "$@"
+    /bin/bash -c "$launcher" bash "$repo_root" "$launch_path" "$shell_bin" "$native_binary" "$native_binary" "$log_path" "$plan_json" "$env_count" "$@"
 }

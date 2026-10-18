@@ -1,8 +1,4 @@
-# Standard Python project metadata. `pip install -e ".[yoagent]"` installs YOmux's deps and
-# the `yomux` command; pip itself enforces `requires-python` and resolves the dependency groups,
-# so Python-version and dependency prerequisites are checked by the standard tooling (not ad-hoc).
-# The tracked web-terminal assets and generated served bundle stay outside the Python wheel. Source
-# and editable installs use static/vendor directly; see `make xterm` for pinned upstream verification.
+# Python developer tooling only. Product commands are installed by tools/install.sh.
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
@@ -15,19 +11,13 @@ requires-python = ">=3.11"
 license = { text = "PolyForm-Noncommercial-1.0.0" }
 authors = [{ name = "Keiven Chang" }]
 dynamic = ["version"]
-dependencies = [
-  "pyyaml",
-  "watchfiles>=1.2.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
-# YO!agent backends (Claude / Codex SDKs) — needed for the in-app agent features.
-yoagent = [
-  "claude-code-sdk==0.0.25",
-  "openai-codex==0.1.0b3",
-]
 # Test / dev tooling.
 dev = [
+  "pyyaml",
+  "watchfiles>=1.2.0",
   "mypy",
   "pillow",
   "pytest",
@@ -36,18 +26,10 @@ dev = [
   "selenium",
 ]
 
-[project.scripts]
-yomux = "yomux:main"
-yolomux = "yolomux:main"
-
-[tool.setuptools]
-py-modules = ["yomux", "yolomux"]
-
 [tool.setuptools.packages.find]
 include = ["tools*", "yomux_lib*"]
 
 [tool.setuptools.package-data]
-yomux_lib = ["data/*.json"]
 tools = ["product_namespace.json"]
 
 # Package metadata reads the product version from version.yaml through the compatibility module.

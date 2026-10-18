@@ -5,8 +5,6 @@ import time
 from concurrent.futures import Future
 from concurrent.futures.process import BrokenProcessPool
 
-from yomux_lib import approvald
-from yomux_lib import batchd
 from yomux_lib.infra.host_identity import current_host_identity
 from yomux_lib.local_services.registry import LOCAL_SERVICE_BACKOFF_SECONDS
 from yomux_lib.local_services.registry import LocalServiceRegistry
@@ -169,93 +167,3 @@ def test_registry_refuses_incompatible_socket_owner_without_sidecar_record(tmp_p
     assert lease["process_diagnostic"]["reason"] == "missing_host_identity"
     assert shutdowns == []
     assert spawned == []
-
-
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_batchd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path, monkeypatch):
-    service = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
-    stale = service._queue_record("text_facts", {"text": "old"}, "maintenance", 1, "same")
-    service.latest_generation["same"] = 2
-    service._supersede_stale_queued("same", 2)
-    expired = service._queue_record("text_facts", {"text": "expired"}, "freshness", 1, "expired", deadline_at=time.monotonic() - 1.0)
-    # Past the BACKSTOP, not merely past the deadline. This row asserts a RUNNING record is
-    # terminalized; a running job now carries its deadline into its worker and owns the terminal
-    # state for BATCHD_RUNNING_DEADLINE_BACKSTOP_SECONDS, so only work that never answers is
-    # terminalized blind. `expired` above stays a bare deadline on purpose: queued expiry is exact.
-    running = service._queue_record(
-        "text_facts",
-        {"text": "hang"},
-        "freshness",
-        1,
-        "hang",
-        deadline_at=time.monotonic() - batchd.BATCHD_RUNNING_DEADLINE_BACKSTOP_SECONDS - 1.0,
-    )
-    running.status = "running"
-    running.future = Future()
-    waiting = service._queue_record("text_facts", {"text": "wait"}, "freshness", 1, "wait")
-    crashed = service._queue_record("text_facts", {"text": "crash"}, "interactive", 1, "crash")
-    crashed.status = "running"
-    crashed.future = Future()
-    crashed.future.set_exception(BrokenProcessPool("worker died"))
-
-    class BrokenExecutor:
-        def __init__(self):
-            self._processes = {}
-
-        def shutdown(self, **_kwargs):
-            return None
-
-    service.executors["interactive"] = BrokenExecutor()  # type: ignore[assignment]
-    service._pump()
-    for number in range(batchd.BATCHD_MAX_QUEUE):
-        queued = service._queue_record("text_facts", {"text": str(number)}, "freshness", number, f"queue-{number}")
-        queued.status = "queued"
-    client = batchd.BatchClient(tmp_path / "missing-batchd.sock")
-    monkeypatch.setattr(client.registry, "ensure_started", lambda: False)
-
-    assert stale.status == "superseded"
-    assert expired.status == "timed_out"
-    assert running.status == "timed_out"
-    assert waiting.status == "queued"
-    assert crashed.status == "failed"
-    # A crashed WORKER is historical job failure, not a current daemon failure. Publishing it
-    # as `last_failure` pinned a healthy batchd to degraded in the health observer, permanently.
-    _st = service.common_status()
-    assert _st["last_job_failure"] == "worker crashed"
-    assert not _st.get("last_failure"), _st.get("last_failure")
-    assert service._submit({"task": "text_facts", "payload": {"text": "overflow"}}) == {"ok": False, "error": "queue full"}
-    missing_response = client.submit("text_facts", {"text": "queued"})
-    assert missing_response["ok"] is False
-    assert missing_response["error"]
-    running.future.set_result(b'{"bytes":4,"lines":1,"nonempty_lines":1}')
-    service._pump()
-    service._on_shutdown()
-
-
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_approvald_live_socket_status_and_shutdown_do_not_replay_actions(tmp_path, monkeypatch):
-    FakeWorker.created = []
-    monkeypatch.setattr(approvald, "AutoApproveWorker", FakeWorker)
-    service = approvald.PersistentApprovalService(tmp_path / "approvald.sock", idle_seconds=10.0)
-    worker = threading.Thread(target=service.run, daemon=True)
-    worker.start()
-    client = approvald.ApprovalClient(tmp_path / "approvald.sock")
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline and not client.request({"action": "ping"}, timeout=0.1).get("ok"):
-        time.sleep(0.01)
-
-    handle, status = client.start_worker(session="6", target="%11", owner_extra={"control_socket": "/tmp/yolo.sock"}, dangerously_yolo=True)
-    live_status = client.service_status()
-    shutdown = client.request({"action": "shutdown"}, timeout=1.0)
-    worker.join(timeout=2.0)
-    restarted = approvald.PersistentApprovalService(tmp_path / "approvald.sock", idle_seconds=10.0)
-
-    assert handle is not None
-    assert status["target"] == "%11"
-    assert live_status["target_count"] == 1
-    assert shutdown == {"ok": True, "shutdown": True}
-    assert worker.is_alive() is False
-    assert FakeWorker.created[0].stopped is True
-    assert restarted.status()["target_count"] == 0

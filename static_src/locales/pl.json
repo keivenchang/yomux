@@ -1547,6 +1547,8 @@
   "shortcuts.section.menus": "Menu, palety i pickery",
   "shortcuts.section.tabsPanes": "Tabulatory / Panele",
   "shortcuts.section.terminal": "Terminalowy",
+  "shortcuts.exitTmuxCopyMode": "Wyjdź z trybu kopiowania tmux",
+  "shortcuts.terminalScrollHelp": "Przewijaj lub użyj Fn+góra/dół, aby przewijać aplikację. Przytrzymaj Shift podczas przewijania, aby przeglądać historię tmux.",
   "shortcuts.switchTmuxWindow": "Poprzedni / następny tab",
   "shortcuts.toggleComment": "Komentarz z linią przełączającą",
   "shortcuts.toggleFinder": "Przełącznik {name}",

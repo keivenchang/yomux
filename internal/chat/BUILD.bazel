@@ -1,0 +1,62 @@
+load("@rules_go//go:def.bzl", "go_library")
+load("//:tools/bazel_rules.bzl", "go_test_pair")
+
+exports_files(["BUILD.bazel"])
+
+go_library(
+    name = "chat_lib",
+    srcs = [
+        "agent.go",
+        "cursor.go",
+        "diagnostics.go",
+        "events.go",
+        "history.go",
+        "messages.go",
+        "presence.go",
+        "questions.go",
+        "service.go",
+        "store.go",
+    ],
+    importpath = "github.com/keivenchang/yomux/internal/chat",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/atomicfile:atomicfile_lib",
+        "//internal/locales:locales_lib",
+        "//internal/mutablefs:mutablefs_lib",
+        "//internal/work:work_lib",
+        "@com_github_mattn_go_sqlite3//:go_default_library",
+        "@org_golang_x_text//cases",
+        "@org_golang_x_text//unicode/norm",
+    ],
+)
+
+go_test_pair(
+    name = "chat",
+    srcs = [
+        "agent_test.go",
+        "cursor_test.go",
+        "events_test.go",
+        "questions_test.go",
+        "service_test.go",
+        "sqlite_test.go",
+        "store_test.go",
+    ],
+    data = ["//:chat_protocol_test_inputs"],
+    embed = [":chat_lib"],
+    deps = [
+        "@com_github_mattn_go_sqlite3//:go_default_library",
+        "@rules_go//go/runfiles",
+    ],
+)
+
+filegroup(
+    name = "qualified_sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.lock",
+            "**/*.log",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)

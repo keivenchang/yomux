@@ -90,8 +90,13 @@ func (c *updateChecker) check(ctx context.Context) updateSnapshot {
 	if preference == "none" {
 		return result
 	}
+	sourceRoot, _, sourceErr := nativeUpdateSource(c.root)
+	if sourceErr != nil {
+		result.Error = sourceErr.Error()
+		return result
+	}
 	command := func(args ...string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", c.root}, args...)...)
+		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", sourceRoot}, args...)...)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return nil, fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(string(output)))
@@ -288,8 +293,11 @@ func (s *server) recoverSelfUpdateJob() {
 	if job.State != "restarting" {
 		return
 	}
-	cmd := exec.Command("git", "-C", s.root, "rev-parse", "HEAD")
-	output, err := cmd.Output()
+	sourceRoot, _, err := nativeUpdateSource(s.root)
+	var output []byte
+	if err == nil {
+		output, err = exec.Command("git", "-C", sourceRoot, "rev-parse", "HEAD").Output()
+	}
 	if err != nil {
 		_, _ = mutateSelfUpdateJob(s.updateJobPath, job.ID, []string{"restarting"}, func(current *selfUpdateJob) {
 			current.State, current.Progress = "failed", "Managed restart did not verify the pinned target"
@@ -369,18 +377,23 @@ func (s *server) runSelfUpdate(job selfUpdateJob) {
 		}
 		return output, nil
 	}
-	root, err := filepath.EvalSymlinks(s.root)
+	runtimeRoot, err := filepath.EvalSymlinks(s.root)
 	if err != nil {
 		fail(err)
 		return
 	}
-	root, err = filepath.Abs(root)
+	runtimeRoot, err = filepath.Abs(runtimeRoot)
 	if err != nil {
 		fail(err)
 		return
 	}
-	if root != s.root {
+	if runtimeRoot != s.root {
 		fail(errors.New("checkout identity changed"))
+		return
+	}
+	root, installation, err := nativeUpdateSource(runtimeRoot)
+	if err != nil {
+		fail(err)
 		return
 	}
 	headBytes, err := command(root, "rev-parse", "HEAD")
@@ -444,7 +457,7 @@ func (s *server) runSelfUpdate(job selfUpdateJob) {
 		fail(fmt.Errorf("stage archive failed: %s %v %v", archiveErr.String(), archiveWait, tarWait))
 		return
 	}
-	for _, args := range [][]string{{"tools/build_go.sh"}, {"python3", "tools/static_build.py"}} {
+	for _, args := range [][]string{{"tools/build_go.sh"}, {"bazel-bin/tools/staticgen/staticgen_/staticgen", "--source-root", stage, "--output-directory", filepath.Join(stage, "static")}} {
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Dir = stage
 		cmd.Env = os.Environ()
@@ -463,6 +476,20 @@ func (s *server) runSelfUpdate(job selfUpdateJob) {
 	if versionErr != nil || strings.TrimSpace(string(versionOutput)) != "yomux-go "+job.Target {
 		fail(fmt.Errorf("prepared Go executable reported the wrong version: %s", strings.TrimSpace(string(versionOutput))))
 		return
+	}
+	operatorCheck := exec.Command(binary, "--operator", "version", "--root", stage)
+	operatorOutput, operatorErr := operatorCheck.CombinedOutput()
+	if operatorErr != nil || strings.TrimSpace(string(operatorOutput)) != job.Target {
+		fail(fmt.Errorf("prepared checkout lacks compatible native launch support: %s", strings.TrimSpace(string(operatorOutput))))
+		return
+	}
+	if installation != nil {
+		options := exec.Command("bash", filepath.Join(stage, "tools", "install.sh"), "--help")
+		output, err := options.CombinedOutput()
+		if err != nil || !strings.Contains(string(output), "--source-root") {
+			fail(fmt.Errorf("prepared installer lacks installed-update provenance support: %s", strings.TrimSpace(string(output))))
+			return
+		}
 	}
 	preparedBinary := filepath.Join(stage, "yomux-go")
 	if err := copyAtomic(binary, preparedBinary, 0o700); err != nil {
@@ -486,30 +513,35 @@ func (s *server) runSelfUpdate(job selfUpdateJob) {
 		fail(errors.New("checkout changed during update preparation"))
 		return
 	}
+	currentSource, currentInstallation, err := nativeUpdateSource(runtimeRoot)
+	if err != nil || currentSource != root || (installation == nil) != (currentInstallation == nil) ||
+		(installation != nil && *installation != *currentInstallation) {
+		fail(errors.New("installation provenance changed during update preparation"))
+		return
+	}
 	if _, err := command(root, "merge", "--ff-only", job.TargetSHA); err != nil {
 		fail(err)
 		return
 	}
-	for _, asset := range []string{"yomux.js", "yomux.css"} {
-		if err := copyAtomic(filepath.Join(stage, "static", asset), filepath.Join(root, "static", asset), 0o644); err != nil {
-			fail(fmt.Errorf("activated commit but bundle install failed: %w", err))
+	if installation != nil {
+		installer := exec.Command("bash", filepath.Join(stage, "tools", "install.sh"), "--prefix", installation.Prefix, "--source-root", root)
+		installer.Dir = stage
+		installer.Env = environmentWithValue(os.Environ(), "YOMUX_GO_BINARY", preparedBinary)
+		if output, err := installer.CombinedOutput(); err != nil {
+			fail(fmt.Errorf("activated commit but native installation failed: %w: %s", err, strings.TrimSpace(string(output))))
 			return
 		}
-	}
-	set("restarting", "Starting the selected instance through boot.sh", nil)
-	args := []string{"--force", "--backend", "go", "--port", strconv.Itoa(s.port)}
-	if s.httpMode {
-		args = append(args, "--http")
-	}
-	for index := 1; index < len(os.Args); index++ {
-		arg := os.Args[index]
-		if arg == "--host" || arg == "--cert" || arg == "--key" {
-			if index+1 < len(os.Args) {
-				args = append(args, arg, os.Args[index+1])
-				index++
+		preparedBinary = filepath.Join(runtimeRoot, "yomux-go")
+	} else {
+		for _, asset := range []string{"yomux.js", "yomux.css"} {
+			if err := copyAtomic(filepath.Join(stage, "static", asset), filepath.Join(root, "static", asset), 0o644); err != nil {
+				fail(fmt.Errorf("activated commit but bundle install failed: %w", err))
+				return
 			}
 		}
 	}
+	set("restarting", "Starting the selected instance through boot.sh", nil)
+	args := s.selfUpdateBootArgs()
 	jobPath, err := filepath.Abs(s.updateJobPath)
 	if err != nil {
 		fail(err)
@@ -518,7 +550,7 @@ func (s *server) runSelfUpdate(job selfUpdateJob) {
 	launcherLog := filepath.Join(stage, "managed-launcher.log")
 	supervisorSpecPath := filepath.Join(stage, "self-update-supervisor.json")
 	spec := selfUpdateSupervisorSpec{
-		JobPath: jobPath, JobID: job.ID, Root: root, PreparedBinary: preparedBinary,
+		JobPath: jobPath, JobID: job.ID, Root: runtimeRoot, PreparedBinary: preparedBinary,
 		BootArgs: args, LogPath: launcherLog,
 	}
 	if err := writeSelfUpdateSupervisorSpec(supervisorSpecPath, spec); err != nil {
@@ -739,4 +771,25 @@ func updateNotifyLevelAllows(level, threshold string) bool {
 		threshold = "patch"
 	}
 	return ranks[level] > 0 && ranks[level] >= ranks[threshold]
+}
+
+// Restart from the effective startup state. Re-reading argv loses defaults and
+// equals-form flags, and can widen a loopback listener during an update.
+func (s *server) selfUpdateBootArgs() []string {
+	args := []string{"--force", "--backend", "go", "--port", strconv.Itoa(s.port), "--host", s.host}
+	if s.config != "" {
+		args = append(args, "--config", s.config)
+	}
+	if s.statsPath != "" {
+		args = append(args, "--stats", s.statsPath)
+	}
+	if !s.dangerouslyYolo {
+		args = append(args, "--no-dang")
+	}
+	if s.httpMode {
+		args = append(args, "--http")
+	} else if s.tlsCertificate != "" {
+		args = append(args, "--cert", s.tlsCertificate, "--key", s.tlsKey)
+	}
+	return args
 }

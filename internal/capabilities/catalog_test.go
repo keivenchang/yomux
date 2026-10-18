@@ -40,34 +40,39 @@ func TestSetAdvancesRevisionOnlyWhenStateChanges(t *testing.T) {
 
 func TestRouteCapabilityIsMethodAndOperationAware(t *testing.T) {
 	checks := map[string]string{
-		"GET /api/fs/read?path=/tmp/a":      "finder.read.v1",
-		"POST /api/fs/write":                "finder.write.v1",
-		"GET /api/fs/search?root=/tmp":      "finder.search.v1",
-		"GET /api/fs/watch-diff?full=1":     "finder.watch.v1",
-		"POST /api/watch/roots":             "finder.watch.v1",
-		"GET /api/batch/zip?path=/tmp/root": "finder.preview.v1",
-		"POST /api/fs/batch":                "finder.batch.v1",
-		"POST /api/create-session":          "session.create.v1",
-		"GET /api/yoagent/conversation":     "pane.agent.v1",
-		"GET /api/system-status":            "core.diagnostics.v1",
-		"GET /api/session-files?session=1":  "finder.git.v1",
-		"GET /api/transcripts":              "core.bootstrap.v1",
-		"GET /api/transcript?session=1":     "terminal.status.v1",
-		"GET /api/context?session=1":        "terminal.status.v1",
-		"GET /api/context-items?session=1":  "terminal.status.v1",
-		"GET /api/context-stream?session=1": "terminal.status.v1",
-		"GET /api/settings":                 "core.settings.v1",
-		"POST /api/settings":                "core.settings.v1",
-		"GET /api/update-status":            "core.updates.v1",
-		"POST /api/self-update":             "core.updates.v1",
-		"GET /api/self-update/status":       "core.updates.v1",
-		"GET /api/watched-prs":              "core.integrations.v1",
-		"GET /api/auto-approve":             "yolo.auto-approve.v1",
-		"POST /api/auto-approve":            "yolo.auto-approve.v1",
-		"GET /api/yolo-rules":               "yolo.auto-approve.v1",
-		"POST /api/yolo-rules/open":         "yolo.auto-approve.v1",
-		"POST /api/yolo-rules/reload":       "yolo.auto-approve.v1",
-		"POST /api/attention-ack":           "terminal.status.v1",
+		"GET /api/fs/read?path=/tmp/a":           "finder.read.v1",
+		"POST /api/fs/write":                     "finder.write.v1",
+		"GET /api/fs/search?root=/tmp":           "finder.search.v1",
+		"GET /api/fs/watch-diff?full=1":          "finder.watch.v1",
+		"POST /api/watch/roots":                  "finder.watch.v1",
+		"GET /api/batch/zip?path=/tmp/root":      "finder.preview.v1",
+		"POST /api/fs/batch":                     "finder.batch.v1",
+		"POST /api/create-session":               "session.create.v1",
+		"GET /api/yoagent/conversation":          "pane.agent.v1",
+		"GET /api/yoagent/jobs":                  "pane.agent.v1",
+		"POST /api/yoagent/actions/preview-send": "pane.agent.v1",
+		"POST /api/yoagent/actions/execute-send": "pane.agent.v1",
+		"POST /api/yoagent/waits/ya_test/clear":  "pane.agent.v1",
+		"POST /api/yoagent/prewarm":              "pane.agent.v1",
+		"GET /api/system-status":                 "core.diagnostics.v1",
+		"GET /api/session-files?session=1":       "finder.git.v1",
+		"GET /api/transcripts":                   "core.bootstrap.v1",
+		"GET /api/transcript?session=1":          "terminal.status.v1",
+		"GET /api/context?session=1":             "terminal.status.v1",
+		"GET /api/context-items?session=1":       "terminal.status.v1",
+		"GET /api/context-stream?session=1":      "terminal.status.v1",
+		"GET /api/settings":                      "core.settings.v1",
+		"POST /api/settings":                     "core.settings.v1",
+		"GET /api/update-status":                 "core.updates.v1",
+		"POST /api/self-update":                  "core.updates.v1",
+		"GET /api/self-update/status":            "core.updates.v1",
+		"GET /api/watched-prs":                   "core.integrations.v1",
+		"GET /api/auto-approve":                  "yolo.auto-approve.v1",
+		"POST /api/auto-approve":                 "yolo.auto-approve.v1",
+		"GET /api/yolo-rules":                    "yolo.auto-approve.v1",
+		"POST /api/yolo-rules/open":              "yolo.auto-approve.v1",
+		"POST /api/yolo-rules/reload":            "yolo.auto-approve.v1",
+		"POST /api/attention-ack":                "terminal.status.v1",
 	}
 	for request, want := range checks {
 		var method, path string
@@ -92,6 +97,17 @@ func TestRouteCapabilityIsMethodAndOperationAware(t *testing.T) {
 	}
 	if got := Policy("POST", "/api/kill-window").Role; got != "admin" {
 		t.Fatalf("tmux window kill role = %q, want admin", got)
+	}
+	if got := Policy("POST", "/api/yoagent/chat/request-1/cancel").Role; got != "admin" {
+		t.Fatalf("YO!agent cancellation role = %q, want admin", got)
+	}
+	if got := Policy("GET", "/api/yoagent/jobs").Role; got != "admin" {
+		t.Fatalf("YO!agent jobs role = %q, want admin", got)
+	}
+	for _, path := range []string{"/api/yoagent/jobs", "/api/yoagent/jobs/cancel-session", "/api/yoagent/jobs/yj_test/confirm", "/api/yoagent/jobs/yj_test/cancel"} {
+		if policy := Policy("POST", path); policy.Role != "admin" || policy.Capability != "pane.agent.v1" {
+			t.Fatalf("YO!agent job mutation policy for %q = %#v", path, policy)
+		}
 	}
 	if got := RouteCapability("POST", "/api/kill-window"); got != "session.kill.v1" {
 		t.Fatalf("tmux window kill capability = %q, want session.kill.v1", got)

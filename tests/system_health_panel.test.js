@@ -329,11 +329,11 @@ function renderAlerts(healthOverrides = {}) {
 
 // -- the guard ---------------------------------------------------------------------------------
 
-test('the panel guard renders schema 5, the version yomux_lib/local_service_projection.py publishes', () => {
+test('the panel guard renders the captured local-services schema contract', () => {
   const guarded = [...source.matchAll(/Number\(payload\.local_services\?\.schema_version\) === (\d+)/g)].map(match => match[1]);
   assert.deepEqual(guarded, ['5'], 'the panel must guard exactly once, on the published schema version');
-  const projection = fs.readFileSync('yomux_lib/local_service_projection.py', 'utf8');
-  assert.match(projection, /^LOCAL_SERVICES_SCHEMA_VERSION = 5$/m, 'producer and consumer pin the same number');
+  const contract = JSON.parse(fs.readFileSync('tests/fixtures/retired_stats_ui_contract.json', 'utf8')).local_services_contract;
+  assert.equal(contract.schema_version, Number(guarded[0]), 'the renderer matches the independently captured producer contract');
 });
 
 test('an unsupported schema renders every health column as its reason, never as a number', () => {
@@ -1456,7 +1456,7 @@ test('a recovered corrupt database is named in the same one compact alert', () =
 
 test('unattached, not-yet-probing and probing-but-unchanged are three different, named facts', () => {
   // `observer_cycles`/`observer_alive` are NULL when nothing is attached, not `0`/`false` --
-  // `yomux_lib/local_service_projection.py` refuses to publish a count nobody took, and
+  // The captured producer contract refuses to publish a count nobody took, and
   // `tests/test_app.py::test_an_app_with_no_observer_attached_says_so_instead_of_publishing_zeros`
   // pins that end. This is the other end: `Number(null)` is 0, so rendering the count through the
   // plain number formatter would have turned the honest absence straight back into a measured

@@ -1,0 +1,2843 @@
+{
+  "baseline": "0e3aa931e",
+  "entries": [
+    {
+      "path": "tests/test_activity.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 286
+    },
+    {
+      "path": "tests/test_activity_summary.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 898
+    },
+    {
+      "path": "tests/test_activity_summary_disabled.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 94
+    },
+    {
+      "path": "tests/test_api_response_parent.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1120
+    },
+    {
+      "path": "tests/test_app.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 19976
+    },
+    {
+      "path": "tests/test_application_scroll.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 58
+    },
+    {
+      "path": "tests/test_approvald.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 259
+    },
+    {
+      "path": "tests/test_attention_ack.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 169
+    },
+    {
+      "path": "tests/test_auto_approve_detector.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_auto_approve_detector.py::test_approval_detection_pipeline_has_one_shared_owner",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_auto_approve_detector.py::test_mock_codex_3_option_worker_walks_to_option_1"
+      ],
+      "lines_removed": 38
+    },
+    {
+      "path": "tests/test_auto_approve_lock.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 57
+    },
+    {
+      "path": "tests/test_auto_approve_worker.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 716
+    },
+    {
+      "path": "tests/test_backend_health_catalog.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1469
+    },
+    {
+      "path": "tests/test_backend_health_event.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 338
+    },
+    {
+      "path": "tests/test_backend_health_job_failure_ownership.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 180
+    },
+    {
+      "path": "tests/test_backend_health_liveness.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 957
+    },
+    {
+      "path": "tests/test_backend_health_observer.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1238
+    },
+    {
+      "path": "tests/test_backend_health_recovery.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 699
+    },
+    {
+      "path": "tests/test_backend_health_recovery_wiring.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 529
+    },
+    {
+      "path": "tests/test_backend_health_store.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 945
+    },
+    {
+      "path": "tests/test_background_scheduler.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 106
+    },
+    {
+      "path": "tests/test_background_scheduler_contract.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 200
+    },
+    {
+      "path": "tests/test_batchd.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 4028
+    },
+    {
+      "path": "tests/test_batchd_failure_isolation.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_batchd_failure_isolation.py::test_contended_shutdown_reports_draining_when_cached_status_predates_accepted_work",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_batchd_failure_isolation.py::test_first_contended_status_is_complete_and_contention_is_counted",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_batchd_failure_isolation.py::test_shutdown_that_wins_admission_refuses_the_overlapping_submit",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_batchd_failure_isolation.py::test_state_lock_contention_records_a_pending_shutdown_request",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_batchd_failure_isolation.py::test_state_lock_contention_returns_typed_busy_without_entering_the_handler",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_batchd_failure_isolation.py::test_submit_that_wins_admission_drains_before_overlapping_shutdown_stops"
+      ],
+      "lines_removed": 256
+    },
+    {
+      "path": "tests/test_bfs_index.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1297
+    },
+    {
+      "path": "tests/test_boot_healthz_probe.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 397
+    },
+    {
+      "path": "tests/test_browser_boot.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_boot.py::test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_boot.py::test_hard_loaded_yoagent_keeps_activity_summary_disabled_without_requests_or_spinner",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_boot.py::test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_and_rotation",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_boot.py::test_real_xterm_opencode_touch_scroll_matches_wheel_and_does_not_move_outer_page",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_boot.py::test_real_xterm_renders_tmux_output_and_survives_pane_resize",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_boot.py::test_real_xterm_terminal_reference_scan_stays_bounded_under_latency",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_boot.py::test_real_xterm_trusted_touch_long_press_selects_extends_and_offers_copy",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_boot.py::test_shared_tree_columns_preserve_unchanged_native_text_nodes"
+      ],
+      "lines_removed": 1419
+    },
+    {
+      "path": "tests/test_browser_dockview.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_dockview.py::test_dockview_delayed_tab_activation_still_focuses_terminal",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_dockview.py::test_dockview_prosemirror_failure_does_not_block_xterm_switch",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_dockview.py::test_dockview_real_xterm_tab_switch_accepts_input_and_output"
+      ],
+      "lines_removed": 263
+    },
+    {
+      "path": "tests/test_browser_finder_fs_repro.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 46
+    },
+    {
+      "path": "tests/test_browser_layout.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_layout.py::test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_layout.py::test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_layout.py::test_real_agent_prompts_render_ask_attention_in_live_server"
+      ],
+      "lines_removed": 1505
+    },
+    {
+      "path": "tests/test_browser_ring_landing_verify.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_ring_landing_verify.py::test_ring_writer_accepts_explicit_zero_beside_downtime_gap"
+      ],
+      "lines_removed": 66
+    },
+    {
+      "path": "tests/test_browser_stats_coverage.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_stats_coverage.py::test_current_cost_pricing_link_dispatches_external_open",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_stats_coverage.py::test_current_stats_browser_traverses_every_exact_matrix_cell",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_stats_coverage.py::test_current_stats_one_second_motion_and_sse_delta_do_not_refetch_or_fabricate",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_stats_coverage.py::test_current_stats_one_second_motion_preserves_sparse_native_cadence_series",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_stats_coverage.py::test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell"
+      ],
+      "lines_removed": 383
+    },
+    {
+      "path": "tests/test_browser_stats_widen.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_stats_widen.py::test_hidden_stats_panel_receives_push_then_opens_from_cached_generation",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_stats_widen.py::test_real_stats_cleanup_settles_start_and_stops_before_final_flush",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_stats_widen.py::test_real_stats_cpu_value_round_trips_through_rpc_and_rendered_svg",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_stats_widen.py::test_real_stats_interval_options_return_after_range_round_trip_and_reload",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_browser_stats_widen.py::test_stats_stream_failure_is_durable_latched_and_recovers_only_after_a_real_push"
+      ],
+      "lines_removed": 677
+    },
+    {
+      "path": "tests/test_cache.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 44
+    },
+    {
+      "path": "tests/test_chat_service.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 217
+    },
+    {
+      "path": "tests/test_chat_store.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 919
+    },
+    {
+      "path": "tests/test_client_event_broker_backlog_disambiguation.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 958
+    },
+    {
+      "path": "tests/test_client_events.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 438
+    },
+    {
+      "path": "tests/test_common.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_common.py::test_backend_primitive_consumers_share_the_canonical_owners",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_common.py::test_backend_primitive_implementation_bodies_have_one_owner",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_common.py::test_main_process_cpu_work_has_named_allowlist",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_common.py::test_record_owned_thread_starts_use_shared_rollback_owner"
+      ],
+      "lines_removed": 161
+    },
+    {
+      "path": "tests/test_control.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 241
+    },
+    {
+      "path": "tests/test_drop_actions.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 165
+    },
+    {
+      "path": "tests/test_e2e_api_errors.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 491
+    },
+    {
+      "path": "tests/test_e2e_auto_approve.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 406
+    },
+    {
+      "path": "tests/test_e2e_browser_harness.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1007
+    },
+    {
+      "path": "tests/test_e2e_external_resources.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 31
+    },
+    {
+      "path": "tests/test_e2e_system_status.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 86
+    },
+    {
+      "path": "tests/test_events_state.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 47
+    },
+    {
+      "path": "tests/test_file_index.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1300
+    },
+    {
+      "path": "tests/test_filesystem.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 5466
+    },
+    {
+      "path": "tests/test_filesystem_access_policy.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 371
+    },
+    {
+      "path": "tests/test_filesystem_authorize_repoint.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1781
+    },
+    {
+      "path": "tests/test_filesystem_delete_cooperation.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 247
+    },
+    {
+      "path": "tests/test_filesystem_operation_route_contract.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 144
+    },
+    {
+      "path": "tests/test_fixture_parents.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_fixture_parents.py::test_fixture_http_server_binds_ephemeral_port_preserves_headers_and_stops_thread"
+      ],
+      "lines_removed": 14
+    },
+    {
+      "path": "tests/test_fs_preflight.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_fs_preflight.py::test_real_pricing_wal_writer_refuses_before_creating_database",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_fs_preflight.py::test_real_search_wal_writer_refuses_before_creating_database",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_fs_preflight.py::test_real_stats_wal_writer_refuses_before_creating_database"
+      ],
+      "lines_removed": 21
+    },
+    {
+      "path": "tests/test_gate_aged_state.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_aged_state.py::test_aged_server_restart_preserves_selected_state_and_private_identity",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_aged_state.py::test_browser_journey_error_gate_fails_closed_on_unreadable_log_ring",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_aged_state.py::test_browser_journey_error_gate_fails_when_bounded_ring_drops_entries",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_aged_state.py::test_browser_journey_error_gate_initializes_absent_consumption_state",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_aged_state.py::test_browser_journey_error_gate_rejects_malformed_existing_consumption_state",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_aged_state.py::test_browser_journey_error_gate_rejects_real_error_and_rejection",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_aged_state.py::test_browser_journey_error_gate_rejects_reused_id_after_server_log_reset",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_aged_state.py::test_browser_journey_error_gate_rejects_unconsumed_server_failures",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_aged_state.py::test_browser_journey_error_gate_rejects_unvisited_claimed_surface",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_aged_state.py::test_nested_finder_journey_retains_each_phase_without_duplicate_work",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_aged_state.py::test_real_client_error_upload_is_always_on_and_durable",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_aged_state.py::test_stateful_journey_stop_rejects_browser_outside_fixture_origin"
+      ],
+      "lines_removed": 585
+    },
+    {
+      "path": "tests/test_gate_agent_state.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_agent_state.py::test_browser_server_forwards_its_runtime_root_owner",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_agent_state.py::test_f1_working_to_idle_and_blocked_clears_the_rendered_green_indicator",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_agent_state.py::test_f2_active_working_capture_renders_the_green_indicator",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_agent_state.py::test_f3_goal_blocked_renders_distinctly_from_goal_achieved",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_agent_state.py::test_f4_python3_claude_mock_process_is_recognised_as_an_ai_agent",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_agent_state.py::test_f5_realistic_roster_count_matches_its_stale_session_breakdown",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_agent_state.py::test_f6_failure_diagnostic_projection_is_reachable_and_serializable",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_agent_state.py::test_f6_realistic_consumers_converge_to_the_published_roster_revision",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_agent_state.py::test_realistic_runtime_uses_browser_demand_to_establish_status_readiness"
+      ],
+      "lines_removed": 400
+    },
+    {
+      "path": "tests/test_gate_api_errors.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 292
+    },
+    {
+      "path": "tests/test_gate_auth.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 141
+    },
+    {
+      "path": "tests/test_gate_batchd_scheduler_pin.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 86
+    },
+    {
+      "path": "tests/test_gate_budgets.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_budgets.py::test_l1_transport_diagnostics_record_maps_through_http",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_budgets.py::test_l2_healthy_endpoint_compute_stays_within_budget",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_budgets.py::test_l2_unreadable_descendant_keeps_endpoints_available_and_within_budget",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_budgets.py::test_l3_keypress_reaches_terminal_data_within_budget",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_budgets.py::test_l4_one_rename_mutation_issues_one_forced_metadata_refresh",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_budgets.py::test_l5_runtime_process_ledger_keeps_launcher_and_finds_untracked_orphan",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_budgets.py::test_l6_absent_socket_recovery_does_not_emit_a_transport_error",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_budgets.py::test_l6_batchd_product_response_past_deadline_is_delivered_not_retried",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_budgets.py::test_l6_batchd_serves_a_product_read_while_another_handler_is_occupied",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_budgets.py::test_l6_idle_exited_service_request_recovers_without_transport_error",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_budgets.py::test_l6_transport_error_records_name_a_varying_exception_type",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_budgets.py::test_l7_every_http_accepted_ticket_is_visible_as_outstanding",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_budgets.py::test_l7_real_pricing_ticket_identity_survives_until_terminal"
+      ],
+      "lines_removed": 603
+    },
+    {
+      "path": "tests/test_gate_chat_host_local.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 118
+    },
+    {
+      "path": "tests/test_gate_coexistence.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_coexistence.py::test_o1_two_builds_serve_together_without_blocking_or_sharing_state",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_coexistence.py::test_o2_rebuilt_process_never_writes_or_write_locks_v0610_artifacts",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_coexistence.py::test_o3_new_stats_schema_uses_a_new_versioned_file_beside_v6",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_coexistence.py::test_o4_v0610_still_serves_after_rebuilt_process_used_the_same_state",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_coexistence.py::test_o5_concurrent_builds_observe_disjoint_sockets_and_locks",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_coexistence.py::test_o6_first_run_creates_new_artifacts_without_adopting_or_removing_old"
+      ],
+      "lines_removed": 114
+    },
+    {
+      "path": "tests/test_gate_contract.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 840
+    },
+    {
+      "path": "tests/test_gate_corruption_ui.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 115
+    },
+    {
+      "path": "tests/test_gate_differ.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1728
+    },
+    {
+      "path": "tests/test_gate_editor.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 973
+    },
+    {
+      "path": "tests/test_gate_f8_harness.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_f8_harness.py::test_generated_lifecycle_adapter_partitions_pending_by_terminal_owner"
+      ],
+      "lines_removed": 82
+    },
+    {
+      "path": "tests/test_gate_finder.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_finder.py::test_b5_unchanged_readable_tree_emits_zero_fs_changed_events_and_bytes",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_finder.py::test_b5_unreadable_descendant_keeps_quiet_fs_changed_volume_at_zero"
+      ],
+      "lines_removed": 17
+    },
+    {
+      "path": "tests/test_gate_findings.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_findings.py::test_n5_real_terminal_wrap_keeps_full_paths_and_passive_misses_are_not_errors"
+      ],
+      "lines_removed": 114
+    },
+    {
+      "path": "tests/test_gate_host_partitioned_db.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 83
+    },
+    {
+      "path": "tests/test_gate_i18n_raw_keys.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 75
+    },
+    {
+      "path": "tests/test_gate_isolation.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_isolation.py::test_browser_server_start_rolls_back_each_acquired_owner",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_isolation.py::test_fixture_runtime_start_rolls_back_each_acquired_owner",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_isolation.py::test_rendered_fixture_get_suppresses_process_lifetime_agent_auth_refresh"
+      ],
+      "lines_removed": 146
+    },
+    {
+      "path": "tests/test_gate_launch.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_launch.py::test_r1_create_session_reaches_roster_and_rendered_tab_within_measured_budget",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_launch.py::test_r2_launch_claude_mock_is_live_and_detected_as_claude",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_launch.py::test_r3_launch_codex_mock_is_live_and_detected_as_codex",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_launch.py::test_r3a_launch_opencode_mock_is_live_and_detected_as_opencode",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_launch.py::test_r4_browser_xterm_input_receives_mock_output",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_launch.py::test_r5_reload_preserves_session_attachment_and_agent_detection",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_launch.py::test_r6_kill_removes_row_and_process_group_without_touching_another_socket"
+      ],
+      "lines_removed": 144
+    },
+    {
+      "path": "tests/test_gate_panels.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_panels.py::test_h2_system_status_metrics_are_not_null"
+      ],
+      "lines_removed": 72
+    },
+    {
+      "path": "tests/test_gate_route_sweep.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_route_sweep.py::test_authenticated_private_server_exercises_every_registered_route",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_route_sweep.py::test_high_risk_local_service_failure_routes_are_typed_bounded_and_correlated",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_route_sweep.py::test_route_sweep_gate_proves_a_raised_route_is_red"
+      ],
+      "lines_removed": 218
+    },
+    {
+      "path": "tests/test_gate_safety.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_safety.py::test_p9_malformed_settings_are_preserved_and_surfaced_without_default_substitution",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_safety.py::test_p9_malformed_settings_never_trigger_chat_retention_from_defaults"
+      ],
+      "lines_removed": 52
+    },
+    {
+      "path": "tests/test_gate_scheduler.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 100
+    },
+    {
+      "path": "tests/test_gate_stats.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_stats.py::test_g0_api_sse_copy_confirms_across_rerender_and_repeats",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_stats.py::test_g0_logs_copy_confirms_first_press_and_repeats_after_revert",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_stats.py::test_g1_real_token_and_cost_series_paint_while_repair_backlog_remains",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_stats.py::test_g4_revisiting_unchanged_selection_reuses_cache_and_repair_reconnects_without_refetch"
+      ],
+      "lines_removed": 398
+    },
+    {
+      "path": "tests/test_gate_stats_nonbrowser.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 314
+    },
+    {
+      "path": "tests/test_gate_stats_range.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_stats_range.py::test_stats_24h_combined_observations_and_transcripts_reconcile_at_300_seconds",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_stats_range.py::test_stats_24h_http_empty_windows_are_not_clamped",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_stats_range.py::test_stats_24h_http_wall_latency_certification",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_stats_range.py::test_stats_24h_query_policy_is_limited_to_five_minute_buckets",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_stats_range.py::test_stats_24h_transcripts_fill_every_five_minute_bucket_without_direct_seed",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_stats_range.py::test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete"
+      ],
+      "lines_removed": 436
+    },
+    {
+      "path": "tests/test_gate_stats_ring_buffer.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 2472
+    },
+    {
+      "path": "tests/test_gate_stats_socket_runtime.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 141
+    },
+    {
+      "path": "tests/test_gate_sweep_p.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_sweep_p.py::test_p13_repeated_valid_basic_requests_are_not_throttled"
+      ],
+      "lines_removed": 16
+    },
+    {
+      "path": "tests/test_gate_tmux.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_d10_rename_optimistically_changes_tab_before_reply_and_has_bounded_reconciliation",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_d1_repeated_enter_posts_rename_exactly_once",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_d2_successful_repeated_enter_rename_never_surfaces_error",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_d3_submit_control_is_visibly_disabled_then_reenabled_on_both_outcomes",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_d4_rename_survives_released_stale_roster_without_reversal",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_gate_d5_kill_session_only_affects_registered_tmux_socket",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_s1_certification_keystroke_wall_latency_holds_the_fixed_user_ceiling",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_s1_certification_tab_activation_native_echo_holds_fixed_user_ceilings",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_s1_cpu_slowdown_starts_only_after_pressure_is_established",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_s1_keystroke_delivery_is_complete_under_terminal_output_pressure",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_s1_keystroke_delivery_survives_a_deterministic_renderer_cpu_slowdown",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_s1_negative_control_dropped_keystroke_fails_delivery_completeness",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_s1_negative_control_stalled_websocket_fails_send_completeness",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_s1_negative_control_stolen_focus_fails_the_focus_invariant",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_tmux.py::test_s1_tab_activation_keeps_native_echo_live_while_cached_differ_renders"
+      ],
+      "lines_removed": 406
+    },
+    {
+      "path": "tests/test_gate_tmux_identity.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 264
+    },
+    {
+      "path": "tests/test_gate_transcript_roots.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 342
+    },
+    {
+      "path": "tests/test_gate_watchd_kernel_watches.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_gate_watchd_kernel_watches.py::test_a_large_indexed_root_holds_no_kernel_watch_per_directory"
+      ],
+      "lines_removed": 49
+    },
+    {
+      "path": "tests/test_host_partitioned_remaining_families.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 114
+    },
+    {
+      "path": "tests/test_host_partitioned_stores.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 89
+    },
+    {
+      "path": "tests/test_hot_path_owner.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1372
+    },
+    {
+      "path": "tests/test_http_unread_body_framing.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 869
+    },
+    {
+      "path": "tests/test_live_browser_soak.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_live_browser_soak.py::test_atomic_finalizer_accepts_observed_browser_ring_eviction_during_retirement",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_live_browser_soak.py::test_atomic_finalizer_rejects_browser_failure_recorded_during_lifecycle",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_live_browser_soak.py::test_atomic_finalizer_rejects_warning_recorded_during_saturated_ring_retirement",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_live_browser_soak.py::test_live_page_identity_survives_the_app_rewriting_its_own_url_but_catches_substitution",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_live_browser_soak.py::test_negative_probe_owned_product_to_statsd_receipt_lifecycle"
+      ],
+      "lines_removed": 445
+    },
+    {
+      "path": "tests/test_local_service_client_retry.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_local_service_client_retry.py::test_job_client_does_not_retry_ambiguous_service_unavailable_response",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_local_service_client_retry.py::test_job_client_does_not_retry_generic_busy_without_prehandler_provenance",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_local_service_client_retry.py::test_job_client_observation_does_not_launch_an_absent_service",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_local_service_client_retry.py::test_job_client_retries_explicit_prehandler_busy_within_one_rpc_budget",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_local_service_client_retry.py::test_job_client_retries_shutdown_admission_refusal_within_one_rpc_budget"
+      ],
+      "lines_removed": 119
+    },
+    {
+      "path": "tests/test_local_service_command_router.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 107
+    },
+    {
+      "path": "tests/test_local_service_health_visibility.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 204
+    },
+    {
+      "path": "tests/test_local_service_lease_release.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_local_service_lease_release.py::test_batchd_interaction_release_timeout_retries_until_the_broker_unpins",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_local_service_lease_release.py::test_status_generation_release_timeout_retries_until_statusd_acknowledges"
+      ],
+      "lines_removed": 83
+    },
+    {
+      "path": "tests/test_local_service_projection.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1006
+    },
+    {
+      "path": "tests/test_local_service_runtime_row_projection.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 163
+    },
+    {
+      "path": "tests/test_local_services_launch.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_local_services_launch.py::test_stats_current_client_prunes_runtime_locks_before_its_healthy_shortcut"
+      ],
+      "lines_removed": 14
+    },
+    {
+      "path": "tests/test_login_auth.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1038
+    },
+    {
+      "path": "tests/test_login_escalation.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 186
+    },
+    {
+      "path": "tests/test_login_rate_limit.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 461
+    },
+    {
+      "path": "tests/test_login_throttle_integration.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 229
+    },
+    {
+      "path": "tests/test_malloc_tuning.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_malloc_tuning.py::test_capped_statsd_child_stays_at_two_arenas_under_construction_contention",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_malloc_tuning.py::test_uncapped_statsd_child_opens_more_than_two_arenas"
+      ],
+      "lines_removed": 29
+    },
+    {
+      "path": "tests/test_metadata.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 2155
+    },
+    {
+      "path": "tests/test_metadata_badge_pulses.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 342
+    },
+    {
+      "path": "tests/test_mock_transcripts.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_mock_transcripts.py::test_append_exercises_offset_observed_size_and_prefix_digest",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_mock_transcripts.py::test_awkward_cases_include_unknown_model_companion_values_and_repair_backlog",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_mock_transcripts.py::test_seed_is_byte_reproducible_and_changes_generated_yostats_value"
+      ],
+      "lines_removed": 68
+    },
+    {
+      "path": "tests/test_observability.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 401
+    },
+    {
+      "path": "tests/test_pricing_catalog.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 666
+    },
+    {
+      "path": "tests/test_ptrace.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 41
+    },
+    {
+      "path": "tests/test_published_json_cache.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 125
+    },
+    {
+      "path": "tests/test_queued_delivery.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 658
+    },
+    {
+      "path": "tests/test_quick_open_freshness_repro.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 808
+    },
+    {
+      "path": "tests/test_refresh_outcome.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 91
+    },
+    {
+      "path": "tests/test_search_index_tombstone_fence.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1752
+    },
+    {
+      "path": "tests/test_search_indexer.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 520
+    },
+    {
+      "path": "tests/test_search_indexer_bfs_cutover.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 989
+    },
+    {
+      "path": "tests/test_search_progress_notifier_isolation.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 148
+    },
+    {
+      "path": "tests/test_server_logs.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 128
+    },
+    {
+      "path": "tests/test_server_query.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 3307
+    },
+    {
+      "path": "tests/test_server_static.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 332
+    },
+    {
+      "path": "tests/test_service_failure_matrix.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_service_failure_matrix.py::test_approvald_live_socket_status_and_shutdown_do_not_replay_actions",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_service_failure_matrix.py::test_batchd_failure_rows_keep_status_and_do_not_fallback_to_main_work"
+      ],
+      "lines_removed": 84
+    },
+    {
+      "path": "tests/test_session_actions.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 441
+    },
+    {
+      "path": "tests/test_session_files.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 6258
+    },
+    {
+      "path": "tests/test_sessions.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1205
+    },
+    {
+      "path": "tests/test_settings.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_settings.py::test_deterministic_yoagent_reply_localizes_framing",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_settings.py::test_yoagent_deterministic_preference_alias_write_fixtures",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_settings.py::test_yoagent_deterministic_routing_alias_fixtures"
+      ],
+      "lines_removed": 53
+    },
+    {
+      "path": "tests/test_state_services.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 147
+    },
+    {
+      "path": "tests/test_stats_batched_persistence.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 940
+    },
+    {
+      "path": "tests/test_stats_current_agent_tokens.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 77
+    },
+    {
+      "path": "tests/test_stats_current_app.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 2529
+    },
+    {
+      "path": "tests/test_stats_current_client.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 579
+    },
+    {
+      "path": "tests/test_stats_current_collectors.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 323
+    },
+    {
+      "path": "tests/test_stats_current_coverage_performance.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 508
+    },
+    {
+      "path": "tests/test_stats_current_failure_isolation.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 236
+    },
+    {
+      "path": "tests/test_stats_current_families.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 174
+    },
+    {
+      "path": "tests/test_stats_current_health.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 322
+    },
+    {
+      "path": "tests/test_stats_current_http.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1437
+    },
+    {
+      "path": "tests/test_stats_current_materializer.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 2204
+    },
+    {
+      "path": "tests/test_stats_current_migration.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1143
+    },
+    {
+      "path": "tests/test_stats_current_observations.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 571
+    },
+    {
+      "path": "tests/test_stats_current_opencode.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1193
+    },
+    {
+      "path": "tests/test_stats_current_pricing.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 475
+    },
+    {
+      "path": "tests/test_stats_current_process_performance.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 147
+    },
+    {
+      "path": "tests/test_stats_current_protocol.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 526
+    },
+    {
+      "path": "tests/test_stats_current_prune_schedule.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_a_fixed_offset_captured_once_would_drift_but_the_local_time_does_not",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_a_missed_window_is_caught_up_rather_than_skipped",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_a_plain_night_prunes_exactly_once_at_the_configured_local_time",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_cutoff_scheduler_rechecks_fractional_wall_clock_shortfall",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_default_prune_time_is_half_past_two_and_is_offered",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_fall_back_prunes_once_even_though_the_ambiguous_hour_happens_twice",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_materializer_worker_enforces_vacuum_cap_when_listener_never_idles",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_materializer_worker_owns_cutoff_deadline_when_listener_never_idles",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_prune_records_its_time_so_a_restart_does_not_repeat_the_night",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_prune_refuses_when_retention_drops_below_the_display_window",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_retention_covers_the_largest_display_window",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_service_bounds_cutoff_sweeps_and_catches_up_after_a_missed_window",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_service_falls_back_to_the_default_time_when_the_preference_is_unusable",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_service_keeps_cleaning_up_when_the_preference_cannot_be_read",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_service_never_prunes_on_the_request_path",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_settings_expose_the_schedule_as_an_editable_preference",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_settings_file_round_trip_keeps_a_valid_time_and_replaces_an_invalid_one",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_spring_forward_prunes_once_even_though_the_configured_time_does_not_exist",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_unusable_prune_times_fall_back_and_never_disable_cleanup",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_stats_current_prune_schedule.py::test_valid_prune_times_are_used_as_written"
+      ],
+      "lines_removed": 360
+    },
+    {
+      "path": "tests/test_stats_current_revision.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 51
+    },
+    {
+      "path": "tests/test_stats_current_runtime.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 846
+    },
+    {
+      "path": "tests/test_stats_current_scheduler.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 523
+    },
+    {
+      "path": "tests/test_stats_current_service.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 5280
+    },
+    {
+      "path": "tests/test_stats_current_service_performance.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 460
+    },
+    {
+      "path": "tests/test_stats_current_storage.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 2163
+    },
+    {
+      "path": "tests/test_stats_current_transcripts.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1404
+    },
+    {
+      "path": "tests/test_stats_current_usage.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 258
+    },
+    {
+      "path": "tests/test_stats_health_route.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 375
+    },
+    {
+      "path": "tests/test_stats_host_sample_backoff.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 173
+    },
+    {
+      "path": "tests/test_stats_pending_overlay_reproducer.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 487
+    },
+    {
+      "path": "tests/test_stats_replay_ledger.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 2059
+    },
+    {
+      "path": "tests/test_stats_replay_startup_publication.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 305
+    },
+    {
+      "path": "tests/test_stats_resolution.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 143
+    },
+    {
+      "path": "tests/test_stats_v7_to_v8_migration.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 598
+    },
+    {
+      "path": "tests/test_statsd_ring_invalidation_storm.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 573
+    },
+    {
+      "path": "tests/test_statusd.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 1945
+    },
+    {
+      "path": "tests/test_statusd_protocol.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 107
+    },
+    {
+      "path": "tests/test_system_status_latency_probe.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_system_status_latency_probe.py::test_measure_system_status_latency",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_system_status_latency_probe.py::test_unique_capture_marker_is_accepted_by_the_real_server_validator"
+      ],
+      "lines_removed": 169
+    },
+    {
+      "path": "tests/test_system_status_snapshot.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 461
+    },
+    {
+      "path": "tests/test_text_client_common_metadata.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_text_client_common_metadata.py::test_yoagent_response_detail_rows_report_codex_transport_timing"
+      ],
+      "lines_removed": 24
+    },
+    {
+      "path": "tests/test_tls_config.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 791
+    },
+    {
+      "path": "tests/test_tmux_signals.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 659
+    },
+    {
+      "path": "tests/test_tmux_theme.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 92
+    },
+    {
+      "path": "tests/test_transcripts.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 273
+    },
+    {
+      "path": "tests/test_uploads.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 176
+    },
+    {
+      "path": "tests/test_watch_diff_route_contract.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 588
+    },
+    {
+      "path": "tests/test_watchd.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 4379
+    },
+    {
+      "path": "tests/test_watchd_demand_lifecycle.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 229
+    },
+    {
+      "path": "tests/test_websocket.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 128
+    },
+    {
+      "path": "tests/test_workdir.py",
+      "disposition": "remove_deprecated_cases_keep_go_and_tooling",
+      "retired_nodes": [
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_workdir.py::test_missing_agent_path_warning_is_one_shot",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_workdir.py::test_missing_agent_path_warning_skips_resolvable_agent",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_workdir.py::test_numeric_session_workdir_prefers_canonical_checkout_when_both_names_exist",
+        "/home/keivenc/dev/yomux/python-retirement/tests/test_workdir.py::test_numeric_session_workdir_uses_matching_yolomux_dev_checkout"
+      ],
+      "lines_removed": 45
+    },
+    {
+      "path": "tests/test_yoagent_actions.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 319
+    },
+    {
+      "path": "tests/test_yoagent_backend.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 188
+    },
+    {
+      "path": "tests/test_yoagent_model_intents.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 126
+    },
+    {
+      "path": "tests/test_yoagent_orchestration.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 433
+    },
+    {
+      "path": "tests/test_yoagent_preferences.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 693
+    },
+    {
+      "path": "tests/test_yoagent_skills.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 175
+    },
+    {
+      "path": "tests/test_yoagent_stream_events.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 190
+    },
+    {
+      "path": "tests/test_yoagent_stream_state.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 539
+    },
+    {
+      "path": "tests/test_yoagent_transports.py",
+      "disposition": "retire_python_server_tests",
+      "lines": 871
+    }
+  ],
+  "additional_retired_cases": [
+    {
+      "module": "tests/test_gate_isolation.py",
+      "test": "test_gate_root_retirement_stops_spawn_owner_before_adopter_reaper_and_root_removal",
+      "lines": 134,
+      "reason": "Exercises only deleted Python status daemon; generic process-generation and root-ownership regression tests retained in this module."
+    },
+    {
+      "module": "tests/test_gate_isolation.py",
+      "test": "test_fixture_app_cleanup_retires_adopted_statusd_from_its_private_service_root",
+      "lines": 78,
+      "reason": "Exercises only deleted Python status daemon; generic process-generation and root-ownership regression tests retained in this module."
+    },
+    {
+      "module": "tests/helpers/stats_replay.py",
+      "test": "replay_service",
+      "lines": 12,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/subsystems/stats_24h_http.py",
+      "test": "assert_transcripts_fill_every_bucket",
+      "lines": 40,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_check_runner.py",
+      "test": "test_the_forwarding_loop_only_passes_names_the_allowlist_contains",
+      "lines": 15,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_check_runner.py",
+      "test": "test_docker_run_tests_forwards_the_stats_persistence_arm_variable",
+      "lines": 10,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_gate_agent_state.py",
+      "test": "_realistic_agent_browser_runtime",
+      "lines": 42,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_gate_agent_state.py",
+      "test": "_assert_runtime_owns_durable_and_service_paths",
+      "lines": 17,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_gate_isolation.py",
+      "test": "test_retired_local_service_root_passes_the_surviving_daemon_invariant",
+      "lines": 18,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_gate_isolation.py",
+      "test": "test_surviving_local_service_daemon_fails_its_own_fixture_and_names_the_owner",
+      "lines": 42,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_gate_isolation.py",
+      "test": "_reap_leaked_daemon",
+      "lines": 9,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_gate_isolation.py",
+      "test": "_leak_one_local_service_daemon",
+      "lines": 21,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_gate_stats_range.py",
+      "test": "_wait_for_ring_publication",
+      "lines": 12,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_local_services_host_identity.py",
+      "test": "test_every_leased_service_routes_departures_through_the_shared_lease_reaper",
+      "lines": 34,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_local_services_launch.py",
+      "test": "test_service_module_entrypoint_exits_cleanly_on_sigterm",
+      "lines": 66,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_local_services_launch.py",
+      "test": "test_real_daemon_final_startup_probe_carries_its_spawned_identity",
+      "lines": 82,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_local_services_launch.py",
+      "test": "test_long_default_socket_fallback_keeps_registry_lock_out_of_tmp",
+      "lines": 18,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_local_services_launch.py",
+      "test": "test_registry_real_ensure_started_preserves_generation_proof_through_cleanup",
+      "lines": 48,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_local_services_launch.py",
+      "test": "test_registry_rejects_recycled_retained_child_identity",
+      "lines": 22,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_local_services_launch.py",
+      "test": "test_registry_absent_leader_rejects_numeric_group_reuse_by_foreign_generation",
+      "lines": 34,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_local_services_launch.py",
+      "test": "test_registry_proves_inherited_worker_when_leader_exits_after_snapshot",
+      "lines": 29,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_local_services_launch.py",
+      "test": "test_registry_first_descendant_discovery_survives_leader_exit",
+      "lines": 26,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_local_services_launch.py",
+      "test": "test_registry_refreshes_spawn_members_only_while_original_leader_matches",
+      "lines": 36,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_local_services_launch.py",
+      "test": "test_registry_spawn_captures_durable_session_ownership",
+      "lines": 28,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_local_services_launch.py",
+      "test": "test_registry_spawn_honors_isolated_idle_override",
+      "lines": 19,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_local_services_launch.py",
+      "test": "test_registry_spawn_rebases_only_generated_artifacts_outside_current_root",
+      "lines": 77,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_local_services_launch.py",
+      "test": "test_registry_spawn_uses_current_interpreter_module_and_quoted_args",
+      "lines": 44,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_malloc_tuning.py",
+      "test": "_fresh_statsd_arenas",
+      "lines": 20,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/test_stats_current_prune_schedule.py",
+      "test": "build_service",
+      "lines": 10,
+      "reason": "exclusive dependency on retired Python daemon implementation"
+    },
+    {
+      "module": "tests/helpers/glibc_arena_probe.py",
+      "test": "whole daemon-only module",
+      "lines": 147,
+      "reason": "retired Python daemon implementation, entrypoint, or exclusive controller"
+    },
+    {
+      "module": "tests/test_batchd_failure_isolation.py",
+      "test": "whole daemon-only module",
+      "lines": 105,
+      "reason": "retired Python daemon implementation, entrypoint, or exclusive controller"
+    },
+    {
+      "module": "tests/test_yostats_active_browser_window.py",
+      "test": "test_deterministic_cold_navigation_starts_after_every_cpu_and_counter_baseline",
+      "lines": 9,
+      "reason": "Python daemon capture CLI retired"
+    },
+    {
+      "module": "tests/test_yostats_active_browser_window.py",
+      "test": "test_active_browser_window_sigterm_cleans_up_once",
+      "lines": 38,
+      "reason": "Python daemon capture CLI retired"
+    },
+    {
+      "module": "tests/test_yostats_active_browser_window.py",
+      "test": "test_active_browser_window_rejects_non_tmp_output_before_chrome_starts",
+      "lines": 12,
+      "reason": "Python daemon capture CLI retired"
+    },
+    {
+      "module": "tests/test_yostats_active_browser_window.py",
+      "test": "test_active_browser_window_rejects_raw_fork_parent_and_child",
+      "lines": 8,
+      "reason": "Python daemon capture CLI retired"
+    },
+    {
+      "module": "tests/test_yostats_active_browser_window.py",
+      "test": "test_active_browser_window_uses_two_second_listener_census",
+      "lines": 21,
+      "reason": "Python daemon capture CLI retired"
+    },
+    {
+      "module": "tests/test_yostats_active_browser_window.py",
+      "test": "test_capture_tools_share_proc_cpu_reader_and_positive_validators",
+      "lines": 9,
+      "reason": "Python daemon capture CLI retired"
+    },
+    {
+      "module": "tests/test_journey_phase_contracts.py",
+      "test": "TARGETS:stats-and-logs",
+      "reason": "The referenced Python backend mega-test was retired; all retained YOchat phase/fixture assertions remain."
+    }
+  ],
+  "retired_source_contracts": [
+    {
+      "contract_id": "stats-delta-queued-producer",
+      "owner_path": "yomux_lib/stats_current/http.py",
+      "owner_token": "def delta_stream(",
+      "proof_path": "tests/test_stats_current_http.py",
+      "proof_test": "test_delta_queued_acknowledgement_can_reach_terminal_body",
+      "queued_producer_function": "delta_stream",
+      "reason": "Retired Python backend owner or its deleted maintenance proof; independent assertion helper and active Finder contract retained."
+    },
+    {
+      "contract_id": "transcript-scan-receipt",
+      "owner_path": "yomux_lib/stats_current/transcripts.py",
+      "owner_token": "def commit(self, receipt_id: int) -> None:",
+      "proof_path": "tests/test_stats_current_transcripts.py",
+      "proof_test": "test_receipt_larger_than_memory_retention_commits_before_pruning",
+      "reason": "Retired Python backend owner or its deleted maintenance proof; independent assertion helper and active Finder contract retained."
+    },
+    {
+      "contract_id": "usage-backfill-status",
+      "owner_path": "yomux_lib/stats_current/transcripts.py",
+      "owner_token": "def usage_atom_backfill_status(self) -> dict[str, object] | None:",
+      "proof_path": "tests/test_stats_current_transcripts.py",
+      "proof_test": "test_usage_atom_backfill_status_varies_with_committed_cursor_progress",
+      "reason": "Retired Python backend owner or its deleted maintenance proof; independent assertion helper and active Finder contract retained."
+    },
+    {
+      "contract_id": "session-files-http-operation-completion",
+      "owner_path": "yomux_lib/app.py",
+      "owner_token": "def session_files_http_payload(",
+      "proof_path": "tests/test_session_files.py",
+      "proof_test": "test_session_files_route_returns_operation_receipt_then_publishes_and_replays_ready",
+      "queued_producer_function": "session_files_http_payload",
+      "reason": "Retired Python backend owner or its deleted maintenance proof; independent assertion helper and active Finder contract retained."
+    },
+    {
+      "contract_id": "batchd-product-operation-completion",
+      "owner_path": "yomux_lib/app.py",
+      "owner_token": "def accept_batchd_product_operation(",
+      "proof_path": "tests/test_gate_differ.py",
+      "proof_test": "test_mock_git_differ_queued_producer_completion_settles_every_visible_surface",
+      "queued_producer_function": "accept_batchd_product_operation",
+      "reason": "Retired Python backend owner or its deleted maintenance proof; independent assertion helper and active Finder contract retained."
+    },
+    {
+      "contract_id": "differ-queued-producer-completion",
+      "owner_path": "yomux_lib/infra/state_services.py",
+      "owner_token": "class SessionFilesOperationLifecycle:",
+      "proof_path": "tests/test_gate_differ.py",
+      "proof_test": "test_mock_git_differ_queued_producer_completion_settles_every_visible_surface",
+      "queued_producer_function": "start",
+      "reason": "Retired Python backend owner or its deleted maintenance proof; independent assertion helper and active Finder contract retained."
+    },
+    {
+      "contract_id": "differ-pending-producer",
+      "owner_path": "static_src/js/yomux/86_changes_10_session_files.js",
+      "owner_token": "function scheduleSessionFilesProducerDeadline(destination, payload)",
+      "proof_path": "tests/test_gate_differ.py",
+      "proof_test": "test_mock_git_differ_pending_producer_without_publish_ends_in_visible_deadline_error",
+      "reason": "Retired Python backend owner or its deleted maintenance proof; independent assertion helper and active Finder contract retained."
+    },
+    {
+      "contract_id": "command-dispatch-pending",
+      "owner_path": "static_src/js/yomux/15_command_registry.js",
+      "owner_token": "function dispatchCommand(route, params = {}, source = null)",
+      "proof_path": "tests/test_gate_contract.py",
+      "proof_test": "test_k0_each_user_command_class_executes_k1_through_k5",
+      "reason": "Retired Python backend owner or its deleted maintenance proof; independent assertion helper and active Finder contract retained."
+    }
+  ],
+  "additional_retired_sources": [
+    {
+      "path": "yomux_lib/stats_current/http.py",
+      "lines": 757,
+      "reason": "Retired Python HTTP forwarding adapter with only unused imports remaining."
+    }
+  ],
+  "actual_final_test_deletions": {
+    "method": "AST test definitions, including class qualification; parameter instances count once. Whole-file physical lines counted directly from baseline Git blobs.",
+    "wholly_deleted_test_modules": [
+      {
+        "path": "tests/test_activity.py",
+        "baseline_physical_lines": 286,
+        "baseline_test_definitions": 16
+      },
+      {
+        "path": "tests/test_activity_summary.py",
+        "baseline_physical_lines": 898,
+        "baseline_test_definitions": 18
+      },
+      {
+        "path": "tests/test_activity_summary_disabled.py",
+        "baseline_physical_lines": 94,
+        "baseline_test_definitions": 4
+      },
+      {
+        "path": "tests/test_api_response_parent.py",
+        "baseline_physical_lines": 1120,
+        "baseline_test_definitions": 27
+      },
+      {
+        "path": "tests/test_app.py",
+        "baseline_physical_lines": 19976,
+        "baseline_test_definitions": 564
+      },
+      {
+        "path": "tests/test_application_scroll.py",
+        "baseline_physical_lines": 58,
+        "baseline_test_definitions": 3
+      },
+      {
+        "path": "tests/test_approvald.py",
+        "baseline_physical_lines": 259,
+        "baseline_test_definitions": 8
+      },
+      {
+        "path": "tests/test_attention_ack.py",
+        "baseline_physical_lines": 169,
+        "baseline_test_definitions": 9
+      },
+      {
+        "path": "tests/test_auto_approve_lock.py",
+        "baseline_physical_lines": 57,
+        "baseline_test_definitions": 1
+      },
+      {
+        "path": "tests/test_auto_approve_worker.py",
+        "baseline_physical_lines": 716,
+        "baseline_test_definitions": 32
+      },
+      {
+        "path": "tests/test_backend_health_catalog.py",
+        "baseline_physical_lines": 1469,
+        "baseline_test_definitions": 23
+      },
+      {
+        "path": "tests/test_backend_health_event.py",
+        "baseline_physical_lines": 338,
+        "baseline_test_definitions": 13
+      },
+      {
+        "path": "tests/test_backend_health_job_failure_ownership.py",
+        "baseline_physical_lines": 180,
+        "baseline_test_definitions": 9
+      },
+      {
+        "path": "tests/test_backend_health_liveness.py",
+        "baseline_physical_lines": 957,
+        "baseline_test_definitions": 23
+      },
+      {
+        "path": "tests/test_backend_health_observer.py",
+        "baseline_physical_lines": 1238,
+        "baseline_test_definitions": 46
+      },
+      {
+        "path": "tests/test_backend_health_recovery.py",
+        "baseline_physical_lines": 699,
+        "baseline_test_definitions": 26
+      },
+      {
+        "path": "tests/test_backend_health_recovery_wiring.py",
+        "baseline_physical_lines": 529,
+        "baseline_test_definitions": 12
+      },
+      {
+        "path": "tests/test_backend_health_store.py",
+        "baseline_physical_lines": 945,
+        "baseline_test_definitions": 38
+      },
+      {
+        "path": "tests/test_background_scheduler.py",
+        "baseline_physical_lines": 106,
+        "baseline_test_definitions": 7
+      },
+      {
+        "path": "tests/test_background_scheduler_contract.py",
+        "baseline_physical_lines": 200,
+        "baseline_test_definitions": 9
+      },
+      {
+        "path": "tests/test_batchd.py",
+        "baseline_physical_lines": 4028,
+        "baseline_test_definitions": 130
+      },
+      {
+        "path": "tests/test_batchd_failure_isolation.py",
+        "baseline_physical_lines": 361,
+        "baseline_test_definitions": 7
+      },
+      {
+        "path": "tests/test_bfs_index.py",
+        "baseline_physical_lines": 1297,
+        "baseline_test_definitions": 46
+      },
+      {
+        "path": "tests/test_boot_healthz_probe.py",
+        "baseline_physical_lines": 397,
+        "baseline_test_definitions": 8
+      },
+      {
+        "path": "tests/test_browser_finder_fs_repro.py",
+        "baseline_physical_lines": 46,
+        "baseline_test_definitions": 1
+      },
+      {
+        "path": "tests/test_cache.py",
+        "baseline_physical_lines": 44,
+        "baseline_test_definitions": 4
+      },
+      {
+        "path": "tests/test_chat_service.py",
+        "baseline_physical_lines": 217,
+        "baseline_test_definitions": 12
+      },
+      {
+        "path": "tests/test_chat_store.py",
+        "baseline_physical_lines": 919,
+        "baseline_test_definitions": 19
+      },
+      {
+        "path": "tests/test_client_event_broker_backlog_disambiguation.py",
+        "baseline_physical_lines": 958,
+        "baseline_test_definitions": 9
+      },
+      {
+        "path": "tests/test_client_events.py",
+        "baseline_physical_lines": 438,
+        "baseline_test_definitions": 22
+      },
+      {
+        "path": "tests/test_control.py",
+        "baseline_physical_lines": 241,
+        "baseline_test_definitions": 9
+      },
+      {
+        "path": "tests/test_deprecated_python_selection.py",
+        "baseline_physical_lines": 180,
+        "baseline_test_definitions": 12
+      },
+      {
+        "path": "tests/test_drop_actions.py",
+        "baseline_physical_lines": 165,
+        "baseline_test_definitions": 6
+      },
+      {
+        "path": "tests/test_e2e_api_errors.py",
+        "baseline_physical_lines": 491,
+        "baseline_test_definitions": 5
+      },
+      {
+        "path": "tests/test_e2e_auto_approve.py",
+        "baseline_physical_lines": 406,
+        "baseline_test_definitions": 5
+      },
+      {
+        "path": "tests/test_e2e_browser_harness.py",
+        "baseline_physical_lines": 1007,
+        "baseline_test_definitions": 13
+      },
+      {
+        "path": "tests/test_e2e_external_resources.py",
+        "baseline_physical_lines": 31,
+        "baseline_test_definitions": 1
+      },
+      {
+        "path": "tests/test_e2e_system_status.py",
+        "baseline_physical_lines": 86,
+        "baseline_test_definitions": 1
+      },
+      {
+        "path": "tests/test_events_state.py",
+        "baseline_physical_lines": 47,
+        "baseline_test_definitions": 2
+      },
+      {
+        "path": "tests/test_file_index.py",
+        "baseline_physical_lines": 1300,
+        "baseline_test_definitions": 47
+      },
+      {
+        "path": "tests/test_filesystem.py",
+        "baseline_physical_lines": 5466,
+        "baseline_test_definitions": 240
+      },
+      {
+        "path": "tests/test_filesystem_access_policy.py",
+        "baseline_physical_lines": 371,
+        "baseline_test_definitions": 9
+      },
+      {
+        "path": "tests/test_filesystem_authorize_repoint.py",
+        "baseline_physical_lines": 1781,
+        "baseline_test_definitions": 24
+      },
+      {
+        "path": "tests/test_filesystem_delete_cooperation.py",
+        "baseline_physical_lines": 247,
+        "baseline_test_definitions": 8
+      },
+      {
+        "path": "tests/test_filesystem_operation_route_contract.py",
+        "baseline_physical_lines": 144,
+        "baseline_test_definitions": 2
+      },
+      {
+        "path": "tests/test_gate_api_errors.py",
+        "baseline_physical_lines": 292,
+        "baseline_test_definitions": 2
+      },
+      {
+        "path": "tests/test_gate_auth.py",
+        "baseline_physical_lines": 141,
+        "baseline_test_definitions": 3
+      },
+      {
+        "path": "tests/test_gate_batchd_scheduler_pin.py",
+        "baseline_physical_lines": 86,
+        "baseline_test_definitions": 2
+      },
+      {
+        "path": "tests/test_gate_chat_host_local.py",
+        "baseline_physical_lines": 118,
+        "baseline_test_definitions": 2
+      },
+      {
+        "path": "tests/test_gate_contract.py",
+        "baseline_physical_lines": 840,
+        "baseline_test_definitions": 7
+      },
+      {
+        "path": "tests/test_gate_corruption_ui.py",
+        "baseline_physical_lines": 115,
+        "baseline_test_definitions": 2
+      },
+      {
+        "path": "tests/test_gate_differ.py",
+        "baseline_physical_lines": 1728,
+        "baseline_test_definitions": 16
+      },
+      {
+        "path": "tests/test_gate_editor.py",
+        "baseline_physical_lines": 973,
+        "baseline_test_definitions": 14
+      },
+      {
+        "path": "tests/test_gate_host_partitioned_db.py",
+        "baseline_physical_lines": 83,
+        "baseline_test_definitions": 4
+      },
+      {
+        "path": "tests/test_gate_i18n_raw_keys.py",
+        "baseline_physical_lines": 75,
+        "baseline_test_definitions": 1
+      },
+      {
+        "path": "tests/test_gate_scheduler.py",
+        "baseline_physical_lines": 100,
+        "baseline_test_definitions": 1
+      },
+      {
+        "path": "tests/test_gate_stats_nonbrowser.py",
+        "baseline_physical_lines": 314,
+        "baseline_test_definitions": 8
+      },
+      {
+        "path": "tests/test_gate_stats_ring_buffer.py",
+        "baseline_physical_lines": 2472,
+        "baseline_test_definitions": 42
+      },
+      {
+        "path": "tests/test_gate_stats_socket_runtime.py",
+        "baseline_physical_lines": 141,
+        "baseline_test_definitions": 6
+      },
+      {
+        "path": "tests/test_gate_tmux_identity.py",
+        "baseline_physical_lines": 264,
+        "baseline_test_definitions": 7
+      },
+      {
+        "path": "tests/test_gate_transcript_roots.py",
+        "baseline_physical_lines": 342,
+        "baseline_test_definitions": 9
+      },
+      {
+        "path": "tests/test_host_partitioned_remaining_families.py",
+        "baseline_physical_lines": 114,
+        "baseline_test_definitions": 4
+      },
+      {
+        "path": "tests/test_host_partitioned_stores.py",
+        "baseline_physical_lines": 89,
+        "baseline_test_definitions": 4
+      },
+      {
+        "path": "tests/test_hot_path_owner.py",
+        "baseline_physical_lines": 1372,
+        "baseline_test_definitions": 34
+      },
+      {
+        "path": "tests/test_http_unread_body_framing.py",
+        "baseline_physical_lines": 869,
+        "baseline_test_definitions": 25
+      },
+      {
+        "path": "tests/test_local_service_command_router.py",
+        "baseline_physical_lines": 107,
+        "baseline_test_definitions": 4
+      },
+      {
+        "path": "tests/test_local_service_health_visibility.py",
+        "baseline_physical_lines": 204,
+        "baseline_test_definitions": 8
+      },
+      {
+        "path": "tests/test_local_service_projection.py",
+        "baseline_physical_lines": 1006,
+        "baseline_test_definitions": 32
+      },
+      {
+        "path": "tests/test_local_service_runtime_row_projection.py",
+        "baseline_physical_lines": 163,
+        "baseline_test_definitions": 6
+      },
+      {
+        "path": "tests/test_login_auth.py",
+        "baseline_physical_lines": 1038,
+        "baseline_test_definitions": 27
+      },
+      {
+        "path": "tests/test_login_escalation.py",
+        "baseline_physical_lines": 186,
+        "baseline_test_definitions": 13
+      },
+      {
+        "path": "tests/test_login_rate_limit.py",
+        "baseline_physical_lines": 461,
+        "baseline_test_definitions": 29
+      },
+      {
+        "path": "tests/test_login_throttle_integration.py",
+        "baseline_physical_lines": 229,
+        "baseline_test_definitions": 10
+      },
+      {
+        "path": "tests/test_metadata.py",
+        "baseline_physical_lines": 2155,
+        "baseline_test_definitions": 81
+      },
+      {
+        "path": "tests/test_metadata_badge_pulses.py",
+        "baseline_physical_lines": 342,
+        "baseline_test_definitions": 9
+      },
+      {
+        "path": "tests/test_observability.py",
+        "baseline_physical_lines": 401,
+        "baseline_test_definitions": 14
+      },
+      {
+        "path": "tests/test_pricing_catalog.py",
+        "baseline_physical_lines": 666,
+        "baseline_test_definitions": 36
+      },
+      {
+        "path": "tests/test_ptrace.py",
+        "baseline_physical_lines": 41,
+        "baseline_test_definitions": 4
+      },
+      {
+        "path": "tests/test_published_json_cache.py",
+        "baseline_physical_lines": 125,
+        "baseline_test_definitions": 2
+      },
+      {
+        "path": "tests/test_queued_delivery.py",
+        "baseline_physical_lines": 658,
+        "baseline_test_definitions": 24
+      },
+      {
+        "path": "tests/test_quick_open_freshness_repro.py",
+        "baseline_physical_lines": 808,
+        "baseline_test_definitions": 18
+      },
+      {
+        "path": "tests/test_refresh_outcome.py",
+        "baseline_physical_lines": 91,
+        "baseline_test_definitions": 7
+      },
+      {
+        "path": "tests/test_search_index_tombstone_fence.py",
+        "baseline_physical_lines": 1752,
+        "baseline_test_definitions": 39
+      },
+      {
+        "path": "tests/test_search_indexer.py",
+        "baseline_physical_lines": 520,
+        "baseline_test_definitions": 22
+      },
+      {
+        "path": "tests/test_search_indexer_bfs_cutover.py",
+        "baseline_physical_lines": 989,
+        "baseline_test_definitions": 43
+      },
+      {
+        "path": "tests/test_search_progress_notifier_isolation.py",
+        "baseline_physical_lines": 148,
+        "baseline_test_definitions": 7
+      },
+      {
+        "path": "tests/test_server_logs.py",
+        "baseline_physical_lines": 128,
+        "baseline_test_definitions": 5
+      },
+      {
+        "path": "tests/test_server_query.py",
+        "baseline_physical_lines": 3307,
+        "baseline_test_definitions": 112
+      },
+      {
+        "path": "tests/test_server_static.py",
+        "baseline_physical_lines": 332,
+        "baseline_test_definitions": 13
+      },
+      {
+        "path": "tests/test_session_actions.py",
+        "baseline_physical_lines": 441,
+        "baseline_test_definitions": 16
+      },
+      {
+        "path": "tests/test_session_files.py",
+        "baseline_physical_lines": 6258,
+        "baseline_test_definitions": 153
+      },
+      {
+        "path": "tests/test_sessions.py",
+        "baseline_physical_lines": 1205,
+        "baseline_test_definitions": 55
+      },
+      {
+        "path": "tests/test_state_services.py",
+        "baseline_physical_lines": 147,
+        "baseline_test_definitions": 4
+      },
+      {
+        "path": "tests/test_stats_batched_persistence.py",
+        "baseline_physical_lines": 940,
+        "baseline_test_definitions": 31
+      },
+      {
+        "path": "tests/test_stats_current_agent_tokens.py",
+        "baseline_physical_lines": 77,
+        "baseline_test_definitions": 2
+      },
+      {
+        "path": "tests/test_stats_current_app.py",
+        "baseline_physical_lines": 2529,
+        "baseline_test_definitions": 62
+      },
+      {
+        "path": "tests/test_stats_current_client.py",
+        "baseline_physical_lines": 579,
+        "baseline_test_definitions": 21
+      },
+      {
+        "path": "tests/test_stats_current_collectors.py",
+        "baseline_physical_lines": 323,
+        "baseline_test_definitions": 15
+      },
+      {
+        "path": "tests/test_stats_current_coverage_performance.py",
+        "baseline_physical_lines": 508,
+        "baseline_test_definitions": 11
+      },
+      {
+        "path": "tests/test_stats_current_failure_isolation.py",
+        "baseline_physical_lines": 236,
+        "baseline_test_definitions": 8
+      },
+      {
+        "path": "tests/test_stats_current_families.py",
+        "baseline_physical_lines": 174,
+        "baseline_test_definitions": 8
+      },
+      {
+        "path": "tests/test_stats_current_health.py",
+        "baseline_physical_lines": 322,
+        "baseline_test_definitions": 20
+      },
+      {
+        "path": "tests/test_stats_current_http.py",
+        "baseline_physical_lines": 1437,
+        "baseline_test_definitions": 36
+      },
+      {
+        "path": "tests/test_stats_current_materializer.py",
+        "baseline_physical_lines": 2204,
+        "baseline_test_definitions": 71
+      },
+      {
+        "path": "tests/test_stats_current_migration.py",
+        "baseline_physical_lines": 1143,
+        "baseline_test_definitions": 35
+      },
+      {
+        "path": "tests/test_stats_current_observations.py",
+        "baseline_physical_lines": 571,
+        "baseline_test_definitions": 19
+      },
+      {
+        "path": "tests/test_stats_current_opencode.py",
+        "baseline_physical_lines": 1193,
+        "baseline_test_definitions": 63
+      },
+      {
+        "path": "tests/test_stats_current_pricing.py",
+        "baseline_physical_lines": 475,
+        "baseline_test_definitions": 17
+      },
+      {
+        "path": "tests/test_stats_current_process_performance.py",
+        "baseline_physical_lines": 147,
+        "baseline_test_definitions": 5
+      },
+      {
+        "path": "tests/test_stats_current_protocol.py",
+        "baseline_physical_lines": 526,
+        "baseline_test_definitions": 26
+      },
+      {
+        "path": "tests/test_stats_current_revision.py",
+        "baseline_physical_lines": 51,
+        "baseline_test_definitions": 2
+      },
+      {
+        "path": "tests/test_stats_current_runtime.py",
+        "baseline_physical_lines": 846,
+        "baseline_test_definitions": 21
+      },
+      {
+        "path": "tests/test_stats_current_scheduler.py",
+        "baseline_physical_lines": 523,
+        "baseline_test_definitions": 15
+      },
+      {
+        "path": "tests/test_stats_current_service.py",
+        "baseline_physical_lines": 5280,
+        "baseline_test_definitions": 112
+      },
+      {
+        "path": "tests/test_stats_current_service_performance.py",
+        "baseline_physical_lines": 460,
+        "baseline_test_definitions": 9
+      },
+      {
+        "path": "tests/test_stats_current_storage.py",
+        "baseline_physical_lines": 2163,
+        "baseline_test_definitions": 80
+      },
+      {
+        "path": "tests/test_stats_current_transcripts.py",
+        "baseline_physical_lines": 1404,
+        "baseline_test_definitions": 30
+      },
+      {
+        "path": "tests/test_stats_current_usage.py",
+        "baseline_physical_lines": 258,
+        "baseline_test_definitions": 9
+      },
+      {
+        "path": "tests/test_stats_health_route.py",
+        "baseline_physical_lines": 375,
+        "baseline_test_definitions": 15
+      },
+      {
+        "path": "tests/test_stats_host_sample_backoff.py",
+        "baseline_physical_lines": 173,
+        "baseline_test_definitions": 5
+      },
+      {
+        "path": "tests/test_stats_pending_overlay_reproducer.py",
+        "baseline_physical_lines": 487,
+        "baseline_test_definitions": 10
+      },
+      {
+        "path": "tests/test_stats_replay_ledger.py",
+        "baseline_physical_lines": 2059,
+        "baseline_test_definitions": 64
+      },
+      {
+        "path": "tests/test_stats_replay_startup_publication.py",
+        "baseline_physical_lines": 305,
+        "baseline_test_definitions": 2
+      },
+      {
+        "path": "tests/test_stats_resolution.py",
+        "baseline_physical_lines": 143,
+        "baseline_test_definitions": 12
+      },
+      {
+        "path": "tests/test_stats_v7_to_v8_migration.py",
+        "baseline_physical_lines": 598,
+        "baseline_test_definitions": 17
+      },
+      {
+        "path": "tests/test_statsd_ring_invalidation_storm.py",
+        "baseline_physical_lines": 573,
+        "baseline_test_definitions": 14
+      },
+      {
+        "path": "tests/test_statusd.py",
+        "baseline_physical_lines": 1945,
+        "baseline_test_definitions": 50
+      },
+      {
+        "path": "tests/test_statusd_protocol.py",
+        "baseline_physical_lines": 107,
+        "baseline_test_definitions": 6
+      },
+      {
+        "path": "tests/test_system_status_snapshot.py",
+        "baseline_physical_lines": 461,
+        "baseline_test_definitions": 19
+      },
+      {
+        "path": "tests/test_tls_config.py",
+        "baseline_physical_lines": 791,
+        "baseline_test_definitions": 26
+      },
+      {
+        "path": "tests/test_tmux_signals.py",
+        "baseline_physical_lines": 659,
+        "baseline_test_definitions": 21
+      },
+      {
+        "path": "tests/test_tmux_theme.py",
+        "baseline_physical_lines": 92,
+        "baseline_test_definitions": 6
+      },
+      {
+        "path": "tests/test_transcripts.py",
+        "baseline_physical_lines": 273,
+        "baseline_test_definitions": 11
+      },
+      {
+        "path": "tests/test_uploads.py",
+        "baseline_physical_lines": 176,
+        "baseline_test_definitions": 11
+      },
+      {
+        "path": "tests/test_watch_diff_route_contract.py",
+        "baseline_physical_lines": 588,
+        "baseline_test_definitions": 15
+      },
+      {
+        "path": "tests/test_watchd.py",
+        "baseline_physical_lines": 4379,
+        "baseline_test_definitions": 124
+      },
+      {
+        "path": "tests/test_watchd_demand_lifecycle.py",
+        "baseline_physical_lines": 229,
+        "baseline_test_definitions": 5
+      },
+      {
+        "path": "tests/test_websocket.py",
+        "baseline_physical_lines": 128,
+        "baseline_test_definitions": 9
+      },
+      {
+        "path": "tests/test_yoagent_actions.py",
+        "baseline_physical_lines": 319,
+        "baseline_test_definitions": 22
+      },
+      {
+        "path": "tests/test_yoagent_backend.py",
+        "baseline_physical_lines": 188,
+        "baseline_test_definitions": 10
+      },
+      {
+        "path": "tests/test_yoagent_model_intents.py",
+        "baseline_physical_lines": 126,
+        "baseline_test_definitions": 4
+      },
+      {
+        "path": "tests/test_yoagent_orchestration.py",
+        "baseline_physical_lines": 433,
+        "baseline_test_definitions": 12
+      },
+      {
+        "path": "tests/test_yoagent_preferences.py",
+        "baseline_physical_lines": 693,
+        "baseline_test_definitions": 32
+      },
+      {
+        "path": "tests/test_yoagent_skills.py",
+        "baseline_physical_lines": 175,
+        "baseline_test_definitions": 6
+      },
+      {
+        "path": "tests/test_yoagent_stream_events.py",
+        "baseline_physical_lines": 190,
+        "baseline_test_definitions": 10
+      },
+      {
+        "path": "tests/test_yoagent_stream_state.py",
+        "baseline_physical_lines": 539,
+        "baseline_test_definitions": 19
+      },
+      {
+        "path": "tests/test_yoagent_transports.py",
+        "baseline_physical_lines": 871,
+        "baseline_test_definitions": 31
+      }
+    ],
+    "wholly_deleted_test_module_count": 147,
+    "wholly_deleted_test_module_physical_lines": 127842,
+    "mixed_module_retirements": [
+      {
+        "path": "tests/test_auto_approve_detector.py",
+        "removed_test_definitions": [
+          "test_approval_detection_pipeline_has_one_shared_owner",
+          "test_mock_codex_3_option_worker_walks_to_option_1"
+        ],
+        "retained_test_definition_count": 126,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_browser_boot.py",
+        "removed_test_definitions": [
+          "test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page",
+          "test_hard_loaded_yoagent_keeps_activity_summary_disabled_without_requests_or_spinner",
+          "test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_and_rotation",
+          "test_real_xterm_opencode_touch_scroll_matches_wheel_and_does_not_move_outer_page",
+          "test_real_xterm_renders_tmux_output_and_survives_pane_resize",
+          "test_real_xterm_terminal_reference_scan_stays_bounded_under_latency",
+          "test_real_xterm_trusted_touch_long_press_selects_extends_and_offers_copy",
+          "test_shared_tree_columns_preserve_unchanged_native_text_nodes"
+        ],
+        "retained_test_definition_count": 1,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_browser_dockview.py",
+        "removed_test_definitions": [
+          "test_dockview_delayed_tab_activation_still_focuses_terminal",
+          "test_dockview_prosemirror_failure_does_not_block_xterm_switch",
+          "test_dockview_real_xterm_tab_switch_accepts_input_and_output"
+        ],
+        "retained_test_definition_count": 186,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_browser_layout.py",
+        "removed_test_definitions": [
+          "test_agent_prompt_browser_cases_share_the_isolated_tmux_runtime_owner",
+          "test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout",
+          "test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser",
+          "test_real_agent_prompts_render_ask_attention_in_live_server"
+        ],
+        "retained_test_definition_count": 225,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_browser_ring_landing_verify.py",
+        "removed_test_definitions": [
+          "test_ring_writer_accepts_explicit_zero_beside_downtime_gap"
+        ],
+        "retained_test_definition_count": 8,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_browser_stats_coverage.py",
+        "removed_test_definitions": [
+          "test_current_cost_pricing_link_dispatches_external_open",
+          "test_current_stats_browser_traverses_every_exact_matrix_cell",
+          "test_current_stats_one_second_motion_and_sse_delta_do_not_refetch_or_fabricate",
+          "test_current_stats_one_second_motion_preserves_sparse_native_cadence_series",
+          "test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell"
+        ],
+        "retained_test_definition_count": 7,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_browser_stats_widen.py",
+        "removed_test_definitions": [
+          "test_hidden_stats_panel_receives_push_then_opens_from_cached_generation",
+          "test_real_stats_cleanup_settles_start_and_stops_before_final_flush",
+          "test_real_stats_cpu_value_round_trips_through_rpc_and_rendered_svg",
+          "test_real_stats_interval_options_return_after_range_round_trip_and_reload",
+          "test_stats_stream_failure_is_durable_latched_and_recovers_only_after_a_real_push"
+        ],
+        "retained_test_definition_count": 6,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_check_runner.py",
+        "removed_test_definitions": [
+          "test_docker_run_tests_forwards_the_stats_persistence_arm_variable",
+          "test_the_forwarding_loop_only_passes_names_the_allowlist_contains"
+        ],
+        "retained_test_definition_count": 189,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_common.py",
+        "removed_test_definitions": [
+          "test_backend_primitive_consumers_share_the_canonical_owners",
+          "test_backend_primitive_implementation_bodies_have_one_owner",
+          "test_main_process_cpu_work_has_named_allowlist",
+          "test_record_owned_thread_starts_use_shared_rollback_owner"
+        ],
+        "retained_test_definition_count": 9,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_cross_layer_matrix.py",
+        "removed_test_definitions": [
+          "test_every_queued_http_producer_has_a_registered_terminal_proof"
+        ],
+        "retained_test_definition_count": 5,
+        "added_test_definitions": [
+          "test_retired_python_http_producers_are_absent"
+        ]
+      },
+      {
+        "path": "tests/test_defect2_harness.py",
+        "removed_test_definitions": [
+          "test_statsd_source_identity_names_every_file_statsd_respawns_from"
+        ],
+        "retained_test_definition_count": 28,
+        "added_test_definitions": [
+          "test_statsd_source_identity_names_every_historical_file"
+        ]
+      },
+      {
+        "path": "tests/test_dev_restart_script.py",
+        "removed_test_definitions": [
+          "test_boot_go_resolution_includes_current_bazel_rule_output",
+          "test_boot_load_flag_is_compatibility_only_and_preserves_startup_guards",
+          "test_boot_never_waits_for_resource_pressure",
+          "test_boot_print_command_accepts_backend_go_alias",
+          "test_boot_print_command_canonical_go_binary_wins_conflicting_legacy_value",
+          "test_boot_print_command_defaults_to_go_for_any_configured_primary_port",
+          "test_boot_print_command_empty_canonical_go_binary_clears_legacy_override",
+          "test_boot_print_command_launches_dev_ports_in_dev_mode",
+          "test_boot_print_command_rejects_backend_python_without_deprecated_flag",
+          "test_boot_print_command_selects_go_backend_and_defaults_to_all_interfaces",
+          "test_boot_print_command_selects_python_only_with_deprecated_flag",
+          "test_boot_print_command_selects_the_executable_bazel_wrapper",
+          "test_boot_print_command_uses_canonical_go_binary_environment_name",
+          "test_boot_refuses_unsafe_tmpdir_before_restart_lock_write",
+          "test_boot_restart_refuses_duplicate_without_blind_listener_kill",
+          "test_boot_restart_waits_for_stable_listener_after_ready",
+          "test_instance_preflight_uses_the_direct_plan_not_ambient_tmpdir",
+          "test_macos_submit_accepts_legacy_six_fields_and_server_options",
+          "test_macos_submit_uses_callers_row_plan_not_tmux_daemon_environment",
+          "test_startup_listener_boundary_uses_selected_interpreter_and_checkout_module"
+        ],
+        "retained_test_definition_count": 18,
+        "added_test_definitions": [
+          "test_canonical_executable_override_wins_and_empty_clears_legacy",
+          "test_captured_row_plan_survives_poisoned_macos_tmux_environment",
+          "test_multiple_ports_generate_only_native_launches",
+          "test_native_binary_override_requires_an_executable_without_fallback",
+          "test_native_boot_aliases_preserve_launch_and_environment_contract",
+          "test_native_boot_rejects_either_raw_backend_before_mutation",
+          "test_native_executable_discovery_uses_supported_wrappers",
+          "test_retired_or_invalid_launch_modes_are_rejected_before_mutation"
+        ]
+      },
+      {
+        "path": "tests/test_entrypoint_alias.py",
+        "removed_test_definitions": [
+          "test_legacy_python_entrypoint_warns_and_forwards_to_canonical_cli"
+        ],
+        "retained_test_definition_count": 0,
+        "added_test_definitions": [
+          "test_installed_entrypoint_aliases_forward_to_native_cli"
+        ]
+      },
+      {
+        "path": "tests/test_fixture_parents.py",
+        "removed_test_definitions": [
+          "test_fixture_http_server_binds_ephemeral_port_preserves_headers_and_stops_thread"
+        ],
+        "retained_test_definition_count": 2,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_fs_preflight.py",
+        "removed_test_definitions": [
+          "test_real_pricing_wal_writer_refuses_before_creating_database",
+          "test_real_search_wal_writer_refuses_before_creating_database",
+          "test_real_stats_wal_writer_refuses_before_creating_database"
+        ],
+        "retained_test_definition_count": 8,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_aged_state.py",
+        "removed_test_definitions": [
+          "test_aged_server_restart_preserves_selected_state_and_private_identity",
+          "test_browser_journey_error_gate_fails_closed_on_unreadable_log_ring",
+          "test_browser_journey_error_gate_fails_when_bounded_ring_drops_entries",
+          "test_browser_journey_error_gate_initializes_absent_consumption_state",
+          "test_browser_journey_error_gate_rejects_malformed_existing_consumption_state",
+          "test_browser_journey_error_gate_rejects_real_error_and_rejection",
+          "test_browser_journey_error_gate_rejects_reused_id_after_server_log_reset",
+          "test_browser_journey_error_gate_rejects_unconsumed_server_failures",
+          "test_browser_journey_error_gate_rejects_unvisited_claimed_surface",
+          "test_nested_finder_journey_retains_each_phase_without_duplicate_work",
+          "test_real_client_error_upload_is_always_on_and_durable",
+          "test_stateful_journey_stop_rejects_browser_outside_fixture_origin"
+        ],
+        "retained_test_definition_count": 1,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_agent_state.py",
+        "removed_test_definitions": [
+          "test_browser_server_forwards_its_runtime_root_owner",
+          "test_f1_working_to_idle_and_blocked_clears_the_rendered_green_indicator",
+          "test_f2_active_working_capture_renders_the_green_indicator",
+          "test_f3_goal_blocked_renders_distinctly_from_goal_achieved",
+          "test_f4_python3_claude_mock_process_is_recognised_as_an_ai_agent",
+          "test_f5_realistic_roster_count_matches_its_stale_session_breakdown",
+          "test_f6_failure_diagnostic_projection_is_reachable_and_serializable",
+          "test_f6_realistic_consumers_converge_to_the_published_roster_revision",
+          "test_realistic_runtime_uses_browser_demand_to_establish_status_readiness"
+        ],
+        "retained_test_definition_count": 11,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_budgets.py",
+        "removed_test_definitions": [
+          "test_l1_transport_diagnostics_record_maps_through_http",
+          "test_l2_healthy_endpoint_compute_stays_within_budget",
+          "test_l2_unreadable_descendant_keeps_endpoints_available_and_within_budget",
+          "test_l3_keypress_reaches_terminal_data_within_budget",
+          "test_l4_one_rename_mutation_issues_one_forced_metadata_refresh",
+          "test_l5_runtime_process_ledger_keeps_launcher_and_finds_untracked_orphan",
+          "test_l6_absent_socket_recovery_does_not_emit_a_transport_error",
+          "test_l6_batchd_product_response_past_deadline_is_delivered_not_retried",
+          "test_l6_batchd_serves_a_product_read_while_another_handler_is_occupied",
+          "test_l6_idle_exited_service_request_recovers_without_transport_error",
+          "test_l6_transport_error_records_name_a_varying_exception_type",
+          "test_l7_every_http_accepted_ticket_is_visible_as_outstanding",
+          "test_l7_real_pricing_ticket_identity_survives_until_terminal"
+        ],
+        "retained_test_definition_count": 13,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_coexistence.py",
+        "removed_test_definitions": [
+          "test_o1_two_builds_serve_together_without_blocking_or_sharing_state",
+          "test_o2_rebuilt_process_never_writes_or_write_locks_v0610_artifacts",
+          "test_o3_new_stats_schema_uses_a_new_versioned_file_beside_v6",
+          "test_o4_v0610_still_serves_after_rebuilt_process_used_the_same_state",
+          "test_o5_concurrent_builds_observe_disjoint_sockets_and_locks",
+          "test_o6_first_run_creates_new_artifacts_without_adopting_or_removing_old"
+        ],
+        "retained_test_definition_count": 34,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_f8_harness.py",
+        "removed_test_definitions": [
+          "test_generated_lifecycle_adapter_partitions_pending_by_terminal_owner"
+        ],
+        "retained_test_definition_count": 22,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_finder.py",
+        "removed_test_definitions": [
+          "test_b5_unchanged_readable_tree_emits_zero_fs_changed_events_and_bytes",
+          "test_b5_unreadable_descendant_keeps_quiet_fs_changed_volume_at_zero"
+        ],
+        "retained_test_definition_count": 13,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_findings.py",
+        "removed_test_definitions": [
+          "test_n5_real_terminal_wrap_keeps_full_paths_and_passive_misses_are_not_errors"
+        ],
+        "retained_test_definition_count": 4,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_isolated_dev_server.py",
+        "removed_test_definitions": [
+          "test_go_only_gate_rejects_python_listener_and_still_starts_go"
+        ],
+        "retained_test_definition_count": 3,
+        "added_test_definitions": [
+          "test_go_only_gate_rejects_python_selection_and_still_starts_go"
+        ]
+      },
+      {
+        "path": "tests/test_gate_isolation.py",
+        "removed_test_definitions": [
+          "test_browser_server_start_rolls_back_each_acquired_owner",
+          "test_fixture_app_cleanup_retires_adopted_statusd_from_its_private_service_root",
+          "test_fixture_runtime_start_rolls_back_each_acquired_owner",
+          "test_gate_root_retirement_stops_spawn_owner_before_adopter_reaper_and_root_removal",
+          "test_rendered_fixture_get_suppresses_process_lifetime_agent_auth_refresh",
+          "test_retired_local_service_root_passes_the_surviving_daemon_invariant",
+          "test_surviving_local_service_daemon_fails_its_own_fixture_and_names_the_owner"
+        ],
+        "retained_test_definition_count": 106,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_launch.py",
+        "removed_test_definitions": [
+          "test_r1_create_session_reaches_roster_and_rendered_tab_within_measured_budget",
+          "test_r2_launch_claude_mock_is_live_and_detected_as_claude",
+          "test_r3_launch_codex_mock_is_live_and_detected_as_codex",
+          "test_r3a_launch_opencode_mock_is_live_and_detected_as_opencode",
+          "test_r4_browser_xterm_input_receives_mock_output",
+          "test_r5_reload_preserves_session_attachment_and_agent_detection",
+          "test_r6_kill_removes_row_and_process_group_without_touching_another_socket"
+        ],
+        "retained_test_definition_count": 2,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_panels.py",
+        "removed_test_definitions": [
+          "test_h2_system_status_metrics_are_not_null"
+        ],
+        "retained_test_definition_count": 15,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_route_sweep.py",
+        "removed_test_definitions": [
+          "test_authenticated_private_server_exercises_every_registered_route",
+          "test_high_risk_local_service_failure_routes_are_typed_bounded_and_correlated",
+          "test_route_sweep_gate_proves_a_raised_route_is_red"
+        ],
+        "retained_test_definition_count": 2,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_safety.py",
+        "removed_test_definitions": [
+          "test_p9_malformed_settings_are_preserved_and_surfaced_without_default_substitution",
+          "test_p9_malformed_settings_never_trigger_chat_retention_from_defaults"
+        ],
+        "retained_test_definition_count": 4,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_stats.py",
+        "removed_test_definitions": [
+          "test_g0_api_sse_copy_confirms_across_rerender_and_repeats",
+          "test_g0_logs_copy_confirms_first_press_and_repeats_after_revert",
+          "test_g1_real_token_and_cost_series_paint_while_repair_backlog_remains",
+          "test_g4_revisiting_unchanged_selection_reuses_cache_and_repair_reconnects_without_refetch"
+        ],
+        "retained_test_definition_count": 4,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_stats_range.py",
+        "removed_test_definitions": [
+          "test_stats_24h_combined_observations_and_transcripts_reconcile_at_300_seconds",
+          "test_stats_24h_http_empty_windows_are_not_clamped",
+          "test_stats_24h_http_wall_latency_certification",
+          "test_stats_24h_query_policy_is_limited_to_five_minute_buckets",
+          "test_stats_24h_service_admission_failure_still_retires_service",
+          "test_stats_24h_transcripts_fill_every_five_minute_bucket_without_direct_seed",
+          "test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete"
+        ],
+        "retained_test_definition_count": 2,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_sweep_p.py",
+        "removed_test_definitions": [
+          "test_p13_repeated_valid_basic_requests_are_not_throttled"
+        ],
+        "retained_test_definition_count": 4,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_tmux.py",
+        "removed_test_definitions": [
+          "test_d10_rename_optimistically_changes_tab_before_reply_and_has_bounded_reconciliation",
+          "test_d1_repeated_enter_posts_rename_exactly_once",
+          "test_d2_successful_repeated_enter_rename_never_surfaces_error",
+          "test_d3_submit_control_is_visibly_disabled_then_reenabled_on_both_outcomes",
+          "test_d4_rename_survives_released_stale_roster_without_reversal",
+          "test_gate_d5_kill_session_only_affects_registered_tmux_socket",
+          "test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session",
+          "test_s1_certification_keystroke_wall_latency_holds_the_fixed_user_ceiling",
+          "test_s1_certification_tab_activation_native_echo_holds_fixed_user_ceilings",
+          "test_s1_cpu_slowdown_starts_only_after_pressure_is_established",
+          "test_s1_keystroke_delivery_is_complete_under_terminal_output_pressure",
+          "test_s1_keystroke_delivery_survives_a_deterministic_renderer_cpu_slowdown",
+          "test_s1_negative_control_dropped_keystroke_fails_delivery_completeness",
+          "test_s1_negative_control_stalled_websocket_fails_send_completeness",
+          "test_s1_negative_control_stolen_focus_fails_the_focus_invariant",
+          "test_s1_tab_activation_keeps_native_echo_live_while_cached_differ_renders"
+        ],
+        "retained_test_definition_count": 10,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_watchd_kernel_watches.py",
+        "removed_test_definitions": [
+          "test_a_large_indexed_root_holds_no_kernel_watch_per_directory"
+        ],
+        "retained_test_definition_count": 1,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_gate_worktree_protection.py",
+        "removed_test_definitions": [
+          "test_server_start_reports_writer_but_keeps_read_only_start_allowed"
+        ],
+        "retained_test_definition_count": 20,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_instance_isolation.py",
+        "removed_test_definitions": [
+          "test_cli_refuses_when_early_port_disagrees_with_argparse",
+          "test_startup_path_line_explains_shared_config_runtime_launch",
+          "test_startup_path_line_names_auto_derived_root_and_resolved_paths",
+          "test_startup_path_line_names_explicit_root"
+        ],
+        "retained_test_definition_count": 25,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_live_browser_soak.py",
+        "removed_test_definitions": [
+          "test_atomic_finalizer_accepts_observed_browser_ring_eviction_during_retirement",
+          "test_atomic_finalizer_rejects_browser_failure_recorded_during_lifecycle",
+          "test_atomic_finalizer_rejects_warning_recorded_during_saturated_ring_retirement",
+          "test_live_page_identity_survives_the_app_rewriting_its_own_url_but_catches_substitution",
+          "test_negative_probe_owned_product_to_statsd_receipt_lifecycle"
+        ],
+        "retained_test_definition_count": 139,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_local_service_client_retry.py",
+        "removed_test_definitions": [
+          "test_job_client_does_not_retry_ambiguous_service_unavailable_response",
+          "test_job_client_does_not_retry_generic_busy_without_prehandler_provenance",
+          "test_job_client_observation_does_not_launch_an_absent_service",
+          "test_job_client_retries_explicit_prehandler_busy_within_one_rpc_budget",
+          "test_job_client_retries_shutdown_admission_refusal_within_one_rpc_budget"
+        ],
+        "retained_test_definition_count": 4,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_local_service_lease_release.py",
+        "removed_test_definitions": [
+          "test_batchd_interaction_release_timeout_retries_until_the_broker_unpins",
+          "test_status_generation_release_timeout_retries_until_statusd_acknowledges"
+        ],
+        "retained_test_definition_count": 2,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_local_services_host_identity.py",
+        "removed_test_definitions": [
+          "test_every_leased_service_routes_departures_through_the_shared_lease_reaper"
+        ],
+        "retained_test_definition_count": 9,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_local_services_launch.py",
+        "removed_test_definitions": [
+          "test_long_default_socket_fallback_keeps_registry_lock_out_of_tmp",
+          "test_pyproject_package_discovery_includes_local_service_subpackages",
+          "test_real_daemon_final_startup_probe_carries_its_spawned_identity",
+          "test_registry_absent_leader_rejects_numeric_group_reuse_by_foreign_generation",
+          "test_registry_first_descendant_discovery_survives_leader_exit",
+          "test_registry_proves_inherited_worker_when_leader_exits_after_snapshot",
+          "test_registry_real_ensure_started_preserves_generation_proof_through_cleanup",
+          "test_registry_refreshes_spawn_members_only_while_original_leader_matches",
+          "test_registry_rejects_recycled_retained_child_identity",
+          "test_registry_spawn_captures_durable_session_ownership",
+          "test_registry_spawn_honors_isolated_idle_override",
+          "test_registry_spawn_rebases_only_generated_artifacts_outside_current_root",
+          "test_registry_spawn_uses_current_interpreter_module_and_quoted_args",
+          "test_service_module_entrypoint_exits_cleanly_on_sigterm",
+          "test_stats_current_client_prunes_runtime_locks_before_its_healthy_shortcut"
+        ],
+        "retained_test_definition_count": 91,
+        "added_test_definitions": [
+          "test_pyproject_package_discovery_retains_developer_support_without_runtime_entrypoints"
+        ]
+      },
+      {
+        "path": "tests/test_malloc_tuning.py",
+        "removed_test_definitions": [
+          "test_capped_statsd_child_stays_at_two_arenas_under_construction_contention",
+          "test_uncapped_statsd_child_opens_more_than_two_arenas"
+        ],
+        "retained_test_definition_count": 5,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_mock_transcripts.py",
+        "removed_test_definitions": [
+          "test_append_exercises_offset_observed_size_and_prefix_digest",
+          "test_awkward_cases_include_unknown_model_companion_values_and_repair_backlog",
+          "test_seed_is_byte_reproducible_and_changes_generated_yostats_value"
+        ],
+        "retained_test_definition_count": 2,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_service_failure_matrix.py",
+        "removed_test_definitions": [
+          "test_approvald_live_socket_status_and_shutdown_do_not_replay_actions",
+          "test_batchd_failure_rows_keep_status_and_do_not_fallback_to_main_work"
+        ],
+        "retained_test_definition_count": 3,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_settings.py",
+        "removed_test_definitions": [
+          "test_deterministic_yoagent_reply_localizes_framing",
+          "test_yoagent_deterministic_preference_alias_write_fixtures",
+          "test_yoagent_deterministic_routing_alias_fixtures"
+        ],
+        "retained_test_definition_count": 39,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_stats_current_prune_schedule.py",
+        "removed_test_definitions": [
+          "test_a_fixed_offset_captured_once_would_drift_but_the_local_time_does_not",
+          "test_a_missed_window_is_caught_up_rather_than_skipped",
+          "test_a_plain_night_prunes_exactly_once_at_the_configured_local_time",
+          "test_cutoff_scheduler_rechecks_fractional_wall_clock_shortfall",
+          "test_default_prune_time_is_half_past_two_and_is_offered",
+          "test_fall_back_prunes_once_even_though_the_ambiguous_hour_happens_twice",
+          "test_materializer_worker_enforces_vacuum_cap_when_listener_never_idles",
+          "test_materializer_worker_owns_cutoff_deadline_when_listener_never_idles",
+          "test_prune_records_its_time_so_a_restart_does_not_repeat_the_night",
+          "test_prune_refuses_when_retention_drops_below_the_display_window",
+          "test_retention_covers_the_largest_display_window",
+          "test_service_bounds_cutoff_sweeps_and_catches_up_after_a_missed_window",
+          "test_service_falls_back_to_the_default_time_when_the_preference_is_unusable",
+          "test_service_keeps_cleaning_up_when_the_preference_cannot_be_read",
+          "test_service_never_prunes_on_the_request_path",
+          "test_settings_expose_the_schedule_as_an_editable_preference",
+          "test_settings_file_round_trip_keeps_a_valid_time_and_replaces_an_invalid_one",
+          "test_spring_forward_prunes_once_even_though_the_configured_time_does_not_exist",
+          "test_unusable_prune_times_fall_back_and_never_disable_cleanup",
+          "test_valid_prune_times_are_used_as_written"
+        ],
+        "retained_test_definition_count": 1,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_system_status_latency_probe.py",
+        "removed_test_definitions": [
+          "test_measure_system_status_latency",
+          "test_unique_capture_marker_is_accepted_by_the_real_server_validator"
+        ],
+        "retained_test_definition_count": 16,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_text_client_common_metadata.py",
+        "removed_test_definitions": [
+          "test_yoagent_response_detail_rows_report_codex_transport_timing"
+        ],
+        "retained_test_definition_count": 45,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_tmux_runtime.py",
+        "removed_test_definitions": [
+          "test_e2e_auto_approve_routes_tmux_waits_through_the_selenium_free_shared_owner"
+        ],
+        "retained_test_definition_count": 12,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_workdir.py",
+        "removed_test_definitions": [
+          "test_missing_agent_path_warning_is_one_shot",
+          "test_missing_agent_path_warning_skips_resolvable_agent",
+          "test_numeric_session_workdir_prefers_canonical_checkout_when_both_names_exist",
+          "test_numeric_session_workdir_uses_matching_yolomux_dev_checkout"
+        ],
+        "retained_test_definition_count": 17,
+        "added_test_definitions": []
+      },
+      {
+        "path": "tests/test_yostats_active_browser_window.py",
+        "removed_test_definitions": [
+          "test_active_browser_window_rejects_non_tmp_output_before_chrome_starts",
+          "test_active_browser_window_rejects_raw_fork_parent_and_child",
+          "test_active_browser_window_sigterm_cleans_up_once",
+          "test_active_browser_window_uses_two_second_listener_census",
+          "test_capture_tools_share_proc_cpu_reader_and_positive_validators",
+          "test_deterministic_cold_navigation_starts_after_every_cpu_and_counter_baseline",
+          "test_main_installs_signal_handlers_deadline_and_selenium_timeouts"
+        ],
+        "retained_test_definition_count": 40,
+        "added_test_definitions": []
+      }
+    ],
+    "mixed_module_count": 50,
+    "removed_test_definition_count": 4065
+  }
+}

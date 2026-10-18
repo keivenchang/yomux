@@ -5,6 +5,7 @@ package stats
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -61,4 +62,13 @@ func assembleDarwinProcessSnapshot(pids []int, complete bool, read func(int) (Da
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].PID < rows[j].PID })
 	return rows, complete
+}
+
+// DarwinProcessForPID bypasses the inventory cache at a process-control boundary.
+func DarwinProcessForPID(pid int) (DarwinProcess, error) {
+	row, ok := darwinProcessIdentityFresh(pid)
+	if !ok {
+		return DarwinProcess{}, fmt.Errorf("process %d is no longer observable", pid)
+	}
+	return row, nil
 }

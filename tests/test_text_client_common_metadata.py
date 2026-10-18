@@ -515,31 +515,6 @@ def test_text_client_normalized_events_match_shared_agent_comms(capsys):
     capsys.readouterr()
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_yoagent_response_detail_rows_report_codex_transport_timing():
-    details = yoagent_response_detail_rows({
-        "backend_used": "codex",
-        "timing": {"ttfr_ms": 1500},
-        "cli": {
-            "transport": "codex-app-server",
-            "process_reused": True,
-            "thread_started": False,
-            "thread_ready_ms": 1.2,
-            "turn_start_ack_ms": 3.4,
-            "first_stream_event_ms": 5.6,
-            "first_assistant_delta_ms": 7.8,
-            "turn_complete_ms": 9.0,
-            "elapsed_ms": 10,
-            "prompt_chars": 42,
-        },
-    })
-
-    by_key = {row["key"]: row for row in details}
-    assert by_key["yoagent.details.codexProcess.warmReuse"]["fallback"] == "Codex process: `warm reuse`"
-    assert by_key["yoagent.details.codexThread.reused"]["fallback"] == "Codex thread: `reused`"
-    assert by_key["yoagent.details.codexTiming.first_assistant_delta_ms"]["params"] == {"milliseconds": "7.8"}
-    assert by_key["yoagent.details.modelCliTime"]["params"] == {"seconds": "0.010"}
 
 
 def test_terminology_markdown_rows_are_valid_table_rows():

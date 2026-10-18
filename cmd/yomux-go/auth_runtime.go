@@ -9,6 +9,7 @@ import (
 	"crypto/pbkdf2"
 	"crypto/sha256"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -261,12 +262,12 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	users := s.users()
 	if authUsersRequireSetup(users) {
-		s.writePythonSetupAuth(w, r)
+		s.writeNativeSetupAuth(w, r)
 		return
 	}
 	if r.Method == http.MethodGet {
 		next := safeLoginNextValue(r.URL.Query().Get("next"))
-		s.writePythonLogin(w, r, next, "")
+		s.writeNativeLogin(w, r, next, "")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
@@ -289,54 +290,29 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusUnauthorized)
-	s.writePythonLogin(w, r, r.FormValue("next"), "Invalid username or password.")
+	s.writeNativeLogin(w, r, r.FormValue("next"), "Invalid username or password.")
 }
 
-func (s *server) writePythonLogin(w http.ResponseWriter, r *http.Request, next, message string) {
-	next = safeLoginNextValue(next)
-	locale := requestLocale(r)
-	script := `import sys
-from yomux_lib.web import login_html
-print(login_html(next_path=sys.argv[1], error=sys.argv[2], secure=sys.argv[3] == "1", current_locale=sys.argv[4], accept_language=sys.argv[5]), end="")`
-	secure := "0"
-	if s.secureCookies() {
-		secure = "1"
-	}
-	body, err := s.renderPythonPage(r.Context(), script, next, message, secure, locale, r.Header.Get("Accept-Language"))
+func (s *server) writeNativeLogin(w http.ResponseWriter, r *http.Request, next, message string) {
+	body, err := s.renderPreauthPage(r, false, next, message)
 	if err != nil {
-		http.Error(w, "login page unavailable", http.StatusInternalServerError)
+		slog.Error("login page unavailable", "error", err)
+		http.Error(w, "login page unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(body)
 }
 
-func (s *server) writePythonSetupAuth(w http.ResponseWriter, r *http.Request) {
-	locale := requestLocale(r)
-	secure := "0"
-	if s.secureCookies() {
-		secure = "1"
-	}
-	script := `import sys
-from yomux_lib.web import setup_auth_html
-print(setup_auth_html(current_locale=sys.argv[1], accept_language=sys.argv[2], secure=sys.argv[3] == "1"), end="")`
-	body, err := s.renderPythonPage(r.Context(), script, locale, r.Header.Get("Accept-Language"), secure)
+func (s *server) writeNativeSetupAuth(w http.ResponseWriter, r *http.Request) {
+	body, err := s.renderPreauthPage(r, true, "/", "")
 	if err != nil {
-		http.Error(w, "authentication setup page unavailable", http.StatusInternalServerError)
+		slog.Error("authentication setup page unavailable", "error", err)
+		http.Error(w, "authentication setup page unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(body)
-}
-
-func requestLocale(r *http.Request) string {
-	if cookie, err := r.Cookie("yomux_locale"); err == nil {
-		return cookie.Value
-	}
-	if cookie, err := r.Cookie("yolomux_locale"); err == nil {
-		return cookie.Value
-	}
-	return ""
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {

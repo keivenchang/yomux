@@ -26,17 +26,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # opt-out for a file or class of tests.
 TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_stats_current_prune_schedule.py:test_preferences_panel_offers_the_schedule_in_the_stats_section": "The client must render the server-owned prune-time choices and must never spell its own copy of the default; that wiring is the contract, and the values themselves are proven behaviourally at test_default_prune_time_is_half_past_two_and_is_offered.",
-    "tests/test_chat_store.py:test_chat_store_paging_sql_reads_the_real_implementation_and_avoids_offset": "The OFFSET paging contract is only falsifiable if the scanned file really defines the store's SQL; the prior form read a six-line sys.modules alias with no SQL and could never fail.",
-    "tests/test_app.py:test_session_http_guards_use_shared_decorator": "The decorator is the declared HTTP guard boundary, so its single shared attachment is a structural contract.",
-    "tests/test_app.py:test_stats_history_sampler_parallel_state_is_retired": "The retired sampler maps must remain absent to prevent a second state owner.",
-    "tests/test_app.py:test_auto_approve_worker_parallel_maps_are_retired": "The retired worker maps must remain absent to preserve the one-worker ownership design.",
-    "tests/test_app.py:test_transcripts_payload_parallel_cache_state_is_retired": "The retired transcript cache maps must remain absent to preserve one cache owner.",
-    "tests/test_app.py:test_tabber_activity_parallel_cache_state_is_retired": "The retired tabber cache maps must remain absent to preserve one cache owner.",
-    "tests/test_app.py:test_tabber_activity_warmer_parallel_state_is_retired": "The retired tabber warmer state must remain absent to preserve one warmer owner.",
-    "tests/test_app.py:test_session_files_disk_prune_parallel_state_is_retired": "The retired disk-prune state must remain absent to prevent a duplicate pruner.",
-    "tests/test_app.py:test_client_watch_file_parallel_state_maps_are_retired": "The retired watch-file maps must remain absent to preserve one event owner.",
-    "tests/test_app.py:test_the_cpu_sample_staleness_policy_has_exactly_one_owner": "The retired `3.0` staleness literal must remain absent from app.py so the reader's threshold cannot drift from the producer's cadence; the arithmetic identity asserted beside it holds regardless of a second hardcoded copy reappearing, so only the source check can detect that copy.",
-    "tests/test_app.py:test_yoagent_session_summary_parallel_worker_fields_are_retired": "The retired summary worker fields must remain absent to preserve the shared worker boundary.",
     "tests/test_auth_config.py:test_missing_auth_yaml_creates_commented_starter": "The shipped starter-file comments are the user-facing configuration contract.",
     "tests/test_auth_config.py:test_legacy_placeholder_auth_yaml_is_replaced_with_commented_starter": "The migration writes the same documented starter-file contract.",
     "tests/test_auth_config.py:test_uncommented_auth_yaml_is_active": "The parser's active-versus-commented configuration grammar is intentionally text-defined.",
@@ -46,34 +35,12 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_common.py:test_package_and_runtime_versions_use_one_source": "The single version module and package metadata are a source-of-truth contract that cannot be established by runtime behavior alone.",
     "tests/test_browser_editor.py:test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels": "The embedded Mermaid sample is a fixed rendering fixture, not a substitute for browser behavior tests.",
     "tests/test_browser_stats_coverage.py:test_current_stats_fixture_uses_canonical_resolution_policy": "The browser fixture must import the canonical stats resolution policy rather than clone it.",
-    "tests/test_client_events.py:test_browser_client_event_contract_matches_server_event_types": "The declared client-event names are a producer/consumer protocol contract.",
-    "tests/test_client_events.py:test_generation_ready_is_dispatched_to_old_and_new_browser_event_names": "The generation-ready event name is a cross-version producer and consumer protocol boundary; checking both dispatch names and the active consumer binding prevents old tabs from missing refreshes during the alias window.",
-    "tests/test_common.py:test_main_process_cpu_work_has_named_allowlist": "The process-accounting allowlist is an explicit static inventory.",
-    "tests/test_dev_restart_script.py:test_boot_restart_waits_for_stable_listener_after_ready": "The boot script's listener sequencing is an operator safety contract best checked before execution.",
-    "tests/test_dev_restart_script.py:test_boot_restart_refuses_duplicate_without_blind_listener_kill": "The boot script must refuse unverified duplicates, reserve replacement for the verified instance lease, and detach the launched server from the invoking shell; these startup wiring contracts are safest to check from source.",
-    "tests/test_dev_restart_script.py:test_boot_load_flag_is_compatibility_only_and_preserves_startup_guards": "The boot script must accept the legacy flag without restoring load admission while retaining startup locking and the normal restart path; these exact wiring constraints are also exercised by launcher integration tests.",
     "tests/test_dev_restart_script.py:test_legacy_startup_admission_helpers_are_nonblocking": "The retired load and resource predicates must remain absent from the compatibility helpers; runtime assertions separately prove both helpers return immediately and successfully.",
-    "tests/test_filesystem.py:test_filesystem_implementations_leave_os_error_normalization_to_package_facade": "The package facade is the deliberate sole owner of OS-error normalization.",
     "tests/test_gate_stats_range.py:test_debug_stats_sample_endpoint_is_not_a_live_client_contract": "The debug endpoint must stay absent from shipped client source.",
     "tests/test_gate_worktree_protection.py:test_docs_keep_gate_state_local_to_nfs_checkouts": "The contributor guide must state that automated gates use host-local temporary storage, fixture-owned state and ports, and avoid the operator server; these are operator instructions rather than runtime behavior.",
-    "tests/test_install_metadata.py:test_install_metadata_owns_python_floor_and_watchfiles_dependency": "Packaging metadata is itself the install-time product contract.",
-    "tests/test_local_services_launch.py:test_pyproject_package_discovery_includes_local_service_subpackages": "Package discovery configuration is an install-time source contract.",
-    "tests/test_login_auth.py:test_login_page_uses_saved_theme_and_active_color": "The pre-login template needs its static theme bootstrap before JavaScript is available.",
-    "tests/test_metadata.py:test_session_metadata_retirement_guards_keep_git_ownership_in_work_graph_only": "The retired metadata path must remain absent to preserve work-graph ownership.",
-    "tests/test_metadata_badge_pulses.py:test_metadata_badge_state_has_one_typed_session_owner": "The typed badge state has one intentional owner and no duplicate state map.",
     "tests/test_mock_agents.py:test_background_codex_working_animation_reuses_its_status_row": "The mock renderer's static markup reuse is its exact TUI parity contract.",
     "tests/test_mock_agents.py:test_all_mock_timer_paths_obey_the_no_repaint_contract": "The mock timer paths are intentionally enumerated static rendering contracts.",
-    "tests/test_server_query.py:test_activity_hours_routes_share_float_validation_owner": "Both routes must call the same validation owner rather than duplicate parsing rules.",
-    "tests/test_server_query.py:test_tmux_attach_routes_through_shared_options": "The browser attach path must call the shared tmux-option helper rather than duplicate terminal setup.",
-    "tests/test_server_query.py:test_tmux_attach_refreshes_clients_after_attach": "The browser attach path must call the shared client-refresh helper.",
-    "tests/test_server_query.py:test_configure_session_tmux_options_uses_bounded_tmux_helper": "The helper must use the bounded tmux wrapper and never bypass it with subprocess.run.",
-    "tests/test_server_query.py:test_request_body_reader_owns_content_length_validation": "Content-length validation has one deliberate request-body owner.",
-    "tests/test_server_query.py:test_http_route_registry_groups_dispatch_and_keeps_verbs_thin": "Route registration and verb dispatch are intentionally centralized architecture boundaries.",
-    "tests/test_server_query.py:test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle": "The signal watcher lifecycle has one intentional client-event owner.",
-    "tests/test_server_query.py:test_server_source_wires_routing_ws_readonly_and_pty_setup": "The server's route, readonly, and PTY wiring form an architecture contract.",
     "tests/test_tmux_utils.py:test_launchers_declare_the_default_server_intent_for_control_mode": "The launcher default-server opt-in and explicit socket clearing are an audited source contract for machine-wide tmux discovery.",
-    "tests/test_session_files.py:test_transcript_scan_store_survives_cold_reload_and_resumes_append": "The persistent scan store's source contains the intentional recovery markers.",
-    "tests/test_session_files.py:test_transcript_scan_cache_has_one_owner_and_bounds_claude_message_ids": "The scan cache has one deliberately bounded state owner.",
     "tests/test_settings.py:test_preferences_source_paths_are_in_backend_catalog": "The backend preference catalog is a static source-of-truth mapping.",
     "tests/test_static_build.py:test_markdown_source_change_invalidates_derived_preview_artifacts": "The static builder's dependency declarations are build-system contracts.",
     "tests/test_static_build.py:test_dialog_capacities_have_one_content_relative_token_owner": "Dialog capacity CSS tokens must have one source owner.",
@@ -87,21 +54,10 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_static_build.py:test_node_shard_launcher_has_unique_behavior_owners_and_a_terminal_summary": "The node shard launcher requires static unique-owner and terminal-summary wiring.",
     "tests/test_static_build.py:test_opaque_white_has_one_css_paint_owner": "Opaque white paint must have one tokenized CSS owner.",
     "tests/test_static_build.py:test_tree_row_hover_and_selection_paint_have_one_base_owner": "Tree hover and selection paint must have one base CSS owner.",
-    "tests/test_stats_current_app.py:test_legacy_stats_handlers_and_scheduler_bodies_are_deleted": "The retired stats handlers must remain absent after the daemon migration.",
-    "tests/test_stats_current_client.py:test_default_paths_are_version_scoped_and_never_use_the_legacy_filename": "Version-scoped storage paths must not revive the legacy filename.",
-    "tests/test_stats_current_materializer.py:test_materializer_source_has_no_synthetic_cost_series_or_metadata_codec": "Synthetic cost and metadata codec paths were intentionally retired.",
-    "tests/test_stats_current_service.py:test_server_wire_builders_do_not_revalidate_each_preencoded_private_variant": "Wire builders must preserve the one validation boundary for private variants.",
-    "tests/test_stats_current_service.py:test_system_status_exposes_current_pipeline_health_without_private_values": "Status source must not expose private values while reporting pipeline health.",
-    "tests/test_stats_current_opencode.py:test_reader_queries_are_explicit_and_credential_free": "The private OpenCode reader must keep credential fields out of its source and enumerate its SQLite columns explicitly; these are source-level privacy and schema-drift contracts, while the reader's success and unavailable outcomes are covered by the behavioral fixture tests in this module.",
-    "tests/test_system_status_snapshot.py:test_the_serving_process_owns_the_producer_lifecycle": "The snapshot producer must have exactly one lifecycle owner, and 'exactly one' is a count over the serving process's source that no runtime assertion can make: a second start call in a second place still yields a running producer, so a behavioural test cannot see it. The producer's observable start/stop behaviour is proven separately; this assertion protects only the single-owner wiring.",
     "tests/test_text_client_common_metadata.py:test_text_clients_use_shared_agent_comms_primitives": "Text clients must import the shared communication primitives rather than fork them.",
-    "tests/test_uploads.py:test_upload_request_limit_comes_from_live_settings": "The upload route must use the live settings limit rather than a duplicate literal.",
-    "tests/test_yostats_active_browser_window.py:test_capture_tools_share_proc_cpu_reader_and_positive_validators": "The capture tools must import shared CPU and positive-value validators.",
     "tests/test_yostats_active_browser_window.py:test_active_browser_window_workload_source_contract": "The operator capture tool's workload and measurement setup is an audited static contract; authentication is exercised separately.",
     "tests/test_yostats_active_browser_window.py:test_benchmark_child_runs_in_its_own_process_group_and_is_group_stopped": "The benchmark subprocess group boundary is an operator cleanup contract.",
     "tests/test_yostats_active_browser_window.py:test_deterministic_operation_batch_quiesces_existing_operations_before_freezing_ack_flushes": "The frozen operator workload must quiesce the pre-existing operation and acknowledgement owners before suppressing the batch timer, then reject missing, unrelated, ignored, or retained acknowledgement IDs. The live 75-second run proves the behavior; this source contract pins the ordering inside the injected browser script that a Python fake driver cannot execute.",
-    "tests/test_yostats_active_browser_window.py:test_main_installs_signal_handlers_deadline_and_selenium_timeouts": "The capture CLI's bounded signal, deadline, and Selenium setup is an operator safety contract.",
-    "tests/test_filesystem_access_policy.py:test_one_owner_builds_every_filesystem_job_descriptor": "The one-owner scan IS a source-shape contract: a filesystem job descriptor built by hand anywhere in app.py, batchd.py or tests/ is the second construction site that reintroduces the cross-port authorization bypass. Its allowlist is keyed by occurrence count so a second copy of an allowlisted literal still fails, and it was watched firing on a reverted fixture.",
     "tests/test_launcher_row_wiring.py:test_launcher_has_no_inherited_global_primary_port_export": "The retired global scheduler primary-port export, the Darwin launchctl setenv, and the two dropped early/managed instance-port vars must remain ABSENT from the live launcher; a negative source search is the only way to prove a removed global env export never returns, and the launcher starts real dev servers so it cannot be exercised at runtime here.",
     "tests/test_launcher_row_wiring.py:test_launcher_captures_one_row_plan_and_reuses_it_for_server_and_both_probes": "The supported bash launcher's per-row wiring is a source contract: one plan captured per row and reused for the server launch and BOTH authenticated probes, bound to the unique listener PID, with no drift. The launcher spawns real dev servers, so its script wiring cannot be unit-run here; the exec-mode and owner-probe primitives are separately proven at runtime by test_exec_launched_server_passes_the_real_owner_probe_and_tears_down_by_pid, but the launcher script itself (plan capture, sessions probe, per-row reuse) is only checkable as source.",
     "tests/test_launcher_row_wiring.py:test_launcher_macos_carries_the_plan_through_the_shared_launcher": "The macOS launcher row carries the captured plan through the shared launcher and injects a primary only for the default/durable row; Darwin execution is deferred (W14) and cannot run on this Linux host, so the macOS launch wiring is a source-only contract.",
@@ -119,8 +75,6 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_check_runner.py:test_go_gate_excludes_deprecated_backend_comparison": "The canonical Go gate and Go browser lane must not select deprecated Python-versus-Go implementation comparisons.",
     "tests/test_check_runner.py:test_bazel_stats_integration_has_explicit_normal_and_race_owners": "The normal and race agent-status integration targets are deliberate Bazel ownership entries; the actual targets are executed in the canonical Dockerized suite, while this source contract prevents one mode from disappearing from the test graph.",
     "tests/test_browser_layout.py:test_static_browser_fixtures_have_one_write_and_navigation_owner": "The static browser fixture must keep one write/navigation owner; runtime scenarios exercise the behavior separately.",
-    "tests/test_local_service_runtime_row_projection.py:test_every_registry_row_producer_delegates_to_the_shared_parent": "Every registry-backed runtime-row producer must delegate to the single shared projection owner.",
-    "tests/test_local_service_runtime_row_projection.py:test_shared_projection_and_watchd_bridge_have_no_lifecycle_entrypoint": "The projection and bridge are deliberately lifecycle-free; source absence prevents a second daemon owner.",
 }
 
 # A function-level reason covers related assertions in that one source-contract
@@ -128,7 +82,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "e4355ac556339253d82e14b275b40f7c639eeab1933dd39865b48ab1eb5001aa"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "2a1c5a3cea068a76aa68dea6784ce106613cd7d0c46a7336035943265152d409"
 
 
 @dataclass(frozen=True, slots=True)

@@ -6,6 +6,10 @@ const {execFileSync} = require('child_process');
 const fs = require('fs');
 const vm = require('vm');
 
+function baselineStatsUiFixture() {
+  return JSON.parse(fs.readFileSync('tests/fixtures/retired_stats_ui_contract.json', 'utf8'));
+}
+
 const source = fs.readFileSync('static_src/js/yomux/84_stats_current.js', 'utf8');
 const transportLifecycleSource = fs.readFileSync('static_src/js/yomux/09_transport_lifecycle.js', 'utf8');
 const coreSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
@@ -755,30 +759,8 @@ test('series validation rejects malformed scalars, identities, and field sets at
   }
 });
 
-test('accepts the service-produced backfill field and no unlisted snapshot field', () => {
-  const bareSnapshot = snapshot({requested: 1});
-  delete bareSnapshot.usage_atom_backfill;
-  const payload = JSON.parse(execFileSync('python3', ['-c', `
-import json
-import sys
-import threading
-from yomux_lib.stats_current.service import StatsCurrentService
-
-service = object.__new__(StatsCurrentService)
-service._snapshot_body_decoration_lock = threading.Lock()
-service._snapshot_body_decoration_cache = None
-service._snapshot_body_decoration_builds = 0
-service._snapshot_body_decoration_hits = 0
-service._usage_atom_backfill = {
-    "state": "complete", "sources": 2, "missing": 0,
-    "scan": {
-        "files_read": 2, "records_parsed": 3, "atoms_emitted": 4,
-        "atoms_accepted": 4, "atoms_rejected": 0, "rejection_reasons": {},
-    },
-}
-service.encoder = lambda value: json.dumps(value, separators=(",", ":")).encode()
-sys.stdout.buffer.write(service._snapshot_body_with_backfill_status(sys.stdin.buffer.read()))
-`], {input: JSON.stringify(bareSnapshot), encoding: 'utf8'}));
+test('accepts the captured baseline backfill field and no unlisted snapshot field', () => {
+  const payload = baselineStatsUiFixture().backfill_snapshot;
   const controller = loadController({capabilities: capabilities(), savedRange: 300, savedResolution: 1, clientId: 'producer-contract'});
   assert.equal(controller.acceptSnapshot(payload), true);
   assert.throws(
@@ -787,64 +769,8 @@ sys.stdout.buffer.write(service._snapshot_body_with_backfill_status(sys.stdin.bu
   );
 });
 
-test('accepts the service-produced first delta after a cold public-owner snapshot', () => {
-  const payload = JSON.parse(execFileSync('python3', ['-c', `
-import json
-import tempfile
-from pathlib import Path
-
-from yomux_lib.stats_current import protocol, service, storage
-
-with tempfile.TemporaryDirectory() as temporary:
-    root = Path(temporary)
-    database = root / storage.DATABASE_FILENAME
-    wall_now = [1_800_000_000.0]
-    initial_monotonic = [0.0]
-    initial = service.StatsCurrentService(
-        root / "initial.sock",
-        database,
-        monotonic=lambda: initial_monotonic[0],
-        clock=lambda: wall_now[0],
-        randomizer=lambda: 0.0,
-    )
-    with storage.Store.open(database) as store:
-        initial.writer = store
-        initial._build_once(store, True, frozenset())
-        initial_monotonic[0] = service.RING_FLUSH_SECONDS
-        assert initial._flush_ring_if_due() is not None
-
-        restarted = service.StatsCurrentService(
-            root / "restarted.sock",
-            database,
-            monotonic=lambda: 0.0,
-            clock=lambda: wall_now[0],
-            randomizer=lambda: 0.0,
-        )
-        restarted.writer = store
-        _metadata, snapshot_binary = restarted.handle_with_binary({
-            "protocol_version": storage.MIN_WRITER_PROTOCOL,
-            "schema_generation": storage.SCHEMA_VERSION,
-            "action": "snapshot",
-            "range_seconds": 900,
-            "resolution": "AUTO",
-            "client_id": "producer-browser",
-        })
-        snapshot = protocol.validate_snapshot(json.loads(snapshot_binary))
-        wall_now[0] += 10.0
-        restarted._build_once(store, True, frozenset())
-        _metadata, delta_binary = restarted.handle_with_binary({
-            "protocol_version": storage.MIN_WRITER_PROTOCOL,
-            "schema_generation": storage.SCHEMA_VERSION,
-            "action": "delta",
-            "range_seconds": 900,
-            "resolution_seconds": 10,
-            "client_id": "producer-browser",
-            "after_cache_generation": snapshot["cache_generation"],
-            "after_revision": 0,
-        })
-        delta = protocol.validate_delta(json.loads(delta_binary))
-        print(json.dumps({"snapshot": snapshot, "delta": delta}, separators=(",", ":")))
-`], {encoding: 'utf8'}));
+test('accepts the captured baseline first delta after a cold public-owner snapshot', () => {
+  const payload = baselineStatsUiFixture().cold_restart;
   const controller = loadController({
     capabilities: capabilities(), savedRange: 900, savedResolution: 'AUTO', clientId: 'producer-browser',
   });

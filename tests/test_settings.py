@@ -282,8 +282,10 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["terminal_editor"]["line_numbers"] is False
     assert settings["yoagent"]["backend"] == "auto"
     assert settings["yoagent"]["invocation"] == "cli"
+    assert settings["yoagent"]["claude_model"] == "claude-haiku-5-5"
     assert settings["yoagent"]["claude_effort"] == "low"
-    assert settings["yoagent"]["codex_effort"] == "low"
+    assert settings["yoagent"]["codex_model"] == "gpt-6-luna"
+    assert settings["yoagent"]["codex_effort"] == "medium"
     assert "auto_refresh" not in settings["yoagent"]
     assert "refresh_interval_seconds" not in settings["yoagent"]
     assert settings["yoagent"]["system_prompt"] == "Use facts"
@@ -355,16 +357,17 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["summary"] == {
         "backend": "codex",
-        "codex_model": "gpt-5.4-mini",
+        "codex_model": "gpt-6.1-sol",
         "codex_effort": "low",
         "codex_service_tier": "fast",
         "lookback_seconds": 3600,
         "timeout_seconds": 600,
     }
     assert payload["settings"]["yoagent"]["backend"] == "auto"
-    assert payload["settings"]["yoagent"]["claude_model"] == "claude-haiku-4-5"
+    assert payload["settings"]["yoagent"]["claude_model"] == "claude-haiku-5-5"
     assert payload["settings"]["yoagent"]["claude_effort"] == "low"
-    assert payload["settings"]["yoagent"]["codex_effort"] == "low"
+    assert payload["settings"]["yoagent"]["codex_model"] == "gpt-6-luna"
+    assert payload["settings"]["yoagent"]["codex_effort"] == "medium"
     assert "auto_refresh" not in payload["settings"]["yoagent"]
     assert "refresh_interval_seconds" not in payload["settings"]["yoagent"]
     assert "normal status-update style" in payload["settings"]["yoagent"]["system_prompt"]
@@ -454,18 +457,22 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
     assert catalog["yoagent.invocation"]["hidden_choices"] == ["api-key"]
     assert "persistent local app-server" in catalog["yoagent.invocation"]["description"]
     assert "stream-json CLI subprocess" in catalog["yoagent.invocation"]["description"]
-    assert catalog["yoagent.codex_model"]["default"] == "gpt-5.4-mini"
-    assert catalog["yoagent.codex_model"]["choices"] == ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]
-    assert catalog["yoagent.codex_model"]["choice_labels"]["gpt-5.3-codex-spark"] == "GPT-5.3-Codex-Spark"
-    assert catalog["yoagent.codex_model"]["choice_metadata"]["gpt-5.5"]["default_effort"] == "low"
-    assert catalog["yoagent.codex_model"]["choice_metadata"]["gpt-5.3-codex-spark"]["default_effort"] == "low"
-    assert catalog["yoagent.codex_model"]["choice_metadata"]["gpt-5.4-mini"]["effort_options"] == ["low", "medium", "high", "xhigh"]
+    assert catalog["yoagent.codex_model"]["default"] == "gpt-6-luna"
+    assert catalog["yoagent.codex_effort"]["default"] == "medium"
+    assert catalog["yoagent.codex_model"]["choices"] == ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol"]
+    assert catalog["yoagent.codex_model"]["choice_labels"]["gpt-6-luna"] == "GPT-6-Luna"
+    assert catalog["yoagent.codex_model"]["choice_metadata"]["gpt-6-luna"]["default_effort"] == "medium"
+    assert catalog["yoagent.codex_model"]["choice_metadata"]["gpt-6-astra"]["default_effort"] == "low"
+    assert catalog["yoagent.codex_model"]["choice_metadata"]["gpt-5.6-sol"]["default_effort"] == "medium"
+    assert catalog["yoagent.codex_model"]["choice_metadata"]["gpt-6-astra"]["effort_options"] == ["low", "medium", "high", "xhigh", "max", "ultra"]
     assert "gpt-5-nano" not in catalog["yoagent.codex_model"]["accepted_choices"]
-    assert catalog["yoagent.claude_model"]["choices"] == ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"]
-    assert catalog["summary.codex_model"]["default"] == "gpt-5.4-mini"
+    assert catalog["yoagent.claude_model"]["choices"] == ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+    assert catalog["yoagent.claude_model"]["choice_labels"]["claude-opus-5-5"] == "Claude Opus 5.5"
+    assert catalog["summary.codex_model"]["default"] == "gpt-6.1-sol"
     assert catalog["summary.codex_model"]["choices"] == catalog["yoagent.codex_model"]["choices"]
     assert catalog["summary.codex_model"]["choice_metadata"] == catalog["yoagent.codex_model"]["choice_metadata"]
-    assert catalog["summary.codex_effort"]["choices"] == ["low", "medium", "high", "xhigh"]
+    assert catalog["yoagent.codex_effort"]["choices"] == ["low", "medium", "high", "xhigh", "max", "ultra"]
+    assert catalog["summary.codex_effort"]["choices"] == ["low", "medium", "high", "xhigh", "max", "ultra"]
     assert catalog["summary.codex_service_tier"]["choices"] == ["fast", "auto", "default"]
     assert catalog["summary.lookback_seconds"]["limits"] == {"min": 60, "max": 86400}
     assert catalog["summary.timeout_seconds"]["limits"] == {"min": 30, "max": 3600}
@@ -485,7 +492,7 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
     assert catalog["cost.anthropic_pricing_profile"]["choices"] == ["default", "subscription"]
 
 
-def test_stale_yoagent_model_settings_revert_to_valid_defaults():
+def test_stale_yoagent_model_settings_migrate_to_current_models():
     sanitized = sanitize_settings({
         "yoagent": {
             "codex_model": "gpt-5.3-codex-spark",
@@ -493,9 +500,9 @@ def test_stale_yoagent_model_settings_revert_to_valid_defaults():
         },
     })
 
-    assert sanitized["yoagent"]["codex_model"] == "gpt-5.3-codex-spark"
-    assert sanitized["yoagent"]["claude_model"] == "claude-fable-5"
-    assert sanitize_settings({"yoagent": {"claude_model": "claude-fable-6"}})["yoagent"]["claude_model"] == "claude-haiku-4-5"
+    assert sanitized["yoagent"]["codex_model"] == "gpt-6-luna"
+    assert sanitized["yoagent"]["claude_model"] == "claude-fable-5-1"
+    assert sanitize_settings({"yoagent": {"claude_model": "claude-fable-6"}})["yoagent"]["claude_model"] == "claude-haiku-5-5"
 
 
 def test_chat_retention_setting_defaults_clamps_and_rejects_stale_values(tmp_path):
@@ -528,7 +535,7 @@ def test_summary_settings_reject_invalid_backend_defaults():
     })
 
     assert sanitized["summary"]["backend"] == "codex"
-    assert sanitized["summary"]["codex_model"] == "gpt-5.4-mini"
+    assert sanitized["summary"]["codex_model"] == "gpt-6.1-sol"
     assert sanitized["summary"]["codex_effort"] == "low"
     assert sanitized["summary"]["codex_service_tier"] == "fast"
     assert sanitized["summary"]["lookback_seconds"] == 60
@@ -571,50 +578,8 @@ def test_language_setting_accepts_names_and_endonyms():
     assert sanitize_settings({"general": {"language": "日本語"}})["general"]["language"] == "ja"
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_yoagent_deterministic_preference_alias_write_fixtures():
-    payload = {"settings": default_settings(), "defaults": default_settings(), "catalog": settings_catalog(default_settings())}
-    cases = [
-        ("change background to white", "appearance.theme", "light"),
-        ("change background to black", "appearance.theme", "dark"),
-        ("make tabs wider", "appearance.tab_width", 192),
-        ("tab width 220", "appearance.tab_width", 220),
-            ("make UI smaller", "appearance.global_font_size", 13),
-            ("terminal font bigger", "appearance.terminal_font_size", 15),
-        ("no notifications", "notifications.notify_transitions", []),
-        ("quiet notifications", "notifications.notify_transitions", []),
-        ("light terminal", "appearance.terminal_theme", "light"),
-        ("dark terminal", "appearance.terminal_theme", "dark"),
-        ("set language to 日本語", "general.language", "ja"),
-        ("set language to Español", "general.language", "es"),
-    ]
-
-    for question, path, value in cases:
-        intent = parse_settings_write(question, payload)
-        assert intent is not None, question
-        assert intent["type"] == "settings_write", question
-        assert intent["path"] == path, question
-        assert intent["value"] == value, question
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_yoagent_deterministic_routing_alias_fixtures():
-    wait = parse_yoagent_action_intent("wait for session 4, send it date, and tell me what it says", [], ["4"])
-    direct = parse_yoagent_action_intent("send date to session 6 and tell me what it says", [], ["6"])
-    no_wait = parse_yoagent_action_intent("send date to session 6 but do not wait for the result", [], ["6"])
-    handoff = parse_yoagent_action_intent("ask session 1 what changed, then ask session 2 if that is correct", [], ["1", "2"])
-
-    assert wait == {"type": "wait_then_send", "session": "4", "text": "tell me the date", "submit": True, "return_result": True}
-    assert direct == {"type": "send_prompt", "session": "6", "text": "tell me the date", "submit": True, "return_result": True}
-    assert no_wait == {"type": "send_prompt", "session": "6", "text": "tell me the date", "submit": True}
-    assert handoff is not None
-    assert handoff["type"] == "session_handoff"
-    assert handoff["session"] == "1"
-    assert handoff["text"] == "what changed"
-    assert handoff["return_result"] is True
-    assert handoff["handoff"] == {"source_session": "1", "session": "2", "instruction": "if that is correct"}
 
 
 def test_save_settings_can_reset_all_values_to_defaults(tmp_path):
@@ -752,20 +717,6 @@ def test_login_locale_picker_writes_general_language():
         save_login_locale("system")  # reset so the shared test config dir isn't left in Chinese
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_deterministic_yoagent_reply_localizes_framing():
-    # The no-agent fallback resolves both framing and per-session facts through the active locale.
-    en_reply = deterministic_yoagent_reply("status?", {}, {}, "en")
-    assert "No AI backend is answering" in en_reply
-    assert "No AI agent activity is available yet." in en_reply
-
-    es_reply = deterministic_yoagent_reply("status?", {}, {}, "es")
-    assert "Ningún backend de IA está respondiendo" in es_reply
-    assert "Aún no hay actividad del agente de IA disponible." in es_reply
-
-    ja_reply = deterministic_yoagent_reply("status?", {}, {}, "ja")
-    assert "応答する AI バックエンドがありません" in ja_reply
 
 
 def test_watched_prs_and_server_event_defaults():

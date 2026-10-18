@@ -53,12 +53,11 @@ from tools import bazel_execution_contract
 from tools import system_status_latency_probe
 from yomux_lib import common as common_module
 from yomux_lib.infra import listener_census
-from yomux_lib.server import Handler
 
 from tests.gate_harness import GateAuthCredentials
 from tests.gate_harness import GateLiveServer
 from tests.gate_harness import gate_auth_credentials  # noqa: F401
-from tests.gate_harness import gate_authenticated_live_server  # noqa: F401
+from tests.native_gate_fixtures import gate_authenticated_live_server  # noqa: F401
 from tests.gate_harness import gate_http_port  # noqa: F401
 from tests.gate_harness import gate_http_request
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
@@ -233,13 +232,6 @@ def acceptance_outcome(values: Sequence[float], budget_ms: float = REPRESENTATIO
     return {"ok": p99 < float(budget_ms), "p99_ms": p99, "budget_ms": float(budget_ms), "count": len(series)}
 
 
-def _server_handler_samples(runtime: GateLiveServer) -> list[dict[str, Any]]:
-    """Read the server's own per-request records for this surface, oldest first."""
-
-    app = runtime.app
-    with app.performance_record_lock:
-        records = [dict(item) for item in app.performance_records]
-    return [item for item in records if item.get("role") == "http-endpoint" and item.get("surface") == SYSTEM_STATUS_SURFACE]
 
 
 def _await_server_handler_samples(runtime: GateLiveServer, expected: int, *, timeout: float = 5.0) -> list[dict[str, Any]]:
@@ -281,165 +273,6 @@ def _summary(values: list[float]) -> dict[str, float]:
     }
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.skipif(
-    not os.environ.get(MEASURE_ENV),
-    reason=f"latency probe runs only when {MEASURE_ENV} names the run (for example 'before' or 'after')",
-)
-def test_measure_system_status_latency(
-    gate_authenticated_live_server: GateLiveServer,  # noqa: F811
-    gate_auth_credentials: GateAuthCredentials,  # noqa: F811
-) -> None:
-    runtime = gate_authenticated_live_server
-    label = str(os.environ.get(MEASURE_ENV) or "unlabelled")
-    cookie = _login_cookie(runtime, gate_auth_credentials)
-    headers = {"Cookie": cookie, "Connection": "close"}
-
-    # The cold request: the first time this process answers this route at all. Nothing has warmed
-    # an import, a cache, or - after the change - published a snapshot.
-    cold_started = time.perf_counter()
-    cold_response = gate_http_request(runtime, SYSTEM_STATUS_PATH, headers=headers, timeout=30.0)
-    cold_round_trip_ms = (time.perf_counter() - cold_started) * 1000.0
-    cold_body = json.loads(cold_response.body.decode("utf-8")) if cold_response.body else {}
-    cold_records = _await_server_handler_samples(runtime, 1)
-    cold_handler_ms = float(cold_records[0].get("compute_ms") or 0.0)
-
-    # The whole run must be answered by ONE unchanged process/artifact. Snapshot the identity before
-    # the first sampled request and again after the last; any drift invalidates the run below.
-    identity_before = server_identity_snapshot()
-
-    for _index in range(WARMUP_REQUESTS):
-        gate_http_request(runtime, SYSTEM_STATUS_PATH, headers=headers, timeout=30.0)
-
-    round_trips: list[float] = []
-    statuses: list[int] = []
-    samples: list[CaptureSample] = []
-    issued_ids: list[str] = []
-    for _index in range(SAMPLE_REQUESTS):
-        marker = unique_capture_marker()
-        request_id = measurement_request_id(marker)
-        issued_ids.append(request_id)
-        started = time.perf_counter()
-        response = gate_http_request(
-            runtime, SYSTEM_STATUS_PATH,
-            headers={**headers, MEASUREMENT_HEADER: marker},
-            timeout=30.0,
-        )
-        round_trips.append((time.perf_counter() - started) * 1000.0)
-        statuses.append(response.status)
-        body = json.loads(response.body.decode("utf-8")) if response.body else {}
-        # A refusal body (unavailable/stale snapshot) carries ok=False; a current body carries
-        # ok=True. Either non-200 or a refusal body invalidates the joined run.
-        stale = not (isinstance(body, dict) and body.get("ok") is True)
-        samples.append(CaptureSample(request_id=request_id, http_status=int(response.status), stale=stale))
-
-    records = _await_server_handler_samples(runtime, 1 + WARMUP_REQUESTS + SAMPLE_REQUESTS)
-    identity_after = server_identity_snapshot()
-    identity_ok, identity_reason = identity_unchanged(identity_before, identity_after)
-    assert identity_ok, identity_reason
-
-    # Join each of the 200 requests to exactly the record its unique marker produced -- not the last
-    # 200 rows of the ring. A missing/duplicate/stale/error/unmeasured row invalidates the whole run.
-    issued = set(issued_ids)
-    sample_records = [
-        item for item in records
-        if isinstance(item.get("details"), dict)
-        and str(item["details"].get("measurement_request_id") or "") in issued
-    ]
-    by_id = {str(item["details"]["measurement_request_id"]): item for item in sample_records}
-    joined = join_capture_samples_to_records(samples, sample_records)
-    assert joined.ok, joined.reason
-
-    representation_ready_ms = list(joined.values)
-    # compute_ms/write_ms retained as DIAGNOSTICS beside the headline, joined from the same records.
-    handler_ms = [float(by_id[rid].get("compute_ms") or 0.0) for rid in issued_ids]
-    write_ms = [float((by_id[rid].get("details") or {}).get("write_ms") or 0.0) for rid in issued_ids]
-    payload_bytes = [int(by_id[rid].get("payload_bytes") or 0) for rid in issued_ids]
-    acceptance = acceptance_outcome(representation_ready_ms)
-    assert acceptance["ok"], (
-        f"{HEADLINE_METRIC} nearest-rank p99 {acceptance['p99_ms']} ms "
-        f"must be under {acceptance['budget_ms']} ms"
-    )
-
-    # The assembly cost itself, measured in-process. This is the quantity the change MOVES rather
-    # than removes: before, every one of those 200 handler times contains it; after, none does.
-    # Recording it on both sides is what makes the two runs comparable on a machine whose absolute
-    # speed differs from the live host.
-    assembly_ms: list[float] = []
-    for _index in range(5):
-        started = time.perf_counter()
-        runtime.app.system_status_payload()
-        assembly_ms.append((time.perf_counter() - started) * 1000.0)
-
-    snapshot_owner = getattr(runtime.app, "system_status_snapshot", None)
-    snapshot_status = snapshot_owner.status() if snapshot_owner is not None else {
-        "present": False,
-        "note": "no background snapshot owner in this build; the route assembles on the request thread",
-    }
-
-    artifact = {
-        "label": label,
-        "protocol": {
-            "headline_quantity": "route_to_representation_ready_ms (route entry to representation ready, before header/body write)",
-            "headline_source": f"app.performance_records role=http-endpoint surface={SYSTEM_STATUS_SURFACE} details.{HEADLINE_METRIC}",
-            "diagnostics": "compute_ms and write_ms retained beside the headline, never substituted for it",
-            "client_round_trip": "recorded separately, never substituted for the headline",
-            "warmup_requests_discarded": WARMUP_REQUESTS,
-            "sample_requests": SAMPLE_REQUESTS,
-            "concurrency": CONCURRENCY,
-            "unique_digest_per_request": True,
-            "join": "one server record per request, joined by measurement_request_id",
-            "acceptance": f"nearest-rank p99 of {HEADLINE_METRIC} < {REPRESENTATION_READY_BUDGET_MS} ms",
-            "invalidation": "any unavailable/stale/error/missing/duplicate row invalidates the run",
-            "cold_request": "the first /api/system-status this server process answered",
-        },
-        "identity": {
-            "before": identity_before,
-            "after": identity_after,
-            "unchanged": identity_ok,
-        },
-        "environment": {
-            "host": socket.gethostname(),
-            "python": platform.python_version(),
-            "platform": platform.platform(),
-            "measured_at": time.time(),
-            # Ambient only. This is NOT the load condition and may not be cited as one.
-            "observed_loadavg_side_fact_only": list(os.getloadavg()),
-        },
-        "snapshot": snapshot_status,
-        "cold": {
-            "server_handler_ms": cold_handler_ms,
-            "client_round_trip_ms": cold_round_trip_ms,
-            "http_status": cold_response.status,
-            "body_keys": sorted(cold_body.keys()) if isinstance(cold_body, dict) else [],
-        },
-        # What the compute change MOVES rather than removes, measured in-process on both sides.
-        "assembly_ms": _summary(assembly_ms),
-        "acceptance": acceptance,
-        "steady_state": {
-            "representation_ready_ms": _summary(representation_ready_ms),
-            "server_handler_ms": _summary(handler_ms),
-            "write_ms": _summary(write_ms),
-            "client_round_trip_ms": _summary(round_trips),
-            "http_status_counts": {str(code): statuses.count(code) for code in sorted(set(statuses))},
-            "payload_bytes_median": statistics.median(payload_bytes),
-        },
-        "raw": {
-            "representation_ready_ms": representation_ready_ms,
-            "server_handler_ms": handler_ms,
-            "write_ms": write_ms,
-            "client_round_trip_ms": round_trips,
-        },
-    }
-    directory = Path(os.environ.get(ARTIFACT_DIR_ENV) or DEFAULT_ARTIFACT_DIR)
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"system-status-latency-{label}.json"
-    text = json.dumps(artifact, indent=2, sort_keys=True)
-    path.write_text(text, encoding="utf-8")
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    (directory / f"system-status-latency-{label}.sha256").write_text(f"{digest}  {path.name}\n", encoding="utf-8")
-    print(f"\nARTIFACT {path}\nSHA256 {digest}\n{json.dumps({k: v for k, v in artifact.items() if k != 'raw'}, indent=2, sort_keys=True)}")
 
 
 # ---- gate-safe synthetic proofs of the probe's pure logic --------------------------------------
@@ -465,18 +298,6 @@ def _record(request_id: str, ready_ms: float, *, status: str = "200", compute_ms
     }
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_unique_capture_marker_is_accepted_by_the_real_server_validator() -> None:
-    marker = unique_capture_marker()
-    # The server's own validator must accept the marker this probe mints, and the server's own join
-    # key must equal the one the probe computes -- otherwise the join silently drops every request.
-    handler = object.__new__(Handler)
-    handler.headers = {MEASUREMENT_HEADER: marker}
-    handler.client_address = ("127.0.0.1", 5000)
-    assert handler.measurement_marker() == marker
-    assert handler.measurement_request_id() == measurement_request_id(marker)
-    assert len({unique_capture_marker() for _ in range(500)}) == 500
 
 
 def test_join_returns_the_headline_series_in_issued_order_for_a_clean_run() -> None:

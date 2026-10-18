@@ -5,7 +5,6 @@ from threading import Thread
 
 import pytest
 
-from yomux_lib import batchd
 from yomux_lib.local_services import client as local_service_client_mod
 from yomux_lib.local_services import registry as registry_mod
 from yomux_lib.local_services import rpc
@@ -59,120 +58,12 @@ def test_lease_release_terminal_upgrade_response_is_recorded_without_retry(monke
     ]
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.parametrize("method", ("result", "product"))
-def test_job_client_observation_does_not_launch_an_absent_service(method, tmp_path, monkeypatch):
-    client = batchd.BatchClient(tmp_path / "batchd.sock")
-    attempts = []
-    launch_calls = []
-
-    def request_once(payload, timeout, request_binary=b"", *, probe=False):
-        attempts.append((dict(payload), timeout, request_binary, probe))
-        return {"ok": False, "error": "socket is absent", "_transport_error": "absent"}, b"", None
-
-    monkeypatch.setattr(client, "_request_once", request_once)
-    monkeypatch.setattr(client.registry, "ensure_started", lambda: launch_calls.append(True) or True)
-
-    if method == "result":
-        response = client.result("job-1", timeout=0.04)
-        expected_payload = {"action": "result", "job_id": "job-1"}
-    else:
-        response, body = client.product("product-1", timeout=0.04)
-        expected_payload = {"action": "product", "coalesce_key": "product-1"}
-        assert body == b""
-
-    assert response["_transport_error"] == "absent"
-    assert attempts == [(expected_payload, pytest.approx(0.04), b"", False)]
-    assert launch_calls == []
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.parametrize("method", ("submit", "produce"))
-def test_job_client_retries_explicit_prehandler_busy_within_one_rpc_budget(method, tmp_path, monkeypatch):
-    client = batchd.BatchClient(tmp_path / "batchd.sock")
-    clock = [100.0]
-    waits = []
-    attempts = []
-    responses = iter((
-        ({"ok": False, "error": "service busy", "capacity_rejected": True}, b""),
-        ({"ok": True, "job": {"job_id": "accepted", "status": "queued"}}, b"accepted"),
-    ))
-
-    def request_once(payload, timeout, request_binary=b"", *, probe=False):
-        attempts.append((dict(payload), timeout, request_binary, probe))
-        response, body = next(responses)
-        return response, body, None
-
-    def wait(seconds):
-        waits.append(seconds)
-        clock[0] += seconds
-
-    monkeypatch.setattr(client, "_request_once", request_once)
-    monkeypatch.setattr(local_service_client_mod, "monotonic_clock", lambda: clock[0])
-    monkeypatch.setattr(local_service_client_mod, "sleep_for", wait)
-
-    if method == "submit":
-        response = client.submit("json_compact", {"value": 1})
-        body = b""
-    else:
-        response, body = client.produce("json_compact", {"value": 1})
-
-    assert response["ok"] is True
-    assert body == (b"accepted" if method == "produce" else b"")
-    assert len(attempts) == 2
-    assert attempts[0][0] == attempts[1][0]
-    assert attempts[0][1] == pytest.approx(0.5)
-    assert attempts[1][1] == pytest.approx(0.495)
-    assert waits == [pytest.approx(rpc.LOCAL_SERVICE_BUSY_RETRY_INITIAL_SECONDS)]
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_job_client_retries_shutdown_admission_refusal_within_one_rpc_budget(tmp_path, monkeypatch):
-    client = batchd.BatchClient(tmp_path / "batchd.sock")
-    clock = [100.0]
-    attempts = []
-    responses = iter((
-        ({"ok": False, "error": "service busy", "admission_rejected": True}, b""),
-        ({"ok": True, "job": {"job_id": "accepted", "status": "queued"}}, b""),
-    ))
-
-    def request_once(payload, timeout, request_binary=b"", *, probe=False):
-        attempts.append((dict(payload), timeout, request_binary, probe))
-        response, body = next(responses)
-        return response, body, None
-
-    monkeypatch.setattr(client, "_request_once", request_once)
-    monkeypatch.setattr(local_service_client_mod, "monotonic_clock", lambda: clock[0])
-    monkeypatch.setattr(
-        local_service_client_mod,
-        "sleep_for",
-        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
-    )
-
-    response = client.submit("json_compact", {"value": 1})
-
-    assert response["ok"] is True
-    assert len(attempts) == 2
-    assert attempts[0][0] == attempts[1][0]
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_job_client_does_not_retry_generic_busy_without_prehandler_provenance(tmp_path, monkeypatch):
-    client = batchd.BatchClient(tmp_path / "batchd.sock")
-    attempts = []
-
-    def request_once(payload, timeout, request_binary=b"", *, probe=False):
-        attempts.append((dict(payload), timeout, request_binary, probe))
-        return {"ok": False, "error": "service busy"}, b"", None
-
-    monkeypatch.setattr(client, "_request_once", request_once)
-
-    assert client.submit("json_compact", {"value": 1}) == {"ok": False, "error": "service busy"}
-    assert len(attempts) == 1
 
 
 @pytest.mark.parametrize("operation", ("ping", "status", "lease", "release", "shutdown"))
@@ -323,21 +214,3 @@ def test_registry_release_lease_retries_capacity_busy_then_succeeds(tmp_path, mo
     assert attempts[0][2] == pytest.approx(0.25)
     assert attempts[1][2] == pytest.approx(0.245)
     assert waits == [pytest.approx(rpc.LOCAL_SERVICE_BUSY_RETRY_INITIAL_SECONDS)]
-
-
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_job_client_does_not_retry_ambiguous_service_unavailable_response(tmp_path, monkeypatch):
-    client = batchd.BatchClient(tmp_path / "batchd.sock")
-    attempts = []
-
-    def request_once(payload, timeout, request_binary=b"", *, probe=False):
-        attempts.append((dict(payload), timeout, request_binary, probe))
-        return {"ok": False, "status": 503, "error": "downstream unavailable"}, b"", None
-
-    monkeypatch.setattr(client, "_request_once", request_once)
-
-    response = client.submit("json_compact", {"value": 1})
-
-    assert response == {"ok": False, "status": 503, "error": "downstream unavailable"}
-    assert len(attempts) == 1

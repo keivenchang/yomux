@@ -28,7 +28,7 @@ from tests.helpers.fixture_tools import clear_fixture_settings
 from tests import gate_harness as gate_harness_module
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.gate_harness import gate_http_port  # noqa: F401
-from tests.gate_harness import gate_live_server  # noqa: F401
+from tests.native_gate_fixtures import gate_live_server  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.gate_harness import load_gate_browser
@@ -814,88 +814,3 @@ def test_read_state_rejects_a_malformed_ownership_field_in_browser_console_mode(
 
     with pytest.raises(AssertionError, match="watch-diff pending ownership is malformed"):
         wait_for_fixture_api_quiescence(MalformedOwnershipDriver(), timeout=0.01)
-
-
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_generated_lifecycle_adapter_partitions_pending_by_terminal_owner(browser, gate_live_server):
-    # Behavioral proof that the REAL generated adapter derives watchDiffPendingOperationIds from each
-    # record's terminalOwner. The Python fakes above hand-construct the field; only this exercises the
-    # actual operationState() partition logic in the shipped bundle. Inject one baseline-owned record
-    # (terminalOwner='filesystem-watch-diff-refresh') and one unrelated pending record, read the
-    # partition, then remove both so teardown quiescence is unaffected.
-    load_gate_browser(browser, gate_live_server)
-    partition = browser.execute_script(
-        """
-        const baselineId = 'op-f8-adapter-baseline';
-        const unrelatedId = 'op-f8-adapter-unrelated';
-        const baselineRecord = {
-          id: baselineId,
-          kind: 'fs_watch_diff',
-          context: {operation: 'watch-diff-baseline', session: 'yt-f8', path: '/fixture/root'},
-          request: {id: 'request-f8-baseline', method: 'GET', path: '/api/fs/watch-diff?full=1'},
-          phase: 'accepted',
-          terminalOwner: 'filesystem-watch-diff-refresh',
-        };
-        const unrelatedRecord = {
-          id: unrelatedId,
-          kind: 'session_files',
-          context: {operation: 'session-files', session: 'yt-f8'},
-          request: {id: 'request-f8-unrelated', method: 'POST', path: '/api/session-files'},
-          phase: 'accepted',
-        };
-        const batchLength = fileExplorerFsBatchQueue.length;
-        fileExplorerFsBatchQueue.push(
-          {terminalOwners: new Set(['filesystem-watch-diff-refresh'])},
-          {terminalOwners: new Set()},
-        );
-        apiOperationState.records.set(baselineId, baselineRecord);
-        apiOperationState.pending.set(baselineId, baselineRecord);
-        apiOperationState.records.set(unrelatedId, unrelatedRecord);
-        apiOperationState.pending.set(unrelatedId, unrelatedRecord);
-        try {
-          const state = window.__yomuxFixtureLifecycle.operationState();
-          return {
-            pending: state.pending,
-            pendingDetails: state.pendingDetails,
-            pendingDetailsTruncated: state.pendingDetailsTruncated,
-            owned: state.watchDiffPendingOperationIds,
-            batchQueuedDelta: state.batchQueued - batchLength,
-            ownedBatchQueuedDelta: state.watchDiffBatchQueued,
-          };
-        } finally {
-          fileExplorerFsBatchQueue.splice(batchLength);
-          apiOperationState.pending.delete(baselineId);
-          apiOperationState.records.delete(baselineId);
-          apiOperationState.pending.delete(unrelatedId);
-          apiOperationState.records.delete(unrelatedId);
-        }
-        """
-    )
-    assert "op-f8-adapter-baseline" in partition["pending"]
-    assert "op-f8-adapter-unrelated" in partition["pending"]
-    assert partition["pendingDetailsTruncated"] is False
-    details = {detail["id"]: detail for detail in partition["pendingDetails"]}
-    assert details["op-f8-adapter-baseline"] == {
-        "id": "op-f8-adapter-baseline",
-        "kind": "fs_watch_diff",
-        "contextOperation": "watch-diff-baseline",
-        "contextSession": "yt-f8",
-        "contextPath": "/fixture/root",
-        "requestId": "request-f8-baseline",
-        "requestMethod": "GET",
-        "requestPath": "/api/fs/watch-diff?full=1",
-        "phase": "accepted",
-        "terminalOwner": "filesystem-watch-diff-refresh",
-        "terminalOwners": [],
-        "waiterCount": 0,
-    }
-    assert details["op-f8-adapter-unrelated"]["kind"] == "session_files"
-    assert details["op-f8-adapter-unrelated"]["requestId"] == "request-f8-unrelated"
-    # The baseline op is baseline-owned; the unrelated op is pending but NOT owned. That is the exact
-    # partition, and it can only be right if the adapter actually reads terminalOwner.
-    assert "op-f8-adapter-baseline" in partition["owned"]
-    assert "op-f8-adapter-unrelated" not in partition["owned"]
-    assert partition["batchQueuedDelta"] == 2
-    assert partition["ownedBatchQueuedDelta"] == 1

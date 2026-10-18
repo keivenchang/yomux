@@ -1520,6 +1520,8 @@
   "shortcuts.section.menus": "תפריטים, פלטות ובוררים",
   "shortcuts.section.tabsPanes": "לשוניות / חלוניות",
   "shortcuts.section.terminal": "טרמינל",
+  "shortcuts.exitTmuxCopyMode": "יציאה ממצב ההעתקה של tmux",
+  "shortcuts.terminalScrollHelp": "גללו או השתמשו ב-Fn+למעלה/למטה כדי לגלול באפליקציה. החזיקו Shift בזמן הגלילה כדי לעיין בהיסטוריית tmux.",
   "shortcuts.switchTmuxWindow": "הכרטיסייה הקודמת / הבאה",
   "shortcuts.toggleComment": "החלף הערת שורה",
   "shortcuts.toggleFinder": "החלף {name}",

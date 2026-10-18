@@ -27,7 +27,7 @@ def test_split_subsystem_owners_do_not_define_pytest_nodes():
 
 
 def test_test_modules_do_not_import_pytest_nodes_from_other_modules():
-    for module_name in ("tests.test_app", "tests.test_browser_layout"):
+    for module_name in ("tests.test_browser_layout",):
         module = importlib.import_module(module_name)
         imported = {
             name: value.__module__

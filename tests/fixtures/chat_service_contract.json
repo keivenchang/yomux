@@ -1,0 +1,725 @@
+{
+  "source_commit": "cf0be86a89df87b7b43d9c2d25979ccf96353d55",
+  "service_blob": "29b3435601cc58c1b91acde7ae6b73a378d5fb3f",
+  "store_blob": "76d6b6eafb69b61b9181098d22e48c5d9c919ecc",
+  "steps": [
+    {
+      "now": 1700000000.5,
+      "method": "bootstrap",
+      "arguments": {
+        "username": "alice",
+        "browser_instance_id": "browser-a"
+      },
+      "result": {
+        "revision": 0,
+        "newer_cursor": "eyJpZCI6MCwia2luZCI6Im5ld2VyIiwidiI6MX3IQg8s9Tv9tLKmysFL0aGu",
+        "older_cursor": null,
+        "has_more_older": false,
+        "read_up_to_id": 0,
+        "first_registration": true,
+        "messages": [],
+        "typing": [],
+        "retention_days": 7
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "send",
+      "arguments": {
+        "username": "alice",
+        "payload": {
+          "browser_instance_id": "browser-a",
+          "client_message_uuid": "uuid-a",
+          "body": "How does this work?"
+        },
+        "locale": "en",
+        "sender_ip": "2001:0db8::1"
+      },
+      "result": [
+        {
+          "message": {
+            "id": 1,
+            "created_at_utc": 1700000000.5,
+            "username": "alice",
+            "sender_ip": "2001:db8::1",
+            "sender_instance_id": "browser-a",
+            "client_message_uuid": "uuid-a",
+            "body": "How does this work?",
+            "is_question": true
+          },
+          "revision": 1,
+          "created": true
+        },
+        true
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "send",
+      "arguments": {
+        "username": "alice",
+        "payload": {
+          "browser_instance_id": "browser-a",
+          "client_message_uuid": "uuid-a",
+          "body": "Retry must not replace the original"
+        },
+        "locale": "en"
+      },
+      "result": [
+        {
+          "message": {
+            "id": 1,
+            "created_at_utc": 1700000000.5,
+            "username": "alice",
+            "sender_ip": "2001:db8::1",
+            "sender_instance_id": "browser-a",
+            "client_message_uuid": "uuid-a",
+            "body": "How does this work?",
+            "is_question": true
+          },
+          "revision": 1,
+          "created": false
+        },
+        false
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "bootstrap",
+      "arguments": {
+        "username": "alice",
+        "browser_instance_id": "browser-a"
+      },
+      "result": {
+        "revision": 1,
+        "newer_cursor": "eyJpZCI6MSwia2luZCI6Im5ld2VyIiwidiI6MX3ePGyVRkJzw-HZGIoIy6T0",
+        "older_cursor": null,
+        "has_more_older": false,
+        "read_up_to_id": 0,
+        "first_registration": false,
+        "messages": [
+          {
+            "id": 1,
+            "created_at_utc": 1700000000.5,
+            "username": "alice",
+            "sender_ip": "2001:db8::1",
+            "sender_instance_id": "browser-a",
+            "client_message_uuid": "uuid-a",
+            "body": "How does this work?",
+            "is_question": true
+          }
+        ],
+        "typing": [],
+        "retention_days": 7
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "bootstrap",
+      "arguments": {
+        "username": "bob",
+        "browser_instance_id": "browser-b"
+      },
+      "result": {
+        "revision": 1,
+        "newer_cursor": "eyJpZCI6MSwia2luZCI6Im5ld2VyIiwidiI6MX3ePGyVRkJzw-HZGIoIy6T0",
+        "older_cursor": "eyJpZCI6Miwia2luZCI6Im9sZGVyIiwidiI6MX2uIwGrXFlh-OZBW43Qes_d",
+        "has_more_older": true,
+        "read_up_to_id": 1,
+        "first_registration": true,
+        "messages": [],
+        "typing": [],
+        "retention_days": 7
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "typing",
+      "arguments": {
+        "username": "alice",
+        "browser_instance_id": "browser-a",
+        "typing": true
+      },
+      "result": {
+        "typing": []
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "bootstrap",
+      "arguments": {
+        "username": "bob",
+        "browser_instance_id": "browser-b"
+      },
+      "result": {
+        "revision": 1,
+        "newer_cursor": "eyJpZCI6MSwia2luZCI6Im5ld2VyIiwidiI6MX3ePGyVRkJzw-HZGIoIy6T0",
+        "older_cursor": "eyJpZCI6Miwia2luZCI6Im9sZGVyIiwidiI6MX2uIwGrXFlh-OZBW43Qes_d",
+        "has_more_older": true,
+        "read_up_to_id": 1,
+        "first_registration": false,
+        "messages": [],
+        "typing": [
+          {
+            "room_id": "global",
+            "username": "alice",
+            "browser_instance_id": "browser-a",
+            "expires_at_utc": 1700000005.5
+          }
+        ],
+        "retention_days": 7
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "send",
+      "arguments": {
+        "username": "bob",
+        "payload": {
+          "browser_instance_id": "browser-b",
+          "client_message_uuid": "uuid-b",
+          "body": "A second message 😀"
+        },
+        "locale": "en"
+      },
+      "result": [
+        {
+          "message": {
+            "id": 2,
+            "created_at_utc": 1700000000.5,
+            "username": "bob",
+            "sender_ip": "",
+            "sender_instance_id": "browser-b",
+            "client_message_uuid": "uuid-b",
+            "body": "A second message 😀",
+            "is_question": false
+          },
+          "revision": 2,
+          "created": true
+        },
+        true
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "delta",
+      "arguments": {
+        "username": "alice",
+        "after": "eyJpZCI6MCwia2luZCI6Im5ld2VyIiwidiI6MX3IQg8s9Tv9tLKmysFL0aGu",
+        "limit": 1
+      },
+      "result": {
+        "messages": [
+          {
+            "id": 1,
+            "created_at_utc": 1700000000.5,
+            "username": "alice",
+            "sender_ip": "2001:db8::1",
+            "sender_instance_id": "browser-a",
+            "client_message_uuid": "uuid-a",
+            "body": "How does this work?",
+            "is_question": true
+          }
+        ],
+        "revision": 1,
+        "newer_cursor": "eyJpZCI6MSwia2luZCI6Im5ld2VyIiwidiI6MX3ePGyVRkJzw-HZGIoIy6T0"
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "delta",
+      "arguments": {
+        "username": "alice",
+        "after": "eyJpZCI6MSwia2luZCI6Im5ld2VyIiwidiI6MX3ePGyVRkJzw-HZGIoIy6T0"
+      },
+      "result": {
+        "messages": [
+          {
+            "id": 2,
+            "created_at_utc": 1700000000.5,
+            "username": "bob",
+            "sender_ip": "",
+            "sender_instance_id": "browser-b",
+            "client_message_uuid": "uuid-b",
+            "body": "A second message 😀",
+            "is_question": false
+          }
+        ],
+        "revision": 2,
+        "newer_cursor": "eyJpZCI6Miwia2luZCI6Im5ld2VyIiwidiI6MX0iH2FfsCVcfN0QKK7XK63w"
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "page",
+      "arguments": {
+        "username": "alice",
+        "limit": 1
+      },
+      "result": {
+        "messages": [
+          {
+            "id": 2,
+            "created_at_utc": 1700000000.5,
+            "username": "bob",
+            "sender_ip": "",
+            "sender_instance_id": "browser-b",
+            "client_message_uuid": "uuid-b",
+            "body": "A second message 😀",
+            "is_question": false
+          }
+        ],
+        "older_cursor": "eyJpZCI6Miwia2luZCI6Im9sZGVyIiwidiI6MX2uIwGrXFlh-OZBW43Qes_d",
+        "has_more": true
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "page",
+      "arguments": {
+        "username": "alice",
+        "before": "eyJpZCI6Miwia2luZCI6Im9sZGVyIiwidiI6MX2uIwGrXFlh-OZBW43Qes_d"
+      },
+      "result": {
+        "messages": [
+          {
+            "id": 1,
+            "created_at_utc": 1700000000.5,
+            "username": "alice",
+            "sender_ip": "2001:db8::1",
+            "sender_instance_id": "browser-a",
+            "client_message_uuid": "uuid-a",
+            "body": "How does this work?",
+            "is_question": true
+          }
+        ],
+        "older_cursor": null,
+        "has_more": false
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "page",
+      "arguments": {
+        "username": "alice",
+        "limit": 0
+      },
+      "result": {
+        "messages": [
+          {
+            "id": 2,
+            "created_at_utc": 1700000000.5,
+            "username": "bob",
+            "sender_ip": "",
+            "sender_instance_id": "browser-b",
+            "client_message_uuid": "uuid-b",
+            "body": "A second message 😀",
+            "is_question": false
+          }
+        ],
+        "older_cursor": "eyJpZCI6Miwia2luZCI6Im9sZGVyIiwidiI6MX2uIwGrXFlh-OZBW43Qes_d",
+        "has_more": true
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "read",
+      "arguments": {
+        "username": "alice",
+        "message_id": 2
+      },
+      "result": {
+        "read_up_to_id": 2
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "read",
+      "arguments": {
+        "username": "alice",
+        "message_id": 0
+      },
+      "result": {
+        "read_up_to_id": 2
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "context",
+      "arguments": {
+        "username": "alice",
+        "message_id": 1,
+        "before": 0,
+        "after": 1
+      },
+      "result": {
+        "target": {
+          "id": 1,
+          "created_at_utc": 1700000000.5,
+          "username": "alice",
+          "sender_ip": "2001:db8::1",
+          "sender_instance_id": "browser-a",
+          "client_message_uuid": "uuid-a",
+          "body": "How does this work?",
+          "is_question": true
+        },
+        "before": [],
+        "after": [
+          {
+            "id": 2,
+            "created_at_utc": 1700000000.5,
+            "username": "bob",
+            "sender_ip": "",
+            "sender_instance_id": "browser-b",
+            "client_message_uuid": "uuid-b",
+            "body": "A second message 😀",
+            "is_question": false
+          }
+        ]
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "context",
+      "arguments": {
+        "username": "alice",
+        "message_id": 99
+      },
+      "error": {
+        "code": "expired",
+        "status": 404,
+        "message": "chat message is no longer available"
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "search",
+      "arguments": {
+        "username": "alice",
+        "query": "work",
+        "limit": 0
+      },
+      "result": {
+        "hits": [
+          {
+            "target": {
+              "id": 1,
+              "created_at_utc": 1700000000.5,
+              "username": "alice",
+              "sender_ip": "2001:db8::1",
+              "sender_instance_id": "browser-a",
+              "client_message_uuid": "uuid-a",
+              "body": "How does this work?",
+              "is_question": true
+            },
+            "before": [],
+            "after": [
+              {
+                "id": 2,
+                "created_at_utc": 1700000000.5,
+                "username": "bob",
+                "sender_ip": "",
+                "sender_instance_id": "browser-b",
+                "client_message_uuid": "uuid-b",
+                "body": "A second message 😀",
+                "is_question": false
+              }
+            ]
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "typing",
+      "arguments": {
+        "username": "alice",
+        "browser_instance_id": "browser-a",
+        "typing": false
+      },
+      "result": {
+        "typing": []
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "yoagent_source",
+      "arguments": {
+        "username": "alice",
+        "browser_instance_id": "browser-a",
+        "message_id": 1
+      },
+      "result": [
+        {
+          "id": 1,
+          "created_at_utc": 1700000000.5,
+          "room_id": "global",
+          "username": "alice",
+          "sender_ip": "2001:db8::1",
+          "sender_instance_id": "browser-a",
+          "client_message_uuid": "uuid-a",
+          "body": "How does this work?",
+          "is_question": true
+        },
+        "How does this work?"
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "yoagent_source",
+      "arguments": {
+        "username": "bob",
+        "browser_instance_id": "browser-b",
+        "message_id": 1
+      },
+      "error": {
+        "code": "forbidden",
+        "status": 403,
+        "message": "chat message does not belong to this sender"
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "yoagent_source",
+      "arguments": {
+        "username": "alice",
+        "browser_instance_id": "browser-other",
+        "message_id": 1
+      },
+      "error": {
+        "code": "forbidden",
+        "status": 403,
+        "message": "chat message does not belong to this sender"
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "record_yoagent_reply",
+      "arguments": {
+        "source_id": 1,
+        "answer": "Answer 😀"
+      },
+      "result": [
+        {
+          "message": {
+            "id": 3,
+            "created_at_utc": 1700000000.5,
+            "username": "YO!agent",
+            "sender_ip": "",
+            "sender_instance_id": "yolomux-yoagent",
+            "client_message_uuid": "yo-reply-1",
+            "body": "Answer 😀",
+            "is_question": false
+          },
+          "revision": 3,
+          "created": true
+        },
+        true
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "record_yoagent_reply",
+      "arguments": {
+        "source_id": 1,
+        "answer": "Retry answer"
+      },
+      "result": [
+        {
+          "message": {
+            "id": 3,
+            "created_at_utc": 1700000000.5,
+            "username": "YO!agent",
+            "sender_ip": "",
+            "sender_instance_id": "yolomux-yoagent",
+            "client_message_uuid": "yo-reply-1",
+            "body": "Answer 😀",
+            "is_question": false
+          },
+          "revision": 3,
+          "created": false
+        },
+        false
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "send",
+      "arguments": {
+        "username": "alice",
+        "payload": {
+          "browser_instance_id": "客户端-1",
+          "client_message_uuid": "uuid-command",
+          "body": "/yoÂ first line\nsecond line"
+        },
+        "locale": "en"
+      },
+      "result": [
+        {
+          "message": {
+            "id": 4,
+            "created_at_utc": 1700000000.5,
+            "username": "alice",
+            "sender_ip": "",
+            "sender_instance_id": "客户端-1",
+            "client_message_uuid": "uuid-command",
+            "body": "/yoÂ first line\nsecond line",
+            "is_question": false
+          },
+          "revision": 4,
+          "created": true
+        },
+        true
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "yoagent_source",
+      "arguments": {
+        "username": "alice",
+        "browser_instance_id": "客户端-1",
+        "message_id": 4
+      },
+      "error": {
+        "code": "invalid_message",
+        "status": 400,
+        "message": "chat message is not a /yo command or question"
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "send",
+      "arguments": {
+        "username": "alice",
+        "payload": {
+          "browser_instance_id": "browser-a",
+          "client_message_uuid": "",
+          "body": "invalid identifier"
+        },
+        "locale": "en"
+      },
+      "error": {
+        "code": "invalid_id",
+        "status": 400,
+        "message": "invalid client message UUID"
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "send",
+      "arguments": {
+        "username": "alice",
+        "payload": {
+          "browser_instance_id": "browser-a",
+          "client_message_uuid": "empty-body",
+          "body": ""
+        },
+        "locale": "en"
+      },
+      "error": {
+        "code": "invalid_message",
+        "status": 400,
+        "message": "message body is empty"
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "bootstrap",
+      "arguments": {
+        "username": "alice",
+        "browser_instance_id": ""
+      },
+      "error": {
+        "code": "invalid_id",
+        "status": 400,
+        "message": "invalid browser instance ID"
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "page",
+      "arguments": {
+        "username": "alice",
+        "before": "invalid-cursor"
+      },
+      "error": {
+        "code": "invalid_cursor",
+        "status": 400,
+        "message": "invalid chat cursor"
+      }
+    },
+    {
+      "now": 1700000005.5,
+      "method": "typing",
+      "arguments": {
+        "username": "bob",
+        "browser_instance_id": "browser-b",
+        "typing": true
+      },
+      "result": {
+        "typing": []
+      }
+    },
+    {
+      "now": 1700000005.5,
+      "method": "typing",
+      "arguments": {
+        "username": "bob",
+        "browser_instance_id": "browser-other",
+        "typing": true
+      },
+      "result": {
+        "typing": [
+          {
+            "room_id": "global",
+            "username": "bob",
+            "browser_instance_id": "browser-b",
+            "expires_at_utc": 1700000010.5
+          }
+        ]
+      }
+    },
+    {
+      "now": 1700000010.5,
+      "method": "bootstrap",
+      "arguments": {
+        "username": "alice",
+        "browser_instance_id": "browser-a"
+      },
+      "result": {
+        "revision": 4,
+        "newer_cursor": "eyJpZCI6NCwia2luZCI6Im5ld2VyIiwidiI6MX0Dp3RrTMEMT2n9iOyjyygo",
+        "older_cursor": "eyJpZCI6Mywia2luZCI6Im9sZGVyIiwidiI6MX1axFtUzGAe9IAmMfPA-Sc7",
+        "has_more_older": true,
+        "read_up_to_id": 2,
+        "first_registration": false,
+        "messages": [
+          {
+            "id": 3,
+            "created_at_utc": 1700000000.5,
+            "username": "YO!agent",
+            "sender_ip": "",
+            "sender_instance_id": "yolomux-yoagent",
+            "client_message_uuid": "yo-reply-1",
+            "body": "Answer 😀",
+            "is_question": false
+          },
+          {
+            "id": 4,
+            "created_at_utc": 1700000000.5,
+            "username": "alice",
+            "sender_ip": "",
+            "sender_instance_id": "客户端-1",
+            "client_message_uuid": "uuid-command",
+            "body": "/yoÂ first line\nsecond line",
+            "is_question": false
+          }
+        ],
+        "typing": [],
+        "retention_days": 7
+      }
+    }
+  ]
+}

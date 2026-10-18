@@ -1030,6 +1030,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   width: 28px;
   height: 22px;
   padding: 0;
+  justify-content: center;
+  text-align: center;
   font: 800 var(--ui-font-size-sm)/1 var(--ui-font);
 }
 .toast .startup-helper-nav-button:first-child {
@@ -4169,8 +4171,8 @@ body.app-vw-lte-980 .tabs {
   padding: 0 var(--space-5);
 }
 .file-explorer-sort-select {
-  width: 50px;
-  flex: 0 0 50px;
+  width: 10ch;
+  flex: 0 0 10ch;
   padding: 0 var(--space-2);
 }
 .file-explorer-date-toggle[data-date-mode="none"] {

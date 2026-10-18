@@ -1,6 +1,6 @@
 # YO!agent
 
-YO!agent answers product questions, watches sessions, sends reviewed prompts, and coordinates handoffs. It currently requires the deprecated Python server, which is an explicit temporary fallback planned for removal around late October 2026. Go status and token collection do not provide YO!agent actions; check `GO_MIGRATION.md` before relying on backend-specific features.
+Native YO!agent owns conversations, skills, jobs, session watches, and reviewed sends in Go. Responses use the installed Claude or Codex CLI and its existing login configuration; Python agent SDKs are not runtime prerequisites. The browser enables YO!agent after its native store initializes. [`GO_MIGRATION.md`](../GO_MIGRATION.md) records supported routes and remaining acceptance checks.
 
 ## Files
 

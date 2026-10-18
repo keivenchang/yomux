@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from collections.abc import Iterable
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -22,39 +25,15 @@ class LocaleSpec:
     aliases: tuple[str, ...] = ()
 
 
-_PLURAL_CATEGORIES_BY_RULE: dict[str, frozenset[str]] = {
-    "other": frozenset({"other"}),
-    "one": frozenset({"one", "other"}),
-    "romance-million": frozenset({"one", "many", "other"}),
-    "french-million": frozenset({"one", "many", "other"}),
-    "polish": frozenset({"one", "few", "many", "other"}),
-    "hebrew": frozenset({"one", "two", "other"}),
-    "arabic": frozenset({"zero", "one", "two", "few", "many", "other"}),
-    "russian": frozenset({"one", "few", "many", "other"}),
-    "hindi": frozenset({"one", "other"}),
-}
 
-LOCALE_SPECS: tuple[LocaleSpec, ...] = (
-    LocaleSpec("en", "English", "one", ("english",)),
-    LocaleSpec("zh-Hant", "繁體中文", "other", ("traditional chinese",)),
-    LocaleSpec("zh-Hans", "简体中文", "other", ("simplified chinese", "中文")),
-    LocaleSpec("ja", "日本語", "other", ("japanese", "日本語")),
-    LocaleSpec("ko", "한국어", "other", ("korean", "한국어")),
-    LocaleSpec("es", "Español", "romance-million", ("espanol", "español", "spanish")),
-    LocaleSpec("de", "Deutsch", "one", ("deutsch", "german")),
-    LocaleSpec("fr", "Français", "french-million", ("francais", "français", "french")),
-    LocaleSpec("it", "Italiano", "romance-million", ("italian",)),
-    LocaleSpec("pt-BR", "Português (BR)", "french-million", ("portuguese", "portugues", "português")),
-    LocaleSpec("pl", "Polski", "polish", ("polish",)),
-    LocaleSpec("nl", "Nederlands", "one", ("dutch", "nederlands")),
-    LocaleSpec("he", "עברית", "hebrew", ("hebrew",)),
-    LocaleSpec("ar", "العربية", "arabic", ("arabic",)),
-    LocaleSpec("ru", "Русский", "russian", ("russian",)),
-    LocaleSpec("hi", "हिन्दी", "hindi", ("hindi",)),
-    LocaleSpec("vi", "Tiếng Việt", "other", ("vietnamese",)),
-    LocaleSpec("th", "ไทย", "other", ("thai",)),
-    LocaleSpec("tr", "Türkçe", "one", ("turkish",)),
+_LOCALE_REGISTRY = json.loads((Path(__file__).resolve().parents[2] / "assets" / "runtime" / "locale-registry.json").read_text(encoding="utf-8"))
+LOCALE_SPECS: tuple[LocaleSpec, ...] = tuple(
+    LocaleSpec(code=spec["code"], endonym=spec["endonym"], plural_rule=spec["plural_rule"], aliases=tuple(spec["aliases"]))
+    for spec in _LOCALE_REGISTRY
 )
+
+QUESTION_PREFIXES_BY_LOCALE = {spec["code"]: tuple(spec["interrogatives"]) for spec in _LOCALE_REGISTRY}
+
 LOCALE_ENDONYMS = tuple((spec.code, spec.endonym) for spec in LOCALE_SPECS)
 SHIPPED_LOCALES = tuple(locale for locale, _label in LOCALE_ENDONYMS)
 FALLBACK_LOCALE = "en"
@@ -73,8 +52,8 @@ RTL_LANGUAGE_BASES = frozenset({"ar", "fa", "he", "ur"})
 _LOCALE_BY_CASEFOLD = {locale.casefold(): locale for locale in (*SHIPPED_LOCALES, PSEUDO_LOCALE)}
 _LOCALE_SPEC_BY_CODE = {spec.code: spec for spec in LOCALE_SPECS}
 PLURAL_CATEGORIES_BY_LOCALE = {
-    spec.code: _PLURAL_CATEGORIES_BY_RULE[spec.plural_rule]
-    for spec in LOCALE_SPECS
+    spec.code: frozenset(entry["plural_categories"])
+    for spec, entry in zip(LOCALE_SPECS, _LOCALE_REGISTRY, strict=True)
 }
 
 

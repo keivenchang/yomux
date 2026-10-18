@@ -11,7 +11,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -204,17 +203,7 @@ func (s *server) reloadFinderIndexSettings(ctx context.Context, onlyChanged bool
 	if onlyChanged && digestErr == nil && digest == s.indexSettingsFileDigest {
 		return s.synchronizeFinderIndexSettings(ctx)
 	}
-	script := `import json
-from yomux_lib.workspace.settings import settings_payload
-print(json.dumps(settings_payload(), separators=(",", ":"), ensure_ascii=False), end="")`
-	command := exec.CommandContext(ctx, "python3", "-c", script)
-	command.Dir = s.root
-	command.Env = pythonBridgeEnvironment(s.root, s.config)
-	output, err := command.Output()
-	var payload map[string]any
-	if err == nil {
-		err = json.Unmarshal(output, &payload)
-	}
+	payload, err := s.nativeSettingsPayload(ctx, nil, false)
 	if err == nil {
 		if message, _ := payload["error"].(string); message != "" {
 			err = errors.New(message)

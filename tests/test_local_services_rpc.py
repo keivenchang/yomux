@@ -986,9 +986,6 @@ def test_local_service_transport_has_no_pickle_or_decompression_surface():
         "yomux_lib/local_services/rpc.py",
         "yomux_lib/local_services/runtime.py",
         "yomux_lib/local_services/registry.py",
-        "yomux_lib/infra/batchd.py",
-        "yomux_lib/stats_current/service.py",
-        "yomux_lib/approvald.py",
     ]
     combined = "\n".join(open(path, encoding="utf-8").read() for path in sources)
 

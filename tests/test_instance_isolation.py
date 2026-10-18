@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 from tools.tmux_paths import short_temp_base, short_fixture_path
 
-from yomux_lib import cli
 from tools.instance_isolation import EARLY_PORT_ENV
 from tools.instance_isolation import INSTANCE_ENV
 from tools.instance_isolation import MANAGED_INSTANCE_PORT_ENV
@@ -442,43 +441,10 @@ def test_legacy_individual_overrides_are_left_to_the_product_resolver(tmp_path: 
     assert resolve_instance_environment(7111, {"YOLOMUX_STATE_DIR": str(tmp_path)}, platform="Linux").error == ""
 
 
-def test_startup_path_line_names_auto_derived_root_and_resolved_paths(tmp_path: Path):
-    resolution = resolve_instance_environment(17775, {}, platform="Linux", tempdir=SHORT_TEMP_ROOT)
-    root = Path(resolution.environment[PRODUCT_ROOT_ENV])
-    paths = YomuxRoots(root / "config", root / "state", root / "cache", root / "codex", root / "runtime", root)
-
-    line = cli.startup_path_line(17775, environ=resolution.environment, roots=paths)
-
-    assert line == (
-        f"YOmux paths: YOMUX_ROOT={root} (auto-derived for non-default port 17775 because no root-family override was set); "
-        f"config={root / 'config'}; state={root / 'state'}; cache={root / 'cache'}; runtime={root / 'runtime'}"
-    )
 
 
-def test_startup_path_line_names_explicit_root(tmp_path: Path):
-    root = tmp_path / "explicit-root"
-    paths = YomuxRoots(root / "config", root / "state", root / "cache", root / "codex", root / "runtime", root)
-
-    line = cli.startup_path_line(17775, environ={PRODUCT_ROOT_ENV: str(root)}, roots=paths)
-
-    assert f"YOMUX_ROOT={root} (explicit)" in line
 
 
-def test_startup_path_line_explains_shared_config_runtime_launch(tmp_path: Path):
-    config = tmp_path / "shared-config"
-    state = tmp_path / "shared-state"
-    cache = tmp_path / "shared-cache"
-    runtime = tmp_path / "private-runtime"
-    paths = YomuxRoots(config, state, cache, tmp_path / "codex", runtime)
-    environ = {
-        "YOLOMUX_CONFIG_DIR": str(config),
-        "YOLOMUX_RUNTIME_DIR": str(runtime),
-    }
-
-    line = cli.startup_path_line(17775, environ=environ, roots=paths)
-
-    assert "YOMUX_ROOT=unset (auto-derivation skipped because YOMUX_CONFIG_DIR, YOMUX_RUNTIME_DIR were explicitly set)" in line
-    assert f"config={config}; state={state}; cache={cache}; runtime={runtime}" in line
 
 
 def test_early_port_mismatch_refuses(monkeypatch):
@@ -491,10 +457,3 @@ def test_early_port_mismatch_refuses(monkeypatch):
         raise AssertionError("expected early-port mismatch refusal")
     monkeypatch.delenv(INSTANCE_ENV)
     assert_early_port(7112)
-
-
-def test_cli_refuses_when_early_port_disagrees_with_argparse(monkeypatch, capsys):
-    monkeypatch.setenv(INSTANCE_ENV, "7111:managed")
-    monkeypatch.setattr(sys, "argv", ["yolomux.py", "--port", "7112", "--print-runtime-report"])
-    assert cli.main() == 2
-    assert "early instance port 7111 disagrees with parsed --port 7112" in capsys.readouterr().err

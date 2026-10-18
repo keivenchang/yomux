@@ -39,10 +39,10 @@ def test_compliant_equal_budget_is_clean():
 def test_growth_and_new_test_import_are_violations():
     manifest = current_manifest()
     actual = copy.deepcopy(manifest)
-    actual["class_budgets"]["yomux_lib/app.py:TmuxWebtermApp"]["methods"] += 1
+    actual["class_budgets"]["fixture.py:Owner"] = {"methods": 1}
     actual["test_to_test_imports"].append("tests/test_one.py->tests.test_two")
     result = architecture_budgets.compare(manifest, actual)
-    assert any("TmuxWebtermApp.methods: grew" in message for message in result.violations)
+    assert any("class_budgets" in message and "fixture.py:Owner" in message for message in result.violations)
     assert any("added tests/test_one.py->tests.test_two" in message for message in result.violations)
     assert result.stale == ()
 
@@ -83,13 +83,13 @@ def test_import_inventory_recurses_into_nested_collecting_modules(tmp_path):
 def test_line_count_growth_and_shrink_are_warnings_while_structure_stays_ratchet():
     manifest = current_manifest()
     actual = copy.deepcopy(manifest)
-    actual["file_lines"]["yomux_lib/app.py"] += 1
-    actual["test_owner_lines"]["tests/test_app.py"] -= 1
+    actual["file_lines"]["yomux_lib/infra/listener_census.py"] += 1
+    actual["test_owner_lines"]["tests/test_architecture_budgets.py"] -= 1
     actual["partial_global_writes"][0]["count"] -= 1
     result = architecture_budgets.compare(manifest, actual)
     assert result.violations == ()
-    assert any("file_lines.yomux_lib/app.py: grew" in message for message in result.warnings)
-    assert any("test_owner_lines.tests/test_app.py: shrank" in message for message in result.warnings)
+    assert any("file_lines.yomux_lib/infra/listener_census.py: grew" in message for message in result.warnings)
+    assert any("test_owner_lines.tests/test_architecture_budgets.py: shrank" in message for message in result.warnings)
     assert any("partial_global_writes" in message and "shrank" in message for message in result.stale)
 
 
@@ -99,16 +99,16 @@ def test_line_count_changes_warn_without_failing_the_command(tmp_path, monkeypat
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     grown = copy.deepcopy(manifest)
-    grown["file_lines"]["yomux_lib/app.py"] += 1
+    grown["file_lines"]["yomux_lib/infra/listener_census.py"] += 1
     monkeypatch.setattr(architecture_budgets, "capture", lambda _root: grown)
     assert architecture_budgets.main(["--manifest", str(manifest_path)]) == 0
-    assert "architecture budget warning: file_lines.yomux_lib/app.py: grew" in capsys.readouterr().err
+    assert "architecture budget warning: file_lines.yomux_lib/infra/listener_census.py: grew" in capsys.readouterr().err
 
     shrunk = copy.deepcopy(manifest)
-    shrunk["file_lines"]["yomux_lib/app.py"] -= 1
+    shrunk["file_lines"]["yomux_lib/infra/listener_census.py"] -= 1
     monkeypatch.setattr(architecture_budgets, "capture", lambda _root: shrunk)
     assert architecture_budgets.main(["--manifest", str(manifest_path)]) == 0
-    assert "architecture budget warning: file_lines.yomux_lib/app.py: shrank" in capsys.readouterr().err
+    assert "architecture budget warning: file_lines.yomux_lib/infra/listener_census.py: shrank" in capsys.readouterr().err
 
 
 def test_retired_share_surface_guard_rejects_filenames_content_i18n_and_binary(tmp_path):
@@ -180,7 +180,7 @@ def test_evaluate_and_cli_keep_line_warnings_separate_from_retired_share_guard(t
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     stale = copy.deepcopy(manifest)
-    stale["file_lines"]["yomux_lib/app.py"] -= 1
+    stale["file_lines"]["yomux_lib/infra/listener_census.py"] -= 1
     monkeypatch.setattr(architecture_budgets, "capture", lambda _root: stale)
     retired = "sha" + "re"
     (tmp_path / "retired.txt").write_text("/api/" + retired, encoding="utf-8")
@@ -188,10 +188,10 @@ def test_evaluate_and_cli_keep_line_warnings_separate_from_retired_share_guard(t
     result = architecture_budgets.evaluate(tmp_path, manifest_path)
 
     assert any("retired_share_surface" in message for message in result.violations)
-    assert any("file_lines.yomux_lib/app.py: shrank" in message for message in result.warnings)
+    assert any("file_lines.yomux_lib/infra/listener_census.py: shrank" in message for message in result.warnings)
     assert architecture_budgets.main(["--root", str(tmp_path), "--manifest", str(manifest_path)]) == 1
     output = capsys.readouterr().err
-    assert "architecture budget warning: file_lines.yomux_lib/app.py: shrank" in output
+    assert "architecture budget warning: file_lines.yomux_lib/infra/listener_census.py: shrank" in output
     assert "architecture budget violation: retired_share_surface" in output
 
 
@@ -224,7 +224,7 @@ def test_cross_partial_write_growth_and_unbudgeted_writer_fail():
 
 @pytest.mark.parametrize(
     "family",
-    ["daemon_actions", "runtime_row_fields", "preview_renderers", "debug_subviews", "control_families"],
+    ["preview_renderers", "debug_subviews", "control_families"],
 )
 def test_every_extension_family_rejects_unregistered_growth_and_ratchets_shrink(family):
     manifest = current_manifest()

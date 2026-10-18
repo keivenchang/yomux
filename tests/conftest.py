@@ -96,25 +96,9 @@ if _test_run_root is not None:
 os.environ.setdefault(product_env_name("LOCAL_SERVICE_IDLE_SECONDS"), "1")
 
 
-from yomux_lib import app as app_module
-from yomux_lib import file_index
-from yomux_lib import statusd_protocol
-from yomux_lib.server import TmuxWebtermHTTPServer
 from tools.test_plan import automatic_test_markers
 from tools.test_plan import SLOWEST_FIRST_TESTS
 from tools.test_plan import test_node_sort_key
-
-
-@pytest.fixture
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-def legacy_activity_summary_enabled(monkeypatch):
-    """Explicitly admit the retired synchronous algorithm for its isolated contract tests."""
-
-    monkeypatch.setattr(
-        statusd_protocol,
-        "ACTIVITY_SUMMARY_ADMISSION",
-        statusd_protocol.ActivitySummaryAdmission(enabled=True, reason=""),
-    )
 
 
 NONBROWSER_TEST_TIMEOUT_SECONDS = 180
@@ -133,45 +117,6 @@ def _test_path_imports_selenium(path: Path) -> bool:
     if path.suffix != ".py" or not path.is_file():
         return False
     return bool(_SELENIUM_IMPORT_RE.search(path.read_text(encoding="utf-8")))
-
-
-@pytest.fixture
-def no_control_socket(monkeypatch, tmp_path):
-    monkeypatch.setattr(app_module.YomuxControlServer, "start", lambda self: None)
-    monkeypatch.setattr(app_module.YomuxControlServer, "stop", lambda self: None)
-    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
-    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations" / "session-files.json")
-
-
-@pytest.fixture
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-def make_tmux_webterm_app(monkeypatch):
-    """Build full apps with their background/control resources torn down after the test."""
-    created = []
-
-    def factory(sessions=("1",), *, dangerously_yolo=False):
-        monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
-        app = app_module.TmuxWebtermApp(list(sessions), dangerously_yolo=dangerously_yolo)
-        created.append(app)
-        return app
-
-    yield factory
-
-    for app in created:
-        app.background_scheduler.stop()
-        app.control_server.stop()
-
-
-@pytest.fixture
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-def isolated_yoagent_conversation_state(monkeypatch, tmp_path):
-    state_dir = tmp_path / "yoagent-state"
-    monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CONVERSATION_PATH", state_dir / "conversation.jsonl")
-    monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CLI_STATE_PATH", state_dir / "cli-sessions.json")
-    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
-    monkeypatch.setattr(app_module, "EVENT_LOG_PATH", tmp_path / "events.jsonl")
-    monkeypatch.setattr(app_module, "ACTIVITY_PATH", tmp_path / "activity.json")
-    monkeypatch.setattr(app_module, "ACTIVITY_HEARTBEATS_PATH", tmp_path / "activity-heartbeats.jsonl")
 
 
 @pytest.fixture
@@ -215,32 +160,6 @@ def local_socket_capability() -> tuple[bool, str]:
         return _SOCKET_AVAILABILITY
     _SOCKET_AVAILABILITY = (True, "")
     return _SOCKET_AVAILABILITY
-
-
-@pytest.fixture(autouse=True)
-def deny_legacy_python_server_without_opt_in(monkeypatch, request):
-    # Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-    if request.config.getoption("run_deprecated_python"):
-        return
-
-    def forbidden_start(*args, **kwargs):
-        raise RuntimeError("deprecated Python product server is forbidden without --run-deprecated-python")
-
-    monkeypatch.setattr(TmuxWebtermHTTPServer, "__init__", forbidden_start)
-
-
-@pytest.fixture(autouse=True)
-def isolated_file_index_background_hooks(monkeypatch, request):
-    # Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-    if request.node.get_closest_marker("deprecated_python_server") is None:
-        yield
-        return
-    # The real indexer is intentionally detached and persistent. Test cases
-    # use a temporary state directory that pytest removes at process exit, so
-    # never leave a detached child pointed at that vanished state behind.
-    monkeypatch.setattr(app_module.SearchIndexerClient, "ensure_started", lambda self: False)
-    with file_index.FileIndexTestScope():
-        yield
 
 
 @pytest.fixture(autouse=True)

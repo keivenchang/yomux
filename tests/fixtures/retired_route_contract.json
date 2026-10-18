@@ -1,0 +1,1038 @@
+{
+  "source_commit": "0e3aa931e",
+  "source_blob": "b96ae69b88b7f71434648ae3692ba9b7be24cec3",
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/static/*",
+      "role": "dynamic",
+      "protocol": "static",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth-setup",
+      "role": "dynamic",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/login",
+      "role": "dynamic",
+      "protocol": "html",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/logout",
+      "role": "dynamic",
+      "protocol": "redirect",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/healthz",
+      "role": "dynamic",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/readyz",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/livez",
+      "role": "dynamic",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/ping",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/stats-capabilities",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/stats-delta",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/stats-snapshot",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/stats-session-aliases",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/stats-stream",
+      "role": "readonly",
+      "protocol": "sse",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/stats-retry",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/pricing-catalog",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/update-status",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/dev-reload",
+      "role": "readonly",
+      "protocol": "sse",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/client-events",
+      "role": "readonly",
+      "protocol": "sse",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/operations/*",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/operations/ack",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/",
+      "role": "readonly",
+      "protocol": "html",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/preview-popout",
+      "role": "readonly",
+      "protocol": "html",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/pane-popout",
+      "role": "readonly",
+      "protocol": "html",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session-metadata",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/transcripts",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/agent-auth",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/activity-summary",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system-status",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system-status/advanced",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/logs",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/diagnostics/performance",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auto-approve",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/notify",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/settings",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/watched-prs",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/yolo-rules",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/events",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/search",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/run-history",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/activity",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session-files-batch",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session-files",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/summary",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/tmux-session-exists",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/login",
+      "role": "dynamic",
+      "protocol": "redirect",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self-update",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/stats-observations",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/pricing-catalog/refresh",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/ensure-session",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/create-session-plan",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/create-session",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/rename-session",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/kill-session",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/kill-window",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/upload",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/auto-approve",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/attention-ack",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/notify",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/settings",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/watch/roots",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/drop-action/run",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yolo-rules/reload",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yolo-rules/open",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "POST",
+      "path": "/api/event",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "core"
+    },
+    {
+      "method": "GET",
+      "path": "/api/yoagent/skills",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "GET",
+      "path": "/api/yoagent/skill-files",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "GET",
+      "path": "/api/yoagent/conversation",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "GET",
+      "path": "/api/yoagent/jobs",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yoagent/chat",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yoagent/chat/*/cancel",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yoagent/actions/preview-send",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yoagent/actions/execute-send",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yoagent/intent",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yoagent/jobs",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yoagent/jobs/cancel-session",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yoagent/jobs/*/confirm",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yoagent/jobs/*/cancel",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yoagent/waits/*/clear",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yoagent/skill-files/upsert",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yoagent/skill-files/delete",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yoagent/prewarm",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/yoagent/reset",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "yoagent"
+    },
+    {
+      "method": "GET",
+      "path": "/api/chat/bootstrap",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "chat"
+    },
+    {
+      "method": "GET",
+      "path": "/api/chat/page",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "chat"
+    },
+    {
+      "method": "GET",
+      "path": "/api/chat/delta",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "chat"
+    },
+    {
+      "method": "GET",
+      "path": "/api/chat/context",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "chat"
+    },
+    {
+      "method": "GET",
+      "path": "/api/chat/search",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "chat"
+    },
+    {
+      "method": "POST",
+      "path": "/api/chat/send",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "chat"
+    },
+    {
+      "method": "POST",
+      "path": "/api/chat/yoagent",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": 4096,
+      "group": "chat"
+    },
+    {
+      "method": "POST",
+      "path": "/api/chat/typing",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": 4096,
+      "group": "chat"
+    },
+    {
+      "method": "POST",
+      "path": "/api/chat/read",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": 4096,
+      "group": "chat"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fs/fast/list",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fs/list",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fs/search",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fs/search-stream",
+      "role": "admin",
+      "protocol": "sse",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fs/index-status",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fs/read",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fs/info",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fs/diff",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fs/git-history",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fs/git-history-stats-stream",
+      "role": "readonly",
+      "protocol": "sse",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fs/git-commit",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fs/watch-diff",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fs/raw",
+      "role": "admin",
+      "protocol": "binary",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "POST",
+      "path": "/api/fs/batch",
+      "role": "admin",
+      "protocol": "json-batch",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "POST",
+      "path": "/api/fs/resolve-file-candidates",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "POST",
+      "path": "/api/fs/write",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "filesystem"
+    },
+    {
+      "method": "POST",
+      "path": "/api/fs/delete",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": 4096,
+      "group": "filesystem"
+    },
+    {
+      "method": "POST",
+      "path": "/api/fs/unindex",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": 4096,
+      "group": "filesystem"
+    },
+    {
+      "method": "POST",
+      "path": "/api/fs/rename",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": 4096,
+      "group": "filesystem"
+    },
+    {
+      "method": "POST",
+      "path": "/api/fs/mkdir",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": 4096,
+      "group": "filesystem"
+    },
+    {
+      "method": "GET",
+      "path": "/api/batch/search",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "batch"
+    },
+    {
+      "method": "GET",
+      "path": "/api/batch/blame",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "batch"
+    },
+    {
+      "method": "GET",
+      "path": "/api/batch/zip",
+      "role": "admin",
+      "protocol": "binary",
+      "body_limit": null,
+      "group": "batch"
+    },
+    {
+      "method": "GET",
+      "path": "/api/batch/count",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "batch"
+    },
+    {
+      "method": "GET",
+      "path": "/api/batch/html-preview",
+      "role": "admin",
+      "protocol": "binary",
+      "body_limit": null,
+      "group": "batch"
+    },
+    {
+      "method": "GET",
+      "path": "/api/tmux",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "tmux"
+    },
+    {
+      "method": "GET",
+      "path": "/api/tmux-signals",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "tmux"
+    },
+    {
+      "method": "GET",
+      "path": "/api/tmux-status",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "tmux"
+    },
+    {
+      "method": "GET",
+      "path": "/api/transcript",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "tmux"
+    },
+    {
+      "method": "GET",
+      "path": "/api/context",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "tmux"
+    },
+    {
+      "method": "GET",
+      "path": "/api/context-items",
+      "role": "readonly",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "tmux"
+    },
+    {
+      "method": "GET",
+      "path": "/api/context-stream",
+      "role": "readonly",
+      "protocol": "sse",
+      "body_limit": null,
+      "group": "tmux"
+    },
+    {
+      "method": "GET",
+      "path": "/api/summary-stream",
+      "role": "admin",
+      "protocol": "sse",
+      "body_limit": null,
+      "group": "tmux"
+    },
+    {
+      "method": "GET",
+      "path": "/ws",
+      "role": "readonly",
+      "protocol": "websocket",
+      "body_limit": null,
+      "group": "tmux"
+    },
+    {
+      "method": "POST",
+      "path": "/api/tmux-next",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "tmux"
+    },
+    {
+      "method": "POST",
+      "path": "/api/tmux-status",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "tmux"
+    },
+    {
+      "method": "POST",
+      "path": "/api/tmux-window",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "tmux"
+    },
+    {
+      "method": "POST",
+      "path": "/api/tmux-copy-selection",
+      "role": "admin",
+      "protocol": "json",
+      "body_limit": null,
+      "group": "tmux"
+    }
+  ]
+}

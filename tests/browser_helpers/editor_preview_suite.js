@@ -1,4 +1,5 @@
 const {
+  serverSettingsSchema,
   assert,
   fs,
   UI_PINS,
@@ -1180,16 +1181,20 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     });
     api.setTmuxSignalStateForTest({windows: [{key: '1:0', session: '1', window_index: '0', active: true, panes: [{window_key: '1:0', session: '1', window_index: '0', pane_index: '0', target: '%1', pane_id: '%1', active: true, alternate_on: true}]}]});
     const pageWheelEvents = [];
-    pageItem.container = {querySelector() { return {dispatchEvent(event) { pageWheelEvents.push(event); return true; }}; }};
-    assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'tmux-scroll-up'), true, 'the touch PgUp key uses the mouse-owning alternate-screen wheel route');
-    assert.equal(pageFrames.length, 0, 'mouse-owning Claude does not receive ignored raw PgUp bytes from the palette');
-    assert.equal(pageWheelEvents.length, 12, `palette PgUp sends the same bounded page-sized wheel sequence as hardware PgUp (${pageWheelEvents.length})`);
+    pageItem.container = new TestElement('page-terminal');
+    pageItem.container.addEventListener('wheel', event => pageWheelEvents.push(event));
+    assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'tmux-scroll-up'), true, 'the touch PgUp key preserves native paging in a mouse-owning pane');
+    assert.deepStrictEqual(pageFrames, [{type: 'input', data: '\x1b[5~', user_input: false}], 'palette PgUp preserves the native page key for the mouse-owning pane');
+    assert.equal(pageWheelEvents.length, 0, 'palette PgUp bypasses xterm and the attached tmux client decoder');
     api.registerTerminalForTest('1', {rows: 24, modes: {mouseTrackingMode: 'none'}, scrollLines() {}}, {
       readyState: WebSocket.OPEN,
       send(message) { pageFrames.push(JSON.parse(message)); },
     });
     assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'tmux-scroll-up'), true, 'the touch PgUp key is delivered when an alternate-screen app owns paging');
-    assert.deepStrictEqual(canonical(pageFrames), [{type: 'input', data: '\x1b[5~', user_input: true}], 'the touch PgUp key reaches an alternate-screen app as its native page byte instead of tmux-scroll');
+    assert.deepStrictEqual(canonical(pageFrames), [
+      {type: 'input', data: '\x1b[5~', user_input: false},
+      {type: 'input', data: '\x1b[5~', user_input: false},
+    ], 'both mouse-owning and other alternate-screen apps receive their native page byte');
     const readOnlyTouchApi = loadYomux('', ['1'], 'http:', 'iPad', 'viewer', {coarsePointer: true});
     const readOnlyTouchHtml = readOnlyTouchApi.terminalMobileAccessoryHtmlForTest('1');
     assert.ok(readOnlyTouchHtml.includes('data-terminal-mobile-toggle="1"'), 'read-only coarse-pointer terminals still expose the movable launcher');
@@ -2545,7 +2550,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(/page-up|page-down|terminalTouchIsFastFlick/.test(source), false, 'touch panning never replaces line movement with a page jump');
   });
 
-  test('mouse-reporting alternate panes route touch and Page Up through xterm wheel reports', () => {
+  test('mouse-reporting panes preserve native wheel and page keys while touch uses reports', () => {
     const api = loadYomux('', ['1']);
     const signal = {
       windows: [{
@@ -2558,29 +2563,34 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const wheelNode = {dispatchEvent(event) { wheelEvents.push(event); return true; }};
     const container = {querySelector() { return wheelNode; }};
     const claudeTerm = {rows: 40, modes: {mouseTrackingMode: 'any'}};
-    const claudeItem = api.registerTerminalForTest('1', claudeTerm);
+    const claudeFrames = [];
+    const claudeItem = api.registerTerminalForTest('1', claudeTerm, {readyState: 1, send(frame) { claudeFrames.push(JSON.parse(frame)); }});
     claudeItem.container = container;
     assert.equal(api.terminalHasMouseTracking(claudeTerm), true, 'xterm public mouse mode identifies Claude as wheel-owning');
     assert.equal(api.routeTerminalScrollLinesForTest('1', claudeTerm, container, -3, {source: 'touch'}), true, 'a touch pan on Claude stays on the wheel route');
-    assert.deepStrictEqual(wheelEvents.map(event => [event.type, event.deltaY, event.deltaMode]), [['wheel', -1, 1], ['wheel', -1, 1], ['wheel', -1, 1]], 'Claude touch pan emits one line-accurate wheel report per line');
+    assert.deepStrictEqual(wheelEvents, [], 'Claude touch pan bypasses the attached tmux client decoder');
+    assert.deepStrictEqual(claudeFrames, [{type: 'application-scroll', pane: '%11', direction: 'up', count: 3, column: 1, row: 1}], 'Claude receives one app-directed report per line');
 
     const notchEvent = {deltaY: 100, deltaMode: 0, wheelDeltaY: -120};
     const gestureEvent = {deltaY: 4, deltaMode: 0, wheelDeltaY: -4.8};
     wheelEvents.length = 0;
-    assert.equal(api.routeTerminalScrollLinesForTest('1', claudeTerm, container, 4 / 35, {source: 'wheel', discreteWheel: api.terminalWheelEventIsDiscrete(notchEvent)}), true, 'a discrete high-resolution wheel notch stays on the alternate-screen wheel route');
-    assert.deepStrictEqual(wheelEvents.map(event => [event.type, event.deltaY, event.deltaMode]), [['wheel', 1, 1]], 'a discrete sub-line notch reaches an alternate-screen app immediately instead of waiting for fractional accumulation');
+    claudeFrames.length = 0;
+    assert.equal(api.routeTerminalScrollLinesForTest('1', claudeTerm, container, 4 / 35, {source: 'wheel', discreteWheel: api.terminalWheelEventIsDiscrete(notchEvent)}), false, 'a physical wheel notch stays with xterm');
+    assert.deepStrictEqual(claudeFrames, [], 'the router does not duplicate native mouse reports');
 
     wheelEvents.length = 0;
-    assert.equal(api.routeTerminalScrollLinesForTest('1', claudeTerm, container, 4 / 35, {source: 'wheel', discreteWheel: api.terminalWheelEventIsDiscrete(gestureEvent)}), true, 'a continuous touchpad delta stays on the alternate-screen wheel route');
-    assert.deepStrictEqual(wheelEvents, [], 'a continuous sub-line touchpad delta remains fractional instead of becoming a staircase');
+    claudeFrames.length = 0;
+    assert.equal(api.routeTerminalScrollLinesForTest('1', claudeTerm, container, 4 / 35, {source: 'wheel', discreteWheel: api.terminalWheelEventIsDiscrete(gestureEvent)}), false, 'continuous touchpad motion stays with xterm');
+    assert.deepStrictEqual(claudeFrames, [], 'a continuous sub-line touchpad delta remains fractional instead of becoming a staircase');
 
     let pagePrevented = 0;
+    claudeFrames.length = 0;
     assert.equal(api.handleTerminalTmuxHistoryNavigationKeydownForTest('1', claudeTerm, {
       type: 'keydown', key: 'PageUp', code: 'PageUp', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false,
       preventDefault() { pagePrevented += 1; },
-    }), true, 'plain Page Up on mouse-owning Claude uses its viewport wheel route');
-    assert.equal(pagePrevented, 1, 'Claude Page Up prevents the dead native terminal key');
-    assert.equal(wheelEvents.length, 12, 'Claude Page Up emits its 34-line page through the bounded 12-line wheel reporter');
+    }), false, 'plain Page Up stays with xterm');
+    assert.equal(pagePrevented, 0, 'native Page Up is not consumed');
+    assert.deepStrictEqual(claudeFrames, [], 'page keys are not rewritten as wheel reports');
 
     api.setTranscriptInfoForTest('1', {agents: [{kind: 'opencode', pane_target: '%opencode'}]});
     api.setTmuxSignalStateForTest({windows: [{
@@ -2623,7 +2633,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
             preventDefault() { pagePrevented += 1; },
           }), true, `plain OpenCode page event uses the app route with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
           assert.equal(pagePrevented, 1, `plain OpenCode page event is consumed with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
-          assert.deepStrictEqual(pageFrames.at(-1), {type: 'input', data: direction < 0 ? '\x1b[5~' : '\x1b[6~', user_input: true}, `plain OpenCode page event uses its native page byte with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+          assert.deepStrictEqual(pageFrames.at(-1), {type: 'input', data: direction < 0 ? '\x1b[5~' : '\x1b[6~', user_input: false}, `plain OpenCode page event uses its native page byte with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
           assert.equal(openCodeWheelEvents.length, 0, `plain OpenCode page event does not synthesize wheel reports with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
           openCodeWheelEvents.length = 0;
         }
@@ -2638,7 +2648,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 
         for (const [action, direction] of [['tmux-scroll-up', -1], ['tmux-scroll-down', 1]]) {
           assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', action), true, `mobile OpenCode ${action} uses the app route with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
-          assert.deepStrictEqual(pageFrames.at(-1), {type: 'input', data: direction < 0 ? '\x1b[5~' : '\x1b[6~', user_input: true}, `mobile OpenCode ${action} uses its native page byte with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+          assert.deepStrictEqual(pageFrames.at(-1), {type: 'input', data: direction < 0 ? '\x1b[5~' : '\x1b[6~', user_input: false}, `mobile OpenCode ${action} uses its native page byte with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
           assert.equal(openCodeWheelEvents.length, 0, `mobile OpenCode ${action} does not synthesize wheel reports with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
           openCodeWheelEvents.length = 0;
         }
@@ -2669,7 +2679,58 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.terminalUsesAppWheelForTest('1', {dataset: {}}), false, 'missing pane identity fails closed for app scrolling');
 
     api.setTranscriptInfoForTest('1', {agents: [{kind: 'codex', pane_target: '%codex'}]});
-    assert.equal(api.terminalUsesAppWheelForTest('1', {dataset: {terminalPaneTarget: '%codex'}}), false, 'Codex does not inherit OpenCode app scrolling');
+    const codexContainer = {dataset: {terminalPaneTarget: '%codex'}};
+    const codexWheelEvents = [];
+    const codexWheelContainer = {
+      ...codexContainer,
+      querySelector() { return {dispatchEvent(event) { codexWheelEvents.push(event); return true; }}; },
+    };
+    const codexFrames = [];
+    const codexTerm = {rows: 40, modes: {mouseTrackingMode: 'none'}};
+    const codexItem = api.registerTerminalForTest('1', codexTerm, {readyState: 1, send(frame) { codexFrames.push(JSON.parse(frame)); }});
+    codexItem.container = codexWheelContainer;
+    assert.equal(api.terminalUsesAppWheelForTest('1', codexContainer), true, 'Codex has an application scroll owner independent of alternate-screen mode');
+    assert.equal(api.terminalOpenCodeNativeShortcutForTest('1', codexContainer, {type: 'keydown', key: 'b', code: 'KeyB', ctrlKey: true, altKey: true, metaKey: false, shiftKey: false}), false, 'Codex does not inherit OpenCode Ctrl+Alt message navigation');
+    for (const alternateOn of [false, true]) {
+      for (const mouseTrackingMode of ['none', 'any']) {
+        api.setTmuxSignalStateForTest({windows: [{
+          key: '1:0', session: '1', window_index: '0', active: true,
+          panes: [{target: '%codex', pane_id: '%codex', current_command: 'codex', active: true, alternate_on: alternateOn}],
+        }]});
+        codexTerm.modes.mouseTrackingMode = mouseTrackingMode;
+        codexWheelEvents.length = 0;
+        codexFrames.length = 0;
+        assert.equal(api.routeTerminalScrollLinesForTest('1', codexTerm, codexWheelContainer, -3, {source: 'wheel'}), true, `Codex wheel uses the app route with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+        assert.deepStrictEqual(codexWheelEvents, [], `Codex wheel does not leave scrolling inside xterm with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+        assert.deepStrictEqual(codexFrames, [{type: 'application-scroll', pane: '%codex', direction: 'up', count: 1, column: 1, row: 1}], `Codex receives a slower app-directed wheel input with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+
+        codexFrames.length = 0;
+        let pagePrevented = 0;
+        assert.equal(api.handleTerminalTmuxHistoryNavigationKeydownForTest('1', codexTerm, {
+          type: 'keydown', key: 'PageUp', code: 'PageUp', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false,
+          preventDefault() { pagePrevented += 1; },
+        }), true, `plain Codex Page Up uses native app paging with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+        assert.equal(pagePrevented, 1, `plain Codex Page Up consumes the browser default with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+        assert.deepStrictEqual(codexFrames, [{type: 'application-scroll', pane: '%codex', direction: 'up', count: 1, column: 1, row: 1, page: true}], `plain Codex Page Up reaches the app as its native key with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+
+        assert.equal(codexItem.lastExplicitInputStartedAt, undefined, 'Codex wheel and page keys do not claim typing ownership');
+        codexFrames.length = 0;
+        assert.equal(api.handleTerminalTmuxHistoryNavigationKeydownForTest('1', codexTerm, {
+          type: 'keydown', key: 'PageDown', code: 'PageDown', metaKey: false, ctrlKey: false, altKey: false, shiftKey: true,
+          preventDefault() {},
+        }), true, `Shift+Codex Page Down forces tmux history with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+      }
+    }
+
+    codexTerm.modes.mouseTrackingMode = 'none';
+    codexFrames.length = 0;
+    assert.equal(api.routeTerminalScrollLinesForTest('1', codexTerm, codexWheelContainer, 0.8, {source: 'wheel'}), true, 'Codex preserves fractional touchpad movement until it crosses a row');
+    assert.deepStrictEqual(codexFrames, [], 'a partial touchpad movement does not send a wheel report');
+    assert.equal(api.routeTerminalScrollLinesForTest('1', codexTerm, codexWheelContainer, -1, {source: 'wheel', discreteWheel: true}), true, 'Codex accepts the next physical wheel notch');
+    assert.deepStrictEqual(codexFrames, [{type: 'application-scroll', pane: '%codex', direction: 'up', count: 1, column: 1, row: 1}], 'each physical Codex wheel notch responds and drops the touchpad remainder');
+    codexFrames.length = 0;
+    assert.equal(api.routeTerminalScrollLinesForTest('1', codexTerm, codexWheelContainer, -1, {source: 'wheel', discreteWheel: true}), true, 'Codex accepts another physical wheel notch');
+    assert.deepStrictEqual(codexFrames, [{type: 'application-scroll', pane: '%codex', direction: 'up', count: 1, column: 1, row: 1}], 'the next physical notch responds independently');
 
     api.setTmuxSignalStateForTest(signal);
     api.setTmuxSignalStateForTest(null);
@@ -3649,7 +3710,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.equal(source.includes(oldMap), false, `${oldMap} cannot return as a parallel terminal input-parser state source`);
     }
     assert.ok(/function noteTerminalTmuxWindowSwitch\(session, shortcut\)[\s\S]*const sequence = directIndex !== null[\s\S]*setTmuxWindowActiveIndexOverride\(session, directIndex\)[\s\S]*setTmuxWindowActiveIndexPending\(session\)[\s\S]*expectedIndex: directIndex, sequence[\s\S]*previousIndex, sequence/.test(source), 'terminal prefix observer highlights explicit targets and carries a sequence through readback');
-    assert.ok(/function handleTerminalDataMeasured\(session, data, options = \{\}\)[\s\S]*socket\.send\(JSON\.stringify\(\{type: 'input', data: filtered, user_input: userInput\}\)\)[\s\S]*observeTerminalTmuxPrefixWindowSwitches\(session, filtered\);/.test(source), 'terminal bytes are sent unchanged before secondary tmux prefix observation');
+    assert.ok(/function handleTerminalDataMeasured\(session, data, options = \{\}\)[\s\S]*socket\.send\(options\.binary === true[\s\S]*JSON\.stringify\(\{type: 'input', data: filtered, user_input: userInput\}\)\)[\s\S]*observeTerminalTmuxPrefixWindowSwitches\(session, filtered\);/.test(source), 'terminal bytes are sent unchanged before secondary tmux prefix observation');
     assert.ok(/const sequence = setTmuxWindowActiveIndexOverride\(session, directIndex\)[\s\S]*apiFetchJson\(`\/api\/tmux-window\?session=\$\{encodeURIComponent\(session\)\}&window=\$\{encodeURIComponent\(String\(directIndex\)\)\}`[\s\S]*tmuxWindowSwitchSequenceMatches\(session, sequence\)[\s\S]*scheduleTmuxWindowReadback\(session, \{delayMs: 0, clearActiveIndexOverride: true, expectedIndex: directIndex, sequence\}\)/.test(source), 'direct window buttons highlight before POST and keep the optimistic target until authoritative confirmation');
     assert.ok(/function setTmuxWindowActiveIndexOverride\(session, windowIndex, options = \{\}\)[\s\S]*applyTmuxWindowActiveIndexToTranscriptInfo\(String\(session\), indexKey, \{render: true\}\)/.test(source), 'known direct tmux targets overlay transcript metadata immediately so stale polls do not flash the old window');
     assert.ok(/async function applySessionMetadataPayload\(payload, options = \{\}\)[\s\S]*const nextPayload = transcriptPayloadWithTmuxWindowOverrides\([\s\S]*setTranscriptMetadataPayload\(nextPayload/.test(source), 'incoming session metadata payloads preserve pending direct-window overrides');
@@ -6241,9 +6302,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(enabledChatHtml.indexOf('data-yoagent-model') < enabledChatHtml.indexOf('data-yoagent-effort'), 'YO!agent composer renders model before effort');
     assert.ok(/data-yoagent-backend[\s\S]*?<option value="claude" selected/.test(enabledChatHtml), 'YO!agent composer selects the saved backend');
     const modelCatalogSource = fs.readFileSync('static/yomux.js', 'utf8');
-    assert.ok(/'claude-fable-5': 'pref\.yoagent\.claude_model\.fable'/.test(modelCatalogSource), 'YO!agent frontend fallback includes the current generally available Claude Fable model');
-    assert.ok(/'gpt-5\.3-codex-spark': 'pref\.yoagent\.codex_model\.gpt53spark'/.test(modelCatalogSource), 'YO!agent frontend fallback includes Codex Spark when the backend catalog is not loaded');
-    assert.ok(/data-yoagent-model[\s\S]*data-yoagent-setting-path="yoagent\.claude_model"[\s\S]*?<option value="claude-opus-4-8"/.test(enabledChatHtml), 'YO!agent composer model options follow the selected backend');
+    assert.ok(/'claude-fable-5-1': 'Claude Fable 5\.1'/.test(modelCatalogSource), 'YO!agent frontend fallback includes the current Claude Fable model');
+    assert.ok(/'gpt-6\.1-sol': 'GPT-6\.1-Sol'/.test(modelCatalogSource), 'YO!agent frontend fallback includes a model exposed by Codex CLI');
+    assert.ok(/data-yoagent-model[\s\S]*data-yoagent-setting-path="yoagent\.claude_model"[\s\S]*?<option value="claude-opus-5-5"/.test(enabledChatHtml), 'YO!agent composer model options follow the selected backend');
     assert.ok(/data-yoagent-effort[\s\S]*data-yoagent-setting-path="yoagent\.claude_effort"[\s\S]*?<option value="low"/.test(enabledChatHtml), 'YO!agent composer effort options follow the selected backend');
     assert.equal(/data-yoagent-backend[\s\S]*?<option value="auto"/.test(enabledChatHtml), false, 'YO!agent composer backend selector does not offer Auto');
     assert.equal(/data-yoagent-backend[\s\S]*?<option value="deterministic"/.test(enabledChatHtml), false, 'YO!agent composer backend selector does not offer No agent as a selectable backend');
@@ -8273,7 +8334,6 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     };
     assert.equal(api.shouldNotifyTransitionKey('needs-input'), true, 'a default session-state key still notifies');
     assert.equal(api.shouldNotifyTransitionKey('pr-merged'), false, 'pr-merged is opt-in, off by default');
-    const settingsSource = fs.readFileSync('yomux_lib/workspace/settings.py', 'utf8');
     const preferencesSource = fs.readFileSync('static_src/js/yomux/83_preferences_panel.js', 'utf8');
     const notificationSource = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
     const activitySource = fs.readFileSync('static_src/js/yomux/35_agent_window_activity.js', 'utf8');
@@ -8282,7 +8342,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       'static_src/js/yomux/99_client_event_transport.js',
     ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
     const locale = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
-    assert.ok(/"notify_working_attention": True,[\s\S]*"notify_working_done": False,/.test(settingsSource), 'working-to-attention notification defaults on while working-to-done defaults off');
+    assert.equal(serverSettingsSchema.DEFAULT_SETTINGS.notifications.notify_working_attention, true);
+    assert.equal(serverSettingsSchema.DEFAULT_SETTINGS.notifications.notify_working_done, false);
     assert.ok(preferencesSource.includes("preferenceSettingItem('notifications.notify_working_attention', {type: 'boolean'})") && preferencesSource.includes("preferenceSettingItem('notifications.notify_working_done', {type: 'boolean'})"), 'Notifications preferences expose separate working-attention and working-done toggles');
     assert.equal(locale['pref.notifications.notify_working_attention.label'], 'Notify when a working AI needs your attention');
     assert.equal(locale['pref.notifications.notify_working_done.label'], 'Notify when a working AI finishes');
@@ -8831,9 +8892,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const css = fs.readFileSync('static/yomux.css', 'utf8');
     assert.ok(/\.file-editor-preview-pane,\s*\n\.file-editor-preview-pane-panel\s*\{[^}]*font-size:\s*var\(--editor-preview-font-size\)/.test(css), 'rendered and split preview panes share the preview font variable owner');
     assert.ok(/\.file-editor-raw-panel\s*\{[^}]*font-size:\s*var\(--editor-font-size\)/.test(css), 'raw editor pane keeps the editor font variable');
-    const settingsSource = fs.readFileSync('yomux_lib/workspace/settings.py', 'utf8');
-    assert.ok(settingsSource.includes('"preview_font_size": 14'), 'preview font size default is 14');
-    assert.ok(settingsSource.includes('("appearance", "preview_font_size"): (6, 32)'), 'preview font size has server-side limits');
+    assert.equal(serverSettingsSchema.DEFAULT_SETTINGS.appearance.preview_font_size, 14, 'preview font size default is 14');
+    assert.deepEqual(serverSettingsSchema.SETTING_LIMITS['appearance.preview_font_size'], [6, 32], 'preview font size has server-side limits');
   });
 
   test('locale resolution and runtime relocalization stay complete', () => {
@@ -9530,7 +9590,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/installRuntimeIntervals\(\);\s*scheduleStartupHelperTip\(\);/.test(bootSrc), 'startup helper is scheduled after initial boot intervals');
     assert.ok(src.includes("if (location.protocol === 'file:') return;"), 'startup helper is skipped in file:// browser fixtures');
     const settingsSrc = fs.readFileSync('yomux_lib/workspace/settings.py', 'utf8');
-    assert.ok(settingsSrc.includes('"startup_tips": True'), 'Startup Tips setting defaults on server-side');
+    assert.equal(serverSettingsSchema.DEFAULT_SETTINGS.general.startup_tips, true, 'Startup Tips setting defaults on server-side');
     assert.ok(settingsSrc.includes('"startup_helpers" in incoming'), 'legacy startup_helpers configs migrate to startup_tips');
   });
 
@@ -9649,9 +9709,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(settingsRuntimeSource.includes('Math.max(75, paneRingOpacity)'), false, 'The active pane ring must not force a 75% floor');
     assert.equal(settingsRuntimeSource.includes('inactive_pane_gradient'), false, 'Inactive pane gradient is removed from runtime settings');
     assert.ok(settingsRuntimeSource.includes("applyInactivePaneOpacity(numberSetting('appearance.inactive_pane_opacity', 60))"), 'Inactive pane opacity defaults to 60% in runtime settings');
-    assert.ok(fs.readFileSync('yomux_lib/workspace/settings.py', 'utf8').includes('("appearance", "pane_ring_opacity"): (5, 100)'), 'Pane ring opacity server settings clamp allows 5%');
-    assert.equal(fs.readFileSync('yomux_lib/workspace/settings.py', 'utf8').includes('inactive_pane_gradient'), false, 'Inactive pane gradient is removed from server settings');
-    assert.ok(fs.readFileSync('yomux_lib/workspace/settings.py', 'utf8').includes('("appearance", "inactive_pane_opacity"): (0, 100)'), 'Inactive pane opacity server settings clamp is 0-100');
+    assert.deepEqual(serverSettingsSchema.SETTING_LIMITS['appearance.pane_ring_opacity'], [5, 100], 'Pane ring opacity server settings clamp allows 5%');
+    assert.equal('inactive_pane_gradient' in serverSettingsSchema.DEFAULT_SETTINGS.appearance, false, 'Inactive pane gradient is removed from server settings');
+    assert.deepEqual(serverSettingsSchema.SETTING_LIMITS['appearance.inactive_pane_opacity'], [0, 100], 'Inactive pane opacity server settings clamp is 0-100');
   });
 
   test('Preferences reset controls are fully localized', () => {

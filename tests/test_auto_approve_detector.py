@@ -14,7 +14,6 @@ from tests.helpers.prompt_corpus import PromptCorpus
 from tests.helpers.prompt_corpus import PromptCorpusPreset
 
 from tools import auto_approve_tmux
-from yomux_lib import app as app_module
 from yomux_lib import approvals
 from yomux_lib import prompt_detector
 from yomux_lib.auto_approve_worker import AutoApproveWorker
@@ -648,19 +647,6 @@ def test_auto_approve_tmux_reexports_detector_helpers():
     assert auto_approve_tmux.model_capacity_notice_visible is prompt_detector.model_capacity_notice_visible
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_approval_detection_pipeline_has_one_shared_owner():
-    # The read-path (app.py), the act-path worker (via the auto_approve_tmux module seam), and the CLI
-    # must all run the SAME detection functions — no parallel re-implementation. Detection lives in
-    # yomux_lib.approvals; the root CLI re-exports it and app.py imports it directly. Identity here
-    # means a future divergent copy fails this test instead of silently drifting the two paths apart.
-    assert auto_approve_tmux.hybrid_approval_prompt_state is approvals.hybrid_approval_prompt_state
-    assert auto_approve_tmux.transcript_approval_prompt_state is approvals.transcript_approval_prompt_state
-    assert auto_approve_tmux.blank_prompt_state is approvals.blank_prompt_state
-    assert auto_approve_tmux.PROMPT_RETRY_SECONDS == approvals.PROMPT_RETRY_SECONDS
-    assert app_module.hybrid_approval_prompt_state is approvals.hybrid_approval_prompt_state
-    assert app_module.blank_prompt_state is approvals.blank_prompt_state
 
 
 def test_auto_approve_cli_state_keeps_normal_questions_out_of_approval_path():
@@ -1217,33 +1203,6 @@ def test_mock_codex_3_option_approve_targets_option_1_yes():
     assert prompt_detector.action_for_bash_prompt(MOCK_CODEX_YESNO_PROMPT) == "option1"
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_mock_codex_3_option_worker_walks_to_option_1():
-    # Y8 act-path: the worker derives the target option from the approve action and walks the highlight
-    # to `1. Yes` (not `2`, not `3. No`), re-verifies it landed on 1, then confirms. Drives the worker's
-    # send_action against a fake tmux module seam so the chosen option is observable without a live tmux.
-    recorded: dict[str, object] = {}
-
-    def fake_move(target, option, selected_option=None):
-        recorded["moved_to"] = option
-
-    def fake_send_enter(target):
-        recorded["sent_enter"] = True
-
-    module = types.SimpleNamespace(
-        tmux_capture_pane=lambda target, visible_only=False: MOCK_CODEX_YESNO_PROMPT,
-        selected_prompt_option=prompt_detector.selected_prompt_option,
-        extract_command=prompt_detector.extract_command,
-        PROMPT_RETRY_SECONDS=8.0,
-        tmux_move_to_option=fake_move,
-        tmux_send_enter=fake_send_enter,
-    )
-
-    worker = AutoApproveWorker("codex-test")
-    action = prompt_detector.action_for_bash_prompt(MOCK_CODEX_YESNO_PROMPT)
-    assert worker.send_action(module, action, selected_option=1) is True
-    assert recorded == {"moved_to": 1, "sent_enter": True}
 
 
 @pytest.mark.parametrize("glyph", ["❯", "›", ">"])

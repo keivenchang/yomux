@@ -1,0 +1,572 @@
+[
+  {
+    "locale": "ar",
+    "body": "كيف يعمل",
+    "question": true
+  },
+  {
+    "locale": "de",
+    "body": "Wie funktioniert das",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "How does this work",
+    "question": true
+  },
+  {
+    "locale": "es",
+    "body": "Cómo funciona",
+    "question": true
+  },
+  {
+    "locale": "fr",
+    "body": "Comment ça marche",
+    "question": true
+  },
+  {
+    "locale": "he",
+    "body": "איך זה עובד",
+    "question": true
+  },
+  {
+    "locale": "hi",
+    "body": "कैसे काम करता है",
+    "question": true
+  },
+  {
+    "locale": "it",
+    "body": "Come funziona",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "どう動く",
+    "question": true
+  },
+  {
+    "locale": "ko",
+    "body": "어떻게 작동해",
+    "question": true
+  },
+  {
+    "locale": "nl",
+    "body": "Hoe werkt dit",
+    "question": true
+  },
+  {
+    "locale": "pl",
+    "body": "Jak to działa",
+    "question": true
+  },
+  {
+    "locale": "pt-BR",
+    "body": "Como funciona",
+    "question": true
+  },
+  {
+    "locale": "ru",
+    "body": "Как это работает",
+    "question": true
+  },
+  {
+    "locale": "th",
+    "body": "อย่างไรจึงทำงาน",
+    "question": true
+  },
+  {
+    "locale": "tr",
+    "body": "Nasıl çalışır",
+    "question": true
+  },
+  {
+    "locale": "vi",
+    "body": "Ai đang làm",
+    "question": true
+  },
+  {
+    "locale": "zh-Hans",
+    "body": "怎么工作",
+    "question": true
+  },
+  {
+    "locale": "zh-Hant",
+    "body": "怎麼工作",
+    "question": true
+  },
+  {
+    "locale": "AR",
+    "body": "  كيف يعمل  ",
+    "question": true
+  },
+  {
+    "locale": "DE",
+    "body": "  Wie funktioniert das  ",
+    "question": true
+  },
+  {
+    "locale": "EN",
+    "body": "  How does this work  ",
+    "question": true
+  },
+  {
+    "locale": "ES",
+    "body": "  Cómo funciona  ",
+    "question": true
+  },
+  {
+    "locale": "FR",
+    "body": "  Comment ça marche  ",
+    "question": true
+  },
+  {
+    "locale": "HE",
+    "body": "  איך זה עובד  ",
+    "question": true
+  },
+  {
+    "locale": "HI",
+    "body": "  कैसे काम करता है  ",
+    "question": true
+  },
+  {
+    "locale": "IT",
+    "body": "  Come funziona  ",
+    "question": true
+  },
+  {
+    "locale": "JA",
+    "body": "  どう動く  ",
+    "question": true
+  },
+  {
+    "locale": "KO",
+    "body": "  어떻게 작동해  ",
+    "question": true
+  },
+  {
+    "locale": "NL",
+    "body": "  Hoe werkt dit  ",
+    "question": true
+  },
+  {
+    "locale": "PL",
+    "body": "  Jak to działa  ",
+    "question": true
+  },
+  {
+    "locale": "PT-BR",
+    "body": "  Como funciona  ",
+    "question": true
+  },
+  {
+    "locale": "RU",
+    "body": "  Как это работает  ",
+    "question": true
+  },
+  {
+    "locale": "TH",
+    "body": "  อย่างไรจึงทำงาน  ",
+    "question": true
+  },
+  {
+    "locale": "TR",
+    "body": "  Nasıl çalışır  ",
+    "question": true
+  },
+  {
+    "locale": "VI",
+    "body": "  Ai đang làm  ",
+    "question": true
+  },
+  {
+    "locale": "ZH-HANS",
+    "body": "  怎么工作  ",
+    "question": true
+  },
+  {
+    "locale": "ZH-HANT",
+    "body": "  怎麼工作  ",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement?",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement?)",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement?”",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement;",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement;)",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement;”",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement՞",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement՞)",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement՞”",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement؟",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement؟)",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement؟”",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement፧",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement፧)",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement፧”",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement？",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement？)",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "statement？”",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement?",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement?)",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement?”",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement;",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement;)",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement;”",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement՞",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement՞)",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement՞”",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement؟",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement؟)",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement؟”",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement፧",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement፧)",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement፧”",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement？",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement？)",
+    "question": true
+  },
+  {
+    "locale": "ja",
+    "body": "statement？”",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement?",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement?)",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement?”",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement;",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement;)",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement;”",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement՞",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement՞)",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement՞”",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement؟",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement؟)",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement؟”",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement፧",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement፧)",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement፧”",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement？",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement？)",
+    "question": true
+  },
+  {
+    "locale": "ar",
+    "body": "statement？”",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "",
+    "question": false
+  },
+  {
+    "locale": "en",
+    "body": "😀",
+    "question": false
+  },
+  {
+    "locale": "en",
+    "body": "https://example.test/search?q=status",
+    "question": false
+  },
+  {
+    "locale": "en",
+    "body": "`value = query?x:y`",
+    "question": false
+  },
+  {
+    "locale": "en",
+    "body": "\"How does this work?\"",
+    "question": false
+  },
+  {
+    "locale": "en",
+    "body": "This is rhetorical text about why things happen",
+    "question": false
+  },
+  {
+    "locale": "en",
+    "body": "ｈｏｗ does this work",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "\u001cHow does this work\u001f",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "`what`?",
+    "question": false
+  },
+  {
+    "locale": "en",
+    "body": "https://example.test/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx?",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "not a question",
+    "question": false
+  },
+  {
+    "locale": "en",
+    "body": "Do this",
+    "question": true
+  },
+  {
+    "locale": "en",
+    "body": "[status?]",
+    "question": false
+  },
+  {
+    "locale": "en",
+    "body": "(status?)",
+    "question": false
+  },
+  {
+    "locale": "en",
+    "body": "whatsoever",
+    "question": false
+  },
+  {
+    "locale": "en",
+    "body": "What about `x`?",
+    "question": true
+  },
+  {
+    "locale": "invalid",
+    "body": "how is this",
+    "question": true
+  },
+  {
+    "locale": "en-XA",
+    "body": "How is this",
+    "question": true
+  },
+  {
+    "locale": "EN",
+    "body": "can this work",
+    "question": true
+  },
+  {
+    "locale": "english",
+    "body": "who is there",
+    "question": true
+  },
+  {
+    "locale": "zh_TW",
+    "body": "谁在哪里",
+    "question": false
+  },
+  {
+    "locale": " zh-Hant ",
+    "body": "什麼意思",
+    "question": true
+  }
+]

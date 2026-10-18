@@ -13,8 +13,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func writerBatch() AppendBatch {
@@ -136,50 +134,6 @@ func TestOpenWriterRepairsMissingRingTriggers(t *testing.T) {
 	}
 	if triggerCount != 6 {
 		t.Fatalf("ring trigger count = %d, want 6", triggerCount)
-	}
-}
-
-// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-func TestOpenWriterInitializesRingForCoreOnlyDatabase(t *testing.T) {
-	testsupport.RequireDeprecatedPythonBackend(t)
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "stats.sqlite3")
-	pythonScript := filepath.Join(t.TempDir(), "create-core-only.py")
-	const script = `import sqlite3, sys
-from yomux_lib.stats_current.storage import Store
-
-connection = sqlite3.connect(sys.argv[1])
-Store._initialize(connection)
-connection.execute(
-    "INSERT INTO observations VALUES(?, ?, ?, ?, ?, ?, ?)",
-    ("legacy-core-fact", "cpu", "synthetic", 10, "legacy-epoch", 1, '{"value":3}'),
-)
-connection.execute("UPDATE schema_meta SET source_generation=1 WHERE singleton=1")
-connection.commit()
-connection.close()
-`
-	if err := os.WriteFile(pythonScript, []byte(script), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	runPython(t, pythonExecutable(t), pythonScript, path)
-	if err := validateWriterDatabaseReadOnly(ctx, path); err != nil {
-		t.Fatalf("valid core-only schema was rejected during preflight: %v", err)
-	}
-
-	writer, err := OpenWriter(ctx, path)
-	if err != nil {
-		t.Fatalf("OpenWriter failed to initialize missing ring extension: %v", err)
-	}
-	defer writer.Close()
-	var preserved int
-	if err := writer.db.QueryRowContext(ctx, "SELECT count(*) FROM observations WHERE event_id='legacy-core-fact'").Scan(&preserved); err != nil || preserved != 1 {
-		t.Fatalf("core-only fact preservation count = %d, err = %v", preserved, err)
-	}
-	if _, err := writer.AppendBatch(ctx, writerBatch()); err != nil {
-		t.Fatalf("append after ring initialization: %v", err)
-	}
-	if err := validateWriterSchema(ctx, writer.db, true); err != nil {
-		t.Fatalf("initialized writer schema is invalid: %v", err)
 	}
 }
 

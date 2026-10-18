@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library")
+load("//:tools/bazel_rules.bzl", "go_test_pair")
+
+exports_files(["BUILD.bazel"])
+
+go_library(
+    name = "staticassets_lib",
+    srcs = [
+        "build.go",
+        "validate.go",
+    ],
+    importpath = "github.com/keivenchang/yomux/internal/staticassets",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/atomicfile:atomicfile_lib",
+        "//internal/locales:locales_lib",
+        "//internal/mutablefs:mutablefs_lib",
+    ],
+)
+
+go_test_pair(
+    name = "staticassets",
+    srcs = ["build_test.go"],
+    data = ["//:static_builder_test_inputs"],
+    embed = [":staticassets_lib"],
+    deps = ["@rules_go//go/runfiles"],
+)
+
+filegroup(
+    name = "qualified_sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.lock",
+            "**/*.log",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)

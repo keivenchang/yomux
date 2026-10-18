@@ -1520,6 +1520,8 @@
   "shortcuts.section.menus": "Menus, palettes et sélecteurs",
   "shortcuts.section.tabsPanes": "Onglets / Panneaux",
   "shortcuts.section.terminal": "Borne",
+  "shortcuts.exitTmuxCopyMode": "Quitter le mode copie de tmux",
+  "shortcuts.terminalScrollHelp": "Faites défiler ou utilisez Fn+Haut/Bas pour parcourir l’application. Maintenez Shift pendant le défilement pour consulter l’historique tmux.",
   "shortcuts.switchTmuxWindow": "Onglet précédent/suivant",
   "shortcuts.toggleComment": "Basculer le commentaire de ligne",
   "shortcuts.toggleFinder": "Basculer {name}",

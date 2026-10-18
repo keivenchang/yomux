@@ -379,7 +379,7 @@ def test_setup_auth_page_recommends_https_only_for_http(monkeypatch):
     recommendation = web.server_string(
         "en",
         "setup.httpsRecommended",
-        command="<code>python3 yomux.py --port 9998</code>",
+        command="<code>./boot.sh --force 9998</code>",
     )
     assert recommendation not in secure_setup_html
     assert "setupSecurity" not in secure_setup_html

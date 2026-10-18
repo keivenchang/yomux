@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import uuid
 from pathlib import Path
 from tools.tmux_paths import short_fixture_path
@@ -19,11 +20,6 @@ import pytest
 from tools.instance_isolation import apply_yomux_environment_assignments
 from yomux_lib.infra.host_identity import LocalProcessReason
 from yomux_lib.infra.host_identity import current_host_identity
-from yomux_lib import approvald
-from yomux_lib import batchd
-from yomux_lib.search.search_indexer import SearchIndexerClient
-from yomux_lib.statusd_client import StatusClient
-from yomux_lib.watchd_client import WatchClient
 from yomux_lib.local_services import registry as registry_mod
 from yomux_lib.local_services.client import LocalServiceClient
 from yomux_lib.local_services.client import TransportFailure
@@ -35,8 +31,6 @@ from yomux_lib.local_services.registry import LocalServiceRegistry
 from yomux_lib.local_services.registry import LocalServiceSpec
 from yomux_lib.local_services.registry import parse_ps_cpu_seconds
 from yomux_lib.local_services.registry import pid_is_serving
-from yomux_lib.stats_current import client as stats_current_client
-from yomux_lib.stats_current import service as stats_current_service
 from yomux_lib.stats_current import storage as stats_current_storage
 from tests.gate_harness import FixtureLocalServiceProcess
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
@@ -169,21 +163,6 @@ def test_registry_prunes_runtime_locks_before_adopting_a_recently_healthy_servic
     assert later_stale_lock.exists() is True
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_stats_current_client_prunes_runtime_locks_before_its_healthy_shortcut(tmp_path, monkeypatch):
-    service_dir = tmp_path / "services"
-    socket_path = service_dir / "statsd.p24s7.active.sock"
-    client = stats_current_client.StatsCurrentClient(socket_path, tmp_path / "stats-v7.sqlite3")
-    registry = client._transport.registry
-    service_dir.mkdir(parents=True)
-    socket_path.with_suffix(".lock").write_text("", encoding="utf-8")
-    stale_lock = service_dir / "statsd.p24s7.stale.lock"
-    stale_lock.write_text("", encoding="utf-8")
-    monkeypatch.setattr(registry, "recently_healthy", lambda: True)
-
-    assert client.ensure_started() is True
-    assert stale_lock.exists() is False
 
 
 def test_query_if_running_does_not_launch_an_absent_local_service(tmp_path, monkeypatch):
@@ -556,365 +535,46 @@ def test_darwin_process_environment_malformed_buffers_do_not_leak_contents(raw):
     assert "raw-secret" not in str(failure.value).lower()
 
 
-def test_pyproject_package_discovery_includes_local_service_subpackages():
-    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-
-    assert "[tool.setuptools.packages.find]" in pyproject
-    assert 'py-modules = ["yomux", "yolomux"]' in pyproject
-    assert 'include = ["tools*", "yomux_lib*"]' in pyproject
-    assert 'packages = ["yomux_lib"]' not in pyproject
+def test_pyproject_package_discovery_retains_developer_support_without_runtime_entrypoints():
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "py-modules" not in pyproject["tool"]["setuptools"]
+    assert "scripts" not in pyproject["project"]
+    assert pyproject["project"]["dependencies"] == []
+    assert pyproject["tool"]["setuptools"]["packages"]["find"]["include"] == ["tools*", "yomux_lib*"]
     for module_name in (
         "tools.auto_approve_tmux",
         "tools.tmux_wall",
         "yomux_lib.local_services",
         "yomux_lib.local_services.rpc",
-        "yomux_lib.stats_current.service",
-        "yomux_lib.batchd",
-        "yomux_lib.approvald",
     ):
         assert importlib.util.find_spec(module_name) is not None
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path, monkeypatch):
-    monkeypatch.delenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", raising=False)
-    monkeypatch.delenv("YOMUX_LOCAL_SERVICE_IDLE_SECONDS", raising=False)
-    starts = []
-
-    class FakeProcess:
-        def poll(self):
-            return None
-
-    def fake_popen(args, **kwargs):
-        starts.append((args, kwargs))
-        return FakeProcess()
-
-    socket_path = tmp_path / ("state with spaces " * 8).strip() / "batchd.sock"
-    registry = LocalServiceRegistry(
-        socket_path.parent,
-        LocalServiceSpec(
-            "batchd",
-            "yomux_lib.batchd",
-            socket_path.name,
-            batchd.BATCHD_PROTOCOL_VERSION,
-            idle_seconds=12.5,
-            extra_args=("--workers", "1"),
-        ),
-        socket_path=socket_path,
-        popen=fake_popen,
-    )
-
-    assert registry._spawn() is not None
-    args, kwargs = starts[0]
-
-    assert args[:3] == [sys.executable, "-m", "yomux_lib.batchd"]
-    assert kwargs["env"][registry_mod.LOCAL_SERVICE_SPAWN_GENERATION_ENV]
-    inherited_paths = kwargs["env"]["PYTHONPATH"].split(os.pathsep)
-    assert all(path in inherited_paths for path in sys.path if path)
-    assert args[args.index("--socket") + 1] == str(registry.socket_path)
-    assert args[args.index("--idle-seconds") + 1] == "12.5"
-    assert args[-2:] == ["--workers", "1"]
-    assert kwargs["start_new_session"] is True
-    assert kwargs["stdin"] is subprocess.DEVNULL
-    assert Path(kwargs["stdout"].name) == registry.stderr_path
-    assert kwargs["stdout"].closed is True
-    assert kwargs["stderr"] is subprocess.STDOUT
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-@pytest.mark.parametrize(
-    "artifact_location",
-    ("generated-outside", "generated-inside", "contained-explicit", "outside-explicit", "forged-exact"),
-)
-def test_registry_spawn_rebases_only_generated_artifacts_outside_current_root(tmp_path, monkeypatch, artifact_location):
-    starts = []
-
-    class FakeProcess:
-        def poll(self):
-            return None
-
-    root = short_fixture_path(f"yls-{os.getpid()}")
-    generated_prefix = str(tmp_path / "bootstrap-python-cache")
-    for key in (
-        "YOMUX_CONFIG_DIR",
-        "YOMUX_STATE_DIR",
-        "YOMUX_CACHE_DIR",
-        "YOMUX_RUNTIME_DIR",
-        "YOMUX_CODEX_HOME",
-        "CODEX_HOME",
-        "YOMUX_HOST_ARTIFACT_DIR",
-        "PYTHONPYCACHEPREFIX",
-        "YOMUX_GENERATED_PYTHONPYCACHEPREFIX",
-    ):
-        monkeypatch.delenv(key, raising=False)
-        if key.startswith("YOMUX_"):
-            monkeypatch.delenv(key.replace("YOMUX_", "YOLOMUX_"), raising=False)
-    monkeypatch.setenv("YOMUX_ROOT", str(root))
-    if artifact_location == "generated-outside":
-        monkeypatch.setenv("PYTHONPYCACHEPREFIX", generated_prefix)
-        monkeypatch.setenv("YOMUX_GENERATED_PYTHONPYCACHEPREFIX", generated_prefix)
-        monkeypatch.setattr(sys, "pycache_prefix", generated_prefix)
-    elif artifact_location == "generated-inside":
-        contained_generated = str(root / "generated-python-cache")
-        monkeypatch.setenv("PYTHONPYCACHEPREFIX", contained_generated)
-        monkeypatch.setenv("YOMUX_GENERATED_PYTHONPYCACHEPREFIX", contained_generated)
-        monkeypatch.setattr(sys, "pycache_prefix", contained_generated)
-    elif artifact_location == "contained-explicit":
-        monkeypatch.setenv("YOMUX_HOST_ARTIFACT_DIR", str(root / "artifacts"))
-        monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(root / "explicit-python-cache"))
-        monkeypatch.delenv("YOMUX_GENERATED_PYTHONPYCACHEPREFIX", raising=False)
-    elif artifact_location == "outside-explicit":
-        monkeypatch.setenv("PYTHONPYCACHEPREFIX", generated_prefix)
-        monkeypatch.setenv("YOMUX_GENERATED_PYTHONPYCACHEPREFIX", str(tmp_path / "different-prefix"))
-    else:
-        monkeypatch.setenv("PYTHONPYCACHEPREFIX", generated_prefix)
-        monkeypatch.setenv("YOMUX_GENERATED_PYTHONPYCACHEPREFIX", generated_prefix)
-        monkeypatch.setattr(sys, "pycache_prefix", str(tmp_path / "different-prefix"))
-    registry = LocalServiceRegistry(
-        tmp_path,
-        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
-        popen=lambda args, **kwargs: starts.append((args, kwargs)) or FakeProcess(),
-    )
-
-    if artifact_location in {"outside-explicit", "forged-exact"}:
-        with pytest.raises(ValueError, match="PYTHONPYCACHEPREFIX resolves outside YOMUX_ROOT"):
-            registry._spawn()
-        assert starts == []
-        return
-
-    assert registry._spawn() is not None
-    child = starts[0][1]["env"]
-    assert Path(child["PYTHONPYCACHEPREFIX"]).is_relative_to(root)
-    assert Path(child["PIP_CACHE_DIR"]).is_relative_to(root)
-    assert Path(child["NPM_CONFIG_CACHE"]).is_relative_to(root)
-    assert Path(child["COVERAGE_FILE"]).is_relative_to(root)
-    if artifact_location == "generated-outside":
-        assert child["PYTHONPYCACHEPREFIX"] != generated_prefix
-        assert child["YOMUX_GENERATED_PYTHONPYCACHEPREFIX"] == child["PYTHONPYCACHEPREFIX"]
-    elif artifact_location == "generated-inside":
-        assert child["PYTHONPYCACHEPREFIX"] == str(root / "generated-python-cache")
-        assert child["YOMUX_GENERATED_PYTHONPYCACHEPREFIX"] == child["PYTHONPYCACHEPREFIX"]
-    else:
-        assert child["YOMUX_HOST_ARTIFACT_DIR"] == str(root / "artifacts")
-        assert child["PYTHONPYCACHEPREFIX"] == str(root / "explicit-python-cache")
-        assert "YOMUX_GENERATED_PYTHONPYCACHEPREFIX" not in child
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_registry_spawn_honors_isolated_idle_override(tmp_path, monkeypatch):
-    starts = []
-
-    class FakeProcess:
-        def poll(self):
-            return None
-
-    monkeypatch.delenv("YOMUX_LOCAL_SERVICE_IDLE_SECONDS", raising=False)
-    monkeypatch.setenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "0.5")
-    registry = LocalServiceRegistry(
-        tmp_path,
-        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION, idle_seconds=60),
-        popen=lambda args, **kwargs: starts.append((args, kwargs)) or FakeProcess(),
-    )
-
-    assert registry._spawn() is not None
-    args, _kwargs = starts[0]
-    assert args[args.index("--idle-seconds") + 1] == "0.5"
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_registry_spawn_captures_durable_session_ownership(tmp_path, monkeypatch):
-    class FakeProcess:
-        pid = 43230
-
-        def poll(self):
-            return None
-
-    monkeypatch.setattr(registry_mod.uuid, "uuid4", lambda: type("Generation", (), {"hex": "a" * 32})())
-    monkeypatch.setattr(registry_mod, "process_start_identity", lambda pid: "ps:portable-start" if pid == 43230 else None)
-    monkeypatch.setattr(registry_mod.os, "getpgid", lambda pid: pid)
-    monkeypatch.setattr(registry_mod.os, "getsid", lambda pid: pid)
-    registry = LocalServiceRegistry(
-        tmp_path,
-        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
-        popen=lambda _args, **_kwargs: FakeProcess(),
-    )
-
-    process = registry._spawn()
-
-    assert process is not None
-    assert registry.spawn_ownership == registry_mod.SpawnProcessOwnership(
-        leader_pid=43230,
-        process_group=43230,
-        session_id=43230,
-        generation_marker="a" * 32,
-        member_identities=((43230, "ps:portable-start"),),
-    )
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_registry_refreshes_spawn_members_only_while_original_leader_matches(tmp_path, monkeypatch):
-    generation_marker = "a" * 32
-    registry = LocalServiceRegistry(
-        tmp_path,
-        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
-    )
-    registry.spawn_ownership = registry_mod.SpawnProcessOwnership(
-        leader_pid=43231,
-        process_group=43231,
-        session_id=43231,
-        generation_marker=generation_marker,
-        member_identities=((43231, "proc:1235"),),
-    )
-    current = {
-        43231: registry_mod.ProcessTableEntry(1, 43231, 0.0, f"python -X{generation_marker}", 1235, 43231, "proc:1235"),
-        43232: registry_mod.ProcessTableEntry(43231, 43231, 0.0, f"python -X{generation_marker}", 1236, 43231, "proc:1236"),
-    }
-    monkeypatch.setattr(registry_mod, "bounded_process_table", lambda: current)
-    monkeypatch.setattr(
-        registry_mod,
-        "process_spawn_generation",
-        lambda pid: generation_marker if pid in current and "foreign" not in current[pid].command else "b" * 32,
-    )
-
-    refreshed = registry.refresh_spawn_ownership()
-    assert refreshed is not None
-    assert refreshed.member_identities == ((43231, "proc:1235"), (43232, "proc:1236"))
-
-    current = {
-        43231: registry_mod.ProcessTableEntry(1, 43231, 0.0, "foreign leader", 9999, 43231, "proc:9999"),
-        43233: registry_mod.ProcessTableEntry(43231, 43231, 0.0, "foreign worker", 9998, 43231, "proc:9998"),
-    }
-    retained = registry.refresh_spawn_ownership()
-    assert retained is refreshed
-    assert retained.member_identities == ((43231, "proc:1235"), (43232, "proc:1236"))
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_registry_first_descendant_discovery_survives_leader_exit(tmp_path, monkeypatch):
-    generation_marker = "a" * 32
-    registry = LocalServiceRegistry(
-        tmp_path,
-        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
-    )
-    registry.spawn_ownership = registry_mod.SpawnProcessOwnership(
-        leader_pid=43234,
-        process_group=43234,
-        session_id=43234,
-        generation_marker=generation_marker,
-        member_identities=((43234, "proc:1237"),),
-    )
-    monkeypatch.setattr(registry_mod, "bounded_process_table", lambda: {
-        43235: registry_mod.ProcessTableEntry(1, 43234, 0.0, f"python -X{generation_marker} worker", 1238, 43234, "proc:1238"),
-        43236: registry_mod.ProcessTableEntry(43235, 43234, 0.0, f"python -X{generation_marker} grandchild", 1239, 43234, "proc:1239"),
-        43237: registry_mod.ProcessTableEntry(1, 43234, 0.0, f"python -X{generation_marker} wrong-session", 1240, 99999, "proc:1240"),
-        43238: registry_mod.ProcessTableEntry(1, 99999, 0.0, f"python -X{generation_marker} wrong-group", 1241, 43234, "proc:1241"),
-    })
-    monkeypatch.setattr(registry_mod, "process_spawn_generation", lambda pid: generation_marker)
-
-    refreshed = registry.refresh_spawn_ownership()
-
-    assert refreshed is not None
-    assert refreshed.member_identities == ((43235, "proc:1238"), (43236, "proc:1239"))
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_registry_proves_inherited_worker_when_leader_exits_after_snapshot(tmp_path, monkeypatch):
-    """A stale leader row cannot hide a live same-generation worker from fixture retirement."""
-
-    generation_marker = "a" * 32
-    registry = LocalServiceRegistry(
-        tmp_path,
-        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
-    )
-    registry.spawn_ownership = registry_mod.SpawnProcessOwnership(
-        leader_pid=43250,
-        process_group=43250,
-        session_id=43250,
-        generation_marker=generation_marker,
-        member_identities=((43250, "proc:leader"),),
-    )
-    leader = registry_mod.ProcessTableEntry(1, 43250, 0.0, "leader", 100, 43250, "proc:leader")
-    worker = registry_mod.ProcessTableEntry(43250, 43250, 0.0, "worker", 101, 43250, "proc:worker")
-    monkeypatch.setattr(registry_mod, "bounded_process_table", lambda: {43250: leader, 43251: worker})
-    monkeypatch.setattr(registry_mod, "process_start_identity", lambda pid: None if pid == 43250 else "proc:worker")
-    monkeypatch.setattr(registry_mod, "process_spawn_generation", lambda pid: None if pid == 43250 else generation_marker)
-
-    proof = registry.refresh_spawn_ownership_proof()
-
-    assert proof is not None
-    assert proof.group_exists is True
-    assert proof.owned_member_identities == ((43251, "proc:worker"),)
-    assert registry.spawn_ownership is not None
-    assert registry.spawn_ownership.member_identities == ((43251, "proc:worker"),)
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_registry_absent_leader_rejects_numeric_group_reuse_by_foreign_generation(tmp_path, monkeypatch):
-    registry = LocalServiceRegistry(
-        tmp_path,
-        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
-    )
-    ownership = registry_mod.SpawnProcessOwnership(
-        leader_pid=43239,
-        process_group=43239,
-        session_id=43239,
-        generation_marker="a" * 32,
-        member_identities=((43239, "proc:1242"),),
-    )
-    registry.spawn_ownership = ownership
-    monkeypatch.setattr(registry_mod, "bounded_process_table", lambda: {
-        43240: registry_mod.ProcessTableEntry(
-            1,
-            43239,
-            0.0,
-            "python -Xyolomux_local_service_generation=generation-b foreign-worker",
-            1243,
-            43239,
-            "proc:1243",
-        ),
-    })
-    monkeypatch.setattr(registry_mod, "process_spawn_generation", lambda _pid: "b" * 32)
-
-    proof = registry.refresh_spawn_ownership_proof()
-    assert proof is not None
-    assert proof.ownership is ownership
-    assert proof.group_exists is True
-    assert proof.owned_member_identities == ()
-    assert registry.refresh_spawn_ownership() is ownership
-    assert registry.spawn_ownership.member_identities == ((43239, "proc:1242"),)
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_registry_rejects_recycled_retained_child_identity(tmp_path, monkeypatch):
-    generation_marker = "a" * 32
-    registry = LocalServiceRegistry(
-        tmp_path,
-        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
-    )
-    ownership = registry_mod.SpawnProcessOwnership(
-        leader_pid=43241,
-        process_group=43241,
-        session_id=43241,
-        generation_marker=generation_marker,
-        member_identities=((43242, "proc:1244"),),
-    )
-    registry.spawn_ownership = ownership
-    monkeypatch.setattr(registry_mod, "bounded_process_table", lambda: {
-        43242: registry_mod.ProcessTableEntry(1, 43241, 0.0, f"python -X{generation_marker}", 9999, 43241, "proc:9999"),
-    })
-    monkeypatch.setattr(registry_mod, "process_spawn_generation", lambda _pid: generation_marker)
-
-    assert registry.refresh_spawn_ownership() is ownership
-    assert registry.spawn_ownership.member_identities == ((43242, "proc:1244"),)
 
 
 def test_registry_first_refresh_after_real_leader_exit_adopts_only_inherited_generation(tmp_path):
@@ -1070,75 +730,9 @@ def test_transport_diagnostics_returns_total_and_per_exception_counters(monkeypa
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_registry_real_ensure_started_preserves_generation_proof_through_cleanup(tmp_path, monkeypatch):
-    monkeypatch.delenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", raising=False)
-    registry = LocalServiceRegistry(
-        tmp_path,
-        LocalServiceSpec(
-            "batchd",
-            "yomux_lib.batchd",
-            "batchd.sock",
-            batchd.BATCHD_PROTOCOL_VERSION,
-            idle_seconds=30,
-            extra_args=("--workers", "1"),
-        ),
-    )
-
-    process = None
-    ownership = None
-    cleanup_complete = False
-    try:
-        assert registry.ensure_started() is True
-        process = registry.process
-        ownership = registry.refresh_spawn_ownership()
-        assert process is not None
-        assert ownership is not None
-        assert len(ownership.generation_marker) == 32
-        assert ownership.member_identities
-        process_entry = registry_mod.bounded_process_table().get(process.pid)
-        assert process_entry is not None, {
-            "poll": process.poll(),
-            "state": registry_mod.process_state(process.pid),
-            "identity": registry_mod.process_start_identity(process.pid),
-        }
-        assert registry_mod.process_spawn_generation(process.pid) == ownership.generation_marker
-
-        stop_fixture_local_service_process(
-            FixtureLocalServiceProcess(registry, process, ownership),
-            label="real local-service generation lifecycle",
-        )
-        cleanup_complete = True
-        assert process.poll() is not None
-    finally:
-        if not cleanup_complete and registry.spawn_ownership is not None:
-            ownership = registry.refresh_spawn_ownership() or registry.spawn_ownership
-        if not cleanup_complete and process is not None and ownership is not None:
-            stop_fixture_local_service_process(
-                FixtureLocalServiceProcess(registry, process, ownership),
-                label="real local-service generation lifecycle fallback",
-            )
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_long_default_socket_fallback_keeps_registry_lock_out_of_tmp(tmp_path, monkeypatch):
-    state_dir = tmp_path / ("long-state-segment-" * 8)
-    monkeypatch.setattr(approvald.common, "RUNTIME_DIR", state_dir)
-
-    client = approvald.ApprovalClient()
-
-    # `safe_socket_path`'s length fallback nests inside its own private digest-named
-    # directory now, never a bare file directly under `/tmp` -- a caller deriving a
-    # sibling path (e.g. a `.service.json` record) must never inherit `/tmp` itself as
-    # `.parent`. See yomux_lib/local_services/rpc.py:safe_socket_path.
-    assert client.socket_path.parent != Path("/tmp")
-    assert client.socket_path.parent.parent.name == "s"
-    assert client.socket_path.parent.parent.parent.name == "yolomux"
-    assert client.socket_path.parent.parent.parent.parent != Path("/tmp")
-    expected_service_dir = state_dir / "services"
-    assert client.registry.service_dir == expected_service_dir
-    assert client.registry.lock_path.parent == expected_service_dir
 
 
 def test_registry_names_the_guard_that_blocked_a_start_instead_of_failing_silently(tmp_path):
@@ -1323,88 +917,6 @@ def _identity_probe_registry(tmp_path, monkeypatch, *, leader_pid, identities, s
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-@pytest.mark.parametrize("service_name", ["batchd", "statusd", "watchd", "approvald", "indexd", "statsd"])
-def test_real_daemon_final_startup_probe_carries_its_spawned_identity(monkeypatch, gate_runtime_paths, service_name):
-    monkeypatch.setenv(registry_mod.LOCAL_SERVICE_IDLE_SECONDS_ENV, "60")
-    socket_path = gate_runtime_paths.runtime_dir / f"{service_name}.sock"
-    if service_name == "statsd":
-        registry = stats_current_client.StatsCurrentClient(
-            socket_path,
-            gate_runtime_paths.state_dir / stats_current_storage.DATABASE_FILENAME,
-        )._transport.registry
-    else:
-        clients = {
-            "batchd": batchd.BatchClient,
-            "statusd": StatusClient,
-            "watchd": WatchClient,
-            "approvald": approvald.ApprovalClient,
-            "indexd": SearchIndexerClient,
-        }
-        registry = clients[service_name](socket_path).registry
-    real_clock = registry.clock
-    real_healthy = registry.healthy
-    real_request = registry._request
-    real_spawn = registry._spawn
-    clock_shift = [0.0]
-    final_calls = []
-    spawned = []
-
-    def observed_spawn():
-        process = real_spawn()
-        spawned.append(process)
-        return process
-
-    def healthy_before_deadline():
-        healthy = real_healthy()
-        if healthy and registry.spawn_ownership is not None:
-            # Force the actual child to first prove readiness in the final probe,
-            # keeping its normal startup timeout and the real status transport.
-            clock_shift[0] = registry.spec.start_timeout_seconds
-            return False
-        return healthy
-
-    def observed_request(method, *args, **kwargs):
-        response = real_request(method, *args, **kwargs)
-        if clock_shift[0]:
-            final_calls.append((method, kwargs.get("timeout"), response))
-        return response
-
-    monkeypatch.setattr(registry, "clock", lambda: real_clock() + clock_shift[0])
-    monkeypatch.setattr(registry, "healthy", healthy_before_deadline)
-    monkeypatch.setattr(registry, "_request", observed_request)
-    monkeypatch.setattr(registry, "_spawn", observed_spawn)
-    try:
-        assert registry.ensure_started() is True, final_calls
-        assert [(method, timeout) for method, timeout, _response in final_calls] == [("status", 0.2)]
-        status = final_calls[0][2]
-        ownership = registry.spawn_ownership
-        assert ownership is not None
-        assert len(spawned) == 1 and spawned[0].pid == ownership.leader_pid
-        assert status["pid"] == ownership.leader_pid
-        assert status["process_start_identity"] == dict(ownership.member_identities)[ownership.leader_pid]
-        assert registry._read_record()["process_start_identity"] == status["process_start_identity"]
-        assert registry.failures == 0 and registry._failure_reason == "" and registry._terminal_failure is False
-        for action in ("ping", "status"):
-            response = real_request(action, timeout=0.2)
-            assert response["ok"] is True
-            assert response["pid"] == status["pid"]
-            assert response["process_start_identity"] == status["process_start_identity"]
-            assert response["stable_host_id"] == current_host_identity().stable_host_id
-            assert response["boot_id"] == current_host_identity().boot_id
-        refused = real_request("not-a-real-action", timeout=0.2)
-        assert refused.get("ok") is False or refused.get("status") == "unsupported"
-        assert "process_start_identity" not in refused
-        released = real_request("release", {"lease_id": "never-acquired"}, timeout=0.2)
-        assert released["ok"] is True and "process_start_identity" not in released
-    finally:
-        registry.seal_starts()
-        if registry.spawn_ownership is not None:
-            stop_fixture_local_service_process(
-                FixtureLocalServiceProcess(registry, registry.process, registry.spawn_ownership),
-                label=f"real {service_name} final startup probe",
-            )
-        registry.settle_reaper_threads()
 
 
 def test_registry_final_identity_probe_accepts_late_valid_and_fails_only_a_reused_pid_imposter(tmp_path, monkeypatch):
@@ -3119,72 +2631,6 @@ def test_registry_does_not_retire_newer_same_protocol_build(tmp_path, monkeypatc
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-@pytest.mark.parametrize(
-    ("module", "service_name", "client_factory", "extra_args"),
-    (
-        (batchd, "batchd", batchd.BatchClient, ()),
-        (approvald, "approvald", approvald.ApprovalClient, ()),
-        (
-            stats_current_service,
-            "statsd",
-            lambda socket_path: stats_current_client.StatsCurrentClient(
-                socket_path,
-                socket_path.parent / stats_current_storage.DATABASE_FILENAME,
-            )._transport,
-            ("--database", "{database}"),
-        ),
-    ),
-)
-def test_service_module_entrypoint_exits_cleanly_on_sigterm(tmp_path, module, service_name, client_factory, extra_args):
-    socket_path = tmp_path / "state with spaces" / f"{service_name}.sock"
-    argv = [
-        sys.executable,
-        "-m",
-        module.__name__,
-        "--serve",
-        "--socket",
-        str(socket_path),
-        "--idle-seconds",
-        "30",
-    ]
-    for item in extra_args:
-        argv.append(str(socket_path.parent / stats_current_storage.DATABASE_FILENAME) if item == "{database}" else item)
-    environment = {}
-    apply_yomux_environment_assignments(environment, {key: value for key, value in os.environ.items() if not key.startswith("YOMUX_ENVIRONMENT_")})
-    process = subprocess.Popen(argv, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    client = client_factory(socket_path)
-    try:
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline and not client.registry.healthy():
-            time.sleep(0.02)
-        if not client.registry.healthy():
-            startup = {
-                'pid': process.pid,
-                'exit_code': process.poll(),
-                'start_identity': registry_mod.process_start_identity(process.pid),
-                'socket_exists': socket_path.exists(),
-                'database_exists': (socket_path.parent / stats_current_storage.DATABASE_FILENAME).exists(),
-            }
-            if process.poll() is None:
-                process.terminate()
-            stdout, stderr = process.communicate(timeout=3.0)
-            pytest.fail(f'{service_name} entrypoint was not ready: {startup}; stdout={stdout!r}; stderr={stderr!r}')
-
-        process.terminate()
-        stdout, stderr = process.communicate(timeout=3.0)
-
-        assert process.returncode == 0
-        assert stdout == ""
-        assert stderr == ""
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline and socket_path.exists():
-            time.sleep(0.02)
-        assert socket_path.exists() is False
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.communicate(timeout=3.0)
 
 
 def test_service_runtime_signal_handlers_set_stop_event_and_restore(monkeypatch):

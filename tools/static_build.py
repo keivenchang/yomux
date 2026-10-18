@@ -680,23 +680,15 @@ I18N_ALLOWED_IDENTICAL_LOCALE_KEYS: dict[str, frozenset[str]] = {
     "it": frozenset({"menu.file"}),
     "pl": frozenset({"transcript.role.system"}),
 }
-I18N_PLACEHOLDER_PATTERN = r"\{[A-Za-z_][A-Za-z0-9_.-]*\}"
+_PSEUDO_SPEC = json.loads((REPO_ROOT / "static_src/pseudo-locale.json").read_text(encoding="utf-8"))
+I18N_PLACEHOLDER_PATTERN = _PSEUDO_SPEC["placeholder_pattern"]
 I18N_FORMAT_TOKEN_PATTERN = r"\{[A-Za-z_][A-Za-z0-9_.-]*:[^{}\s]+\}"
 I18N_PLACEHOLDER_RE = re.compile(I18N_PLACEHOLDER_PATTERN)
-I18N_PROTECTED_TOKEN_RE = re.compile(
-    I18N_FORMAT_TOKEN_PATTERN
-    + r"|`[^`\n]+`"
-    r"|https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+"
-    r"|/(?:static|assets?)/[A-Za-z0-9._~@+%/-]+"
-    r"|</?[A-Za-z][^>]*>"
-    r"|~/(?:[A-Za-z0-9_.{}@+-]+/)*[A-Za-z0-9_.{}@+-]*"
-    r"|\b(?:Ctrl|Cmd)(?:[-+][A-Za-z0-9_.]+)+\b"
-)
-I18N_PSEUDO_TOKEN_RE = re.compile(f"({I18N_PLACEHOLDER_PATTERN}|{I18N_PROTECTED_TOKEN_RE.pattern})")
-I18N_TRANSLATABLE_CODE_KEYS = frozenset({"yoagent.prompt.format"})
+I18N_PROTECTED_TOKEN_RE = re.compile(_PSEUDO_SPEC["protected_token_pattern"])
+I18N_TRANSLATABLE_CODE_KEYS = frozenset(_PSEUDO_SPEC["translatable_code_keys"])
 I18N_REQUIRED_YO_MARKERS = {"zh-Hans": "优", "zh-Hant": "優"}
 I18N_PRESERVED_YO_PRODUCT_KEYS = frozenset({"brand.tab.agent", "brand.tab.chat", "brand.tab.info"})
-I18N_OPTIONAL_NONENGLISH_TRANSLATIONS = {"brand.wordmark.second": frozenset({"zh-Hans", "zh-Hant"})}
+I18N_OPTIONAL_NONENGLISH_TRANSLATIONS = {key: frozenset(locales) for key, locales in _PSEUDO_SPEC["optional_blank_translations"].items()}
 I18N_ALLOWED_DUPLICATE_KEY_GROUPS: dict[frozenset[str], str] = {
     frozenset({"debug.summary", "searchHistory.summary", "transcript.role.summary"}): "view labels and a transcript role need different grammar",
     frozenset({"dialog.delete.kindFile", "popover.kind.file", "yolo.rule.source.file"}): "file kind, popover metadata, and rule source need different grammar",
@@ -739,78 +731,10 @@ I18N_VISIBLE_SINK_RE = re.compile(
 )
 I18N_CSS_CONTENT_RE = re.compile(r"\bcontent\s*:\s*(?P<quote>['\"])(?P<value>[^'\"\n]+)(?P=quote)")
 I18N_VISIBLE_LITERAL_UNITS = frozenset({"b", "gb", "kb", "mb", "ms", "px", "s"})
-_PSEUDO_ACCENTS = str.maketrans({
-    "a": "á", "b": "ƀ", "c": "ç", "d": "đ", "e": "é", "f": "ƒ", "g": "ǧ", "h": "ĥ", "i": "í",
-    "j": "ĵ", "k": "ķ", "l": "ł", "m": "ɱ", "n": "ñ", "o": "ó", "p": "ƥ", "q": "ɋ", "r": "ř",
-    "s": "š", "t": "ť", "u": "ú", "v": "ṽ", "w": "ŵ", "x": "ẋ", "y": "ý", "z": "ž",
-    "A": "Á", "B": "Ɓ", "C": "Ç", "D": "Đ", "E": "É", "F": "Ƒ", "G": "Ǧ", "H": "Ĥ", "I": "Í",
-    "J": "Ĵ", "K": "Ķ", "L": "Ł", "M": "Ɱ", "N": "Ñ", "O": "Ó", "P": "Ƥ", "Q": "Ɋ", "R": "Ř",
-    "S": "Š", "T": "Ť", "U": "Ú", "V": "Ṽ", "W": "Ŵ", "X": "Ẋ", "Y": "Ý", "Z": "Ž",
-})
+_PSEUDO_ACCENTS = str.maketrans(_PSEUDO_SPEC["accent_from"], _PSEUDO_SPEC["accent_to"])
+I18N_PSEUDO_TOKEN_RE = re.compile(f"({_PSEUDO_SPEC['token_pattern']})")
 
-ASSETS: dict[str, list[str]] = {
-    "emoji-data.js": [
-        "static_src/js/emoji/emoji_data.js",
-    ],
-    "yomux.js": [
-        "static_src/js/yomux/00_bootstrap_state.js",
-        "static_src/js/yomux/02_timing.js",
-        "static_src/js/yomux/05_i18n.js",
-        "static_src/js/yomux/09_transport_lifecycle.js",
-        "static_src/js/yomux/10_core_utils.js",
-        "static_src/js/yomux/15_command_registry.js",
-        "static_src/js/yomux/20_layout_state.js",
-        "static_src/js/yomux/30_app_menus.js",
-        "static_src/js/yomux/35_agent_window_activity.js",
-        "static_src/js/yomux/39_raw_file_media.js",
-        "static_src/js/yomux/40_file_explorer_files.js",
-        "static_src/js/yomux/45_file_explorer_actions.js",
-        "static_src/js/yomux/46_file_drop_actions.js",
-        "static_src/js/yomux/50_editor_settings_runtime.js",
-        "static_src/js/yomux/60_popovers_tabs.js",
-        "static_src/js/yomux/70_layout_actions.js",
-        "static_src/js/yomux/75_dockview_layout.js",
-        "static_src/js/yomux/76_panel_dom_actions.js",
-        "static_src/js/yomux/78_panel_shell.js",
-        "static_src/js/yomux/79_conversation_common.js",
-        "static_src/js/yomux/80_info_panel.js",
-        "static_src/js/yomux/81_yoagent_panel.js",
-        "static_src/js/yomux/82_chat_panel.js",
-        "static_src/js/yomux/83_preferences_panel.js",
-        "static_src/js/yomux/84_stats_current.js",
-        "static_src/js/yomux/84_debug_runtime_facade.js",
-        "static_src/js/yomux/84_debug_observation.js",
-        "static_src/js/yomux/85_debug_panel.js",
-        "static_src/js/yomux/85_git_diff_viewer.js",
-        "static_src/js/yomux/86_changes_00_refs.js",
-        "static_src/js/yomux/86_changes_10_session_files.js",
-        "static_src/js/yomux/86_changes_20_differ.js",
-        "static_src/js/yomux/86_changes_30_preferences.js",
-        "static_src/js/yomux/86_changes_40_finder.js",
-        "static_src/js/yomux/86_changes_editor.js",
-        "static_src/js/yomux/87_editor_nav.js",
-        "static_src/js/yomux/88_markdown_preview.js",
-        "static_src/js/yomux/89_preview_renderers.js",
-        "static_src/js/yomux/90_pane_popout.js",
-        "static_src/js/yomux/91_preview_popout.js",
-        "static_src/js/yomux/92_codemirror_editor.js",
-        "static_src/js/yomux/93_prosemirror_editor.js",
-        "static_src/js/yomux/98_terminal_runtime_facade.js",
-        "static_src/js/yomux/99_terminal_boot.js",
-        "static_src/js/yomux/99_client_event_transport.js",
-        "static_src/js/yomux/99_terminal_shortcuts_boot.js",
-    ],
-    "yomux.css": [
-        "static_src/css/yomux/00_tokens_base.css",
-        "static_src/css/yomux/10_topbar_menus.css",
-        "static_src/css/yomux/20_sessions_popovers.css",
-        "static_src/css/yomux/30_preferences_changes.css",
-        "static_src/css/yomux/35_git_diff_viewer.css",
-        "static_src/css/yomux/40_layout_panes_tabs.css",
-        "static_src/css/yomux/50_terminal_file_tree.css",
-        "static_src/css/yomux/60_editor_file_panels.css",
-    ],
-}
+ASSETS: dict[str, list[str]] = json.loads((REPO_ROOT / "static_src/build-manifest.json").read_text(encoding="utf-8"))
 
 # Source partials intentionally kept on disk but no longer concatenated into a served asset. A
 # reviewed marker distinguishes retirement from the much more dangerous "forgot to register it"
@@ -2730,11 +2654,41 @@ def check_locales() -> list[str]:
     return stale
 
 
+def _read_build_inputs() -> None:
+    """Rebase shared build metadata together for selected roots and watched edits."""
+    global ASSETS, SHIPPED_LOCALES, PLURAL_CATEGORIES_BY_LOCALE, _PSEUDO_SPEC, _PSEUDO_ACCENTS
+    global I18N_PLACEHOLDER_PATTERN, I18N_PLACEHOLDER_RE, I18N_PROTECTED_TOKEN_RE, I18N_PSEUDO_TOKEN_RE
+    global I18N_TRANSLATABLE_CODE_KEYS, I18N_OPTIONAL_NONENGLISH_TRANSLATIONS
+    ASSETS = json.loads(read_text(REPO_ROOT / "static_src/build-manifest.json"))
+    _PSEUDO_SPEC = json.loads(read_text(REPO_ROOT / "static_src/pseudo-locale.json"))
+    _PSEUDO_ACCENTS = str.maketrans(_PSEUDO_SPEC["accent_from"], _PSEUDO_SPEC["accent_to"])
+    I18N_PLACEHOLDER_PATTERN = _PSEUDO_SPEC["placeholder_pattern"]
+    I18N_PLACEHOLDER_RE = re.compile(I18N_PLACEHOLDER_PATTERN)
+    I18N_PROTECTED_TOKEN_RE = re.compile(_PSEUDO_SPEC["protected_token_pattern"])
+    I18N_PSEUDO_TOKEN_RE = re.compile(f"({_PSEUDO_SPEC['token_pattern']})")
+    I18N_TRANSLATABLE_CODE_KEYS = frozenset(_PSEUDO_SPEC["translatable_code_keys"])
+    I18N_OPTIONAL_NONENGLISH_TRANSLATIONS = {key: frozenset(locales) for key, locales in _PSEUDO_SPEC["optional_blank_translations"].items()}
+    registry = json.loads(read_text(REPO_ROOT / "assets/runtime/locale-registry.json"))
+    SHIPPED_LOCALES = tuple(spec["code"] for spec in registry)
+    PLURAL_CATEGORIES_BY_LOCALE = {spec["code"]: frozenset(spec["plural_categories"]) for spec in registry}
+
+
+def reload_build_inputs() -> None:
+    try:
+        _read_build_inputs()
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise BuildError(f"invalid shared build metadata: {error}") from error
+
+
 def watched_source_paths(assets: list[str]) -> list[Path]:
     """Every source file whose change should trigger a rebuild: the asset partials + locale catalogs."""
-    paths: list[Path] = []
+    paths: list[Path] = [
+        REPO_ROOT / "static_src/build-manifest.json",
+        REPO_ROOT / "static_src/pseudo-locale.json",
+        REPO_ROOT / "assets/runtime/locale-registry.json",
+    ]
     for asset in assets:
-        paths.extend(repo_path(part) for part in ASSETS[asset])
+        paths.extend(repo_path(part) for part in ASSETS.get(asset, []))
     if "yomux.js" in assets:
         paths.append(repo_path("internal/finder/search_rank_weights.json"))
     if LOCALES_SRC.is_dir():
@@ -2743,6 +2697,9 @@ def watched_source_paths(assets: list[str]) -> list[Path]:
 
 
 def build_once(assets: list[str]) -> list[str]:
+    unknown = sorted(set(assets) - set(ASSETS))
+    if unknown:
+        raise BuildError(f"unknown assets: {unknown}")
     check_css_braces()
     changed = [asset for asset in assets if write_asset(asset)]
     if write_locales():
@@ -2750,7 +2707,7 @@ def build_once(assets: list[str]) -> list[str]:
     return changed
 
 
-def watch_loop(assets: list[str], interval: float = 0.4) -> int:
+def watch_loop(assets: list[str], interval: float = 0.4, *, all_assets: bool = False) -> int:
     """Dev-velocity #1: rebuild on source change so the edit->reload loop drops the manual build step.
     A plain mtime poll (the build is ~36ms; no inotify dependency). A BuildError mid-edit (e.g. a
     transient locale-parity gap while typing) is printed and the watch keeps running."""
@@ -2764,7 +2721,7 @@ def watch_loop(assets: list[str], interval: float = 0.4) -> int:
 
     def snapshot() -> dict[Path, float]:
         stamps: dict[Path, float] = {}
-        for path in sources:
+        for path in watched_source_paths(assets):
             try:
                 stamps[path] = path.stat().st_mtime_ns
             except OSError:
@@ -2780,7 +2737,11 @@ def watch_loop(assets: list[str], interval: float = 0.4) -> int:
                 continue
             last = now
             try:
+                reload_build_inputs()
+                if all_assets:
+                    assets = sorted(ASSETS)
                 changed = build_once(assets)
+                last = snapshot()
                 if changed:
                     print("rebuilt: " + ", ".join(changed), flush=True)
             except BuildError as exc:
@@ -2814,7 +2775,7 @@ def _main(argv: list[str] | None = None) -> int:
             print(line, file=sys.stderr)
         return 1 if errors else 0
     if args.watch:
-        return watch_loop(assets)
+        return watch_loop(assets, all_assets=not args.assets)
     try:
         if args.check:
             check_css_braces()
@@ -2884,6 +2845,11 @@ def main(argv: list[str] | None = None, *, environ: dict[str, str] | None = None
     OUTPUT_ROOT = (paths.output_directory or REPO_ROOT / "static").resolve()
     LOCALES_SRC = REPO_ROOT / "static_src" / "locales"
     LOCALES_OUT = OUTPUT_ROOT / "locales"
+    try:
+        reload_build_inputs()
+    except BuildError as error:
+        print(str(error), file=sys.stderr)
+        return 1
     try:
         # Declared Bazel outputs are private to the action, so no checkout writer is involved.
         if OUTPUT_ROOT != REPO_ROOT / "static":

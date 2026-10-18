@@ -1,0 +1,29 @@
+load("@rules_go//go:def.bzl", "go_library")
+load("//:tools/bazel_rules.bzl", "go_test_pair")
+
+go_library(
+    name = "tailfile_lib",
+    srcs = ["tailfile.go"],
+    importpath = "github.com/keivenchang/yomux/internal/tailfile",
+    visibility = ["//visibility:public"],
+)
+
+go_test_pair(
+    name = "tailfile",
+    srcs = ["tailfile_test.go"],
+    embed = [":tailfile_lib"],
+)
+
+filegroup(
+    name = "qualified_sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.lock",
+            "**/*.log",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+exports_files(["BUILD.bazel"])

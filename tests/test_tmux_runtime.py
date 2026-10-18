@@ -312,12 +312,3 @@ def test_wait_for_isolated_tmux_panes_honors_a_fixed_interval_and_returns_last_c
     assert panes == {"one": "still-waiting"}
     assert captures == ["one", "one", "one"]
     assert sleeps == pytest.approx([0.2, 0.1])
-
-
-def test_e2e_auto_approve_routes_tmux_waits_through_the_selenium_free_shared_owner():
-    tree = ast.parse(Path(__file__).with_name("test_e2e_auto_approve.py").read_text(encoding="utf-8"))
-    imports = {(node.module, alias.name) for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) for alias in node.names}
-    functions = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    calls = {node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
-    assert ("tests.tmux_runtime", "wait_for_isolated_tmux_panes") in imports
-    assert "_wait_until" not in functions and "sleep" not in calls

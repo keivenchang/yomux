@@ -4021,6 +4021,8 @@ function keyboardShortcutCatalog() {
       {label: t('common.copyTmuxSelection'), keys: appShortcutText('C', {alt: true})},
       {label: t('shortcuts.switchTmuxWindow'), keys: `${metaShortcutText('←')} / ${metaShortcutText('→')}`},
       {label: t('shortcuts.pageTmuxScrollback'), keys: `${appShortcutText('↑')} / ${appShortcutText('↓')}`},
+      {label: t('shortcuts.terminalScrollHelp'), keys: 'Fn+↑ / Fn+↓'},
+      {label: t('shortcuts.exitTmuxCopyMode'), keys: 'Esc'},
     ]},
     {section: t('shortcuts.section.editor'), items: [
       {label: t('shortcuts.saveEditor'), keys: appShortcutText('S')},

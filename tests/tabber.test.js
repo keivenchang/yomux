@@ -368,7 +368,7 @@ test('shared Tabber reconciliation holds sibling order at every expanded depth a
   assert.deepEqual(names(children), ['c','b']);
 });
 
-test('Advanced transition distributes the complete recency roster and selects Finder', () => {
+test('Advanced transition distributes the complete recency roster and selects Finder by default', () => {
   for (const count of [0, 1, 3, 4, 100]) {
     const names = Array.from({length: count}, (_, i) => `session-${i}`);
     const api = loadYomux('', names);
@@ -386,6 +386,14 @@ test('Advanced transition distributes the complete recency roster and selects Fi
     assert.deepEqual(canonical(terminals.flatMap(value => value.tabs)), names.slice().reverse());
     if (count > 1) assert.equal(terminals[0].tabs.length, Math.ceil(count / 2));
   }
+});
+
+test('Advanced layout keeps Tabber selected when Tabber was active', () => {
+  const api = loadYomux('', ['one']);
+  api.setNativeViewportForTest({width: 2200});
+  const slots = api.advancedTabberLayoutSlots('__tabber__');
+  const home = Object.values(slots).find(value => value?.tabs?.includes('__tabber__'));
+  assert.equal(home.active, '__tabber__');
 });
 
 test('Advanced transition keeps active window views and falls back below the measured split width', () => {

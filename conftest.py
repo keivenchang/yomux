@@ -148,7 +148,7 @@ def _container_working_directory(repo_root: Path) -> str:
 
 
 def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
-    """Do not import wholly deprecated backend modules during default collection."""
+    """Ignore active document editor coordination directories during collection."""
 
     if any(part.endswith(".agent-edit.lock") for part in collection_path.parts):
         return True

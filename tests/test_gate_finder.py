@@ -15,7 +15,6 @@ from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
 from tests.browser_helpers.browser_layout import serve_repo_fixture_page
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.terminal_state_guard import assert_terminal_transition
-from yomux_lib import app as app_module
 
 
 FINDER_ROOT = "/home/test"
@@ -1037,82 +1036,6 @@ def test_b4_indexed_label_appears_after_context_index_and_survives_finder_refres
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
-def _quiet_fs_changed_volume(monkeypatch, tmp_path, make_tmux_webterm_app, *, unreadable_descendant: bool) -> dict[str, object]:
-    root = tmp_path / "quiet-tree"
-    root.mkdir()
-    stable = root / "stable.txt"
-    stable.write_text("unchanged\n", encoding="utf-8")
-    restricted = root / "restricted"
-    if unreadable_descendant:
-        restricted.mkdir()
-        (restricted / "hidden.txt").write_text("unchanged and inaccessible\n", encoding="utf-8")
-        restricted.chmod(0)
-    restricted_mode = stat.S_IMODE(restricted.stat().st_mode) if unreadable_descendant else None
-
-    webapp = make_tmux_webterm_app(())
-    subscriber_id = None
-    try:
-        registered = webapp.update_client_watch_roots({"client_id": "gate-finder", "roots": [str(root)]})
-        subscriber_id, subscriber_queue = webapp.client_events.subscribe(channels={"files"}, client_id="gate-finder")
-        record = app_module.ClientEventWatcherRecord()
-        with webapp.client_watch_service.lock:
-            webapp.client_watch_service.event_watcher_record = record
-        positive_before = webapp.client_events.snapshot()
-        stable.write_text("readable sibling changed\n", encoding="utf-8")
-        revision = {
-            "epoch": "gate-finder-watchd",
-            "revision": 1,
-            "watch_generation": 1,
-            "roots": [str(root)],
-            "root_generations": {str(root): 1},
-            "token": "gate-finder-watchd:1",
-            "created_at": time.time(),
-            "healthy": True,
-            "changed_paths": [str(stable)],
-        }
-        positive_events = webapp.apply_watchd_revision(record, revision)
-        positive_delivery = subscriber_queue.get(timeout=5.0)
-        positive_after = webapp.client_events.snapshot()
-        with webapp.client_watch_service.lock:
-            signatures = [webapp.client_watch_service.filesystem_signature]
-        rounds = [webapp.apply_watchd_revision(record, revision) for _index in range(QUIET_POLL_CYCLES)]
-        with webapp.client_watch_service.lock:
-            signatures.append(webapp.client_watch_service.filesystem_signature)
-        after = webapp.client_events.snapshot()
-    finally:
-        if subscriber_id is not None:
-            webapp.client_events.unsubscribe(subscriber_id)
-        if unreadable_descendant:
-            restricted.chmod(0o700)
-
-    def counter(snapshot, field):
-        return snapshot.get(field, {}).get("fs_changed", {"events": 0, "bytes": 0})
-
-    positive_published_before = counter(positive_before, "published_by_type")
-    positive_published_after = counter(positive_after, "published_by_type")
-    positive_delivered_before = counter(positive_before, "delivered_by_type")
-    positive_delivered_after = counter(positive_after, "delivered_by_type")
-    published_before = counter(positive_after, "published_by_type")
-    published_after = counter(after, "published_by_type")
-    delivered_before = counter(positive_after, "delivered_by_type")
-    delivered_after = counter(after, "delivered_by_type")
-    return {
-        "registered": registered,
-        "positive_events": positive_events,
-        "positive_delivery": positive_delivery,
-        "positive_published_events": positive_published_after["events"] - positive_published_before["events"],
-        "positive_published_bytes": positive_published_after["bytes"] - positive_published_before["bytes"],
-        "positive_delivered_events": positive_delivered_after["events"] - positive_delivered_before["events"],
-        "positive_delivered_bytes": positive_delivered_after["bytes"] - positive_delivered_before["bytes"],
-        "quiet_queue_empty": subscriber_queue.empty(),
-        "rounds": rounds,
-        "signatures": signatures,
-        "published_events": published_after["events"] - published_before["events"],
-        "published_bytes": published_after["bytes"] - published_before["bytes"],
-        "delivered_events": delivered_after["events"] - delivered_before["events"],
-        "delivered_bytes": delivered_after["bytes"] - delivered_before["bytes"],
-        "restricted_mode": restricted_mode,
-    }
 
 
 def _assert_quiet_fs_changed_volume(metrics: dict[str, object]) -> None:
@@ -1127,26 +1050,3 @@ def _assert_quiet_fs_changed_volume(metrics: dict[str, object]) -> None:
     assert metrics["signatures"][0] == metrics["signatures"][1], metrics
     assert metrics["published_events"] == 0 and metrics["published_bytes"] == 0, metrics
     assert metrics["delivered_events"] == 0 and metrics["delivered_bytes"] == 0, metrics
-
-
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_b5_unchanged_readable_tree_emits_zero_fs_changed_events_and_bytes(
-    monkeypatch, tmp_path, gate_runtime_paths, make_tmux_webterm_app
-):
-    """Twenty-five unchanged production polls are a deterministic quiet SSE window."""
-    metrics = _quiet_fs_changed_volume(monkeypatch, tmp_path, make_tmux_webterm_app, unreadable_descendant=False)
-    _assert_quiet_fs_changed_volume(metrics)
-
-
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_b5_unreadable_descendant_keeps_quiet_fs_changed_volume_at_zero(
-    monkeypatch, tmp_path, gate_runtime_paths, make_tmux_webterm_app
-):
-    """A mode-000 descendant cannot turn the same quiet window into polling or SSE churn."""
-    metrics = _quiet_fs_changed_volume(monkeypatch, tmp_path, make_tmux_webterm_app, unreadable_descendant=True)
-    assert metrics["restricted_mode"] == 0, metrics
-    _assert_quiet_fs_changed_volume(metrics)

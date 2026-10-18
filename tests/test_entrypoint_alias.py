@@ -1,37 +1,31 @@
+"""Installed canonical and legacy command names share the native entrypoint."""
+
 import os
 from pathlib import Path
 import subprocess
-import sys
-import tempfile
+
+from tests.isolated_dev_server import go_test_server_binary
+from tools.instance_isolation import synthetic_test_environment
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_legacy_python_entrypoint_warns_and_forwards_to_canonical_cli() -> None:
-    with tempfile.TemporaryDirectory(prefix="yomux-legacy-cli-") as temp_root:
-        temporary_root = Path(temp_root)
-        home = temporary_root / "home"
-        runtime_tmp = temporary_root / "tmp"
-        home.mkdir()
-        runtime_tmp.mkdir()
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith(("YOLOMUX_", "YOMUX_", "XDG_"))
-        }
-        environment["HOME"] = str(home)
-        environment["TMPDIR"] = str(runtime_tmp)
-        result = subprocess.run(
-            [sys.executable, str(REPO_ROOT / "yolomux.py"), "--help"],
-            cwd=REPO_ROOT,
-            env=environment,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=15,
-        )
-
-    assert result.returncode == 0, result.stderr
-    assert "WARNING: the yolomux command and entrypoint are deprecated; use yomux." in result.stderr
-    assert "usage:" in result.stdout
+def test_installed_entrypoint_aliases_forward_to_native_cli(tmp_path):
+    binary = go_test_server_binary(REPO_ROOT)
+    environment = synthetic_test_environment({
+        "PATH": os.environ["PATH"], "HOME": str(tmp_path / "home"),
+        "YOMUX_GO_BINARY": str(binary),
+    })
+    prefix = tmp_path / "installed"
+    installed = subprocess.run([str(REPO_ROOT / "tools/install.sh"), "--prefix", str(prefix)],
+                               env=environment, capture_output=True, text=True, timeout=30)
+    assert installed.returncode == 0, installed.stderr
+    outputs = []
+    for command in ("yomux", "yolomux"):
+        result = subprocess.run([str(prefix / "bin" / command), "--version"],
+                                env=environment, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.startswith("yomux-go ")
+        outputs.append(result.stdout)
+    assert outputs[0] == outputs[1]

@@ -1493,6 +1493,8 @@
   "shortcuts.section.menus": "Menu's, paletten en pickers",
   "shortcuts.section.tabsPanes": "Tabs / Panelen",
   "shortcuts.section.terminal": "Terminalvenster",
+  "shortcuts.exitTmuxCopyMode": "tmux-kopieermodus afsluiten",
+  "shortcuts.terminalScrollHelp": "Scroll of gebruik Fn+Omhoog/Omlaag om door de toepassing te bladeren. Houd Shift ingedrukt tijdens het scrollen om de tmux-geschiedenis te bekijken.",
   "shortcuts.switchTmuxWindow": "Vorige / volgende tab",
   "shortcuts.toggleComment": "Wissel lijncommentaar",
   "shortcuts.toggleFinder": "{name} in-/uitschakelen",

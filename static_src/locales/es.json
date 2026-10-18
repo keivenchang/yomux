@@ -1520,6 +1520,8 @@
   "shortcuts.section.menus": "Menús, paletas y selectores.",
   "shortcuts.section.tabsPanes": "Pestañas / Paneles",
   "shortcuts.section.terminal": "terminales",
+  "shortcuts.exitTmuxCopyMode": "Salir del modo de copia de tmux",
+  "shortcuts.terminalScrollHelp": "Desplázate o usa Fn+Arriba/Abajo para recorrer la aplicación. Mantén Shift mientras te desplazas para consultar el historial de tmux.",
   "shortcuts.switchTmuxWindow": "Pestaña anterior/siguiente",
   "shortcuts.toggleComment": "Alternar comentario de línea",
   "shortcuts.toggleFinder": "Alternar {name}",

@@ -33,18 +33,31 @@ alias(
 )
 
 filegroup(
-    name = "python_runtime",
+    name = "runtime_assets",
     srcs = [
+        "assets/runtime/chat-question-rules.json",
+        "assets/runtime/internal_model_pricing.json",
+        "assets/runtime/locale-registry.json",
+        "assets/runtime/model_pricing.json",
+        "assets/runtime/model_pricing.schema.json",
+        "assets/runtime/settings-schema.json",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "python_test_support",
+    testonly = True,
+    srcs = [
+        "assets/runtime/internal_rates_2026-09-10.json",
         "version.yaml",
-        "yomux.py",
-    ] + glob([
-        "yomux_lib/**/*.py",
-        "yomux_lib/**/*.json",
-    ]),
+        ":runtime_assets",
+    ] + glob(["yomux_lib/**/*.py"]),
 )
 
 filegroup(
     name = "pytest_collection_support",
+    testonly = True,
     srcs = [
         "tools/pytest_catalog_plugin.py",
         "tools/test_catalog.py",
@@ -54,6 +67,7 @@ filegroup(
 
 filegroup(
     name = "execution_contract_inputs",
+    testonly = True,
     srcs = [
         "tools/bazel_execution_contract.py",
         "tools/bazel_native.py",
@@ -64,6 +78,7 @@ filegroup(
 
 filegroup(
     name = "integration_python_tools",
+    testonly = True,
     srcs = [
         "tools/auto_approve_tmux.py",
         "tools/bazel_go_browser_e2e.py",
@@ -87,33 +102,28 @@ filegroup(
 
 filegroup(
     name = "agent_status_prompt_fixtures",
+    testonly = True,
     srcs = glob(["tests/fixtures/prompt_corpus/**/*.yaml"]),
 )
 
 filegroup(
     name = "browser_scenario_fixture_inputs",
+    testonly = True,
     srcs = glob(["tests/fixtures/current_model_usage/**/*.jsonl"]),
 )
 
 filegroup(
-    name = "go_python_runtime",
+    name = "go_test_python_support",
+    testonly = True,
     srcs = [
         "version.yaml",
-        "yomux.py",
-    ] + glob(
-        [
-            "yomux_lib/**/*.py",
-            "yomux_lib/**/*.json",
-        ],
-        exclude = [
-            "yomux_lib/data/internal_rates_2026-09-10.json",
-            "yomux_lib/data/model_pricing.schema.json",
-        ],
-    ),
+        ":runtime_assets",
+    ] + glob(["yomux_lib/**/*.py"]),
 )
 
 filegroup(
     name = "go_test_tool_inputs",
+    testonly = True,
     srcs = [
         "tools/auto_approve_tmux.py",
         "tools/go_binary.py",
@@ -131,14 +141,17 @@ filegroup(
 
 filegroup(
     name = "go_cmd_test_support_inputs",
+    testonly = True,
     srcs = [
-        ":go_python_runtime",
+        "tests/fixtures/settings_native_contract.json",
+        ":go_test_python_support",
         ":go_test_tool_inputs",
-    ],
+    ] + glob(["static/locales/*.json"]),
 )
 
 runtime_tree(
     name = "go_cmd_test_support",
+    testonly = True,
     srcs = [":go_cmd_test_support_inputs"],
     runtime_groups = ["git_tmux"],
     visibility = ["//visibility:public"],
@@ -146,6 +159,7 @@ runtime_tree(
 
 filegroup(
     name = "go_stats_test_support_inputs",
+    testonly = True,
     srcs = [
         "tests/fixtures/current_model_usage/observed.claude.jsonl",
         "tests/fixtures/current_model_usage/observed.codex.jsonl",
@@ -155,6 +169,7 @@ filegroup(
 
 runtime_tree(
     name = "go_stats_test_support",
+    testonly = True,
     srcs = [":go_stats_test_support_inputs"],
     runtime_groups = ["git_tmux"],
     visibility = ["//visibility:public"],
@@ -162,15 +177,17 @@ runtime_tree(
 
 filegroup(
     name = "testsupport_runfiles_inputs",
+    testonly = True,
     srcs = [
+        "assets/runtime/internal_model_pricing.json",
+        "assets/runtime/model_pricing.json",
         "yomux_lib/__init__.py",
-        "yomux_lib/data/internal_model_pricing.json",
-        "yomux_lib/data/model_pricing.json",
     ],
 )
 
 runtime_tree(
     name = "testsupport_runfiles",
+    testonly = True,
     srcs = [":testsupport_runfiles_inputs"],
     runtime_groups = ["git_tmux"],
     visibility = ["//internal/testsupport:__pkg__"],
@@ -181,16 +198,45 @@ filegroup(
     srcs = ["//internal/finder:search_rank_weights.json"] + glob(["static_src/**"]),
 )
 
+filegroup(
+    name = "agent_conversation_test_inputs",
+    testonly = True,
+    srcs = ["tests/fixtures/agent_conversation_contract.json"],
+    visibility = ["//internal/yoagent:__pkg__"],
+)
+
+filegroup(
+    name = "chat_protocol_test_inputs",
+    testonly = True,
+    srcs = [
+        "assets/runtime/chat-question-rules.json",
+        "assets/runtime/locale-registry.json",
+        "tests/fixtures/chat_cursor_contract.json",
+        "tests/fixtures/chat_question_contract.json",
+        "tests/fixtures/chat_schema_contract.json",
+        "tests/fixtures/chat_service_contract.json",
+        "tests/fixtures/chat_store_contract.json",
+    ],
+    visibility = ["//internal/chat:__pkg__"],
+)
+
+filegroup(
+    name = "static_builder_test_inputs",
+    testonly = True,
+    srcs = [
+        "assets/runtime/locale-registry.json",
+        "tests/fixtures/static_assets_contract.json",
+        "tests/fixtures/static_pseudo_contract.json",
+        ":frontend_source_inputs",
+    ],
+    visibility = ["//internal/staticassets:__pkg__"],
+)
+
 frontend_assets(
     name = "frontend_assets",
     srcs = [
-        "tools/instance_isolation.py",
-        "tools/product_environment.py",
-        "tools/product_namespace.json",
-        "tools/static_build.py",
-        "tools/tabber_browser_journey.py",
+        "assets/runtime/locale-registry.json",
         ":frontend_source_inputs",
-        ":python_runtime",
     ],
 )
 
@@ -208,6 +254,7 @@ filegroup(
 
 filegroup(
     name = "browser_test_support",
+    testonly = True,
     srcs = [
         "conftest.py",
         "pyproject.toml",
@@ -215,18 +262,22 @@ filegroup(
         "tests/aged_state.py",
         "tests/conftest.py",
         "tests/e2e_browser_harness.py",
+        "tests/fixtures/retired_route_contract.json",
         "tests/gate_harness.py",
         "tests/helpers/__init__.py",
         "tests/helpers/browser_boot.py",
         "tests/helpers/fixture_content_root.py",
         "tests/helpers/fixture_tools.py",
+        "tests/helpers/route_contract.py",
+        "tests/isolated_dev_server.py",
+        "tests/native_gate_fixtures.py",
         "tests/test_browser_stats_widen.py",
         "tests/tmux_runtime.py",
         ":browser_scenario_fixture_inputs",
         ":frontend_runtime",
         ":frontend_source_inputs",
         ":integration_python_tools",
-        ":python_runtime",
+        ":python_test_support",
     ] + glob(
         [
             "tests/browser_helpers/**",
@@ -238,6 +289,7 @@ filegroup(
 
 runtime_tree(
     name = "stats_browser_runtime",
+    testonly = True,
     srcs = [":browser_test_support"],
     frontend = ":frontend_assets",
     runtime_groups = [
@@ -250,6 +302,7 @@ runtime_tree(
 
 filegroup(
     name = "go_browser_runtime_inputs",
+    testonly = True,
     srcs = [
         "tests/browser_helpers/__init__.py",
         "tests/browser_helpers/native_pointer.py",
@@ -257,12 +310,13 @@ filegroup(
         ":frontend_runtime",
         ":frontend_source_inputs",
         ":integration_python_tools",
-        ":python_runtime",
+        ":python_test_support",
     ],
 )
 
 runtime_tree(
     name = "go_browser_runtime",
+    testonly = True,
     srcs = [":go_browser_runtime_inputs"],
     frontend = ":frontend_assets",
     runtime_groups = [
@@ -276,6 +330,7 @@ runtime_tree(
 
 filegroup(
     name = "agent_status_test_support",
+    testonly = True,
     srcs = [
         "conftest.py",
         "pyproject.toml",
@@ -294,12 +349,13 @@ filegroup(
         ":execution_contract_inputs",
         ":integration_python_tools",
         ":pytest_collection_support",
-        ":python_runtime",
+        ":python_test_support",
     ] + glob(["tools/mockers/**/*.py"]),
 )
 
 runtime_tree(
     name = "agent_status_runtime",
+    testonly = True,
     srcs = [":agent_status_test_support"],
     runtime_groups = [
         "git_tmux",
@@ -320,13 +376,20 @@ filegroup(
         "//internal/atomicfile:BUILD.bazel",
         "//internal/cache:BUILD.bazel",
         "//internal/capabilities:BUILD.bazel",
+        "//internal/chat:BUILD.bazel",
+        "//internal/decimal:BUILD.bazel",
         "//internal/fakellm:BUILD.bazel",
         "//internal/finder:BUILD.bazel",
+        "//internal/locales:BUILD.bazel",
         "//internal/mutablefs:BUILD.bazel",
+        "//internal/staticassets:BUILD.bazel",
         "//internal/stats:BUILD.bazel",
+        "//internal/tailfile:BUILD.bazel",
         "//internal/testsupport:BUILD.bazel",
         "//internal/tmuxcmd:BUILD.bazel",
         "//internal/work:BUILD.bazel",
+        "//internal/yoagent:BUILD.bazel",
+        "//tools/staticgen:BUILD.bazel",
     ],
 )
 
@@ -347,22 +410,62 @@ sh_test(
 )
 
 test_suite(
+    name = "agent_conversation_tests",
+    tests = [
+        ":bazel_source_check_test",
+        "//internal/decimal:decimal_race_test",
+        "//internal/decimal:decimal_test",
+        "//internal/yoagent:yoagent_race_test",
+        "//internal/yoagent:yoagent_test",
+    ],
+)
+
+test_suite(
+    name = "chat_protocol_tests",
+    tests = [
+        ":bazel_source_check_test",
+        "//internal/atomicfile:atomicfile_race_test",
+        "//internal/atomicfile:atomicfile_test",
+        "//internal/chat:chat_race_test",
+        "//internal/chat:chat_test",
+        "//internal/locales:locales_race_test",
+        "//internal/locales:locales_test",
+    ],
+)
+
+test_suite(
+    name = "static_builder_tests",
+    tests = [
+        ":bazel_source_check_test",
+        "//internal/staticassets:staticassets_test",
+        "//tools/staticgen:staticgen_test",
+    ],
+)
+
+test_suite(
     name = "go_unit_tests",
     tests = [
         "//cmd/yomux-go:yomux_go_test",
         "//internal/atomicfile:atomicfile_test",
         "//internal/cache:cache_test",
         "//internal/capabilities:capabilities_test",
+        "//internal/chat:chat_test",
+        "//internal/decimal:decimal_test",
         "//internal/fakellm:fakellm_test",
         "//internal/finder:finder_test",
+        "//internal/locales:locales_test",
         "//internal/mutablefs:mutablefs_test",
         "//internal/productenv:productenv_test",
         "//internal/productversion:productversion_test",
+        "//internal/staticassets:staticassets_test",
         "//internal/stats:agent_status_integration_test",
         "//internal/stats:stats_test",
+        "//internal/tailfile:tailfile_test",
         "//internal/testsupport:testsupport_test",
         "//internal/work:work_test",
+        "//internal/yoagent:yoagent_test",
         "//internal/yolo:yolo_test",
+        "//tools/staticgen:staticgen_test",
     ],
 )
 
@@ -373,13 +476,19 @@ test_suite(
         "//internal/atomicfile:atomicfile_race_test",
         "//internal/cache:cache_race_test",
         "//internal/capabilities:capabilities_race_test",
+        "//internal/chat:chat_race_test",
+        "//internal/decimal:decimal_race_test",
         "//internal/fakellm:fakellm_race_test",
         "//internal/finder:finder_race_test",
+        "//internal/locales:locales_race_test",
         "//internal/mutablefs:mutablefs_race_test",
+        "//internal/staticassets:staticassets_race_test",
         "//internal/stats:agent_status_integration_race_test",
         "//internal/stats:stats_race_test",
+        "//internal/tailfile:tailfile_race_test",
         "//internal/testsupport:testsupport_race_test",
         "//internal/work:work_race_test",
+        "//internal/yoagent:yoagent_race_test",
         "//internal/yolo:yolo_race_test",
     ],
 )
@@ -519,10 +628,11 @@ sh_test(
 
 runtime_tree(
     name = "go_runtime_safety_runtime",
+    testonly = True,
     srcs = [
         "tools/verify_go_stats_restart.py",
         ":integration_python_tools",
-        ":python_runtime",
+        ":python_test_support",
     ],
     runtime_groups = ["git_tmux"],
 )
@@ -548,6 +658,7 @@ sh_test(
 
 filegroup(
     name = "native_execution_support",
+    testonly = True,
     srcs = [
         "tests/browser_helpers/__init__.py",
         "tests/browser_helpers/webdriver_lease.py",
@@ -565,6 +676,7 @@ filegroup(
 
 native_python_binary(
     name = "native_test_entrypoint",
+    testonly = True,
     data = [":native_execution_support"],
     runtime_groups = [],
     script = "tools/bazel_native_entrypoint.py",
@@ -591,6 +703,7 @@ native_python_test(
 
 filegroup(
     name = "qualified_gate_sources",
+    testonly = True,
     srcs = glob(
         [
             "*.py",
@@ -604,6 +717,7 @@ filegroup(
             "tools/**",
             "tests/**",
             "yomux_lib/**",
+            "assets/runtime/**",
             "static_src/**",
             "static/**",
             "docs/**",
@@ -641,22 +755,30 @@ filegroup(
         "//internal/atomicfile:qualified_sources",
         "//internal/cache:qualified_sources",
         "//internal/capabilities:qualified_sources",
+        "//internal/chat:qualified_sources",
+        "//internal/decimal:qualified_sources",
         "//internal/fakellm:qualified_sources",
         "//internal/finder:qualified_sources",
+        "//internal/locales:qualified_sources",
         "//internal/mutablefs:qualified_sources",
         "//internal/productenv:qualified_sources",
         "//internal/productversion:qualified_sources",
+        "//internal/staticassets:qualified_sources",
         "//internal/stats:qualified_sources",
+        "//internal/tailfile:qualified_sources",
         "//internal/testsupport:qualified_sources",
         "//internal/tmuxcmd:qualified_sources",
         "//internal/work:qualified_sources",
+        "//internal/yoagent:qualified_sources",
         "//internal/yolo:qualified_sources",
+        "//tools/staticgen:qualified_sources",
         "//tools/versiongen:qualified_sources",
     ],
 )
 
 runtime_tree(
     name = "qualified_gate_runtime",
+    testonly = True,
     srcs = [":qualified_gate_sources"],
     frontend = ":frontend_assets",
 )

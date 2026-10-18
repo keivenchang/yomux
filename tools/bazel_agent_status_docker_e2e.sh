@@ -4,7 +4,7 @@ repo="$(readlink -f "$1")"
 common="$2"
 . "$common"
 bazel_test_prepare_environment
-test -f "$repo/yomux.py"
+test -f "$repo/version.yaml"
 cd "$repo"
 claude --version
 codex --version

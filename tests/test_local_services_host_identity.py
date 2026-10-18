@@ -556,39 +556,3 @@ def test_a_service_can_never_mint_an_external_claim_naming_itself() -> None:
     )
     assert self_claim["diagnostic"]["reason"] == "self_connection"
     assert len(leases) == 1, "a refused self-claim was still stored in the lease table"
-
-
-def test_every_leased_service_routes_departures_through_the_shared_lease_reaper() -> None:
-    """A crashed client must not pin ANY daemon, not just the ones wired up.
-
-    ``reap_dead_client_leases`` is the one owner that drops a lease whose process
-    is provably gone. Measured today: ``approvald`` and ``search_indexer`` accept
-    leases but never call it, so a client that crashes holds those two open
-    indefinitely. The list below is the set of modules that mint leases; each
-    must also route departures through the shared reaper.
-    """
-    leasing_modules = {
-        "yomux_lib/statusd.py",
-        "yomux_lib/watchd.py",
-        "yomux_lib/approval/approvald.py",
-        "yomux_lib/search/search_indexer.py",
-        "yomux_lib/infra/batchd.py",
-        "yomux_lib/stats_current/service.py",
-    }
-    repo_root = Path(__file__).resolve().parents[1]
-    acquires: set[str] = set()
-    reaps: set[str] = set()
-    for relative in sorted(leasing_modules):
-        source = (repo_root / relative).read_text(encoding="utf-8")
-        if "acquire_client_lease" in source:
-            acquires.add(relative)
-        if "reap_dead_client_leases" in source:
-            reaps.add(relative)
-
-    # Positive control: the scan really did find the lease-acquiring call sites,
-    # so the difference below is a real gap and not an empty-vs-empty comparison.
-    assert acquires == leasing_modules, f"lease-acquiring modules moved: {sorted(leasing_modules - acquires)}"
-    assert reaps == acquires, (
-        f"these services accept client leases but never reap dead ones, so a crashed client "
-        f"pins them forever: {sorted(acquires - reaps)}"
-    )

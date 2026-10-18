@@ -225,7 +225,7 @@ def qualify(binary: Path) -> dict:
             "YOMUX_CONFIG_DIR": str(config), "YOMUX_STATE_DIR": str(state), "YOMUX_TMUX_SOCKET": str(socket_path),
             "YOMUX_CLAUDE_TRANSCRIPT_ROOT": str(projects), "YOMUX_CODEX_TRANSCRIPT_ROOT": str(codex),
             "YOMUX_OPENCODE_DATABASE": str(root / "opencode.db"), "YOMUX_STATS_SYNTHETIC_HOST": "1",
-            "YOMUX_STATS_SYNTHETIC_INVENTORY": "1", "YOMUX_PRICING_CATALOG": str(REPO / "yomux_lib/data/model_pricing.json"),
+            "YOMUX_STATS_SYNTHETIC_INVENTORY": "1", "YOMUX_PRICING_CATALOG": str(REPO / "assets/runtime/model_pricing.json"),
         }
         tmux = shutil.which("tmux")
         if tmux is None:

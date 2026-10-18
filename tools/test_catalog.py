@@ -24,162 +24,6 @@ from tools.test_plan import test_node_sort_key
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_ROOT = REPO_ROOT / "tests"
-DEPRECATED_PYTHON_MARKER = "deprecated_python_server"
-# These are backend implementations, not the Python HTML renderer or contributor
-# tooling. Shared fixture/ownership tests must state their role when using them.
-LEGACY_BACKEND_MODULES = frozenset({
-    "app", "server", "server_auth", "server_query", "server_logs", "server_static",
-    "search", "file_index", "bfs_index", "search_indexer", "statusd", "statusd_client", "statusd_protocol",
-    "stats_current", "activity", "activity_summary", "activity_summary_runtime",
-    "observability", "workspace.session_files", "session_files", "workspace.metadata", "metadata",
-    "batchd", "infra.batchd", "approvald", "approval.approvald", "auto_approve_worker",
-    "watchd", "watchd_client", "client_events", "yoagent",
-    "filesystem", "backend_health", "infra.state_services", "state_services", "http_routes",
-    "login_rate_limit", "login_escalation", "control", "chat", "chat_service", "chat_store",
-    "watchd_protocol", "tmux.sessions", "sessions", "cache", "websocket",
-    "background_scheduler", "infra.background_scheduler", "infra.published_json_cache",
-    "infra.refresh_outcome", "tmux_theme", "tmux.tmux_theme", "ptrace", "infra.ptrace",
-})
-LEGACY_BACKEND_HELPERS = frozenset({
-    "gate_live_server", "gate_authenticated_live_server", "stateful_journey", "gate_browser_runtime",
-    "e2e_browser", "authenticated_e2e_browser", "make_tmux_webterm_app",
-    "start_isolated_browser_app", "start_browser_server", "start_fixture_runtime",
-    "start_fixture_live_server", "TmuxWebtermApp", "TmuxWebtermHTTPServer", "FixtureHttpServer",
-    "_start_current_stats", "_seed_realistic_stats", "commit_scan",
-    "_fresh_statsd_arenas", "session_workdir", "numbered_session_workdir",
-    "session_dev_workdir", "warn_unavailable_agent_commands_once",
-})
-BACKEND_TEST_ROLES = frozenset({DEPRECATED_PYTHON_MARKER, "shared_tooling", "go_backend"})
-
-
-def unclassified_legacy_tests(path: Path, *, repo_root: Path = REPO_ROOT) -> tuple[str, ...]:
-    """Find backend consumers lacking an explicit backend or shared-tooling role.
-
-    Follow local helpers and fixtures, including inherited class fixtures. This is
-    a classification guard, never an inferred exclusion: source markers own selection.
-    """
-    metadata = dict(test_metadata(path, repo_root=repo_root))
-    if all(markers & BACKEND_TEST_ROLES for markers in metadata.values()):
-        return ()
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    legacy_names = set(LEGACY_BACKEND_HELPERS)
-    for statement in ast.walk(tree):
-        imports: list[tuple[str, str]] = []
-        if isinstance(statement, ast.ImportFrom) and statement.module:
-            imports = [(f"{statement.module}.{alias.name}", alias.asname or alias.name) for alias in statement.names]
-        elif isinstance(statement, ast.Import):
-            imports = [(alias.name, alias.asname or alias.name.split(".")[0]) for alias in statement.names]
-        for module, local in imports:
-            if module.startswith("yomux_lib."):
-                owner = module.removeprefix("yomux_lib.")
-                if any(owner == prefix or owner.startswith(prefix + ".") for prefix in LEGACY_BACKEND_MODULES):
-                    legacy_names.add(local)
-    functions: dict[tuple[str, ...], ast.FunctionDef | ast.AsyncFunctionDef] = {}
-    bases: dict[tuple[str, ...], tuple[tuple[str, ...], ...]] = {}
-    classes: dict[tuple[str, ...], ast.ClassDef] = {}
-
-    def visit(body: list[ast.stmt], scope: tuple[str, ...] = ()) -> None:
-        for node in body:
-            if isinstance(node, ast.ClassDef):
-                owner = (*scope, node.name)
-                classes[owner] = node
-                bases[owner] = tuple((*scope, base.id) for base in node.bases if isinstance(base, ast.Name))
-                visit(node.body, owner)
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                functions[(*scope, node.name)] = node
-
-    visit(tree.body)
-
-    def class_scopes(scope: tuple[str, ...], visited: frozenset[tuple[str, ...]] = frozenset()) -> set[tuple[str, ...]]:
-        if scope in visited:
-            return set()
-        return {scope} | set().union(*(class_scopes(base, visited | {scope}) for base in bases.get(scope, ())), set())
-
-    def resolve(name: str, scope: tuple[str, ...]) -> tuple[str, ...] | str:
-        for owner in sorted(class_scopes(scope), key=len, reverse=True):
-            if (*owner, name) in functions:
-                return (*owner, name)
-        return (name,) if (name,) in functions else name
-
-    autouse: set[tuple[str, ...]] = set()
-    for key, node in functions.items():
-        for decorator in node.decorator_list:
-            if isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "fixture":
-                if any(keyword.arg == "autouse" and isinstance(keyword.value, ast.Constant) and keyword.value.value is True for keyword in decorator.keywords):
-                    # A marker-gated legacy autouse fixture intentionally stays idle
-                    # for normal cases; it must not turn shared tooling into legacy tests.
-                    guarded = any(isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
-                                  and value.func.attr == "get_closest_marker" and value.args
-                                  and isinstance(value.args[0], ast.Constant) and value.args[0].value == DEPRECATED_PYTHON_MARKER
-                                  for value in ast.walk(node))
-                    if not guarded:
-                        autouse.add(key)
-
-    references: dict[tuple[str, ...] | str, set[tuple[str, ...] | str]] = {}
-    module_fixtures: set[str] = set()
-    for statement in tree.body:
-        if isinstance(statement, (ast.Assign, ast.AnnAssign)) and statement.value is not None:
-            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
-            dependencies = {value.id for value in ast.walk(statement.value) if isinstance(value, ast.Name)}
-            for value in ast.walk(statement.value):
-                if isinstance(value, ast.Call) and _pytest_marker_name(value) == "usefixtures":
-                    module_fixtures.update(argument.value for argument in value.args
-                                           if isinstance(argument, ast.Constant) and isinstance(argument.value, str))
-                if isinstance(value, ast.Call) and value.args and isinstance(value.args[0], ast.Constant):
-                    module = value.args[0].value
-                    if isinstance(module, str) and module.startswith("yomux_lib."):
-                        owner = module.removeprefix("yomux_lib.")
-                        if any(owner == prefix or owner.startswith(prefix + ".") for prefix in LEGACY_BACKEND_MODULES):
-                            dependencies.add("TmuxWebtermApp")
-            for target in targets:
-                if isinstance(target, ast.Name):
-                    references[target.id] = {resolve(name, ()) for name in dependencies}
-    for key, node in functions.items():
-        scope = key[:-1]
-        names = {value.id for value in ast.walk(node) if isinstance(value, ast.Name)}
-        names.update(argument.arg for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs))
-        names.update(value.attr for value in ast.walk(node) if isinstance(value, ast.Attribute)
-                     and ((isinstance(value.value, ast.Name) and value.value.id in {"self", "cls"})
-                          or value.attr in LEGACY_BACKEND_HELPERS))
-        for value in ast.walk(node):
-            if not isinstance(value, ast.Call):
-                continue
-            if _pytest_marker_name(value) == "usefixtures":
-                names.update(argument.value for argument in value.args if isinstance(argument, ast.Constant) and isinstance(argument.value, str))
-            method = value.func.attr if isinstance(value.func, ast.Attribute) else value.func.id if isinstance(value.func, ast.Name) else ""
-            if method == "getfixturevalue" and value.args and isinstance(value.args[0], ast.Constant):
-                names.add(value.args[0].value)
-            if method == "import_module" and value.args and isinstance(value.args[0], ast.Constant):
-                module = value.args[0].value
-                if isinstance(module, str) and module.startswith("yomux_lib."):
-                    owner = module.removeprefix("yomux_lib.")
-                    if any(owner == prefix or owner.startswith(prefix + ".") for prefix in LEGACY_BACKEND_MODULES):
-                        names.add("TmuxWebtermApp")
-        references[key] = {resolve(name, scope) for name in names if isinstance(name, str)}
-        references[key].update(resolve(name, scope) for name in module_fixtures)
-        references[key].update(fixture for fixture in autouse if fixture[:-1] in (class_scopes(scope) | {()}))
-        # Class usefixtures markers apply to every method, just like autouse fixtures.
-        for owner in class_scopes(scope):
-            if owner in classes:
-                klass = classes[owner]
-                expressions = [*klass.decorator_list, *(statement.value for statement in klass.body
-                                if isinstance(statement, (ast.Assign, ast.AnnAssign)) and statement.value is not None)]
-                for expression in expressions:
-                    for decorator in ast.walk(expression):
-                        if not isinstance(decorator, ast.Call) or _pytest_marker_name(decorator) != "usefixtures":
-                            continue
-                        references[key].update(resolve(argument.value, scope) for argument in decorator.args
-                                               if isinstance(argument, ast.Constant) and isinstance(argument.value, str))
-    consumers: set[tuple[str, ...] | str] = set(legacy_names)
-    while True:
-        new_consumers = {name for name, names in references.items() if names & consumers}
-        if new_consumers <= consumers:
-            break
-        consumers.update(new_consumers)
-    return tuple(nodeid for nodeid, markers in metadata.items()
-                 if tuple(nodeid.split("::")[1:]) in consumers and not markers & BACKEND_TEST_ROLES)
-
-
 def _pytest_marker_name(node: ast.AST) -> str | None:
     value = node.func if isinstance(node, ast.Call) else node
     if not isinstance(value, ast.Attribute):
@@ -261,20 +105,11 @@ def test_metadata(path: Path, *, repo_root: Path = REPO_ROOT) -> tuple[tuple[str
     return tuple(definitions)
 
 
-def wholly_deprecated(path: Path, *, repo_root: Path = REPO_ROOT) -> bool:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    if DEPRECATED_PYTHON_MARKER in _assigned_pytest_markers(tree.body):
-        return True
-    definitions = test_metadata(path, repo_root=repo_root)
-    return bool(definitions) and all(DEPRECATED_PYTHON_MARKER in markers for _, markers in definitions)
-
-
-def test_definitions(path: Path, *, repo_root: Path = REPO_ROOT, run_deprecated_python: bool = True) -> tuple[tuple[str, str], ...]:
-    """Return node IDs and phases; inventories include deprecated cases unless filtered."""
+def test_definitions(path: Path, *, repo_root: Path = REPO_ROOT) -> tuple[tuple[str, str], ...]:
+    """Return node IDs and phases for the current test suite."""
     return tuple(
         (nodeid, phase_for_markers(set(markers)))
         for nodeid, markers in test_metadata(path, repo_root=repo_root)
-        if run_deprecated_python or DEPRECATED_PYTHON_MARKER not in markers
     )
 
 
@@ -288,7 +123,6 @@ def discover_pytest_phase_files(
     test_root: Path = TEST_ROOT,
     *,
     repo_root: Path = REPO_ROOT,
-    run_deprecated_python: bool = False,
 ) -> dict[str, tuple[str, ...]]:
     """Derive phase file ownership from every Python test under test_root."""
 
@@ -297,7 +131,7 @@ def discover_pytest_phase_files(
         relative = path.relative_to(repo_root).as_posix()
         definitions.extend(
             (nodeid, phase, relative)
-            for nodeid, phase in test_definitions(path, repo_root=repo_root, run_deprecated_python=run_deprecated_python)
+            for nodeid, phase in test_definitions(path, repo_root=repo_root)
         )
     ordered = sorted(
         enumerate(definitions),
@@ -311,7 +145,6 @@ def discover_pytest_phase_files(
 
 
 PYTEST_PHASE_FILES: Final[dict[str, tuple[str, ...]]] = discover_pytest_phase_files()
-MAINTENANCE_PHASE_FILES: Final[dict[str, tuple[str, ...]]] = discover_pytest_phase_files(run_deprecated_python=True)
 NONBROWSER_FILES: Final[tuple[str, ...]] = PYTEST_PHASE_FILES["nonbrowser"]
 BOOT_FILES: Final[tuple[str, ...]] = PYTEST_PHASE_FILES["boot"]
 BROWSER_FILES: Final[tuple[str, ...]] = PYTEST_PHASE_FILES["browser"]
@@ -357,14 +190,11 @@ NODE_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
 PYTHON_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
     "tests/helpers/fixture_http_server.py",
     "tests/helpers/login_throttle.py",
-    "tests/subsystems/app_darwin_memory.py",
-    "tests/subsystems/app_batchd_product.py",
     "tests/subsystems/browser_harness_lifecycle.py",
-    "tests/subsystems/stats_24h_http.py",
 )
 
-def pytest_files(phase: str, *, run_deprecated_python: bool = False) -> list[str]:
+def pytest_files(phase: str) -> list[str]:
     """Return the derived pytest targets for one canonical phase."""
 
-    catalog = MAINTENANCE_PHASE_FILES if run_deprecated_python else PYTEST_PHASE_FILES
+    catalog = PYTEST_PHASE_FILES
     return list(catalog[phase])

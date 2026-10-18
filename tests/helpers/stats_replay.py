@@ -6,23 +6,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from yomux_lib.stats_current import service as service_module
 from yomux_lib.stats_current import storage
 from yomux_lib.stats_current.storage import Observation
 
 
-def replay_service(
-    tmp_path: Path,
-    monotonic_now: list[float],
-    wall_now: list[float],
-) -> service_module.StatsCurrentService:
-    return service_module.StatsCurrentService(
-        tmp_path / "statsd.sock",
-        tmp_path / storage.DATABASE_FILENAME,
-        monotonic=lambda: monotonic_now[0],
-        clock=lambda: wall_now[0],
-        randomizer=lambda: 0.0,
-    )
 
 
 def replay_observation(event_id: str, observed_at: float) -> Observation:

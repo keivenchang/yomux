@@ -9,7 +9,6 @@ from tests.browser_helpers.browser_layout import fast_pointer_actions
 from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import run_when_browser_ready
-from yomux_lib import app as app_module
 
 
 SYSTEM_STATUS_SERVICE_IDS = ("indexd", "statsd", "batchd", "statusd", "watchd", "approvald")
@@ -123,79 +122,6 @@ DEFAULT_ROSTER_STATES = ["running", "running", "running", "unavailable", "idle",
 ISSUE_ROSTER_STATES = ["running", "running", "issue", "unavailable", "idle", "running"]
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.no_browser
-def test_h2_system_status_metrics_are_not_null(monkeypatch, gate_runtime_paths):
-    """The System API reports five real services and qualifies every unavailable metric."""
-    now = 1_785_600_000.0
-    webapp = app_module.TmuxWebtermApp([])
-    gate_runtime_paths.fixture_apps.append(webapp)
-    try:
-        webapp.stats_current_client.database_path = gate_runtime_paths.state_dir / "services" / "stats-v7.sqlite3"
-        monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {
-            "service": "indexd", "pid": 4101, "started_at": now - 101, "healthy": True,
-            "resources": {"cpu_percent": None, "rss_bytes": 64 * 1024 * 1024},
-        })
-        monkeypatch.setattr(webapp.stats_current_runtime, "status", lambda: {
-            "service": {"ok": True, "pid": 4102, "started_at": now - 102, "migration": {
-                "state": "ready",
-                "result": "recovered",
-                "issue_records": ({
-                    "kind": "unreadable_current_database",
-                    "source": "stats-v7.sqlite3.corrupt-1785600000",
-                    "detail": "database disk image is malformed",
-                },),
-            }},
-            "families": {},
-        })
-        monkeypatch.setattr(webapp.stats_current_client, "runtime_status", lambda status: {
-            **status,
-            "resources": {"cpu_percent": 2.0, "rss_bytes": 48 * 1024 * 1024},
-        }, raising=False)
-        monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {
-            "service": "batchd", "pid": 4103, "started_at": now - 103, "healthy": True,
-            "resources": {"cpu_percent": 3.0, "rss_bytes": 96 * 1024 * 1024},
-        })
-        monkeypatch.setattr(webapp.status_client, "runtime_status", lambda: {
-            "service": "statusd", "pid": 4104, "started_at": now - 104, "healthy": True,
-            "resources": {"cpu_percent": 4.0, "rss_bytes": 32 * 1024 * 1024},
-        })
-        monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {
-            "service": "approvald", "pid": 0, "started_at": 0.0, "healthy": True,
-            "resources": {"cpu_percent": None, "rss_bytes": None},
-        })
-        payload = webapp.system_status_payload()
-    finally:
-        webapp.control_server.stop()
-
-    local_services = payload["local_services"]
-    assert local_services["schema_version"] == 5, local_services
-    assert tuple(local_services["inventory"]) == SYSTEM_STATUS_SERVICE_IDS, local_services
-    services = local_services["services"]
-    assert tuple(service["id"] for service in services) == SYSTEM_STATUS_SERVICE_IDS, services
-    for service in services:
-        for key in SYSTEM_STATUS_METRIC_KEYS:
-            metric = service["metrics"][key]
-            assert metric["state"] in {"measured", "warming", "not_running", "unavailable"}, (service, key)
-            if metric["state"] == "measured":
-                assert isinstance(metric["value"], (int, float)), (service, key)
-            else:
-                assert metric["value"] is None and metric["reason_code"] and metric["reason"], (service, key)
-    assert services[0]["metrics"]["cpu_now_percent"]["state"] == "warming", services[0]
-    assert services[1]["metrics"]["cpu_now_percent"] == {
-        "state": "measured", "value": 2.0, "reason_code": "", "reason": "",
-    }, services[1]
-    assert services[1]["metrics"]["rss_bytes"]["value"] == 48 * 1024 * 1024, services[1]
-    assert all(metric["state"] == "not_running" for metric in services[-1]["metrics"].values()), services[-1]
-    assert local_services["recovery_events"] == [{
-        "subsystem": "statsd",
-        "event": "unreadable_current_database",
-        "quarantined_artifact": "stats-v7.sqlite3.corrupt-1785600000",
-        "quarantined_path": str(gate_runtime_paths.state_dir / "services" / "stats-v7.sqlite3.corrupt-1785600000"),
-        "destination_path": str(gate_runtime_paths.state_dir / "services" / "stats-v7.sqlite3"),
-        "reason": "database disk image is malformed",
-    }]
 
 
 @pytest.mark.browser

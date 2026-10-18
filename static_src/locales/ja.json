@@ -1493,6 +1493,8 @@
   "shortcuts.section.menus": "メニュー、パレット、ピッカー",
   "shortcuts.section.tabsPanes": "タブ / ペイン",
   "shortcuts.section.terminal": "ターミナル",
+  "shortcuts.exitTmuxCopyMode": "tmuxのコピーモードを終了",
+  "shortcuts.terminalScrollHelp": "スクロールまたはFn+上/下でアプリケーションをスクロールします。Shiftを押しながらスクロールするとtmuxの履歴を表示します。",
   "shortcuts.switchTmuxWindow": "前/次のタブ",
   "shortcuts.toggleComment": "行コメントを切り替え",
   "shortcuts.toggleFinder": "{name} を切り替え",

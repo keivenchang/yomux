@@ -408,10 +408,14 @@ def test_neither_arm_may_leave_the_variable_unset():
         {"control_synchronous": "0", "treatment_batched": "0"}))
 
 
-def test_statsd_source_identity_names_every_file_statsd_respawns_from():
+def test_statsd_source_identity_names_every_historical_file(tmp_path):
     """statsd respawns from disk and no served response distinguishes patched from unpatched."""
 
-    records = harness.statsd_source_identity()
+    for relative in harness.STATSD_SOURCE_FILES:
+        source = tmp_path / relative
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"historical fixture source\n")
+    records = harness.statsd_source_identity(tmp_path)
     assert [record["source"] for record in records] == [
         "yomux_lib/stats_current/storage.py",
         "yomux_lib/stats_current/service.py",

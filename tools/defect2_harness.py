@@ -699,6 +699,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if violations else 0
 
     if args.preflight:
+        if not args.from_ref and not args.arm_env and not (REPO_ROOT / ARM_ENV_OWNER).exists():
+            parser.error("The Python stats service is retired; use --from-ref to inspect historical experiment admission.")
         # The composed tree an attempt will run from is not necessarily this worktree, and
         # materializing one is 68 MB. Reading two files out of a ref is kilobytes.
         allowlist_source = read_from_ref(args.from_ref, Path("docker/run-tests.sh")) if args.from_ref else None

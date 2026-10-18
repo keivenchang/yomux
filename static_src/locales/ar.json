@@ -1601,6 +1601,8 @@
   "shortcuts.section.menus": "القوائم واللوحات والملتقطين",
   "shortcuts.section.tabsPanes": "التبويبات / الأجزاء",
   "shortcuts.section.terminal": "المحطة",
+  "shortcuts.exitTmuxCopyMode": "الخروج من وضع النسخ في tmux",
+  "shortcuts.terminalScrollHelp": "مرّر أو استخدم Fn+Up/Down لتمرير التطبيق. اضغط Shift أثناء التمرير لتصفح سجل tmux.",
   "shortcuts.switchTmuxWindow": "علامة التبويب السابقة / التالية",
   "shortcuts.toggleComment": "تبديل تعليق السطر",
   "shortcuts.toggleFinder": "تبديل {name}",

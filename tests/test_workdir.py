@@ -49,27 +49,8 @@ def test_terminal_commands_are_discovered_and_selected_only_by_name(monkeypatch,
     assert terminal_command("../../bin/sh") is None
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_numeric_session_workdir_uses_matching_yolomux_dev_checkout(monkeypatch, tmp_path):
-    dev_checkout = tmp_path / "yolomux.dev8002"
-    dev_checkout.mkdir()
-    monkeypatch.setattr(workdir.Path, "home", lambda: tmp_path)
-
-    assert workdir.session_workdir("8002") == dev_checkout
-    assert workdir.numbered_session_workdir("8002") == dev_checkout
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_numeric_session_workdir_prefers_canonical_checkout_when_both_names_exist(monkeypatch, tmp_path):
-    canonical_checkout = tmp_path / "yomux.dev8002"
-    legacy_checkout = tmp_path / "yolomux.dev8002"
-    canonical_checkout.mkdir()
-    legacy_checkout.mkdir()
-    monkeypatch.setattr(workdir.Path, "home", lambda: tmp_path)
-
-    assert workdir.session_dev_workdir("8002") == canonical_checkout
 
 
 def test_yomux_working_directory_identity_matches_only_product_checkout_names(monkeypatch, tmp_path):
@@ -268,38 +249,8 @@ def test_agent_auth_status_marks_missing_cli_as_not_on_path(monkeypatch, tmp_pat
     assert status["codex"] == {"installed": False, "logged_in": False, "unavailable_reason": "not-on-path"}
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_missing_agent_path_warning_is_one_shot(monkeypatch, tmp_path, caplog):
-    monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.setattr(common.Path, "home", lambda: tmp_path)
-    common._AGENT_PATH_WARNING_KEYS.clear()
-
-    with caplog.at_level(logging.WARNING):
-        common.warn_unavailable_agent_commands_once(("claude",))
-        common.warn_unavailable_agent_commands_once(("claude",))
-
-    messages = [record.getMessage() for record in caplog.records]
-    assert len(messages) == 1
-    assert "claude not found on server PATH=" in messages[0]
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_missing_agent_path_warning_skips_resolvable_agent(monkeypatch, tmp_path, caplog):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    claude = bin_dir / "claude"
-    claude.write_text(fixture_script("#!/bin/sh\nexit 0\n"), encoding="utf-8")
-    claude.chmod(0o700)
-    monkeypatch.setenv("PATH", str(bin_dir))
-    monkeypatch.setattr(common.Path, "home", lambda: tmp_path)
-    common._AGENT_PATH_WARNING_KEYS.clear()
-
-    with caplog.at_level(logging.WARNING):
-        common.warn_unavailable_agent_commands_once(("claude",))
-
-    assert [record.getMessage() for record in caplog.records] == []
 
 
 def test_agent_auth_status_nonzero_exit_and_timeout_are_unknown(monkeypatch):

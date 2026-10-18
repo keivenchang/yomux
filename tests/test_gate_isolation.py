@@ -21,9 +21,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from yomux_lib.http_routes import ALL_ROUTES
-from yomux_lib.http_routes import RESPONSE_SSE
-from yomux_lib.http_routes import RESPONSE_WEBSOCKET
+from tests.helpers.route_contract import ALL_ROUTES
+from tests.helpers.route_contract import RESPONSE_SSE
+from tests.helpers.route_contract import RESPONSE_WEBSOCKET
 from yomux_lib.server_logs import ServerLogRing
 from tests import gate_harness as gate_harness_module
 from tests.browser_helpers import browser_console
@@ -49,7 +49,6 @@ from tests.gate_harness import LOCAL_SERVICE_DAEMON_SURVIVED_CODE
 from tests.gate_harness import resolved_gate_writable_paths
 from tests.gate_harness import stop_fixture_app_runtime
 from tests.gate_harness import wait_for_fixture_api_quiescence
-from yomux_lib.statusd_client import StatusClient
 
 
 def clean_browser_receipt_barrier(*, accepted=0):
@@ -162,41 +161,6 @@ def test_fixture_http_app_owns_service_idle_setting(monkeypatch, canonical):
     assert values["YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS"] == gate_harness_module.GATE_LOCAL_SERVICE_IDLE_SECONDS
 
 
-@pytest.mark.socket
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_rendered_fixture_get_suppresses_process_lifetime_agent_auth_refresh(monkeypatch, gate_runtime_paths):
-    refresh_calls = []
-    gate_harness_module.workdir_module._clear_agent_auth_status_cache_for_tests()
-    monkeypatch.setattr(
-        gate_harness_module.server_module,
-        "start_agent_auth_status_refresh",
-        lambda *, force=False: refresh_calls.append(force),
-    )
-    monkeypatch.setattr(
-        gate_harness_module.workdir_module,
-        "start_agent_auth_status_refresh",
-        lambda *, force=False: refresh_calls.append(force),
-    )
-    monkeypatch.setenv(gate_harness_module.TEST_AUTH_BYPASS_ENV, "1")
-    app = gate_harness_module.app_module.TmuxWebtermApp([], dangerously_yolo=False)
-
-    gate_harness_module.prepare_fixture_http_app(monkeypatch, app)
-    server = gate_harness_module.TmuxWebtermHTTPServer(("127.0.0.1", 0), app)
-    gate_harness_module.track_fixture_http_requests(server)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
-    try:
-        connection.request("GET", "/")
-        response = connection.getresponse()
-        response.read()
-        assert response.status == 200
-        assert refresh_calls == []
-    finally:
-        connection.close()
-        gate_harness_module.stop_fixture_http_app(app, server, thread, label="rendered auth suppression")
-        gate_harness_module.workdir_module._clear_agent_auth_status_cache_for_tests()
 
 
 def test_browser_runtime_paths_override_inherited_canonical_roots(monkeypatch, tmp_path):
@@ -2443,127 +2407,14 @@ def test_stop_browser_server_rejects_singular_and_plural_browser_inputs_after_cl
     assert cleaned[0][3] == "isolated browser"
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.parametrize("failure_stage", ("paths", "tmux", "app"))
-def test_fixture_runtime_start_rolls_back_each_acquired_owner(monkeypatch, tmp_path, failure_stage):
-    calls = []
-    paths = object()
-    tmux = SimpleNamespace(sessions=["fixture"])
-
-    def isolate(*_args):
-        calls.append("paths-start")
-        if failure_stage == "paths":
-            raise RuntimeError("injected paths failure")
-        return paths
-
-    def start_tmux(*_args, **_kwargs):
-        calls.append("tmux-start")
-        if failure_stage == "tmux":
-            raise RuntimeError("injected tmux failure")
-        return tmux
-
-    def app(*_args, **_kwargs):
-        calls.append("app-start")
-        if failure_stage == "app":
-            raise RuntimeError("injected app failure")
-        return object()
-
-    monkeypatch.setattr(browser_layout, "isolate_browser_runtime_paths", isolate)
-    monkeypatch.setattr(browser_layout, "start_isolated_tmux_runtime", start_tmux)
-    monkeypatch.setattr(browser_layout, "TmuxWebtermApp", app)
-    monkeypatch.setattr(
-        browser_layout,
-        "stop_isolated_tmux_runtime",
-        lambda runtime: calls.append(("tmux-stop", runtime)),
-    )
-    monkeypatch.setattr(
-        browser_layout,
-        "cleanup_isolated_browser_runtime_paths",
-        lambda runtime_paths: calls.append(("paths-stop", runtime_paths)),
-    )
-
-    with pytest.raises(RuntimeError, match=f"injected {failure_stage} failure"):
-        browser_layout.start_fixture_runtime(
-            monkeypatch,
-            tmp_path,
-            browser_layout.FixtureRuntimeOptions(),
-        )
-
-    expected = ["paths-start"]
-    if failure_stage != "paths":
-        expected.append("tmux-start")
-    if failure_stage == "app":
-        expected.append("app-start")
-    expected.extend((
-        ("tmux-stop", tmux if failure_stage == "app" else None),
-        ("paths-stop", paths if failure_stage != "paths" else None),
-    ))
-    assert calls == expected
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.parametrize("failure_stage", ("bind", "request-tracker", "thread-start"))
-def test_browser_server_start_rolls_back_each_acquired_owner(monkeypatch, tmp_path, failure_stage):
-    calls = []
-
-    class App:
-        def stop_client_event_watcher(self):
-            calls.append("client-watcher")
-
-        def stop_batchd_operation_service(self):
-            calls.append("batchd-operations")
-
-        def stop_background_scheduler(self):
-            calls.append("background-scheduler")
-
-        def stop_auto_approve_all(self):
-            calls.append("auto-approve")
-
-    class Server:
-        def __init__(self, *_args, **_kwargs):
-            if failure_stage == "bind":
-                raise OSError("injected bind failure")
-            self._fixture_http_request_activity = object()
-
-        def server_close(self):
-            calls.append("server-close")
-
-        def serve_forever(self):
-            raise AssertionError("injected thread must fail before serving")
-
-    class Thread:
-        def __init__(self, **_kwargs):
-            pass
-
-        def is_alive(self):
-            return False
-
-        def start(self):
-            if failure_stage == "thread-start":
-                raise RuntimeError("injected thread start failure")
-
-    def track(_server):
-        if failure_stage == "request-tracker":
-            raise RuntimeError("injected request tracker failure")
-
-    monkeypatch.setattr(gate_harness_module, "TmuxWebtermHTTPServer", Server)
-    monkeypatch.setattr(gate_harness_module, "track_fixture_http_requests", track)
-    monkeypatch.setattr(gate_harness_module.threading, "Thread", Thread)
-    monkeypatch.setattr(gate_harness_module, "prepare_fixture_http_app", lambda *_args: None)
-
-    with pytest.raises((OSError, RuntimeError), match=failure_stage.replace("-", " ")):
-        browser_layout.start_browser_server(monkeypatch, tmp_path, App())
-
-    assert calls[:4] == ["client-watcher", "batchd-operations", "background-scheduler", "auto-approve"]
-    assert ("server-close" in calls) is (failure_stage != "bind")
 
 
 def test_stateful_journey_stop_preserves_gate_failure_when_port_reacquire_fails(monkeypatch):
     gate_failure = AssertionError("fixture gate failure")
     reacquire_failure = OSError("port became unavailable")
-    journey = object.__new__(gate_harness_module.GateStatefulJourney)
+    journey = object.__new__(gate_harness_module.FixtureStatefulJourney)
     journey.app = object()
     journey.server = object()
     journey.thread = object()
@@ -2611,7 +2462,7 @@ def test_stateful_journey_start_rolls_back_background_scheduler_failure_and_reac
         def server_close(self):
             calls.append("server-close")
 
-    journey = object.__new__(gate_harness_module.GateStatefulJourney)
+    journey = object.__new__(gate_harness_module.FixtureStatefulJourney)
     journey.request = SimpleNamespace()
     journey.monkeypatch = monkeypatch
     journey.tmux = SimpleNamespace(sessions=("fixture",))
@@ -2626,8 +2477,8 @@ def test_stateful_journey_start_rolls_back_background_scheduler_failure_and_reac
     journey.server_log_boundary = None
     journey.starts = 0
 
-    monkeypatch.setattr(gate_harness_module.app_module, "TmuxWebtermApp", lambda _sessions: App())
-    monkeypatch.setattr(gate_harness_module, "TmuxWebtermHTTPServer", Server)
+    journey.create_fixture_app = lambda _sessions: App()
+    monkeypatch.setattr(gate_harness_module, "FixtureHTTPServer", Server)
     monkeypatch.setattr(gate_harness_module, "track_fixture_http_requests", lambda _server: None)
     monkeypatch.setattr(gate_harness_module, "prepare_fixture_http_app", lambda *_args: None)
 
@@ -2687,7 +2538,7 @@ def test_gate_server_start_rolls_back_thread_creation_failure_and_reacquires_por
         reacquire=lambda: calls.append("reacquire"),
     )
     created_apps = []
-    monkeypatch.setattr(gate_harness_module, "TmuxWebtermHTTPServer", Server)
+    monkeypatch.setattr(gate_harness_module, "FixtureHTTPServer", Server)
     monkeypatch.setattr(gate_harness_module, "track_fixture_http_requests", lambda _server: None)
     monkeypatch.setattr(gate_harness_module, "prepare_fixture_http_app", lambda *_args: None)
     monkeypatch.setattr(gate_harness_module.threading, "Thread", FailingThread)
@@ -2697,7 +2548,7 @@ def test_gate_server_start_rolls_back_thread_creation_failure_and_reacquires_por
         created_apps.append(app)
         return app
 
-    generator = gate_harness_module._serve_gate_live_server(
+    generator = gate_harness_module.serve_fixture_lifecycle(
         SimpleNamespace(node=SimpleNamespace(funcargs={})),
         monkeypatch,
         make_app,
@@ -4253,223 +4104,9 @@ def test_registry_reaper_settlement_failure_precedes_runtime_root_removal(tmp_pa
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_gate_root_retirement_stops_spawn_owner_before_adopter_reaper_and_root_removal(monkeypatch):
-    root = short_temp_base() / f"ysd-{os.getpid()}-{time.time_ns():x}"
-    unrelated_root = root.with_name(f"{root.name}-unrelated")
-    root.mkdir(mode=0o700)
-    unrelated_root.mkdir(mode=0o700)
-    monkeypatch.setenv("YOLOMUX_ROOT", str(root))
-    for name in ("CONFIG", "STATE", "CACHE", "RUNTIME"):
-        monkeypatch.setenv(f"YOLOMUX_{name}_DIR", str(root / name.lower()))
-    monkeypatch.delenv("YOLOMUX_HOST_ARTIFACT_DIR", raising=False)
-    monkeypatch.delenv("YOLOMUX_CODEX_HOME", raising=False)
-    monkeypatch.delenv("YOMUX_CODEX_HOME", raising=False)
-    monkeypatch.delenv("PYTHONPYCACHEPREFIX", raising=False)
-    monkeypatch.setattr(local_service_registry, "MANAGED_PRIVATE_ROOT", True)
-    service_dir = root / "runtime" / "services"
-    socket_path = service_dir / "statusd.sock"
-    owner_client = StatusClient(socket_path)
-    adopter_client = StatusClient(socket_path)
-    unrelated_tmp = unrelated_root / "tmp"
-    unrelated_tmp.mkdir()
-    unrelated_runtime_marker = unrelated_root / "runtime" / "owner.json"
-    unrelated_runtime_marker.parent.mkdir(parents=True)
-    unrelated_runtime_marker.write_bytes(b"{}\n")
-    unrelated_environment = dict(os.environ)
-    unrelated_environment["TMPDIR"] = str(unrelated_tmp)
-    unrelated_process = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
-        env=unrelated_environment,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    ledger = gate_harness_module.FixtureLocalServiceLedger()
-    ledger.record_registry(owner_client.registry)
-    ledger.record_registry(adopter_client.registry)
-
-    try:
-        gate_harness_module.assert_fixture_local_service_started(owner_client.registry)
-        owner_process = owner_client.registry.process
-        assert owner_process is not None
-        owner_pid = owner_process.pid
-        owner_generation = owner_client.registry.spawn_ownership
-        assert owner_generation is not None
-        assert owner_client.registry.claim is not None
-        owner_claim_path = owner_client.registry.claim_ledger().claim_path(owner_client.registry.claim.claim_id)
-        assert adopter_client.registry.ensure_started()
-        adopter = adopter_client.registry
-        assert adopter.process is None
-        assert adopter._adopted_reaper_pid == owner_pid
-        assert owner_client.registry._read_record()["root_sharing"] == "managed-private"
-        metadata_stop = threading.Event()
-
-        def metadata_warmer():
-            metadata_stop.wait()
-            owner_process.wait()
-
-        metadata_thread = threading.Thread(target=metadata_warmer, name="fixture-test-metadata-warmer")
-        metadata_thread.start()
-
-        app = SimpleNamespace(
-            status_client=adopter_client,
-            metadata_warm_lock=threading.Lock(),
-            metadata_warm_record=SimpleNamespace(worker=metadata_thread, stop_event=metadata_stop),
-            _fixture_local_service_ledger=ledger,
-            stop_client_event_watcher=lambda: None,
-            stop_batchd_operation_service=lambda: None,
-            stop_background_scheduler=lambda: None,
-            stop_auto_approve_all=lambda: None,
-        )
-        stop_fixture_app_runtime(app, label="same-root adopted statusd app")
-        assert app._fixture_runtime_stopped is True
-        assert any(thread.is_alive() for thread in adopter._child_ownership.reaper_threads), {
-            "adopted_reaper_pid": adopter._adopted_reaper_pid,
-            "reapers": [(thread.name, thread.is_alive()) for thread in adopter._child_ownership.reaper_threads],
-            "owner_pid": owner_pid,
-        }
-        assert owner_process.poll() is None
-        assert metadata_thread.is_alive(), "metadata observer must remain joined to batchd retirement"
-
-        actual_rmtree = gate_harness_module.shutil.rmtree
-
-        def verify_retired_before_root_removal(path, *args, **kwargs):
-            if Path(path) == root:
-                assert owner_process.poll() is not None
-                assert not gate_harness_module.fixture_owned_process_group_exists(
-                    owner_generation,
-                    label="same-root statusd owner regression",
-                    require_proof=False,
-                )
-                assert not socket_path.exists()
-                assert not owner_client.registry.record_path.exists()
-                assert all(not thread.is_alive() for thread in adopter._child_ownership.reaper_threads)
-                assert all(not thread.is_alive() for thread in owner_client.registry._child_ownership.reaper_threads)
-                assert not metadata_thread.is_alive()
-                assert unrelated_process.poll() is None
-                assert unrelated_runtime_marker.read_bytes() == b"{}\n"
-            return actual_rmtree(path, *args, **kwargs)
-
-        with monkeypatch.context() as cleanup_patch:
-            cleanup_patch.setattr(gate_harness_module.shutil, "rmtree", verify_retired_before_root_removal)
-            remove_fixture_runtime_root(
-                ledger,
-                root,
-                label="same-root statusd owner regression",
-                after_retirement=lambda: gate_harness_module.join_deferred_fixture_metadata_warmers(
-                    (app,), label="same-root statusd owner regression",
-                ),
-            )
-        assert not root.exists()
-        assert not owner_claim_path.exists()
-    finally:
-        if unrelated_process.poll() is None:
-            unrelated_process.terminate()
-            unrelated_process.wait(timeout=2)
-        if owner_client.registry.process is not None and owner_client.registry.process.poll() is None:
-            gate_harness_module.stop_fixture_local_service_processes(
-                gate_harness_module.capture_fixture_local_service_processes(
-                    (owner_client.registry, adopter_client.registry),
-                ),
-                label="same-root statusd owner regression cleanup",
-            )
-        if "metadata_thread" in locals():
-            metadata_stop.set()
-            gate_harness_module.join_fixture_metadata_warmer(
-                metadata_thread,
-                label="same-root statusd owner regression cleanup",
-            )
-        gate_harness_module.settle_fixture_local_service_reapers(
-            (owner_client.registry, adopter_client.registry),
-            label="same-root statusd owner regression cleanup",
-        )
-        if "owner_process" not in locals() or owner_process.poll() is not None:
-            shutil.rmtree(root, ignore_errors=True)
-        shutil.rmtree(unrelated_root, ignore_errors=True)
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_fixture_app_cleanup_retires_adopted_statusd_from_its_private_service_root(monkeypatch):
-    root = short_temp_base() / f"ysd-app-{os.getpid()}-{time.time_ns():x}-{'x' * 80}"
-    unrelated_root = root.with_name(f"{root.name}-unrelated")
-    root.mkdir(mode=0o700)
-    unrelated_root.mkdir(mode=0o700)
-    gate_harness_module.patch_isolated_product_environment(monkeypatch, {gate_harness_module.product_env_name("TEST_ROOT"): str(root)})
-    monkeypatch.delenv("YOLOMUX_ROOT", raising=False)
-    for name in ("CONFIG", "STATE", "CACHE", "RUNTIME"):
-        monkeypatch.setenv(f"YOLOMUX_{name}_DIR", str(root / name.lower()))
-    monkeypatch.delenv("YOLOMUX_HOST_ARTIFACT_DIR", raising=False)
-    monkeypatch.delenv("YOLOMUX_CODEX_HOME", raising=False)
-    monkeypatch.delenv("YOMUX_CODEX_HOME", raising=False)
-    monkeypatch.delenv("PYTHONPYCACHEPREFIX", raising=False)
-    gate_harness_module.patch_isolated_product_environment(monkeypatch, {gate_harness_module.product_env_name("LOCAL_SERVICE_IDLE_SECONDS"): "600"})
-    monkeypatch.setattr(local_service_registry, "MANAGED_PRIVATE_ROOT", True)
-
-    socket_path = root / "runtime" / "services" / "statusd.sock"
-    owner_client = StatusClient(socket_path)
-    adopter_client = StatusClient(socket_path)
-    unrelated_tmp = unrelated_root / "tmp"
-    unrelated_tmp.mkdir()
-    unrelated_process = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
-        env={**os.environ, "TMPDIR": str(unrelated_tmp)},
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-
-    owner_process = None
-    try:
-        gate_harness_module.assert_fixture_local_service_started(owner_client.registry)
-        owner_process = owner_client.registry.process
-        assert owner_process is not None
-        assert adopter_client.registry.ensure_started()
-        adopter = adopter_client.registry
-        assert adopter.process is None
-        assert adopter._adopted_reaper_pid == owner_process.pid
-        assert adopter.socket_path != socket_path
-        assert not adopter.socket_path.is_relative_to(root)
-
-        app = SimpleNamespace(
-            status_client=adopter_client,
-            stop_client_event_watcher=lambda: None,
-            stop_batchd_operation_service=lambda: None,
-            stop_background_scheduler=lambda: None,
-            stop_auto_approve_all=lambda: None,
-        )
-        assert gate_harness_module.capture_fixture_local_service_processes((adopter,)) == ()
-        stop_fixture_app_runtime(app, label="adopted statusd app cleanup")
-
-        assert app._fixture_runtime_stopped is True
-        assert owner_process.poll() is not None
-        assert not any(thread.is_alive() for thread in adopter._child_ownership.reaper_threads)
-        assert not gate_harness_module.local_service_daemons_beneath(adopter.socket_path)
-        assert unrelated_process.poll() is None
-    finally:
-        if owner_process is not None and owner_process.poll() is None:
-            gate_harness_module.stop_fixture_local_service_processes(
-                gate_harness_module.capture_fixture_local_service_processes(
-                    (owner_client.registry, adopter_client.registry),
-                ),
-                label="adopted statusd app cleanup recovery",
-            )
-        gate_harness_module.retire_local_service_daemons_beneath(
-            adopter_client.registry.socket_path,
-            label="adopted statusd app cleanup recovery",
-        )
-        gate_harness_module.settle_fixture_local_service_reapers(
-            (owner_client.registry, adopter_client.registry),
-            label="adopted statusd app cleanup recovery",
-        )
-        if unrelated_process.poll() is None:
-            unrelated_process.terminate()
-            unrelated_process.wait(timeout=2)
-        shutil.rmtree(root, ignore_errors=True)
-        shutil.rmtree(unrelated_root, ignore_errors=True)
 
 
 def test_adopted_app_cleanup_attempts_every_private_socket_root(monkeypatch, tmp_path):
@@ -4614,102 +4251,12 @@ def test_browser_boot_scenario_is_deeply_immutable_at_its_mapping_boundaries():
         scenario.settings["other"] = True
 
 
-def _leak_one_local_service_daemon(root, service):
-    """Start one real daemon under ``root`` and leave it running, as a leak would."""
-
-    socket_path = root / "yolomux-runtime" / "services" / f"{service.rsplit('.', 1)[-1]}.sock"
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
-    return subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            service,
-            "--serve",
-            "--socket",
-            str(socket_path),
-            "--idle-seconds",
-            "60",
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
 
 
-def _reap_leaked_daemon(process):
-    """Remove the probe daemon on every path, including the failing one."""
-
-    if process.poll() is None:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            process.kill()
-    process.wait(timeout=10)
 
 
-@pytest.mark.socket
-def test_surviving_local_service_daemon_fails_its_own_fixture_and_names_the_owner(tmp_path):
-    """A fixture that leaks a daemon must fail itself, not the next test that needs its limit."""
-
-    root = tmp_path / "yag-leak"
-    root.mkdir()
-    process = _leak_one_local_service_daemon(root, "yomux_lib.watchd")
-    try:
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline and not local_service_daemons_beneath(root):
-            time.sleep(0.05)
-        survivors = local_service_daemons_beneath(root)
-        assert [daemon.service for daemon in survivors] == ["yomux_lib.watchd"], survivors
-        assert survivors[0].pid == process.pid, survivors
-
-        with pytest.raises(AssertionError) as failure:
-            assert_no_surviving_local_service_daemons(root, label="negative-control")
-
-        reason = json.loads(str(failure.value))
-        assert reason["error_code"] == LOCAL_SERVICE_DAEMON_SURVIVED_CODE, reason
-        assert reason["root"] == str(root), reason
-        assert [entry["service"] for entry in reason["surviving"]] == ["yomux_lib.watchd"], reason
-        assert reason["surviving"][0]["pid"] == process.pid, reason
-        assert reason["surviving"][0]["socket_path"].startswith(str(root)), reason
-        # The ledger names the limit that refuses the watcher, not only the fd table.
-        ledger = reason["ledger"]
-        assert ledger["inotify_max_user_instances"] >= 1, ledger
-        assert ledger["inotify_instances_user"] >= 0, ledger
-        assert ledger["rlimit_nofile_soft"] >= 1, ledger
-
-        # The assertion itself must not kill: reclaiming is a separate, named
-        # teardown phase, so the guard stays a pure observation of the state.
-        assert local_service_daemons_beneath(root), "assertion must not retire the daemon"
-
-        # The reclaim phase returns the instance so one leak cannot cascade.
-        retired = retire_local_service_daemons_beneath(root, label="negative-control")
-        assert [daemon.pid for daemon in retired] == [process.pid], retired
-        process.wait(timeout=10)
-        assert local_service_daemons_beneath(root) == ()
-        assert assert_no_surviving_local_service_daemons(root, label="negative-control") is None
-    finally:
-        _reap_leaked_daemon(process)
 
 
-@pytest.mark.socket
-def test_retired_local_service_root_passes_the_surviving_daemon_invariant(tmp_path):
-    """The same guard stays green for a root whose daemons really did retire."""
-
-    root = tmp_path / "yag-clean"
-    (root / "yolomux-runtime" / "services").mkdir(parents=True)
-    process = _leak_one_local_service_daemon(root, "yomux_lib.watchd")
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and not local_service_daemons_beneath(root):
-        time.sleep(0.05)
-    assert local_service_daemons_beneath(root), "probe daemon never became visible"
-    _reap_leaked_daemon(process)
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and local_service_daemons_beneath(root):
-        time.sleep(0.05)
-
-    assert local_service_daemons_beneath(root) == ()
-    assert assert_no_surviving_local_service_daemons(root, label="negative-control") is None
 
 
 def test_resource_ledger_measures_the_uid_wide_inotify_limit_not_only_the_fd_table(tmp_path):

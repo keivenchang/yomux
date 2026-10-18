@@ -35,15 +35,12 @@ from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
-from yomux_lib import app as app_module
 from yomux_lib import common
 from yomux_lib import auth as auth_module
-from yomux_lib import server as server_module
-from yomux_lib import server_auth
 from yomux_lib.auth import TEST_AUTH_BYPASS_ENV
-from yomux_lib.http_routes import RESPONSE_SSE
-from yomux_lib.http_routes import RESPONSE_WEBSOCKET
-from yomux_lib.http_routes import route_for_request
+from tests.helpers.route_contract import RESPONSE_SSE
+from tests.helpers.route_contract import RESPONSE_WEBSOCKET
+from tests.helpers.route_contract import route_for_request
 from yomux_lib.infra.inotify_capacity import INOTIFY_FD_TARGET
 from yomux_lib.infra.inotify_capacity import INOTIFY_MAX_USER_INSTANCES_PATH
 from yomux_lib.infra.inotify_capacity import INOTIFY_MAX_USER_WATCHES_PATH
@@ -58,7 +55,7 @@ from yomux_lib.local_services.registry import SpawnProcessOwnership
 from yomux_lib.local_services.registry import SpawnOwnershipProof
 from yomux_lib.local_services.registry import process_spawn_generation
 from yomux_lib.host_identity import process_start_identity
-from yomux_lib.server import TmuxWebtermHTTPServer
+from http.server import ThreadingHTTPServer as FixtureHTTPServer
 from yomux_lib.server_logs import SERVER_LOGS
 from yomux_lib.workspace import uploads as uploads_module
 from yomux_lib.workspace import workdir as workdir_module
@@ -178,7 +175,7 @@ class HttpPortLease:
         """The one reservation primitive: an exclusive listening hold on the port.
 
         The reservation must exclude the same thing the real subject excludes. The gate's
-        subject server (`TmuxWebtermHTTPServer.allow_reuse_address == 1`) binds AND listens
+        subject server (`FixtureHTTPServer.allow_reuse_address == 1`) binds AND listens
         with SO_REUSEADDR, so a bind-only reservation does not hold the port against a
         like-for-like reuse-enabled server -- two SO_REUSEADDR sockets can both bind the same
         NON-listening address. Binding and then listening makes the hold exclusive against a
@@ -570,31 +567,12 @@ def aged_state_root(gate_runtime_paths: GateRuntimePaths) -> Iterable[AgedStateR
         root.close()
 
 
-@pytest.fixture
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-def stateful_journey(
-    request: pytest.FixtureRequest,
-    monkeypatch: pytest.MonkeyPatch,
-    aged_state_root: AgedStateRoot,
-    gate_runtime_paths: GateRuntimePaths,
-    gate_http_port: HttpPortLease,
-    gate_tmux,
-) -> Iterable[GateStatefulJourney]:
-    """Provide a restartable private server without resetting the selected aged recipes."""
-
-    del aged_state_root
-    monkeypatch.setenv(TEST_AUTH_BYPASS_ENV, "1")
-    journey = GateStatefulJourney(request, monkeypatch, gate_runtime_paths, gate_tmux, gate_http_port)
-    try:
-        yield journey
-    finally:
-        journey.stop()
 
 
 @dataclass
 class GateLiveServer:
     app: Any
-    server: TmuxWebtermHTTPServer
+    server: FixtureHTTPServer
     thread: threading.Thread
     tmux: Any
     paths: GateRuntimePaths
@@ -659,7 +637,6 @@ class GateLiveServerOptions:
     pin_batchd_scheduler: bool = False
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 def start_fixture_live_server(
     monkeypatch: pytest.MonkeyPatch,
     app: Any,
@@ -688,9 +665,9 @@ def start_fixture_live_server(
         if options.pin_batchd_scheduler:
             pin_fixture_batchd_scheduler(app)
         if options.tls_context is None:
-            server = TmuxWebtermHTTPServer(options.address, app)
+            server = FixtureHTTPServer(options.address, app)
         else:
-            server = TmuxWebtermHTTPServer(options.address, app, tls_context=options.tls_context)
+            server = FixtureHTTPServer(options.address, app, tls_context=options.tls_context)
         track_fixture_http_requests(server)
         thread = threading.Thread(
             target=server.serve_forever,
@@ -873,7 +850,7 @@ def retire_expected_fixture_http_failures(
 
 def retire_expected_fixture_typed_api_failure(
     driver: Any,
-    server: TmuxWebtermHTTPServer,
+    server: FixtureHTTPServer,
     api_event: Mapping[str, Any],
     *,
     method: str,
@@ -951,7 +928,6 @@ def prepare_fixture_http_app(monkeypatch: pytest.MonkeyPatch, app: Any) -> None:
     monkeypatch.setattr(app, "start_update_check_thread", lambda: False, raising=False)
     # The production auth cache is process-global and probes external CLIs on a daemon thread.
     # A fixture server cannot join that owner, so never let it outlive the fixture HOME.
-    monkeypatch.setattr(server_module, "start_agent_auth_status_refresh", lambda *, force=False: False)
     monkeypatch.setattr(workdir_module, "start_agent_auth_status_refresh", lambda *, force=False: False)
     for method_name in (
         "stop_client_event_watcher",
@@ -986,8 +962,7 @@ class FixtureSchedulerClient(Protocol):
 class FixtureSchedulerApp(Protocol):
     """The app-ownership seam ``pin_fixture_batchd_scheduler`` requires of any fixture app.
 
-    Both the real gate ``TmuxWebtermApp`` and the rollback fake app satisfy this one contract, so
-    the pin routes through a typed seam rather than an ad-hoc attribute assumption, and the same
+    Rollback stand-ins satisfy this contract so setup and teardown share the same owner. The
     ``job_client`` that setup pins is the one teardown's ``stop_background_scheduler`` releases.
     """
 
@@ -1121,7 +1096,7 @@ def fixture_http_request_is_finite(method: str, target: str) -> bool:
     return route is None or route.protocol not in {RESPONSE_SSE, RESPONSE_WEBSOCKET}
 
 
-def track_fixture_http_requests(server: TmuxWebtermHTTPServer) -> None:
+def track_fixture_http_requests(server: FixtureHTTPServer) -> None:
     """Track finite work and every accepted fixture connection through handler ownership."""
 
     server_state = vars(server)
@@ -1232,7 +1207,7 @@ def track_fixture_http_requests(server: TmuxWebtermHTTPServer) -> None:
     )
 
 
-def seal_fixture_http_requests(server: TmuxWebtermHTTPServer) -> None:
+def seal_fixture_http_requests(server: FixtureHTTPServer) -> None:
     """Refuse every handler entry before the fixture stops accepting requests."""
 
     activity = vars(server).get("_fixture_http_request_activity")
@@ -1243,7 +1218,7 @@ def seal_fixture_http_requests(server: TmuxWebtermHTTPServer) -> None:
         activity.condition.notify_all()
 
 
-def wait_for_fixture_http_quiescence(server: TmuxWebtermHTTPServer, *, timeout: float = 3.0) -> None:
+def wait_for_fixture_http_quiescence(server: FixtureHTTPServer, *, timeout: float = 3.0) -> None:
     """Wait only for pre-seal finite handlers and surface any post-seal entry."""
 
     activity = vars(server).get("_fixture_http_request_activity")
@@ -1261,7 +1236,7 @@ def wait_for_fixture_http_quiescence(server: TmuxWebtermHTTPServer, *, timeout: 
         )
 
 
-def retire_fixture_http_connections(server: TmuxWebtermHTTPServer, *, timeout: float = 3.0) -> None:
+def retire_fixture_http_connections(server: FixtureHTTPServer, *, timeout: float = 3.0) -> None:
     """Wake and join every idle or persistent fixture connection after finite work settles."""
 
     activity = vars(server).get("_fixture_http_request_activity")
@@ -2475,7 +2450,7 @@ def settle_fixture_app_evidence_boundary(app: Any, *, label: str) -> None:
         app.wait_for_batchd_operations_terminal(FIXTURE_ACCEPTED_OPERATION_SETTLE_TIMEOUT_SECONDS)
 
 
-def stop_fixture_http_app(app: Any, server: TmuxWebtermHTTPServer, thread: threading.Thread, *, label: str) -> None:
+def stop_fixture_http_app(app: Any, server: FixtureHTTPServer, thread: threading.Thread, *, label: str) -> None:
     """Stop every app/server owner before a fixture may delete its runtime root."""
 
     def join_server_thread() -> None:
@@ -2495,7 +2470,7 @@ def stop_fixture_http_app(app: Any, server: TmuxWebtermHTTPServer, thread: threa
 
 def rollback_failed_fixture_http_start(
     app: Any,
-    server: TmuxWebtermHTTPServer | None,
+    server: FixtureHTTPServer | None,
     thread: threading.Thread | None,
     *,
     label: str,
@@ -2530,8 +2505,8 @@ def rollback_failed_fixture_http_start(
         raise BaseExceptionGroup(f"{label} startup rollback failed", errors)
 
 
-class GateStatefulJourney:
-    """Restart one private server while retaining the same state, cache, tmux, and port."""
+class FixtureStatefulJourney:
+    """Test stand-in lifecycle with an explicitly supplied handler factory."""
 
     def __init__(
         self,
@@ -2540,7 +2515,9 @@ class GateStatefulJourney:
         paths: GateRuntimePaths,
         tmux: Any,
         port_lease: HttpPortLease,
+        create_fixture_app: Callable[[list[str]], Any],
     ) -> None:
+        self.create_fixture_app = create_fixture_app
         self.request = request
         self.monkeypatch = monkeypatch
         self.paths = paths
@@ -2548,7 +2525,7 @@ class GateStatefulJourney:
         self.port_lease = port_lease
         self.port = port_lease.port
         self.app: Any | None = None
-        self.server: TmuxWebtermHTTPServer | None = None
+        self.server: FixtureHTTPServer | None = None
         self.thread: threading.Thread | None = None
         self.server_log_boundary: Mapping[str, Any] | None = None
         self.starts = 0
@@ -2588,13 +2565,13 @@ class GateStatefulJourney:
         if self.running:
             raise RuntimeError("stateful journey server is already running")
         server_log_boundary = SERVER_LOGS.payload()
-        app = app_module.TmuxWebtermApp(list(self.tmux.sessions))
+        app = self.create_fixture_app(list(self.tmux.sessions))
         prepare_fixture_http_app(self.monkeypatch, app)
         server = None
         thread = None
         self.port_lease.release()
         try:
-            server = TmuxWebtermHTTPServer(("127.0.0.1", self.port), app)
+            server = FixtureHTTPServer(("127.0.0.1", self.port), app)
             track_fixture_http_requests(server)
             if not app.start_background_scheduler(port=self.port):
                 raise RuntimeError("local background scheduler failed to start")
@@ -4312,17 +4289,17 @@ def run_finder_nested_reexpand_journey(
     return journey_result
 
 
-def _serve_gate_live_server(
+def serve_fixture_lifecycle(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
-    make_tmux_webterm_app,
+    create_fixture_app,
     gate_runtime_paths: GateRuntimePaths,
     gate_http_port: HttpPortLease,
     gate_tmux,
 ) -> Iterable[GateLiveServer]:
-    """Shared server lifecycle for bypassed and form-authenticated fixtures."""
+    """Exercise rollback and teardown for an explicitly supplied test stand-in."""
 
-    app = make_tmux_webterm_app(tuple(gate_tmux.sessions))
+    app = create_fixture_app(tuple(gate_tmux.sessions))
     runtime = start_fixture_live_server(
         monkeypatch,
         app,
@@ -4347,27 +4324,6 @@ def _serve_gate_live_server(
         )
 
 
-@pytest.fixture
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-def gate_live_server(
-    request: pytest.FixtureRequest,
-    monkeypatch: pytest.MonkeyPatch,
-    make_tmux_webterm_app,
-    gate_runtime_paths: GateRuntimePaths,
-    gate_http_port: HttpPortLease,
-    gate_tmux,
-) -> Iterable[GateLiveServer]:
-    """Serve the real app with the existing explicit test-auth bypass."""
-
-    monkeypatch.setenv(TEST_AUTH_BYPASS_ENV, "1")
-    yield from _serve_gate_live_server(
-        request,
-        monkeypatch,
-        make_tmux_webterm_app,
-        gate_runtime_paths,
-        gate_http_port,
-        gate_tmux,
-    )
 
 
 @pytest.fixture
@@ -4377,42 +4333,6 @@ def gate_auth_credentials() -> GateAuthCredentials:
     return GateAuthCredentials(username="e2e-admin", password="fixture-only-password", role="admin")
 
 
-@pytest.fixture
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-def gate_authenticated_live_server(
-    request: pytest.FixtureRequest,
-    monkeypatch: pytest.MonkeyPatch,
-    make_tmux_webterm_app,
-    gate_runtime_paths: GateRuntimePaths,
-    gate_http_port: HttpPortLease,
-    gate_tmux,
-    gate_auth_credentials: GateAuthCredentials,
-) -> Iterable[GateLiveServer]:
-    """Serve the real app with auth enabled and one fixture-owned account."""
-
-    monkeypatch.delenv(TEST_AUTH_BYPASS_ENV, raising=False)
-    monkeypatch.setattr(server_auth, "current_language_pref", lambda: "system")
-    auth_path = gate_runtime_paths.auth_config_path
-    assert common.AUTH_CONFIG_PATH == auth_path
-    assert auth_module.AUTH_CONFIG_PATH == auth_path
-    user = auth_module.AuthUser(
-        username=gate_auth_credentials.username,
-        password=gate_auth_credentials.password,
-        role=gate_auth_credentials.role,
-    )
-    auth_module.write_auth_config(auth_path, auth_module.auth_config_text((user,)))
-    initialized = auth_module.initialize_auth_config(auth_path)
-    assert len(initialized) == 1 and initialized[0].username == gate_auth_credentials.username
-    assert auth_module.auth_password_is_hash(initialized[0].password)
-    assert not auth_module.test_auth_bypass_enabled()
-    yield from _serve_gate_live_server(
-        request,
-        monkeypatch,
-        make_tmux_webterm_app,
-        gate_runtime_paths,
-        gate_http_port,
-        gate_tmux,
-    )
 
 
 def _browser_global_requirements(globals_required: Iterable[str] | Mapping[str, str]) -> dict[str, str]:

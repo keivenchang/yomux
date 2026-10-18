@@ -1,0 +1,1332 @@
+{
+  "source_commit": "cf0be86a89df87b7b43d9c2d25979ccf96353d55",
+  "source_blob": "76d6b6eafb69b61b9181098d22e48c5d9c919ecc",
+  "steps": [
+    {
+      "now": 1700000000.5,
+      "method": "bootstrap",
+      "arguments": {
+        "username": "alice"
+      },
+      "result": {
+        "latest_message_id": 0,
+        "read_cursor": {
+          "room_id": "global",
+          "username": "alice",
+          "read_up_to_id": 0,
+          "updated_at_utc": 1700000000.5
+        },
+        "unread_messages": [],
+        "typing": [],
+        "first_registration": true,
+        "has_more_older": false
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "insert_message",
+      "arguments": {
+        "username": "alice",
+        "sender_ip": "2001:0db8::1",
+        "sender_instance_id": "browser-a",
+        "client_message_uuid": "uuid-a",
+        "body": "Original café 😀 مرحبا",
+        "is_question": true
+      },
+      "result": [
+        {
+          "id": 1,
+          "created_at_utc": 1700000000.5,
+          "room_id": "global",
+          "username": "alice",
+          "sender_ip": "2001:db8::1",
+          "sender_instance_id": "browser-a",
+          "client_message_uuid": "uuid-a",
+          "body": "Original café 😀 مرحبا",
+          "is_question": true
+        },
+        true
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "insert_message",
+      "arguments": {
+        "username": "alice",
+        "sender_instance_id": "browser-a",
+        "client_message_uuid": "uuid-a",
+        "body": "Retry must preserve original",
+        "is_question": false
+      },
+      "result": [
+        {
+          "id": 1,
+          "created_at_utc": 1700000000.5,
+          "room_id": "global",
+          "username": "alice",
+          "sender_ip": "2001:db8::1",
+          "sender_instance_id": "browser-a",
+          "client_message_uuid": "uuid-a",
+          "body": "Original café 😀 مرحبا",
+          "is_question": true
+        },
+        false
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "bootstrap",
+      "arguments": {
+        "username": "alice"
+      },
+      "result": {
+        "latest_message_id": 1,
+        "read_cursor": {
+          "room_id": "global",
+          "username": "alice",
+          "read_up_to_id": 0,
+          "updated_at_utc": 1700000000.5
+        },
+        "unread_messages": [
+          {
+            "id": 1,
+            "created_at_utc": 1700000000.5,
+            "room_id": "global",
+            "username": "alice",
+            "sender_ip": "2001:db8::1",
+            "sender_instance_id": "browser-a",
+            "client_message_uuid": "uuid-a",
+            "body": "Original café 😀 مرحبا",
+            "is_question": true
+          }
+        ],
+        "typing": [],
+        "first_registration": false,
+        "has_more_older": false
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "bootstrap",
+      "arguments": {
+        "username": "bob"
+      },
+      "result": {
+        "latest_message_id": 1,
+        "read_cursor": {
+          "room_id": "global",
+          "username": "bob",
+          "read_up_to_id": 1,
+          "updated_at_utc": 1700000000.5
+        },
+        "unread_messages": [],
+        "typing": [],
+        "first_registration": true,
+        "has_more_older": true
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "set_typing",
+      "arguments": {
+        "username": "bob",
+        "browser_instance_id": "browser-b",
+        "typing": true
+      },
+      "result": [
+        {
+          "room_id": "global",
+          "username": "bob",
+          "browser_instance_id": "browser-b",
+          "expires_at_utc": 1700000005.5
+        }
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "typing_snapshot",
+      "arguments": {},
+      "result": [
+        {
+          "room_id": "global",
+          "username": "bob",
+          "browser_instance_id": "browser-b",
+          "expires_at_utc": 1700000005.5
+        }
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "set_typing",
+      "arguments": {
+        "username": "alice",
+        "browser_instance_id": "browser-a",
+        "typing": true
+      },
+      "result": [
+        {
+          "room_id": "global",
+          "username": "alice",
+          "browser_instance_id": "browser-a",
+          "expires_at_utc": 1700000005.5
+        },
+        {
+          "room_id": "global",
+          "username": "bob",
+          "browser_instance_id": "browser-b",
+          "expires_at_utc": 1700000005.5
+        }
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "insert_message",
+      "arguments": {
+        "username": "alice",
+        "sender_instance_id": "browser-a",
+        "client_message_uuid": "uuid-b",
+        "body": "Second café message",
+        "is_question": false
+      },
+      "result": [
+        {
+          "id": 2,
+          "created_at_utc": 1700000000.5,
+          "room_id": "global",
+          "username": "alice",
+          "sender_ip": "",
+          "sender_instance_id": "browser-a",
+          "client_message_uuid": "uuid-b",
+          "body": "Second café message",
+          "is_question": false
+        },
+        true
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "typing_snapshot",
+      "arguments": {},
+      "result": [
+        {
+          "room_id": "global",
+          "username": "bob",
+          "browser_instance_id": "browser-b",
+          "expires_at_utc": 1700000005.5
+        }
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "insert_message",
+      "arguments": {
+        "username": "bob",
+        "sender_instance_id": "browser-b",
+        "client_message_uuid": "uuid-a",
+        "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+        "is_question": false
+      },
+      "result": [
+        {
+          "id": 3,
+          "created_at_utc": 1700000000.5,
+          "room_id": "global",
+          "username": "bob",
+          "sender_ip": "",
+          "sender_instance_id": "browser-b",
+          "client_message_uuid": "uuid-a",
+          "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+          "is_question": false
+        },
+        true
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "typing_snapshot",
+      "arguments": {},
+      "result": []
+    },
+    {
+      "now": 1700000000.5,
+      "method": "read_up_to",
+      "arguments": {
+        "username": "alice",
+        "message_id": 2
+      },
+      "result": {
+        "room_id": "global",
+        "username": "alice",
+        "read_up_to_id": 2,
+        "updated_at_utc": 1700000000.5
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "read_up_to",
+      "arguments": {
+        "username": "alice",
+        "message_id": 1
+      },
+      "result": {
+        "room_id": "global",
+        "username": "alice",
+        "read_up_to_id": 2,
+        "updated_at_utc": 1700000000.5
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "read_up_to",
+      "arguments": {
+        "username": "alice",
+        "message_id": 9
+      },
+      "validation_error": "read cursor exceeds current chat tail"
+    },
+    {
+      "now": 1700000000.5,
+      "method": "bootstrap",
+      "arguments": {
+        "username": "alice"
+      },
+      "result": {
+        "latest_message_id": 3,
+        "read_cursor": {
+          "room_id": "global",
+          "username": "alice",
+          "read_up_to_id": 2,
+          "updated_at_utc": 1700000000.5
+        },
+        "unread_messages": [
+          {
+            "id": 3,
+            "created_at_utc": 1700000000.5,
+            "room_id": "global",
+            "username": "bob",
+            "sender_ip": "",
+            "sender_instance_id": "browser-b",
+            "client_message_uuid": "uuid-a",
+            "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+            "is_question": false
+          }
+        ],
+        "typing": [],
+        "first_registration": false,
+        "has_more_older": true
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "page_before",
+      "arguments": {
+        "limit": 2
+      },
+      "result": {
+        "messages": [
+          {
+            "id": 2,
+            "created_at_utc": 1700000000.5,
+            "room_id": "global",
+            "username": "alice",
+            "sender_ip": "",
+            "sender_instance_id": "browser-a",
+            "client_message_uuid": "uuid-b",
+            "body": "Second café message",
+            "is_question": false
+          },
+          {
+            "id": 3,
+            "created_at_utc": 1700000000.5,
+            "room_id": "global",
+            "username": "bob",
+            "sender_ip": "",
+            "sender_instance_id": "browser-b",
+            "client_message_uuid": "uuid-a",
+            "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+            "is_question": false
+          }
+        ],
+        "older_cursor": 2,
+        "has_more": true
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "page_before",
+      "arguments": {
+        "before_id": 2,
+        "limit": 2
+      },
+      "result": {
+        "messages": [
+          {
+            "id": 1,
+            "created_at_utc": 1700000000.5,
+            "room_id": "global",
+            "username": "alice",
+            "sender_ip": "2001:db8::1",
+            "sender_instance_id": "browser-a",
+            "client_message_uuid": "uuid-a",
+            "body": "Original café 😀 مرحبا",
+            "is_question": true
+          }
+        ],
+        "older_cursor": null,
+        "has_more": false
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "messages_after",
+      "arguments": {
+        "after_id": 1,
+        "limit": 1
+      },
+      "result": [
+        {
+          "id": 2,
+          "created_at_utc": 1700000000.5,
+          "room_id": "global",
+          "username": "alice",
+          "sender_ip": "",
+          "sender_instance_id": "browser-a",
+          "client_message_uuid": "uuid-b",
+          "body": "Second café message",
+          "is_question": false
+        }
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "context",
+      "arguments": {
+        "message_id": 2,
+        "before": 1,
+        "after": 1
+      },
+      "result": {
+        "target": {
+          "id": 2,
+          "created_at_utc": 1700000000.5,
+          "room_id": "global",
+          "username": "alice",
+          "sender_ip": "",
+          "sender_instance_id": "browser-a",
+          "client_message_uuid": "uuid-b",
+          "body": "Second café message",
+          "is_question": false
+        },
+        "before": [
+          {
+            "id": 1,
+            "created_at_utc": 1700000000.5,
+            "room_id": "global",
+            "username": "alice",
+            "sender_ip": "2001:db8::1",
+            "sender_instance_id": "browser-a",
+            "client_message_uuid": "uuid-a",
+            "body": "Original café 😀 مرحبا",
+            "is_question": true
+          }
+        ],
+        "after": [
+          {
+            "id": 3,
+            "created_at_utc": 1700000000.5,
+            "room_id": "global",
+            "username": "bob",
+            "sender_ip": "",
+            "sender_instance_id": "browser-b",
+            "client_message_uuid": "uuid-a",
+            "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+            "is_question": false
+          }
+        ]
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "context",
+      "arguments": {
+        "message_id": 99
+      },
+      "result": null
+    },
+    {
+      "now": 1700000000.5,
+      "method": "search",
+      "arguments": {
+        "query": "cafe",
+        "limit": 1
+      },
+      "result": {
+        "hits": [
+          {
+            "message": {
+              "id": 2,
+              "created_at_utc": 1700000000.5,
+              "room_id": "global",
+              "username": "alice",
+              "sender_ip": "",
+              "sender_instance_id": "browser-a",
+              "client_message_uuid": "uuid-b",
+              "body": "Second café message",
+              "is_question": false
+            },
+            "context": {
+              "target": {
+                "id": 2,
+                "created_at_utc": 1700000000.5,
+                "room_id": "global",
+                "username": "alice",
+                "sender_ip": "",
+                "sender_instance_id": "browser-a",
+                "client_message_uuid": "uuid-b",
+                "body": "Second café message",
+                "is_question": false
+              },
+              "before": [
+                {
+                  "id": 1,
+                  "created_at_utc": 1700000000.5,
+                  "room_id": "global",
+                  "username": "alice",
+                  "sender_ip": "2001:db8::1",
+                  "sender_instance_id": "browser-a",
+                  "client_message_uuid": "uuid-a",
+                  "body": "Original café 😀 مرحبا",
+                  "is_question": true
+                }
+              ],
+              "after": [
+                {
+                  "id": 3,
+                  "created_at_utc": 1700000000.5,
+                  "room_id": "global",
+                  "username": "bob",
+                  "sender_ip": "",
+                  "sender_instance_id": "browser-b",
+                  "client_message_uuid": "uuid-a",
+                  "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+                  "is_question": false
+                }
+              ]
+            }
+          }
+        ],
+        "next_cursor": 2,
+        "has_more": true,
+        "mode": "fts5"
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "search",
+      "arguments": {
+        "query": "cafe",
+        "cursor": 2,
+        "limit": 1
+      },
+      "result": {
+        "hits": [
+          {
+            "message": {
+              "id": 1,
+              "created_at_utc": 1700000000.5,
+              "room_id": "global",
+              "username": "alice",
+              "sender_ip": "2001:db8::1",
+              "sender_instance_id": "browser-a",
+              "client_message_uuid": "uuid-a",
+              "body": "Original café 😀 مرحبا",
+              "is_question": true
+            },
+            "context": {
+              "target": {
+                "id": 1,
+                "created_at_utc": 1700000000.5,
+                "room_id": "global",
+                "username": "alice",
+                "sender_ip": "2001:db8::1",
+                "sender_instance_id": "browser-a",
+                "client_message_uuid": "uuid-a",
+                "body": "Original café 😀 مرحبا",
+                "is_question": true
+              },
+              "before": [],
+              "after": [
+                {
+                  "id": 2,
+                  "created_at_utc": 1700000000.5,
+                  "room_id": "global",
+                  "username": "alice",
+                  "sender_ip": "",
+                  "sender_instance_id": "browser-a",
+                  "client_message_uuid": "uuid-b",
+                  "body": "Second café message",
+                  "is_question": false
+                },
+                {
+                  "id": 3,
+                  "created_at_utc": 1700000000.5,
+                  "room_id": "global",
+                  "username": "bob",
+                  "sender_ip": "",
+                  "sender_instance_id": "browser-b",
+                  "client_message_uuid": "uuid-a",
+                  "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+                  "is_question": false
+                }
+              ]
+            }
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "mode": "fts5"
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "search",
+      "arguments": {
+        "query": "100%_"
+      },
+      "result": {
+        "hits": [
+          {
+            "message": {
+              "id": 3,
+              "created_at_utc": 1700000000.5,
+              "room_id": "global",
+              "username": "bob",
+              "sender_ip": "",
+              "sender_instance_id": "browser-b",
+              "client_message_uuid": "uuid-a",
+              "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+              "is_question": false
+            },
+            "context": {
+              "target": {
+                "id": 3,
+                "created_at_utc": 1700000000.5,
+                "room_id": "global",
+                "username": "bob",
+                "sender_ip": "",
+                "sender_instance_id": "browser-b",
+                "client_message_uuid": "uuid-a",
+                "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+                "is_question": false
+              },
+              "before": [
+                {
+                  "id": 1,
+                  "created_at_utc": 1700000000.5,
+                  "room_id": "global",
+                  "username": "alice",
+                  "sender_ip": "2001:db8::1",
+                  "sender_instance_id": "browser-a",
+                  "client_message_uuid": "uuid-a",
+                  "body": "Original café 😀 مرحبا",
+                  "is_question": true
+                },
+                {
+                  "id": 2,
+                  "created_at_utc": 1700000000.5,
+                  "room_id": "global",
+                  "username": "alice",
+                  "sender_ip": "",
+                  "sender_instance_id": "browser-a",
+                  "client_message_uuid": "uuid-b",
+                  "body": "Second café message",
+                  "is_question": false
+                }
+              ],
+              "after": []
+            }
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "mode": "fts5"
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "search",
+      "arguments": {
+        "query": "👨‍👩‍👧‍👦"
+      },
+      "result": {
+        "hits": [
+          {
+            "message": {
+              "id": 3,
+              "created_at_utc": 1700000000.5,
+              "room_id": "global",
+              "username": "bob",
+              "sender_ip": "",
+              "sender_instance_id": "browser-b",
+              "client_message_uuid": "uuid-a",
+              "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+              "is_question": false
+            },
+            "context": {
+              "target": {
+                "id": 3,
+                "created_at_utc": 1700000000.5,
+                "room_id": "global",
+                "username": "bob",
+                "sender_ip": "",
+                "sender_instance_id": "browser-b",
+                "client_message_uuid": "uuid-a",
+                "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+                "is_question": false
+              },
+              "before": [
+                {
+                  "id": 1,
+                  "created_at_utc": 1700000000.5,
+                  "room_id": "global",
+                  "username": "alice",
+                  "sender_ip": "2001:db8::1",
+                  "sender_instance_id": "browser-a",
+                  "client_message_uuid": "uuid-a",
+                  "body": "Original café 😀 مرحبا",
+                  "is_question": true
+                },
+                {
+                  "id": 2,
+                  "created_at_utc": 1700000000.5,
+                  "room_id": "global",
+                  "username": "alice",
+                  "sender_ip": "",
+                  "sender_instance_id": "browser-a",
+                  "client_message_uuid": "uuid-b",
+                  "body": "Second café message",
+                  "is_question": false
+                }
+              ],
+              "after": []
+            }
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "mode": "fts5"
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "insert_message",
+      "arguments": {
+        "username": "bob",
+        "sender_instance_id": "browser-b",
+        "client_message_uuid": "other-room",
+        "room_id": "other",
+        "body": "Private room café",
+        "is_question": false
+      },
+      "result": [
+        {
+          "id": 4,
+          "created_at_utc": 1700000000.5,
+          "room_id": "other",
+          "username": "bob",
+          "sender_ip": "",
+          "sender_instance_id": "browser-b",
+          "client_message_uuid": "other-room",
+          "body": "Private room café",
+          "is_question": false
+        },
+        true
+      ]
+    },
+    {
+      "now": 1700000000.5,
+      "method": "bootstrap",
+      "arguments": {
+        "username": "carol"
+      },
+      "result": {
+        "latest_message_id": 3,
+        "read_cursor": {
+          "room_id": "global",
+          "username": "carol",
+          "read_up_to_id": 3,
+          "updated_at_utc": 1700000000.5
+        },
+        "unread_messages": [],
+        "typing": [],
+        "first_registration": true,
+        "has_more_older": true
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "bootstrap",
+      "arguments": {
+        "username": "bob",
+        "room_id": "other"
+      },
+      "result": {
+        "latest_message_id": 4,
+        "read_cursor": {
+          "room_id": "other",
+          "username": "bob",
+          "read_up_to_id": 4,
+          "updated_at_utc": 1700000000.5
+        },
+        "unread_messages": [],
+        "typing": [],
+        "first_registration": true,
+        "has_more_older": true
+      }
+    },
+    {
+      "now": 1700000000.5,
+      "method": "set_typing",
+      "arguments": {
+        "username": "alice",
+        "browser_instance_id": "browser-a",
+        "typing": true
+      },
+      "result": [
+        {
+          "room_id": "global",
+          "username": "alice",
+          "browser_instance_id": "browser-a",
+          "expires_at_utc": 1700000005.5
+        }
+      ]
+    },
+    {
+      "now": 1700000004.5,
+      "method": "typing_snapshot",
+      "arguments": {},
+      "result": [
+        {
+          "room_id": "global",
+          "username": "alice",
+          "browser_instance_id": "browser-a",
+          "expires_at_utc": 1700000005.5
+        }
+      ]
+    },
+    {
+      "now": 1700000004.5,
+      "method": "set_typing",
+      "arguments": {
+        "username": "alice",
+        "browser_instance_id": "browser-a",
+        "typing": true
+      },
+      "result": [
+        {
+          "room_id": "global",
+          "username": "alice",
+          "browser_instance_id": "browser-a",
+          "expires_at_utc": 1700000009.5
+        }
+      ]
+    },
+    {
+      "now": 1700000008.5,
+      "method": "typing_snapshot",
+      "arguments": {},
+      "result": [
+        {
+          "room_id": "global",
+          "username": "alice",
+          "browser_instance_id": "browser-a",
+          "expires_at_utc": 1700000009.5
+        }
+      ]
+    },
+    {
+      "now": 1700000008.5,
+      "method": "set_typing",
+      "arguments": {
+        "username": "alice",
+        "browser_instance_id": "browser-a",
+        "typing": false
+      },
+      "result": []
+    },
+    {
+      "now": 1700000008.5,
+      "method": "typing_snapshot",
+      "arguments": {},
+      "result": []
+    },
+    {
+      "now": 1700000008.5,
+      "method": "insert_message",
+      "arguments": {
+        "username": "alice",
+        "sender_instance_id": "browser-a",
+        "client_message_uuid": "expired",
+        "body": "Expired message",
+        "is_question": false,
+        "created_at_utc": 1699308808.5
+      },
+      "result": [
+        {
+          "id": 5,
+          "created_at_utc": 1699308808.5,
+          "room_id": "global",
+          "username": "alice",
+          "sender_ip": "",
+          "sender_instance_id": "browser-a",
+          "client_message_uuid": "expired",
+          "body": "Expired message",
+          "is_question": false
+        },
+        true
+      ]
+    },
+    {
+      "now": 1700000008.5,
+      "method": "page_before",
+      "arguments": {},
+      "result": {
+        "messages": [
+          {
+            "id": 1,
+            "created_at_utc": 1700000000.5,
+            "room_id": "global",
+            "username": "alice",
+            "sender_ip": "2001:db8::1",
+            "sender_instance_id": "browser-a",
+            "client_message_uuid": "uuid-a",
+            "body": "Original café 😀 مرحبا",
+            "is_question": true
+          },
+          {
+            "id": 2,
+            "created_at_utc": 1700000000.5,
+            "room_id": "global",
+            "username": "alice",
+            "sender_ip": "",
+            "sender_instance_id": "browser-a",
+            "client_message_uuid": "uuid-b",
+            "body": "Second café message",
+            "is_question": false
+          },
+          {
+            "id": 3,
+            "created_at_utc": 1700000000.5,
+            "room_id": "global",
+            "username": "bob",
+            "sender_ip": "",
+            "sender_instance_id": "browser-b",
+            "client_message_uuid": "uuid-a",
+            "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+            "is_question": false
+          }
+        ],
+        "older_cursor": null,
+        "has_more": false
+      }
+    },
+    {
+      "now": 1700000008.5,
+      "method": "prune",
+      "arguments": {
+        "retention_days": 7,
+        "hard_row_limit": 2
+      },
+      "result": {
+        "deleted_expired": 1,
+        "deleted_overflow": 2,
+        "remaining_rows": 2,
+        "ran": true
+      }
+    },
+    {
+      "now": 1700000008.5,
+      "method": "page_before",
+      "arguments": {},
+      "result": {
+        "messages": [
+          {
+            "id": 3,
+            "created_at_utc": 1700000000.5,
+            "room_id": "global",
+            "username": "bob",
+            "sender_ip": "",
+            "sender_instance_id": "browser-b",
+            "client_message_uuid": "uuid-a",
+            "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+            "is_question": false
+          }
+        ],
+        "older_cursor": null,
+        "has_more": false
+      }
+    },
+    {
+      "now": 1700000008.5,
+      "method": "prune_if_due",
+      "arguments": {
+        "retention_days": 7
+      },
+      "result": {
+        "deleted_expired": 0,
+        "deleted_overflow": 0,
+        "remaining_rows": 2,
+        "ran": false
+      }
+    },
+    {
+      "now": 1700000008.5,
+      "method": "prune_if_due",
+      "arguments": {
+        "retention_days": 1,
+        "previous_retention_days": 7
+      },
+      "result": {
+        "deleted_expired": 0,
+        "deleted_overflow": 0,
+        "remaining_rows": 2,
+        "ran": true
+      }
+    },
+    {
+      "now": 1700000008.5,
+      "method": "page_before",
+      "arguments": {
+        "limit": 0
+      },
+      "result": {
+        "messages": [
+          {
+            "id": 3,
+            "created_at_utc": 1700000000.5,
+            "room_id": "global",
+            "username": "bob",
+            "sender_ip": "",
+            "sender_instance_id": "browser-b",
+            "client_message_uuid": "uuid-a",
+            "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+            "is_question": false
+          }
+        ],
+        "older_cursor": null,
+        "has_more": false
+      }
+    },
+    {
+      "now": 1700000008.5,
+      "method": "page_before",
+      "arguments": {
+        "limit": -1
+      },
+      "result": {
+        "messages": [
+          {
+            "id": 3,
+            "created_at_utc": 1700000000.5,
+            "room_id": "global",
+            "username": "bob",
+            "sender_ip": "",
+            "sender_instance_id": "browser-b",
+            "client_message_uuid": "uuid-a",
+            "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+            "is_question": false
+          }
+        ],
+        "older_cursor": null,
+        "has_more": false
+      }
+    },
+    {
+      "now": 1700000008.5,
+      "method": "messages_after",
+      "arguments": {
+        "after_id": 0,
+        "limit": 0
+      },
+      "result": [
+        {
+          "id": 3,
+          "created_at_utc": 1700000000.5,
+          "room_id": "global",
+          "username": "bob",
+          "sender_ip": "",
+          "sender_instance_id": "browser-b",
+          "client_message_uuid": "uuid-a",
+          "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+          "is_question": false
+        }
+      ]
+    },
+    {
+      "now": 1700000008.5,
+      "method": "search",
+      "arguments": {
+        "query": "cafe",
+        "limit": 0
+      },
+      "result": {
+        "hits": [],
+        "next_cursor": null,
+        "has_more": false,
+        "mode": "fts5"
+      }
+    },
+    {
+      "now": 1700000008.5,
+      "method": "context",
+      "arguments": {
+        "message_id": 3,
+        "before": 0,
+        "after": 0
+      },
+      "result": {
+        "target": {
+          "id": 3,
+          "created_at_utc": 1700000000.5,
+          "room_id": "global",
+          "username": "bob",
+          "sender_ip": "",
+          "sender_instance_id": "browser-b",
+          "client_message_uuid": "uuid-a",
+          "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+          "is_question": false
+        },
+        "before": [],
+        "after": []
+      }
+    },
+    {
+      "now": 1700000008.5,
+      "method": "insert_message",
+      "arguments": {
+        "username": "alice",
+        "sender_instance_id": "browser-a",
+        "client_message_uuid": "two-days-old",
+        "body": "café older than one day",
+        "is_question": false,
+        "created_at_utc": 1699827208.5
+      },
+      "result": [
+        {
+          "id": 6,
+          "created_at_utc": 1699827208.5,
+          "room_id": "global",
+          "username": "alice",
+          "sender_ip": "",
+          "sender_instance_id": "browser-a",
+          "client_message_uuid": "two-days-old",
+          "body": "café older than one day",
+          "is_question": false
+        },
+        true
+      ]
+    },
+    {
+      "now": 1700000008.5,
+      "method": "insert_message",
+      "arguments": {
+        "username": "alice",
+        "sender_instance_id": "browser-a",
+        "client_message_uuid": "fresh",
+        "body": "café fresh",
+        "is_question": false
+      },
+      "result": [
+        {
+          "id": 7,
+          "created_at_utc": 1700000008.5,
+          "room_id": "global",
+          "username": "alice",
+          "sender_ip": "",
+          "sender_instance_id": "browser-a",
+          "client_message_uuid": "fresh",
+          "body": "café fresh",
+          "is_question": false
+        },
+        true
+      ]
+    },
+    {
+      "now": 1700000008.5,
+      "method": "page_before",
+      "arguments": {
+        "retention_days": 0
+      },
+      "result": {
+        "messages": [
+          {
+            "id": 3,
+            "created_at_utc": 1700000000.5,
+            "room_id": "global",
+            "username": "bob",
+            "sender_ip": "",
+            "sender_instance_id": "browser-b",
+            "client_message_uuid": "uuid-a",
+            "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+            "is_question": false
+          },
+          {
+            "id": 7,
+            "created_at_utc": 1700000008.5,
+            "room_id": "global",
+            "username": "alice",
+            "sender_ip": "",
+            "sender_instance_id": "browser-a",
+            "client_message_uuid": "fresh",
+            "body": "café fresh",
+            "is_question": false
+          }
+        ],
+        "older_cursor": null,
+        "has_more": false
+      }
+    },
+    {
+      "now": 1700000008.5,
+      "method": "messages_after",
+      "arguments": {
+        "after_id": 0,
+        "retention_days": 0
+      },
+      "result": [
+        {
+          "id": 3,
+          "created_at_utc": 1700000000.5,
+          "room_id": "global",
+          "username": "bob",
+          "sender_ip": "",
+          "sender_instance_id": "browser-b",
+          "client_message_uuid": "uuid-a",
+          "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+          "is_question": false
+        },
+        {
+          "id": 7,
+          "created_at_utc": 1700000008.5,
+          "room_id": "global",
+          "username": "alice",
+          "sender_ip": "",
+          "sender_instance_id": "browser-a",
+          "client_message_uuid": "fresh",
+          "body": "café fresh",
+          "is_question": false
+        }
+      ]
+    },
+    {
+      "now": 1700000008.5,
+      "method": "search",
+      "arguments": {
+        "query": "cafe",
+        "retention_days": 0
+      },
+      "result": {
+        "hits": [
+          {
+            "message": {
+              "id": 7,
+              "created_at_utc": 1700000008.5,
+              "room_id": "global",
+              "username": "alice",
+              "sender_ip": "",
+              "sender_instance_id": "browser-a",
+              "client_message_uuid": "fresh",
+              "body": "café fresh",
+              "is_question": false
+            },
+            "context": {
+              "target": {
+                "id": 7,
+                "created_at_utc": 1700000008.5,
+                "room_id": "global",
+                "username": "alice",
+                "sender_ip": "",
+                "sender_instance_id": "browser-a",
+                "client_message_uuid": "fresh",
+                "body": "café fresh",
+                "is_question": false
+              },
+              "before": [
+                {
+                  "id": 3,
+                  "created_at_utc": 1700000000.5,
+                  "room_id": "global",
+                  "username": "bob",
+                  "sender_ip": "",
+                  "sender_instance_id": "browser-b",
+                  "client_message_uuid": "uuid-a",
+                  "body": "Word search, literals 100%_ and 👨‍👩‍👧‍👦",
+                  "is_question": false
+                }
+              ],
+              "after": []
+            }
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "mode": "fts5"
+      }
+    },
+    {
+      "now": 1700000008.5,
+      "method": "context",
+      "arguments": {
+        "message_id": 6,
+        "retention_days": 0
+      },
+      "result": null
+    },
+    {
+      "now": 1700000008.5,
+      "method": "prune",
+      "arguments": {
+        "retention_days": 0
+      },
+      "result": {
+        "deleted_expired": 1,
+        "deleted_overflow": 0,
+        "remaining_rows": 3,
+        "ran": true
+      }
+    },
+    {
+      "now": 1700000008.5,
+      "method": "prune",
+      "arguments": {
+        "hard_row_limit": 0
+      },
+      "result": {
+        "deleted_expired": 0,
+        "deleted_overflow": 2,
+        "remaining_rows": 1,
+        "ran": true
+      }
+    },
+    {
+      "now": 1700000008.5,
+      "method": "test_set_metadata",
+      "arguments": {
+        "key": "last_prune_at",
+        "value": "broken"
+      },
+      "result": null
+    },
+    {
+      "now": 1700000008.5,
+      "method": "prune_if_due",
+      "arguments": {},
+      "result": {
+        "deleted_expired": 0,
+        "deleted_overflow": 0,
+        "remaining_rows": 1,
+        "ran": true
+      }
+    }
+  ]
+}

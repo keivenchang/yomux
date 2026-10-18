@@ -34,25 +34,11 @@ from tools.test_plan import StepId  # noqa: E402
 DEFAULT_MANIFEST = REPO_ROOT / "tests/fixtures/architecture_budgets/v1.json"
 MANIFEST_VERSION = 1
 
-CLASS_TARGETS: Final[tuple[tuple[str, str], ...]] = (
-    ("yomux_lib/app.py", "TmuxWebtermApp"),
-    ("yomux_lib/server.py", "Handler"),
-    ("yomux_lib/stats_current/service.py", "StatsCurrentService"),
-    ("yomux_lib/local_services/registry.py", "LocalServiceRegistry"),
-    ("yomux_lib/watchd.py", "PersistentWatchService"),
-    ("yomux_lib/infra/batchd.py", "PersistentJobBroker"),
-    ("yomux_lib/infra/batchd.py", "JobProductStore"),
-    ("yomux_lib/infra/background_scheduler.py", "BackgroundScheduler"),
-    ("yomux_lib/infra/state_services.py", "SessionFilesOperationLifecycle"),
-)
+CLASS_TARGETS: Final[tuple[tuple[str, str], ...]] = ()
 PRODUCTION_LINE_TARGETS: Final[tuple[str, ...]] = (
-    "yomux_lib/app.py",
     "yomux_lib/infra/listener_census.py",
-    "yomux_lib/infra/state_services.py",
-    "yomux_lib/server.py",
     "yomux_lib/search/file_index.py",
     "yomux_lib/workspace/session_files.py",
-    "yomux_lib/stats_current/service.py",
     "static_src/js/yomux/85_debug_panel.js",
     "static_src/js/yomux/99_terminal_boot.js",
     "static_src/js/yomux/20_layout_state.js",
@@ -255,72 +241,10 @@ def _line_budget_categories(root: Path) -> tuple[dict[str, int], dict[str, int]]
     return production, test_owners
 
 
-def _string_set(node: ast.AST, values: dict[str, set[str]]) -> set[str] | None:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return {node.value}
-    if isinstance(node, ast.Name):
-        return values.get(node.id)
-    if isinstance(node, ast.Starred):
-        return _string_set(node.value, values)
-    if isinstance(node, (ast.Set, ast.List, ast.Tuple)):
-        result: set[str] = set()
-        for item in node.elts:
-            resolved = _string_set(item, values)
-            if resolved is None:
-                return None
-            result.update(resolved)
-        return result
-    if isinstance(node, ast.Dict):
-        result = set()
-        for key in node.keys:
-            if key is None:
-                continue
-            resolved = _string_set(key, values)
-            if resolved is None:
-                return None
-            result.update(resolved)
-        return result
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {"frozenset", "set", "tuple", "list"} and node.args:
-        return _string_set(node.args[0], values)
-    if isinstance(node, ast.DictComp) and isinstance(node.key, ast.Name) and len(node.generators) == 1:
-        generator = node.generators[0]
-        if isinstance(generator.target, ast.Name) and node.key.id == generator.target.id:
-            return _string_set(generator.iter, values)
-    return None
 
 
-def _daemon_actions(root: Path) -> list[str]:
-    rows: list[str] = []
-    for path in sorted((root / "yomux_lib").rglob("*.py")):
-        relative = path.relative_to(root).as_posix()
-        tree = _python_tree(root, relative)
-        values: dict[str, set[str]] = {}
-        for node in tree.body:
-            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-                continue
-            targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
-            resolved = _string_set(node.value, values)
-            for target in targets:
-                if isinstance(target, ast.Name) and resolved is not None:
-                    values[target.id] = resolved
-                if not isinstance(target, ast.Name) or not target.id.endswith("_COMMAND_ROUTER"):
-                    continue
-                if not isinstance(node.value, ast.Call) or not node.value.args:
-                    continue
-                actions = _string_set(node.value.args[0], values)
-                if actions is not None:
-                    rows.extend(f"{relative}:{target.id}:{action}" for action in actions)
-    return sorted(rows)
 
 
-def _runtime_row_fields(root: Path) -> list[str]:
-    tree = _python_tree(root, "yomux_lib/local_service_projection.py")
-    target = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "LocalServiceRuntimeRow")
-    return sorted(
-        node.target.id
-        for node in target.body
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
-    )
 
 
 def _registry_ids(root: Path, relative: str, registry: str, constructor: str) -> list[str]:
@@ -410,8 +334,6 @@ def capture(root: Path) -> dict[str, Any]:
         "partial_global_writes": _partial_global_writes(root),
         "lane_ownership": _lane_ownership(root),
         "extension_families": {
-            "daemon_actions": _daemon_actions(root),
-            "runtime_row_fields": _runtime_row_fields(root),
             "preview_renderers": _registry_ids(root, "static_src/js/yomux/00_bootstrap_state.js", "PREVIEW_RENDERERS", "previewRendererStrategy"),
             "debug_subviews": _registry_ids(root, "static_src/js/yomux/85_debug_panel.js", "DEBUG_SUBVIEWS", "debugSubviewDescriptor"),
             "control_families": _control_families(root),

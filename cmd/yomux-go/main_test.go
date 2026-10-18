@@ -55,6 +55,7 @@ func TestNormalizeYomuxEnvironmentMirrorsCanonicalValuesToLegacyReaders(t *testi
 }
 
 func TestManagedLaunchLeasesStayWithServerAndNeverReachChildren(t *testing.T) {
+	t.Cleanup(func() { acceptedLaunchLeaseFDs = nil })
 	lease, err := os.CreateTemp(t.TempDir(), "instance.lock")
 	if err != nil {
 		t.Fatal(err)
@@ -364,41 +365,6 @@ func TestTmuxCommandContextPreservesExplicitFixtureSocketEnvironment(t *testing.
 	}
 }
 
-func TestPythonBridgeEnvironmentUsesReadOnlyAuthConfig(t *testing.T) {
-	env := strings.Join(pythonBridgeEnvironment("/fixture/root", "/fixture/config"), "\x00")
-	if !strings.Contains(env, "PYTHONPATH=/fixture/root") {
-		t.Fatal("python bridge did not receive the fixture root")
-	}
-	if !strings.Contains(env, "YOMUX_CONFIG_DIR=/fixture/config") {
-		t.Fatal("python bridge did not receive the fixture config")
-	}
-	if !strings.Contains(env, "YOMUX_AUTH_CONFIG_READ_ONLY=1") {
-		t.Fatal("python bridge must not rewrite auth.yaml")
-	}
-}
-
-func TestPythonBridgeConfigFlagOverridesCanonicalAndLegacyEnvironment(t *testing.T) {
-	t.Setenv("YOMUX_ROOT", "/env/new-root")
-	t.Setenv("YOLOMUX_ROOT", "/env/old-root")
-	t.Setenv("YOMUX_CONFIG_DIR", "/env/new-config")
-	t.Setenv("YOLOMUX_CONFIG_DIR", "/env/old-config")
-
-	environment := pythonBridgeEnvironment("/fixture/root", "/flag/config")
-	values := make(map[string]string, len(environment))
-	for _, entry := range environment {
-		key, value, ok := strings.Cut(entry, "=")
-		if ok {
-			values[key] = value
-		}
-	}
-	if values["YOMUX_CONFIG_DIR"] != "/flag/config" || values["YOLOMUX_CONFIG_DIR"] != "" {
-		t.Fatalf("bridge config environment = %#v, want only canonical flag config", values)
-	}
-	if values["YOMUX_ROOT"] != "" || values["YOLOMUX_ROOT"] != "" {
-		t.Fatalf("bridge retained a parent product root: %#v", values)
-	}
-}
-
 func TestWriteAndReadMaskedFrame(t *testing.T) {
 	var wire bytes.Buffer
 	clientFrame := []byte{0x81, 0x83, 1, 2, 3, 4, 'h' ^ 1, 'i' ^ 2, '!' ^ 3}
@@ -486,8 +452,13 @@ func TestGoCreateSessionLaunchesShellAndAgentsWithExplicitDangerousFlags(t *test
 				t.Fatalf("create session payload = %#v, want agent=%q command=%q", payload, item.agent, item.want)
 			}
 			pane, err := srv.tmuxCommand("list-panes", "-t", "="+item.session+":", "-F", "#{pane_start_command}").Output()
-			if err != nil || !strings.Contains(string(pane), item.want) {
-				t.Fatalf("created pane command = %q, err=%v, want %q", pane, err, item.want)
+			executable, lookupErr := exec.LookPath(item.name)
+			if lookupErr != nil {
+				t.Fatal(lookupErr)
+			}
+			expected := shellQuote(executable) + strings.TrimPrefix(item.want, item.name)
+			if err != nil || !strings.Contains(string(pane), expected) || !strings.Contains(string(pane), "PATH=") {
+				t.Fatalf("created pane command = %q, err=%v, want resolved command %q with explicit PATH", pane, err, expected)
 			}
 		})
 	}
@@ -1113,6 +1084,28 @@ func TestDefaultConfigDirUsesProductRoot(t *testing.T) {
 	t.Setenv("HOME", "/tmp/yomux-test-home")
 	if got, want := defaultConfigDir(), "/tmp/yomux-test-root/config"; got != want {
 		t.Fatalf("defaultConfigDir() = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultStateDirMatchesProductRootLayout(t *testing.T) {
+	testsupport.PreserveProductEnvironment(t)
+	t.Setenv("YOMUX_STATE_DIR", "")
+	t.Setenv("YOLOMUX_STATE_DIR", "")
+	t.Setenv("YOMUX_ROOT", "/tmp/yomux-test-root")
+	state, err := defaultStateDir()
+	if err != nil || state != "/tmp/yomux-test-root/state" {
+		t.Fatalf("defaultStateDir() = %q, %v", state, err)
+	}
+}
+
+func TestDefaultStateDirHonorsExplicitPath(t *testing.T) {
+	testsupport.PreserveProductEnvironment(t)
+	t.Setenv("YOMUX_STATE_DIR", "/tmp/yomux-explicit-state")
+	t.Setenv("YOLOMUX_STATE_DIR", "")
+	t.Setenv("YOMUX_ROOT", "/tmp/yomux-test-root")
+	state, err := defaultStateDir()
+	if err != nil || state != "/tmp/yomux-explicit-state" {
+		t.Fatalf("defaultStateDir() = %q, %v", state, err)
 	}
 }
 

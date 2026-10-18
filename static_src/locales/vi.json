@@ -1490,6 +1490,8 @@
   "shortcuts.section.menus": "Menu, bảng màu và bộ chọn",
   "shortcuts.section.tabsPanes": "Tab / Ngăn Thiết bị đầu cuối",
   "shortcuts.section.terminal": "Thiết bị đầu cuối",
+  "shortcuts.exitTmuxCopyMode": "Thoát chế độ sao chép tmux",
+  "shortcuts.terminalScrollHelp": "Cuộn hoặc nhấn Fn+Lên/Xuống để cuộn ứng dụng. Giữ Shift khi cuộn để xem lịch sử tmux.",
   "shortcuts.switchTmuxWindow": "Trước / tiếp theo tab",
   "shortcuts.toggleComment": "Nhận xét dòng chuyển đổi",
   "shortcuts.toggleFinder": "Chuyển đổi {name}",

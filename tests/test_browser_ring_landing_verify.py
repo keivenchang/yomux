@@ -43,9 +43,7 @@ from tests.gate_harness import retire_local_service_daemons_beneath
 from tests.gate_harness import run_fixture_cleanup_phases
 from yomux_lib import auth as auth_module
 from yomux_lib import common
-from yomux_lib import server_auth
 from yomux_lib.infra.worktree_writer import child_process_artifact_environment
-from yomux_lib.stats_current import service as stats_service
 from yomux_lib.stats_current import storage
 from tools.instance_isolation import synthetic_test_environment
 from tools.bazel_execution_contract import repository_head_sha
@@ -492,73 +490,6 @@ def _seed_zero_and_gap(
     }, {"gap_start": gap_start, "gap_end": gap_end, "zero_start": gap_end + 10, "left_edge": left_edge}
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_ring_writer_accepts_explicit_zero_beside_downtime_gap(tmp_path: Path) -> None:
-    wall_now = 1_800_000_000
-    monotonic_now = [0.0]
-    database = tmp_path / storage.DATABASE_FILENAME
-    service = stats_service.StatsCurrentService(
-        tmp_path / "statsd.sock",
-        database,
-        clock=lambda: wall_now,
-        monotonic=lambda: monotonic_now[0],
-        randomizer=lambda: 0.0,
-    )
-    request = {
-        "action": "append",
-        "protocol_version": storage.MIN_WRITER_PROTOCOL,
-        "schema_generation": storage.SCHEMA_VERSION,
-        "observations": [
-            {
-                "event_id": "before",
-                "family": "gpu",
-                "source_id": "gpu:ring-e2e",
-                "observed_at": wall_now - 110,
-                "epoch_id": "before",
-                "owner_generation": 1,
-                "payload": {"util_percent": 40, "memory_used_bytes": 400, "memory_capacity_bytes": 1000, "label": "Ring E2E GPU"},
-            },
-            {
-                "event_id": "zero",
-                "family": "gpu",
-                "source_id": "gpu:ring-e2e",
-                "observed_at": wall_now - 30,
-                "epoch_id": "after",
-                "owner_generation": 1,
-                "payload": {"util_percent": 0, "memory_used_bytes": 0, "memory_capacity_bytes": 1000, "label": "Ring E2E GPU"},
-            },
-        ],
-        "usage_atoms": [],
-        "usage_tombstones": [],
-        "coverage_epochs": [
-            {"family": "gpu", "source_id": "gpu:ring-e2e", "epoch_id": "before", "started_at": wall_now - 120, "ended_at": wall_now - 60, "native_cadence_seconds": 10, "owner_generation": 1},
-            {"family": "gpu", "source_id": "gpu:ring-e2e", "epoch_id": "after", "started_at": wall_now - 40, "ended_at": None, "native_cadence_seconds": 10, "owner_generation": 1},
-        ],
-        "unavailable_spans": [
-            {"family": "gpu", "source_id": "gpu:ring-e2e", "epoch_id": "gap", "started_at": wall_now - 60, "ended_at": wall_now - 40, "native_cadence_seconds": 10, "reason": "fixture_downtime", "owner_generation": 1},
-        ],
-    }
-    with storage.Store.open(database) as store:
-        service.writer = store
-        accepted, binary = service.handle_with_binary(request)
-        assert accepted["accepted"] == 5
-        assert binary == b""
-        service._build_once(store, True, frozenset())
-        assert service._cache is not None
-        candidate = service._cache.generation
-        cells = frozenset(service._pending_ring_dirty)
-        store.initialize_ring_storage()
-        writes = service._ring_writes(
-            candidate,
-            service._restart_ring_cells(store, candidate, cells),
-        )
-        assert writes
-        store.publish_ring_buckets(
-            buckets=writes,
-            source_generation=candidate.source_generation,
-            published_at=wall_now,
-        )
 
 
 def _graph_state(driver) -> dict[str, object]:
@@ -963,7 +894,6 @@ def _prepare_ring_runtime(
     """
     assert 7900 <= gate_http_port.port <= 7999
     monkeypatch.delenv(common.TEST_AUTH_BYPASS_ENV, raising=False)
-    monkeypatch.setattr(server_auth, "current_language_pref", lambda: "system")
     auth_path = gate_runtime_paths.config_dir / "auth.yaml"
     assert common.AUTH_CONFIG_PATH == auth_path
     auth_module.write_auth_config(

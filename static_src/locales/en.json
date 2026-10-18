@@ -1545,6 +1545,8 @@
   "shortcuts.section.tabsPanes": "Tabs / Panes",
   "shortcuts.section.terminal": "Terminal",
   "shortcuts.switchTmuxWindow": "Previous / next tab",
+  "shortcuts.terminalScrollHelp": "In Codex, scroll normally to move through the conversation while keeping the prompt fixed. Hold Shift while scrolling to browse tmux history. Page Up/Down (Fn+Up/Down on Mac) also scrolls the application.",
+  "shortcuts.exitTmuxCopyMode": "Exit tmux copy mode",
   "shortcuts.toggleComment": "Toggle line comment",
   "shortcuts.toggleFinder": "Toggle {name}",
   "shortcuts.undoChunk": "Undo accept/reject chunk",

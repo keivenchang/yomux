@@ -290,7 +290,7 @@ def main() -> int:
                 product_env_name('STATS_SYNTHETIC_INVENTORY'): "1",
                 product_env_name('CLAUDE_TRANSCRIPT_ROOT'): str(home / "claude" / "projects"),
                 product_env_name('CODEX_TRANSCRIPT_ROOT'): str(home / "codex" / "sessions"),
-                product_env_name('PRICING_CATALOG'): str(REPO / "yomux_lib" / "data" / "model_pricing.json"),
+                product_env_name('PRICING_CATALOG'): str(REPO / "assets" / "runtime" / "model_pricing.json"),
             }
             print(json.dumps({"verification": "starting", product_env_name('TMUX_SOCKET'): require_product_env('TMUX_SOCKET', environ=server_env), "tmux_panes": inventory.splitlines()}, sort_keys=True), flush=True)
             server_log = server_log_path.open("w", encoding="utf-8")

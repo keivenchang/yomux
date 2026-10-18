@@ -1493,6 +1493,8 @@
   "shortcuts.section.menus": "Menüs, Paletten und Auswahlmöglichkeiten",
   "shortcuts.section.tabsPanes": "Tabs / Fenster",
   "shortcuts.section.terminal": "Terminalbereich",
+  "shortcuts.exitTmuxCopyMode": "Den tmux-Kopiermodus beenden",
+  "shortcuts.terminalScrollHelp": "Mit Scrollen oder Fn+Auf/Ab durch die Anwendung blättern. Halten Sie beim Scrollen Shift gedrückt, um den tmux-Verlauf anzusehen.",
   "shortcuts.switchTmuxWindow": "Vorheriger/nächster Tab",
   "shortcuts.toggleComment": "Zeilenkommentar umschalten",
   "shortcuts.toggleFinder": "{name} umschalten",

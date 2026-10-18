@@ -41,11 +41,13 @@ import (
 	"unicode"
 
 	"github.com/keivenchang/yomux/internal/capabilities"
+	"github.com/keivenchang/yomux/internal/chat"
 	"github.com/keivenchang/yomux/internal/finder"
 	"github.com/keivenchang/yomux/internal/productenv"
 	"github.com/keivenchang/yomux/internal/stats"
 	"github.com/keivenchang/yomux/internal/tmuxcmd"
 	"github.com/keivenchang/yomux/internal/work"
+	"github.com/keivenchang/yomux/internal/yoagent"
 )
 
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -67,10 +69,17 @@ type server struct {
 	dangerouslyYolo        bool
 	config                 string
 	httpMode               bool
+	tlsCertificate         string
+	tlsKey                 string
 	mu                     sync.Mutex
 	clientEventMu          sync.Mutex
 	clientEventConnections map[string]int
 	children               map[*exec.Cmd]struct{}
+	chat                   *nativeChat
+	yoagentState           *yoagent.Store
+	yoagent                *nativeYOAgent
+	agentActions           *nativeYOAgentActions
+	yoagentJobMu           sync.Mutex
 	events                 *eventBroker
 
 	eventLogPath                        string
@@ -97,6 +106,7 @@ type server struct {
 	capabilities                        *capabilities.Catalog
 	updates                             *updateChecker
 	instanceID                          string
+	launchIdentity                      map[string]string
 	updateJobMu                         sync.Mutex
 	updateJobPath                       string
 	statsPath                           string
@@ -218,7 +228,7 @@ type server struct {
 	childCPU                         map[string]childCPUState
 	threadCPU                        map[string]childCPUState
 	authState
-	pythonHTMLState
+	nativePageState
 	tmuxMetadataState
 	operationState
 }
@@ -554,6 +564,17 @@ func useMachineTmuxForOperatorLaunch() {
 }
 
 func main() {
+	if err := validateNativeBackend(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--operator" {
+		if err := runNativeOperator(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--internal-self-update-supervisor" {
 		if len(os.Args) != 3 {
 			fmt.Fprintln(os.Stderr, "usage: yomux-go --internal-self-update-supervisor <spec.json>")
@@ -565,23 +586,27 @@ func main() {
 		}
 		return
 	}
+	initialLaunchIdentity := [2]string{productenv.Value("ROOT"), productenv.Value("INSTANCE")}
 	normalizeYomuxEnvironment()
 	useMachineTmuxForOperatorLaunch()
-	port := flag.Int("port", 7221, "HTTP port")
-	listenFD := flag.Int("listen-fd", -1, "use an already-bound TCP listener file descriptor")
-	launchLeaseFDs := flag.String("launch-lease-fds", "", "managed launcher lease descriptors")
-	host := flag.String("host", "127.0.0.1", "bind address")
-	root := flag.String("root", ".", "YOmux checkout root")
-	configDir := flag.String("config", productenv.Value("CONFIG_DIR"), "YOmux config directory")
-	statsPath := flag.String("stats", productenv.Value("STATS_DATABASE"), "YO!stats database path")
-	httpMode := flag.Bool("http", false, "serve plain HTTP instead of the default HTTPS")
-	certPath := flag.String("cert", "", "TLS certificate PEM path")
-	keyPath := flag.String("key", "", "TLS private key PEM path")
-	dangerouslyYolo := flag.Bool("dangerously-yolo", false, "allow new Claude/Codex sessions to use dangerous bypass flags")
-	searchIndexWorker := flag.Bool("search-index-worker", false, "run the private Finder index worker")
-	searchIndexDB := flag.String("index-db", "", "private Finder index database path")
-	flag.BoolVar(dangerouslyYolo, "dang", false, "alias for --dangerously-yolo")
-	showVersion := flag.Bool("version", false, "print version")
+	options := registerServerFlags(flag.CommandLine)
+	managedLaunch := options.managedLaunch
+	launchPlanJSON := options.launchPlanJSON
+	forceLaunch := options.forceLaunch
+	port := options.port
+	listenFD := options.listenFD
+	launchLeaseFDs := options.launchLeaseFDs
+	host := options.host
+	root := options.root
+	configDir := options.configDir
+	statsPath := options.statsPath
+	httpMode := options.httpMode
+	certPath := options.certPath
+	keyPath := options.keyPath
+	dangerouslyYolo := options.dangerouslyYolo
+	searchIndexWorker := options.searchIndexWorker
+	searchIndexDB := options.searchIndexDB
+	showVersion := options.showVersion
 	flag.Parse()
 	if err := acceptLaunchDescriptors(*launchLeaseFDs, *listenFD); err != nil {
 		fatal("invalid managed launch leases: " + err.Error())
@@ -601,8 +626,78 @@ func main() {
 		fmt.Printf("yomux-go %s\n", version)
 		return
 	}
+	if *managedLaunch {
+		explicit := make(map[string]bool)
+		flag.Visit(func(value *flag.Flag) { explicit[value.Name] = true })
+		if err := nativeManagedDefaults(explicit, port, host, dangerouslyYolo); err != nil {
+			fatal(err.Error())
+		}
+	}
+	if *launchPlanJSON != "" && !*managedLaunch {
+		fatal("--launch-plan-json requires --launch")
+	}
 	if *port < 1 || *port > 65535 {
 		fatal("invalid port")
+	}
+	var managedListenerFile *os.File
+	if *managedLaunch {
+		absolute, err := filepath.Abs(*root)
+		if err != nil {
+			fatal(err.Error())
+		}
+		*root = absolute
+		if err := validateNativeTLS(*httpMode, *certPath, *keyPath); err != nil {
+			fatal(err.Error())
+		}
+		configExplicit := false
+		flag.Visit(func(value *flag.Flag) {
+			if value.Name == "config" {
+				configExplicit = true
+			}
+		})
+		if configExplicit {
+			if err := os.Setenv(productenv.Name("CONFIG_DIR"), *configDir); err != nil {
+				fatal(err.Error())
+			}
+		}
+		if *listenFD >= 0 {
+			if err := nativeInheritedLaunchPreflight(absolute, *host, *port, *listenFD, *launchPlanJSON); err != nil {
+				fatal(err.Error())
+			}
+		} else if err := nativeManagedPreflight(absolute, *host, *port, *httpMode, *forceLaunch, *launchPlanJSON); err != nil {
+			fatal(err.Error())
+		}
+		if initialLaunchIdentity != [2]string{productenv.Value("ROOT"), productenv.Value("INSTANCE")} {
+			if err := reexecNativeManagedLaunch(*listenFD); err != nil {
+				fatal("publish managed launch environment: " + err.Error())
+			}
+		}
+		if *listenFD < 0 {
+			listener, err := net.Listen("tcp", net.JoinHostPort(*host, strconv.Itoa(*port)))
+			if err != nil {
+				fatal(err.Error())
+			}
+			file, err := listener.(*net.TCPListener).File()
+			if err != nil {
+				_ = listener.Close()
+				fatal(err.Error())
+			}
+			_ = listener.Close()
+			managedListenerFile = file
+			*listenFD = int(file.Fd())
+			defer file.Close()
+		}
+		leases, err := nativeAcquireMutableLeases()
+		if err != nil {
+			fatal(err.Error())
+		}
+		defer func() {
+			for _, lease := range leases {
+				releaseInstanceRootLease(lease)
+			}
+		}()
+		// Root defaults must be selected after applying the captured instance plan.
+		*configDir = productenv.Value("CONFIG_DIR")
 	}
 	if *configDir == "" {
 		*configDir = defaultConfigDir()
@@ -613,6 +708,10 @@ func main() {
 	rootPath, err := filepath.Abs(*root)
 	if err != nil {
 		fatal("invalid root: " + err.Error())
+	}
+	stateDir, err := defaultStateDir()
+	if err != nil {
+		fatal("YOmux state directory setup failed: " + err.Error())
 	}
 	productRootPath := productenv.Value("ROOT")
 	if productRootPath == "" {
@@ -640,11 +739,7 @@ func main() {
 	// releasing here would let a replacement process race those final mutations.
 	defer func() { runtime.KeepAlive(configLease) }()
 	eventPath := filepath.Join(*configDir, "go-events.jsonl")
-	stateDir := strings.TrimSpace(productenv.Value("STATE_DIR"))
-	if stateDir == "" {
-		stateDir = *configDir
-	}
-	s := &server{root: rootPath, host: *host, port: *port, dangerouslyYolo: *dangerouslyYolo, config: *configDir, state: stateDir, httpMode: *httpMode, statsPath: *statsPath, pricing: pricing, children: make(map[*exec.Cmd]struct{}), processEntriesFn: processEntries, childProcessEntriesFn: descendantProcessEntries, startedAt: time.Now(), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), updates: newUpdateChecker(rootPath, version, nil), instanceID: fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()), updateJobPath: filepath.Join(*configDir, "self-update-job.json"), finderJobs: newFinderJobScheduler(), finderBackgroundJobs: newFinderBackgroundJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler(), operationState:
+	s := &server{root: rootPath, host: *host, port: *port, dangerouslyYolo: *dangerouslyYolo, config: *configDir, state: stateDir, httpMode: *httpMode, statsPath: *statsPath, pricing: pricing, children: make(map[*exec.Cmd]struct{}), processEntriesFn: processEntries, childProcessEntriesFn: descendantProcessEntries, startedAt: time.Now(), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), updates: newUpdateChecker(rootPath, version, nil), instanceID: fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()), launchIdentity: nativeLaunchIdentityEnvironment(), updateJobPath: filepath.Join(*configDir, "self-update-job.json"), finderJobs: newFinderJobScheduler(), finderBackgroundJobs: newFinderBackgroundJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler(), operationState:
 	// The Go server has no parent observer to retain lifecycle history. Keep the
 	// port-scoped ledger in the configured state directory so normal operator
 	// restarts expose measured restart/demand counters instead of zeros or an
@@ -676,8 +771,7 @@ func main() {
 	// stats handlers while the first ring build is still in flight, or the browser cannot ever learn
 	// the matrix it needs to start that build's read path.
 	s.capabilities.Set("pane.stats.v1", capabilities.Entry{Available: true, Degraded: true, Reason: &capabilities.Reason{Code: "stats_pending", MessageKey: "capability.statsPending", MessageParams: map[string]any{}}})
-	// Settings use the shared Python schema/serializer below, so the Go backend exposes the
-	// same validated payload and persistence contract as the Python backend.
+	// Settings use the native schema and persistence owner shared by request and startup paths.
 	s.capabilities.Set("core.settings.v1", capabilities.Entry{Available: true})
 	s.updates.readPref = s.updateNotifyPreference
 	s.capabilities.Set("core.updates.v1", capabilities.Entry{Available: true})
@@ -717,6 +811,61 @@ func main() {
 		_, err := s.events.publish(kind, payload)
 		return err
 	})
+	hostPartitionID, hostPartitionErr := productHostPartitionID()
+	if hostPartitionErr != nil {
+		err = hostPartitionErr
+	} else {
+		yoagentDirectory := filepath.Join(stateDir, "hosts", hostPartitionID, "yoagent")
+		s.yoagentState, err = yoagent.NewStore(yoagentDirectory)
+		if err != nil {
+			slog.Error("native YO!agent state unavailable", "error", err)
+		} else {
+			legacyStatePath := filepath.Join(*configDir, "state.json")
+			if err = s.yoagentState.ImportLegacyJobs(context.Background(), legacyStatePath); err != nil {
+				slog.Error("legacy YO!agent jobs could not be imported", "error", err)
+			} else {
+				s.yoagent, err = newNativeYOAgent(s.yoagentState, rootPath, *configDir, s.nativeYOAgentSettings, func(kind string, payload map[string]any) error {
+					_, publishErr := s.events.publish(kind, payload)
+					return publishErr
+				})
+				if err != nil {
+					slog.Error("native YO!agent backend unavailable", "error", err)
+				} else {
+					s.agentActions = newNativeYOAgentActions(s)
+				}
+			}
+		}
+		chatDatabase := filepath.Join(stateDir, "hosts", hostPartitionID, "yochat.sqlite3")
+		chatRuntime, chatErr := newNativeChat(context.Background(), rootPath, chatDatabase, s.chatRetentionDays, func(ctx context.Context, kind string, payload map[string]any) error {
+			_, err := s.events.publish(kind, payload)
+			return err
+		})
+		if chatErr != nil {
+			err = chatErr
+		} else {
+			s.chat = chatRuntime
+			if s.yoagent != nil {
+				replies, replyErr := chat.NewAgentReplies(s.chat.service, s.chat.events, func(ctx context.Context, request chat.AgentRequest) (string, error) {
+					sessions, rosterErr := s.tmuxSessionRoster()
+					if rosterErr != nil {
+						slog.Warn("YO!chat agent session inventory unavailable", "error", rosterErr)
+						sessions = nil
+					}
+					answer, _, answerErr := s.yoagent.AnswerWithSessions(ctx, request.Message, request.Locale, request.RequestID, request.RequestID, request.AccessRole, sessions)
+					return answer, answerErr
+				})
+				if replyErr != nil {
+					slog.Error("native chat agent bridge unavailable", "error", replyErr)
+				} else {
+					s.chat.replies = replies
+				}
+			}
+			err = nil
+		}
+	}
+	if hostPartitionErr != nil || err != nil {
+		slog.Error("native chat storage unavailable; chat capability remains disabled", "error", err)
+	}
 	s.yolo, err = newGoYoloStore(*configDir)
 	if err != nil {
 		s.shutdown()
@@ -759,6 +908,21 @@ func main() {
 	mux.Handle("/api/diagnostics/heap", s.protected(http.HandlerFunc(s.runtimeHeapProfile)))
 	mux.Handle("/api/diagnostics/performance", s.protected(http.HandlerFunc(s.diagnosticsPerformance)))
 	mux.Handle("/api/settings", s.protected(http.HandlerFunc(s.settings)))
+	mux.Handle("/api/agent-auth", s.protected(http.HandlerFunc(s.agentAuthStatus)))
+	mux.Handle("/api/yoagent/skills", s.protected(http.HandlerFunc(s.yoagentSkills)))
+	mux.Handle("/api/yoagent/skill-files", s.protected(http.HandlerFunc(s.yoagentSkillFiles)))
+	mux.Handle("/api/yoagent/skill-files/upsert", s.protected(http.HandlerFunc(s.yoagentSkillFileUpsert)))
+	mux.Handle("/api/yoagent/skill-files/delete", s.protected(http.HandlerFunc(s.yoagentSkillFileDelete)))
+	mux.Handle("/api/yoagent/jobs", s.protected(http.HandlerFunc(s.yoagentJobs)))
+	mux.Handle("/api/yoagent/jobs/", s.protected(http.HandlerFunc(s.yoagentJobMutation)))
+	mux.Handle("/api/yoagent/conversation", s.protected(http.HandlerFunc(s.yoagentConversation)))
+	mux.Handle("/api/yoagent/chat", s.protected(http.HandlerFunc(s.yoagentChat)))
+	mux.Handle("/api/yoagent/chat/", s.protected(http.HandlerFunc(s.yoagentChatCancel)))
+	mux.Handle("/api/yoagent/actions/preview-send", s.protected(http.HandlerFunc(s.yoagentActionPreview)))
+	mux.Handle("/api/yoagent/actions/execute-send", s.protected(http.HandlerFunc(s.yoagentActionExecute)))
+	mux.Handle("/api/yoagent/waits/", s.protected(http.HandlerFunc(s.yoagentWaitClear)))
+	mux.Handle("/api/yoagent/prewarm", s.protected(http.HandlerFunc(s.yoagentPrewarm)))
+	mux.Handle("/api/yoagent/reset", s.protected(http.HandlerFunc(s.yoagentReset)))
 	// The browser requests session metadata during boot, before it opens the
 	// stats surface. Keep this route on the Go mux so a stats-capable process
 	// does not turn a boot identity probe into the generic unsupported response.
@@ -769,6 +933,7 @@ func main() {
 	mux.Handle("/api/yolo-rules", s.protected(http.HandlerFunc(s.yoloRules)))
 	mux.Handle("/api/yolo-rules/open", s.protected(http.HandlerFunc(s.yoloRulesOpen)))
 	mux.Handle("/api/yolo-rules/reload", s.protected(http.HandlerFunc(s.yoloRulesReload)))
+	s.registerChatRoutes(mux)
 	s.registerAttentionAckRoute(mux)
 	mux.Handle("/api/background/claim", s.protected(http.HandlerFunc(s.backgroundClaim)))
 	mux.Handle("/api/operations/accept", s.protected(http.HandlerFunc(s.operationAccept)))
@@ -802,7 +967,10 @@ func main() {
 	httpServer := &http.Server{Addr: addr, Handler: s.logging(mux), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 120 * time.Second}
 	var listener net.Listener
 	if *listenFD >= 0 {
-		listenerFile := os.NewFile(uintptr(*listenFD), "yolomux-listener")
+		listenerFile := managedListenerFile
+		if listenerFile == nil {
+			listenerFile = os.NewFile(uintptr(*listenFD), "yolomux-listener")
+		}
 		if listenerFile == nil {
 			s.shutdown()
 			fatal("invalid listener file descriptor")
@@ -832,6 +1000,7 @@ func main() {
 			s.shutdown()
 			fatal("TLS setup failed: " + err.Error())
 		}
+		s.tlsCertificate, s.tlsKey = certFile, keyFile
 		config, err := tlsConfig(certFile, keyFile)
 		if err != nil {
 			_ = listener.Close()
@@ -847,6 +1016,21 @@ func main() {
 	go s.runUpdateChecker(shutdownContext)
 	defer stopSignals()
 	s.serverCancel = stopSignals
+	if s.chat != nil {
+		s.capabilities.Set("pane.chat.v1", capabilities.Entry{Available: true})
+	}
+	if s.yoagent != nil && s.agentActions != nil {
+		s.capabilities.Set("pane.agent.v1", capabilities.Entry{Available: true})
+	}
+	if s.chat != nil && !s.startBackgroundWork(func() {
+		if err := s.chat.events.Run(shutdownContext, 250*time.Millisecond, func(err error) {
+			slog.Error("native chat event publication failed", "error", err)
+		}); err != nil {
+			slog.Error("native chat event loop stopped", "error", err)
+		}
+	}) {
+		slog.Error("native chat event loop was not admitted")
+	}
 	s.startBackgroundWork(func() { s.reconcileFinderIndexes(shutdownContext) })
 	if err := os.MkdirAll(*configDir, 0o700); err != nil {
 		_ = listener.Close()
@@ -1068,6 +1252,9 @@ func main() {
 				shutdownClean = false
 			}
 		}()
+	}
+	if s.yoagent != nil && !s.startBackgroundWork(func() { s.runNativeYOAgentJobs(shutdownContext) }) {
+		slog.Error("native YO!agent job loop was not admitted")
 	}
 	scheme := "https"
 	if *httpMode {
@@ -1434,11 +1621,20 @@ func (s *server) diagnosticsPerformance(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *server) health(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "backend": "go", "version": version, "instance_id": s.instanceID})
+	payload := s.nativeServerIdentity()
+	payload["ok"] = true
+	if len(s.users()) > 0 {
+		delete(payload, "root")
+		delete(payload, "launch_environment")
+	}
+	jsonResponse(w, http.StatusOK, payload)
 }
 
 func (s *server) ping(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "backend": "go", "version": version, "instance_id": s.instanceID, "capabilities": s.capabilityEntries()})
+	payload := s.nativeServerIdentity()
+	payload["ok"] = true
+	payload["capabilities"] = s.capabilityEntries()
+	jsonResponse(w, http.StatusOK, payload)
 }
 
 func (s *server) capabilityEntries() map[string]any {
@@ -3970,7 +4166,12 @@ func (s *server) systemStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	process := metricsFn(now)
 	serverMetrics := goServerMetricsPayload(now, process)
-	serverBlock := map[string]any{"backend": "go", "version": version, "bundle_revision": "go:" + version, "instance_id": s.instanceID, "root": s.root, "pid": process.PID, "started_at": unixSeconds(process.StartedAt)}
+	serverBlock := s.nativeServerIdentity()
+	if s.processMetricsFn != nil {
+		// Preserve injected metrics in status fixtures; launch authority uses ping.
+		serverBlock["pid"] = process.PID
+	}
+	serverBlock["started_at"] = unixSeconds(process.StartedAt)
 	if process.StartedAt.IsZero() {
 		serverBlock["started_at"] = unixSeconds(now)
 	}
@@ -4573,7 +4774,16 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 	if cwd == "" {
 		cwd = "."
 	}
-	output, err := s.tmuxCommand("new-session", "-d", "-s", name, "-e", "TERM=xterm-256color", "-c", cwd, command).CombinedOutput()
+	runtimePath, err := nativeRuntimePath()
+	if err != nil {
+		slog.Error("session launch environment unavailable", "error", err)
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "session launch environment unavailable"})
+		return
+	}
+	// tmux can publish a session PATH while its spawn path still uses the
+	// existing server PATH. Set the actual process environment at exec too.
+	launchScript := "PATH=" + shellQuote(runtimePath) + " exec " + command
+	output, err := s.tmuxCommand("new-session", "-d", "-s", name, "-e", "TERM=xterm-256color", "-e", "PATH="+runtimePath, "-c", cwd, launchScript).CombinedOutput()
 	if err != nil {
 		diagnostic := strings.TrimSpace(string(output))
 		if diagnostic == "" {
@@ -4587,7 +4797,7 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"ok": true, "created": true, "session": name, "sessions": topology.sessions, "agent": agent,
 		"topology_generation": topology.generation,
-		"terminal":            terminal, "cwd": cwd, "command": command, "dangerously_yolo": launchDangerously,
+		"terminal":            terminal, "cwd": cwd, "command": goAgentCommand(agent, terminal, launchDangerously), "dangerously_yolo": launchDangerously,
 		"generation": generation,
 	})
 }
@@ -4605,32 +4815,22 @@ func validSessionLaunchName(value string) bool {
 }
 
 func goSessionLaunchCommand(agent, terminal string, dangerouslyYolo bool) (string, error) {
-	command := agent
+	name := agent
 	switch agent {
 	case "claude", "codex", "opencode":
-		if _, err := exec.LookPath(agent); err != nil {
-			return "", fmt.Errorf("%s is not available on this server PATH", agent)
-		}
 	case "term":
 		if !validSessionLaunchName(terminal) {
 			return "", errors.New("choose an explicit terminal command")
 		}
-		if _, err := exec.LookPath(terminal); err != nil {
-			return "", fmt.Errorf("terminal command is not available on this server PATH: %s", terminal)
-		}
-		command = terminal
+		name = terminal
 	default:
 		return "", fmt.Errorf("unsupported agent: %s", agent)
 	}
-	if dangerouslyYolo {
-		switch agent {
-		case "claude":
-			command += " --dangerously-skip-permissions"
-		case "codex":
-			command += " --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
-		}
+	executable, err := nativeCommandPath(name)
+	if err != nil {
+		return "", fmt.Errorf("%s is not available on this server PATH: %w", name, err)
 	}
-	return command, nil
+	return formatGoAgentCommand(agent, shellQuote(executable), dangerouslyYolo), nil
 }
 
 func (s *server) createSessionPlan(w http.ResponseWriter, r *http.Request) {
@@ -4680,16 +4880,13 @@ func nextNumberedSessionName(existing []string) string {
 	return ""
 }
 
-// settings delegates persistence to the repository's Python settings owner. Keeping one owner for
-// defaults, validation, migrations, comments, and atomic YAML writes prevents the Go backend from
-// silently accepting a different value. The bridge is intentionally JSON-only and uses the server's
-// explicit config directory, so tests can provide a synthetic isolated file.
+// Settings HTTP and startup reconciliation share native persistence and validation.
 func (s *server) settings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var body string
+	var patch any
 	if r.Method == http.MethodPost {
 		user, _ := r.Context().Value(authContextKey{}).(authUser)
 		if user.role != "admin" {
@@ -4701,12 +4898,10 @@ func (s *server) settings(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusBadRequest, typedError("invalid settings request", "request.error.invalid", false))
 			return
 		}
-		encoded, err := json.Marshal(payload)
-		if err != nil {
-			jsonResponse(w, http.StatusBadRequest, typedError("invalid settings request", "request.error.invalid", false))
-			return
+		patch = payload
+		if value, exists := payload["settings"]; exists {
+			patch = value
 		}
-		body = string(encoded)
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
@@ -4717,31 +4912,9 @@ func (s *server) settings(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.indexSettingsUpdateMu.Unlock()
 
-	script := `import json,sys
-from yomux_lib.workspace.settings import save_settings, settings_payload
-if sys.argv[1] == "POST":
-    request = json.loads(sys.argv[2])
-    patch = request.get("settings", request) if isinstance(request, dict) else request
-    result = save_settings(patch)
-else:
-    result = settings_payload()
-print(json.dumps(result, separators=(",", ":"), ensure_ascii=False), end="")`
-	args := []string{"python3", "-c", script, r.Method}
-	if r.Method == http.MethodPost {
-		args = append(args, body)
-	}
-	command := exec.CommandContext(ctx, args[0], args[1:]...)
-	command.Dir = s.root
-	command.Env = pythonBridgeEnvironment(s.root, s.config)
-	output, err := command.Output()
+	payload, err := s.nativeSettingsPayload(ctx, patch, r.Method == http.MethodPost)
 	if err != nil {
-		slog.Error("settings bridge failed", "method", r.Method, "error", err)
-		jsonResponse(w, http.StatusServiceUnavailable, typedError("settings unavailable", "common.requestFailed", true))
-		return
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(output, &payload); err != nil {
-		slog.Error("settings bridge returned invalid JSON", "method", r.Method, "error", err)
+		slog.Error("settings unavailable", "method", r.Method, "error", err)
 		jsonResponse(w, http.StatusServiceUnavailable, typedError("settings unavailable", "common.requestFailed", true))
 		return
 	}
@@ -4777,20 +4950,6 @@ print(json.dumps(result, separators=(",", ":"), ensure_ascii=False), end="")`
 		}
 	}
 	jsonResponse(w, http.StatusOK, payload)
-}
-
-func pythonBridgeEnvironment(root, config string) []string {
-	env := make([]string, 0, len(os.Environ())+2)
-	for _, value := range os.Environ() {
-		key, _, _ := strings.Cut(value, "=")
-		setting, product := productenv.Suffix(key)
-		if product && (setting == "ROOT" || setting == "CONFIG_DIR") || key == "PYTHONPATH" {
-			continue
-		}
-		env = append(env, value)
-	}
-	env = append(env, "PYTHONPATH="+root, productenv.Name("CONFIG_DIR")+"="+config, productenv.Name("AUTH_CONFIG_READ_ONLY")+"=1")
-	return env
 }
 
 // The browser carries this lifecycle token as a JavaScript Number, so it must stay below
@@ -5082,49 +5241,19 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.writePythonHome(w, r, user)
+	s.writeNativeHome(w, r, user)
 }
 
-func (s *server) writePythonHome(w http.ResponseWriter, r *http.Request, user authUser) {
+func (s *server) writeNativeHome(w http.ResponseWriter, r *http.Request, user authUser) {
 	topology, topologyErr := s.tmuxTopologySnapshot(true)
 	if topologyErr != nil {
 		http.Error(w, "session roster unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	request := map[string]any{
-		"sessions": topology.sessions, "role": user.role, "username": user.username,
-		"tmux_topology": map[string]any{"generation": topology.generation, "epoch": s.metadataEpoch()},
-		"language":      r.Header.Get("Accept-Language"), "capabilities": s.capabilities.Snapshot(),
-		"stats_only": queryTrue(r.URL.Query().Get("stats_only")), "backend": goRuntimeLabel(),
-		"dangerously_yolo": s.dangerouslyYolo,
-	}
-	ctx, release, err := s.admitPythonRender(r.Context())
+	body, err := s.renderNativeHome(r, user, topology)
 	if err != nil {
+		slog.Error("application page unavailable", "error", err)
 		http.Error(w, "application unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	defer release()
-	s.homeRendererMu.Lock()
-	if s.homeRenderer == nil && !s.htmlClosed {
-		s.homeRenderer, err = startPythonHomeRenderer(s.root, s.config)
-	}
-	renderer := s.homeRenderer
-	s.homeRendererMu.Unlock()
-	var body []byte
-	if renderer == nil {
-		err = fmt.Errorf("Python HTML renderer unavailable")
-	} else {
-		body, err = renderer.renderContext(ctx, request)
-	}
-	if err != nil {
-		s.homeRendererMu.Lock()
-		if s.homeRenderer == renderer {
-			s.homeRenderer = nil
-		}
-		s.homeRendererMu.Unlock()
-	}
-	if err != nil {
-		http.Error(w, "application unavailable", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -5564,7 +5693,14 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 		return
 	}
 	var msg struct {
-		Type       string `json:"type"`
+		Type   string `json:"type"`
+		Pane   string `json:"pane"`
+		Column int    `json:"column"`
+		Row    int    `json:"row"`
+		Count  int    `json:"count"`
+		Page   bool   `json:"page"`
+		Global bool   `json:"global"`
+
 		Data       string `json:"data"`
 		UserInput  *bool  `json:"user_input"`
 		Rows       int    `json:"rows"`
@@ -5576,7 +5712,14 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 		Foreground *bool  `json:"foreground"`
 		Activate   bool   `json:"activate"`
 	}
-	if json.Unmarshal(payload, &msg) != nil {
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		var control struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(payload, &control) == nil && control.Type == "application-scroll" {
+			s.rejectApplicationScroll(conn, session, err)
+			return
+		}
 		if writable {
 			if s.writeTerminalInput(stdin, conn, payload) && terminalInputIsActivity(payload) {
 				s.recordTerminalInput(session, pty)
@@ -5601,6 +5744,10 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 			cols := clampDimension(msg.Cols, 20, 500, 120)
 			pty.requestControl(cols, rows, 0, msg.Activate || msg.Foreground != nil && *msg.Foreground)
 		}
+	case "application-scroll":
+		if err := s.applicationScroll(ctx, session, msg.Pane, msg.Direction, msg.Count, msg.Column, msg.Row, msg.Page, msg.Global); err != nil {
+			s.rejectApplicationScroll(conn, session, err)
+		}
 	case "tmux-scroll":
 		if (msg.Direction == "up" || msg.Direction == "down") && msg.Lines > 0 {
 			lines := clampDimension(msg.Lines, 1, 80, 1)
@@ -5611,7 +5758,7 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 			if msg.Direction == "up" {
 				key = "scroll-up"
 			}
-			_ = s.tmuxPointCommand(ctx, "send-keys", "-X", "-N", strconv.Itoa(lines), key, "-t", s.exactTarget(session)).Run()
+			_ = s.tmuxPointCommand(ctx, "send-keys", "-X", "-t", s.exactTarget(session), "-N", strconv.Itoa(lines), key).Run()
 		}
 	case "refresh":
 		pty.requestControl(0, 0, msg.Txn)

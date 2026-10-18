@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
 from collections.abc import Callable
 from http import HTTPStatus
 from pathlib import Path
@@ -34,7 +35,7 @@ from tests.isolated_dev_server import IsolatedDevServer
 from tests.isolated_dev_server import assert_isolated_dev_server_port
 from tests.isolated_dev_server import isolated_dev_server  # noqa: F401  -- fixture
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401  -- fixture
-from yomux_lib.server import TmuxWebtermHTTPServer
+from tests.isolated_dev_server import REPO_ROOT, go_test_server_binary
 
 
 pytestmark = pytest.mark.socket
@@ -158,14 +159,21 @@ def test_m13_teardown_ends_the_process_and_releases_the_port(
 
 # Go is the subject; Python imports only construct the fixture or verify its ownership.
 @pytest.mark.go_backend
-def test_go_only_gate_rejects_python_listener_and_still_starts_go(
+def test_go_only_gate_rejects_python_selection_and_still_starts_go(
     monkeypatch: pytest.MonkeyPatch,
     isolated_dev_server_factory: Callable[..., IsolatedDevServer],
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("YOMUX_CHECK_GO_ONLY", "1")
 
-    with pytest.raises(RuntimeError, match="deprecated Python product server is forbidden"):
-        TmuxWebtermHTTPServer(("127.0.0.1", 0), object())
+    rejected_root = tmp_path / "rejected-runtime"
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(("YOMUX_", "YOLOMUX_"))}
+    environment["YOMUX_ROOT"] = str(rejected_root)
+    result = subprocess.run([str(go_test_server_binary(REPO_ROOT)), "--launch", "--backend", "python"],
+                            env=environment, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 2, result.stderr
+    assert "backend" in result.stderr
+    assert not rejected_root.exists()
 
     server = isolated_dev_server_factory("go-only-gate")
     assert Path(server.process.args[0]).name == "yomux-go", server.process.args

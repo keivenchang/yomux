@@ -1316,6 +1316,30 @@ func TestCurrentQuestionControlsIgnoreQuotedAndStaleQuestions(t *testing.T) {
 	}
 }
 
+func TestAgentAttentionKindSeparatesQuestionsFromApprovals(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{name: "question", text: "Which implementation should I use?\n\n› Ask Codex to do anything", want: "question"},
+		{name: "current question wins over stale approval text", text: "Allow this command?\n1. Yes\nEnter to select\nWhich implementation should I use?\n› Ask Codex to do anything", want: "question"},
+		{name: "approval", text: "Allow this command?\n1. Yes\n2. No\nEnter to select · Esc to cancel", want: "approval"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := classifyVisibleAgentText(test.text)
+			if got.Status != AgentStatusAsk || got.AttentionKind != test.want {
+				t.Fatalf("classification = %+v, want ask/%s", got, test.want)
+			}
+		})
+	}
+	got := classifyPaneStatus(AgentStatusPane{Status: "needs-input"}, AgentStatusRequest{})
+	if got.Status != AgentStatusAsk || got.AttentionKind != "unknown" {
+		t.Fatalf("unclassified structured ask = %+v, want ask/unknown", got)
+	}
+}
+
 func TestAttentionSignaturePreservesCommandArgumentsAndIgnoresTerminalPadding(t *testing.T) {
 	classify := func(text string) AgentStatusResult {
 		return ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "codex", PaneTarget: "%1"}, AgentStatusSources{

@@ -25,11 +25,9 @@ def test_common_protocol_unions_keep_request_and_response_variants_distinct():
 def test_static_slice_allowlist_is_an_exact_expansion_ratchet():
     assert check_local_service_types.static_slice() == (
         "yomux_lib/local_services/protocol_types.py",
-        "yomux_lib/local_services/command_router.py",
         "yomux_lib/local_services/rpc.py",
         "yomux_lib/local_services/client.py",
         "yomux_lib/local_services/registry.py",
-        "yomux_lib/local_services/static_contracts.py",
     )
 
 

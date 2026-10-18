@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="{{.Locale}}" dir="{{.Direction}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{{t "app.documentTitle"}}</title>
+<link rel="icon" data-yomux-favicon href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%2399d441'/%3E%3Ctext x='32' y='47' text-anchor='middle' font-family='Arial,sans-serif' font-size='46' font-weight='900' fill='%23111827'%3EY%3C/text%3E%3C/svg%3E" type="image/svg+xml">
+<link rel="stylesheet" href="{{asset "vendor/xterm.css"}}">
+<link rel="stylesheet" href="{{asset "brand.css"}}">
+<link rel="stylesheet" href="{{asset "vendor/dockview.css"}}">
+<link rel="stylesheet" href="{{asset "yomux.css"}}">
+<link rel="stylesheet" href="{{asset "vendor/highlight-github-dark.min.css"}}">
+<script src="{{asset "vendor/xterm.js"}}"></script>
+<script src="{{asset "vendor/xterm-addon-unicode11.js"}}"></script>
+<script src="{{asset "vendor/marked.min.js"}}" defer></script>
+<script src="{{asset "vendor/highlight.min.js"}}" defer></script>
+</head>
+<body>
+<div id="appRoot" class="app-root">
+<header class="topbar">
+  <div class="brand-cell">
+    {{brand "brand brand-title title" "div"}}
+    <span id="httpsWarning" class="transport-warning" hidden aria-label="{{t "app.noHttps"}}"></span>
+  </div>
+  <div id="sessionButtons" class="app-menu-area" aria-label="{{t "app.menusAria"}}"></div>
+  <div class="actions">
+    <div id="latencyMeter" class="latency-meter topbar-status-surface" title="{{t "app.latencyTitle"}}">
+      <svg class="latency-graph" viewBox="0 0 44 18" aria-hidden="true">
+        <polyline id="latencyLine" class="latency-line" points=""></polyline>
+      </svg>
+      <span id="latencyNumber" class="latency-number">-- ms</span>
+    </div>
+    <button id="notifyToggle" class="notify-toggle" title="{{t "notify.toggleTitle" "state" (t "state.off")}}">{{t "pref.section.notifications"}}</button>
+    <button id="refreshMeta">{{t "common.refresh"}}</button>
+    <button id="logoutButton" title="{{t "menu.file.logout"}}" aria-label="{{t "menu.file.logout"}}">{{t "menu.file.logout"}}</button>
+    <span id="status" class="sub a11y-only" role="status" aria-live="polite" aria-atomic="true">{{t "state.starting"}}</span>
+  </div>
+</header>
+<div id="attentionAlerts" class="attention-alerts" aria-live="polite"></div>
+<aside id="fileExplorer" class="file-explorer" hidden aria-label="{{t "finder.label.explorer"}}">
+  <div class="file-explorer-tree-col">
+    <div class="file-explorer-head">
+      <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/" spellcheck="false" aria-label="{{t "finder.toolbar.rootPath" "name" (t "finder.label.explorer")}}">
+      <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy" title="{{t "finder.toolbar.copyPath"}}" aria-label="{{t "finder.toolbar.copyPath"}}"></button>
+      <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="{{t "common.collapseAll"}}" aria-label="{{t "common.collapseAll"}}">▤</button>
+      <button type="button" id="fileExplorerHiddenToggle" class="file-explorer-hidden-toggle" title="{{t "finder.toolbar.hidden"}}" aria-pressed="false">.*</button>
+      <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle active" title="{{t "finder.toolbar.syncTitle"}}" aria-pressed="true">{{t "finder.toolbar.syncLabel"}}</button>
+      <button type="button" class="file-explorer-header-action" data-file-explorer-new-file title="{{t "finder.toolbar.newFile"}}" aria-label="{{t "finder.toolbar.newFile"}}">+</button>
+      <button type="button" class="file-explorer-header-action" data-file-explorer-new-folder title="{{t "finder.toolbar.newFolder"}}" aria-label="{{t "finder.toolbar.newFolder"}}">▣</button>
+      <button type="button" class="file-explorer-header-action" data-file-explorer-refresh title="{{t "common.refresh"}}" aria-label="{{t "common.refresh"}}">↻</button>
+      <button type="button" id="fileExplorerClose" class="file-explorer-close" title="{{t "finder.close" "name" (t "finder.label.explorer")}}" aria-label="{{t "common.close"}}"></button>
+    </div>
+    <div class="file-explorer-tree" id="fileExplorerTree" role="tree" tabindex="0"></div>
+  </div>
+</aside>
+<main id="grid" class="grid"></main>
+<div id="panelPool" class="panel-pool" aria-hidden="true"></div>
+<section id="modal" class="modal app-modal-overlay">
+  <div class="modal-dialog">
+    <div class="modal-head">
+      <div id="modalTitle">{{t "common.transcript"}}</div>
+      <button id="closeModal" title="{{t "common.close"}}" aria-label="{{t "common.close"}}">X</button>
+    </div>
+    <pre id="modalBody"></pre>
+  </div>
+</section>
+</div>
+<script id="yomux-bootstrap" type="application/json">{{.BootstrapJSON}}</script>
+<script src="{{asset "vendor/dockview-core.noStyle.js"}}"></script>
+<script src="{{asset "yomux.js"}}"></script>
+</body>
+</html>

@@ -1,0 +1,746 @@
+[
+  {
+    "input": "Ctrl+K",
+    "output": "⟦Ctrl+K·⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": "Ctrl+Ké",
+    "output": "⟦Çťřł+Ķé···⟧",
+    "protected": {}
+  },
+  {
+    "input": "Ctrl+K aaaa",
+    "output": "⟦Ctrl+K áááá··⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": "Ctrl+Ké aaaa",
+    "output": "⟦Çťřł+Ķé áááá·····⟧",
+    "protected": {}
+  },
+  {
+    "input": "Ctrl+K_",
+    "output": "⟦Ctrl+K_·⟧",
+    "protected": {
+      "Ctrl+K_": 1
+    }
+  },
+  {
+    "input": "Ctrl+K٥",
+    "output": "⟦Çťřł+Ķ٥···⟧",
+    "protected": {}
+  },
+  {
+    "input": "Ctrl+K.",
+    "output": "⟦Ctrl+K.·⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": "Ctrl+K.é",
+    "output": "⟦Çťřł+Ķ.é·⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": "Ctrl+K. aaaa",
+    "output": "⟦Ctrl+K. áááá··⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": "Ctrl+K.é aaaa",
+    "output": "⟦Çťřł+Ķ.é áááá··⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": "Ctrl+K._",
+    "output": "⟦Ctrl+K._·⟧",
+    "protected": {
+      "Ctrl+K._": 1
+    }
+  },
+  {
+    "input": "Ctrl+K.٥",
+    "output": "⟦Çťřł+Ķ.٥·⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": "Ctrl-A",
+    "output": "⟦Ctrl-A·⟧",
+    "protected": {
+      "Ctrl-A": 1
+    }
+  },
+  {
+    "input": "Ctrl-Aé",
+    "output": "⟦Çťřł-Áé···⟧",
+    "protected": {}
+  },
+  {
+    "input": "Ctrl-A aaaa",
+    "output": "⟦Ctrl-A áááá··⟧",
+    "protected": {
+      "Ctrl-A": 1
+    }
+  },
+  {
+    "input": "Ctrl-Aé aaaa",
+    "output": "⟦Çťřł-Áé áááá·····⟧",
+    "protected": {}
+  },
+  {
+    "input": "Ctrl-A_",
+    "output": "⟦Ctrl-A_·⟧",
+    "protected": {
+      "Ctrl-A_": 1
+    }
+  },
+  {
+    "input": "Ctrl-A٥",
+    "output": "⟦Çťřł-Á٥···⟧",
+    "protected": {}
+  },
+  {
+    "input": "Cmd+K.",
+    "output": "⟦Cmd+K.·⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": "Cmd+K.é",
+    "output": "⟦Çɱđ+Ķ.é·⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": "Cmd+K. aaaa",
+    "output": "⟦Cmd+K. áááá··⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": "Cmd+K.é aaaa",
+    "output": "⟦Çɱđ+Ķ.é áááá··⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": "Cmd+K._",
+    "output": "⟦Cmd+K._·⟧",
+    "protected": {
+      "Cmd+K._": 1
+    }
+  },
+  {
+    "input": "Cmd+K.٥",
+    "output": "⟦Çɱđ+Ķ.٥·⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": "Cmd+A-B..",
+    "output": "⟦Cmd+A-B..·⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  },
+  {
+    "input": "Cmd+A-B..é",
+    "output": "⟦Çɱđ+Á-Ɓ..é·⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  },
+  {
+    "input": "Cmd+A-B.. aaaa",
+    "output": "⟦Cmd+A-B.. áááá···⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  },
+  {
+    "input": "Cmd+A-B..é aaaa",
+    "output": "⟦Çɱđ+Á-Ɓ..é áááá··⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  },
+  {
+    "input": "Cmd+A-B.._",
+    "output": "⟦Cmd+A-B.._·⟧",
+    "protected": {
+      "Cmd+A-B.._": 1
+    }
+  },
+  {
+    "input": "Cmd+A-B..٥",
+    "output": "⟦Çɱđ+Á-Ɓ..٥·⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  },
+  {
+    "input": "éCtrl+K",
+    "output": "⟦éÇťřł+Ķ···⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl+Ké",
+    "output": "⟦éÇťřł+Ķé···⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl+K aaaa",
+    "output": "⟦éÇťřł+Ķ áááá·····⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl+Ké aaaa",
+    "output": "⟦éÇťřł+Ķé áááá·····⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl+K_",
+    "output": "⟦éÇťřł+Ķ_···⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl+K٥",
+    "output": "⟦éÇťřł+Ķ٥···⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl+K.",
+    "output": "⟦éÇťřł+Ķ.···⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl+K.é",
+    "output": "⟦éÇťřł+Ķ.é····⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl+K. aaaa",
+    "output": "⟦éÇťřł+Ķ. áááá·····⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl+K.é aaaa",
+    "output": "⟦éÇťřł+Ķ.é áááá······⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl+K._",
+    "output": "⟦éÇťřł+Ķ._····⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl+K.٥",
+    "output": "⟦éÇťřł+Ķ.٥····⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl-A",
+    "output": "⟦éÇťřł-Á···⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl-Aé",
+    "output": "⟦éÇťřł-Áé···⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl-A aaaa",
+    "output": "⟦éÇťřł-Á áááá·····⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl-Aé aaaa",
+    "output": "⟦éÇťřł-Áé áááá·····⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl-A_",
+    "output": "⟦éÇťřł-Á_···⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCtrl-A٥",
+    "output": "⟦éÇťřł-Á٥···⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCmd+K.",
+    "output": "⟦éÇɱđ+Ķ.···⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCmd+K.é",
+    "output": "⟦éÇɱđ+Ķ.é···⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCmd+K. aaaa",
+    "output": "⟦éÇɱđ+Ķ. áááá·····⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCmd+K.é aaaa",
+    "output": "⟦éÇɱđ+Ķ.é áááá·····⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCmd+K._",
+    "output": "⟦éÇɱđ+Ķ._···⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCmd+K.٥",
+    "output": "⟦éÇɱđ+Ķ.٥···⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCmd+A-B..",
+    "output": "⟦éÇɱđ+Á-Ɓ..····⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCmd+A-B..é",
+    "output": "⟦éÇɱđ+Á-Ɓ..é····⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCmd+A-B.. aaaa",
+    "output": "⟦éÇɱđ+Á-Ɓ.. áááá······⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCmd+A-B..é aaaa",
+    "output": "⟦éÇɱđ+Á-Ɓ..é áááá······⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCmd+A-B.._",
+    "output": "⟦éÇɱđ+Á-Ɓ.._····⟧",
+    "protected": {}
+  },
+  {
+    "input": "éCmd+A-B..٥",
+    "output": "⟦éÇɱđ+Á-Ɓ..٥····⟧",
+    "protected": {}
+  },
+  {
+    "input": "-Ctrl+K",
+    "output": "⟦-Ctrl+K·⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": "-Ctrl+Ké",
+    "output": "⟦-Çťřł+Ķé···⟧",
+    "protected": {}
+  },
+  {
+    "input": "-Ctrl+K aaaa",
+    "output": "⟦-Ctrl+K áááá··⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": "-Ctrl+Ké aaaa",
+    "output": "⟦-Çťřł+Ķé áááá·····⟧",
+    "protected": {}
+  },
+  {
+    "input": "-Ctrl+K_",
+    "output": "⟦-Ctrl+K_·⟧",
+    "protected": {
+      "Ctrl+K_": 1
+    }
+  },
+  {
+    "input": "-Ctrl+K٥",
+    "output": "⟦-Çťřł+Ķ٥···⟧",
+    "protected": {}
+  },
+  {
+    "input": "-Ctrl+K.",
+    "output": "⟦-Ctrl+K.·⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": "-Ctrl+K.é",
+    "output": "⟦-Çťřł+Ķ.é·⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": "-Ctrl+K. aaaa",
+    "output": "⟦-Ctrl+K. áááá···⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": "-Ctrl+K.é aaaa",
+    "output": "⟦-Çťřł+Ķ.é áááá···⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": "-Ctrl+K._",
+    "output": "⟦-Ctrl+K._·⟧",
+    "protected": {
+      "Ctrl+K._": 1
+    }
+  },
+  {
+    "input": "-Ctrl+K.٥",
+    "output": "⟦-Çťřł+Ķ.٥·⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": "-Ctrl-A",
+    "output": "⟦-Ctrl-A·⟧",
+    "protected": {
+      "Ctrl-A": 1
+    }
+  },
+  {
+    "input": "-Ctrl-Aé",
+    "output": "⟦-Çťřł-Áé···⟧",
+    "protected": {}
+  },
+  {
+    "input": "-Ctrl-A aaaa",
+    "output": "⟦-Ctrl-A áááá··⟧",
+    "protected": {
+      "Ctrl-A": 1
+    }
+  },
+  {
+    "input": "-Ctrl-Aé aaaa",
+    "output": "⟦-Çťřł-Áé áááá·····⟧",
+    "protected": {}
+  },
+  {
+    "input": "-Ctrl-A_",
+    "output": "⟦-Ctrl-A_·⟧",
+    "protected": {
+      "Ctrl-A_": 1
+    }
+  },
+  {
+    "input": "-Ctrl-A٥",
+    "output": "⟦-Çťřł-Á٥···⟧",
+    "protected": {}
+  },
+  {
+    "input": "-Cmd+K.",
+    "output": "⟦-Cmd+K.·⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": "-Cmd+K.é",
+    "output": "⟦-Çɱđ+Ķ.é·⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": "-Cmd+K. aaaa",
+    "output": "⟦-Cmd+K. áááá···⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": "-Cmd+K.é aaaa",
+    "output": "⟦-Çɱđ+Ķ.é áááá···⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": "-Cmd+K._",
+    "output": "⟦-Cmd+K._·⟧",
+    "protected": {
+      "Cmd+K._": 1
+    }
+  },
+  {
+    "input": "-Cmd+K.٥",
+    "output": "⟦-Çɱđ+Ķ.٥·⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": "-Cmd+A-B..",
+    "output": "⟦-Cmd+A-B..·⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  },
+  {
+    "input": "-Cmd+A-B..é",
+    "output": "⟦-Çɱđ+Á-Ɓ..é·⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  },
+  {
+    "input": "-Cmd+A-B.. aaaa",
+    "output": "⟦-Cmd+A-B.. áááá···⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  },
+  {
+    "input": "-Cmd+A-B..é aaaa",
+    "output": "⟦-Çɱđ+Á-Ɓ..é áááá···⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  },
+  {
+    "input": "-Cmd+A-B.._",
+    "output": "⟦-Cmd+A-B.._·⟧",
+    "protected": {
+      "Cmd+A-B.._": 1
+    }
+  },
+  {
+    "input": "-Cmd+A-B..٥",
+    "output": "⟦-Çɱđ+Á-Ɓ..٥·⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  },
+  {
+    "input": " Ctrl+K",
+    "output": "⟦ Ctrl+K·⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": " Ctrl+Ké",
+    "output": "⟦ Çťřł+Ķé···⟧",
+    "protected": {}
+  },
+  {
+    "input": " Ctrl+K aaaa",
+    "output": "⟦ Ctrl+K áááá··⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": " Ctrl+Ké aaaa",
+    "output": "⟦ Çťřł+Ķé áááá·····⟧",
+    "protected": {}
+  },
+  {
+    "input": " Ctrl+K_",
+    "output": "⟦ Ctrl+K_·⟧",
+    "protected": {
+      "Ctrl+K_": 1
+    }
+  },
+  {
+    "input": " Ctrl+K٥",
+    "output": "⟦ Çťřł+Ķ٥···⟧",
+    "protected": {}
+  },
+  {
+    "input": " Ctrl+K.",
+    "output": "⟦ Ctrl+K.·⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": " Ctrl+K.é",
+    "output": "⟦ Çťřł+Ķ.é·⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": " Ctrl+K. aaaa",
+    "output": "⟦ Ctrl+K. áááá···⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": " Ctrl+K.é aaaa",
+    "output": "⟦ Çťřł+Ķ.é áááá···⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": " Ctrl+K._",
+    "output": "⟦ Ctrl+K._·⟧",
+    "protected": {
+      "Ctrl+K._": 1
+    }
+  },
+  {
+    "input": " Ctrl+K.٥",
+    "output": "⟦ Çťřł+Ķ.٥·⟧",
+    "protected": {
+      "Ctrl+K": 1
+    }
+  },
+  {
+    "input": " Ctrl-A",
+    "output": "⟦ Ctrl-A·⟧",
+    "protected": {
+      "Ctrl-A": 1
+    }
+  },
+  {
+    "input": " Ctrl-Aé",
+    "output": "⟦ Çťřł-Áé···⟧",
+    "protected": {}
+  },
+  {
+    "input": " Ctrl-A aaaa",
+    "output": "⟦ Ctrl-A áááá··⟧",
+    "protected": {
+      "Ctrl-A": 1
+    }
+  },
+  {
+    "input": " Ctrl-Aé aaaa",
+    "output": "⟦ Çťřł-Áé áááá·····⟧",
+    "protected": {}
+  },
+  {
+    "input": " Ctrl-A_",
+    "output": "⟦ Ctrl-A_·⟧",
+    "protected": {
+      "Ctrl-A_": 1
+    }
+  },
+  {
+    "input": " Ctrl-A٥",
+    "output": "⟦ Çťřł-Á٥···⟧",
+    "protected": {}
+  },
+  {
+    "input": " Cmd+K.",
+    "output": "⟦ Cmd+K.·⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": " Cmd+K.é",
+    "output": "⟦ Çɱđ+Ķ.é·⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": " Cmd+K. aaaa",
+    "output": "⟦ Cmd+K. áááá···⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": " Cmd+K.é aaaa",
+    "output": "⟦ Çɱđ+Ķ.é áááá···⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": " Cmd+K._",
+    "output": "⟦ Cmd+K._·⟧",
+    "protected": {
+      "Cmd+K._": 1
+    }
+  },
+  {
+    "input": " Cmd+K.٥",
+    "output": "⟦ Çɱđ+Ķ.٥·⟧",
+    "protected": {
+      "Cmd+K": 1
+    }
+  },
+  {
+    "input": " Cmd+A-B..",
+    "output": "⟦ Cmd+A-B..·⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  },
+  {
+    "input": " Cmd+A-B..é",
+    "output": "⟦ Çɱđ+Á-Ɓ..é·⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  },
+  {
+    "input": " Cmd+A-B.. aaaa",
+    "output": "⟦ Cmd+A-B.. áááá···⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  },
+  {
+    "input": " Cmd+A-B..é aaaa",
+    "output": "⟦ Çɱđ+Á-Ɓ..é áááá···⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  },
+  {
+    "input": " Cmd+A-B.._",
+    "output": "⟦ Cmd+A-B.._·⟧",
+    "protected": {
+      "Cmd+A-B.._": 1
+    }
+  },
+  {
+    "input": " Cmd+A-B..٥",
+    "output": "⟦ Çɱđ+Á-Ɓ..٥·⟧",
+    "protected": {
+      "Cmd+A-B": 1
+    }
+  }
+]

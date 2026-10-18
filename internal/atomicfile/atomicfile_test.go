@@ -4,7 +4,9 @@ package atomicfile
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -129,5 +131,103 @@ func TestSecretPublicationIsCompleteAndShared(t *testing.T) {
 	raw, _ := os.ReadFile(path)
 	if string(raw) != "corrupt" {
 		t.Fatal("corrupt key mutated")
+	}
+}
+
+func TestRawSecretIndependentCreatorsPreserveBinaryFormat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "chat-cursor.key")
+	var workers sync.WaitGroup
+	keys := make(chan []byte, 40)
+	for range 40 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			key, err := LoadOrCreateRawSecret(context.Background(), path)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			keys <- key
+		}()
+	}
+	workers.Wait()
+	close(keys)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 32 {
+		t.Fatalf("raw key length=%d", len(raw))
+	}
+	for key := range keys {
+		if !bytes.Equal(key, raw) {
+			t.Fatal("independent creators disagreed")
+		}
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("key mode: %v %v", info, err)
+	}
+	long := bytes.Repeat([]byte{0, 255, 10, 32}, 20)
+	if err := os.WriteFile(path, long, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key, err := LoadOrCreateRawSecret(context.Background(), path)
+	if err != nil || !bytes.Equal(key, long) {
+		t.Fatal("long binary key changed")
+	}
+}
+
+func TestRawSecretLegacyPublicationAndCancellation(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		t.Run(fmt.Sprint(cancelled), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "legacy-key")
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			observed := make(chan struct{})
+			var once sync.Once
+			read := func() ([]byte, error) {
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					return nil, err
+				}
+				if len(raw) < 32 {
+					once.Do(func() { close(observed) })
+					return nil, errIncompleteSecret
+				}
+				return raw, nil
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result := make(chan error, 1)
+			go func() { _, err := waitForCompleteSecret(ctx, read); result <- err }()
+			<-observed
+			if cancelled {
+				cancel()
+			} else {
+				if err := os.WriteFile(path, bytes.Repeat([]byte{1}, 32), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := <-result
+			if cancelled && !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation=%v", err)
+			}
+			if !cancelled && err != nil {
+				t.Fatalf("legacy publication=%v", err)
+			}
+			raw, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			expected := 0
+			if !cancelled {
+				expected = 32
+			}
+			if len(raw) != expected {
+				t.Fatal("reader rewrote legacy key")
+			}
+		})
 	}
 }

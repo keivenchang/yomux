@@ -3,6 +3,13 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$repo_root/tools/startup_common.sh"
+yomux_validate_backend || exit $?
+if [[ "$#" -eq 1 && "$1" == --check-assets ]]; then
+  for asset in xterm.js xterm.css xterm-addon-unicode11.js; do
+    [[ -s "$repo_root/static/vendor/$asset" ]] || { printf 'error: missing tracked asset: %s\n' "$asset" >&2; exit 2; }
+  done
+  exit 0
+fi
 yomux_normalize_environment
 primary_port="$(product_env_print PORT "$(product_env_print DEFAULT_PORT "")")"
 default_port="$primary_port"
@@ -17,16 +24,19 @@ http_mode=0
 print_command=0
 check_assets=0
 force_start=0
+dangerously_yolo=true
+config_path=""
+stats_path=""
 launched_pid=""
 ports=()
-python_bin="${PYTHON:-python3}"
+
 server_shell="${SHELL:-$(command -v bash)}"
 
 usage() {
   cat <<'EOF'
-Usage: boot.sh [--print-command|--check-assets] [--ignore-load (legacy no-op)] [--force] [--golang|--deprecated-python|--backend go] [--http|--cert CERT --key KEY] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
+Usage: boot.sh [--print-command|--check-assets] [--ignore-load (legacy no-op)] [--force] [--golang|--backend go|auto] [--http|--cert CERT --key KEY] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
-Restart this checkout's Go YOmux server. Use --deprecated-python to select the legacy Python backend. YOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOMUX_DEFAULT_PORT. Non-primary ports use --dev by default.
+Restart this checkout's Go YOmux server. YOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOMUX_DEFAULT_PORT. The retired Python server and development reloader are unavailable.
 
 Operator launches always use this Unix user's machine-wide tmux server, so every session visible to `tmux list-sessions` is eligible for discovery. The launcher clears inherited nested-tmux and private-socket routing; only isolated test fixtures should set YOMUX_TMUX_SOCKET explicitly.
 
@@ -34,7 +44,6 @@ Examples:
   ./boot.sh
   ./boot.sh <dev-port>
   ./boot.sh --force <port>
-  ./boot.sh --deprecated-python <port>
   ./boot.sh --port <port-a> --port <port-b>
 EOF
 }
@@ -76,21 +85,27 @@ while [[ "$#" -gt 0 ]]; do
       shift
       ;;
     --deprecated-python)
-      backend="python"
-      shift
+      die "the Python server is retired; use --backend go"
       ;;
     --backend)
       [[ "$#" -ge 2 ]] || die "--backend requires a value"
       case "$2" in
-        go) backend="go" ;;
-        python) die "the Python backend is deprecated for managed launches; use --deprecated-python" ;;
-        *) die "invalid backend: $2 (expected go)" ;;
+        go|auto) backend="go" ;;
+        python) die "the Python backend is deprecated for managed launches; use --backend go" ;;
+        *) die "invalid backend: $2 (expected go or auto)" ;;
       esac
       shift 2
       ;;
     --host)
       [[ "$#" -ge 2 ]] || die "--host requires a value"
       host="$2"
+      shift 2
+      ;;
+    --no-dang) dangerously_yolo=false; shift ;;
+    --dang|--dangerously-yolo) dangerously_yolo=true; shift ;;
+    --config|--stats)
+      [[ "$#" -ge 2 ]] || die "$1 requires a path"
+      if [[ "$1" == --config ]]; then config_path="$2"; else stats_path="$2"; fi
       shift 2
       ;;
     --http)
@@ -113,8 +128,7 @@ while [[ "$#" -gt 0 ]]; do
       shift 2
       ;;
     --dev)
-      dev_mode="always"
-      shift
+      die "--dev is retired; rebuild and restart the Go server"
       ;;
     --no-dev)
       dev_mode="never"
@@ -136,6 +150,9 @@ while [[ "$#" -gt 0 ]]; do
       ;;
   esac
 done
+
+[[ -z "$config_path" ]] || product_env_assign CONFIG_DIR="$config_path"
+[[ -z "$stats_path" ]] || product_env_assign STATS_DATABASE="$stats_path"
 
 if [[ -n "$cert_path" || -n "$key_path" ]]; then
   [[ "$http_mode" -eq 0 ]] || die "--http cannot be combined with --cert or --key"
@@ -174,31 +191,11 @@ export PYTHONUNBUFFERED=1
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 yomux_use_machine_tmux
 
-# YO!agent's Claude backend runs `claude` non-interactively. On macOS, the `claude`
-# binary authenticates only via ANTHROPIC_API_KEY (or a Keychain login) and does NOT
-# read primaryApiKey from ~/.claude.json the way the Linux build does, so export the
-# stored primaryApiKey as ANTHROPIC_API_KEY when it is not already set. Exported (not
-# passed on argv) so the key never appears in `ps`. Linux is excluded: its `claude`
-# build already reads primaryApiKey from ~/.claude.json directly, and forcing the env
-# var here collides with a claude.ai (OAuth) login stored in the same file.
+# Client login remains client-owned; explicit API credentials can be inherited.
 # TODO: verify this is still accurate on the current macOS `claude` release.
-if [[ "$(uname -s)" == "Darwin" && -z "${ANTHROPIC_API_KEY:-}" && -r "${HOME}/.claude.json" ]]; then
-  ANTHROPIC_API_KEY="$("$python_bin" -c 'import json, os
-try:
-    print(json.load(open(os.path.expanduser("~/.claude.json"))).get("primaryApiKey") or "")
-except Exception:
-    print("")' 2>/dev/null || true)"
-  [[ -n "$ANTHROPIC_API_KEY" ]] && export ANTHROPIC_API_KEY
-fi
-
+go_binary="$(yomux_go_binary "$repo_root")" || exit $?
+"$go_binary" --operator version --root "$repo_root" >/dev/null || exit $?
 extra_env=()
-go_binary=""
-if [[ "$backend" == "go" ]]; then
-  go_binary="$(product_env_print GO_BINARY "")"
-  if [[ -z "$go_binary" ]]; then
-    go_binary="$("$python_bin" "$repo_root/tools/go_binary.py" "$repo_root")"
-  fi
-fi
 while IFS= read -r -d '' assignment; do
   extra_env+=("$assignment")
 done < <(yomux_server_launch_environment "$backend" "$go_binary")
@@ -216,25 +213,18 @@ use_dev_mode() {
 server_args=()
 build_server_args() {
   local port="$1"
-  server_args=(--host "$host" --port "$port" --dang)
+  server_args=(--host "$host" --port "$port" "--dang=$dangerously_yolo")
+  [[ -z "$config_path" ]] || server_args+=(--config "$config_path")
+  [[ -z "$stats_path" ]] || server_args+=(--stats "$stats_path")
   if [[ "$http_mode" -eq 1 ]]; then
     server_args+=(--http)
   elif [[ -n "$cert_path" ]]; then
     server_args+=(--cert "$cert_path" --key "$key_path")
-  else
-    server_args+=(--self-signed)
   fi
   if [[ "$force_start" -eq 1 ]]; then
     server_args+=(--force)
   fi
-  if [[ "$backend" == "go" ]]; then
-    server_args+=(--backend go)
-  else
-    server_args+=(--backend python)
-  fi
-  if [[ "$backend" == "python" ]] && use_dev_mode "$port"; then
-    server_args+=(--dev)
-  fi
+  server_args+=(--backend go)
 }
 
 log_path_for() {
@@ -246,7 +236,7 @@ print_launch_command() {
   local port="$1"
   local log_path
   local isolation_exports
-  isolation_exports="$("$python_bin" "$repo_root/tools/instance_isolation.py" --port "$port")" || die "port $port launch refused by instance-isolation preflight"
+  isolation_exports="$("$go_binary" --operator plan-direct --root "$repo_root" --port "$port")" || die "port $port launch refused by instance-isolation preflight"
   printf '%s\n' "$isolation_exports"
   log_path="$(log_path_for "$port")"
   build_server_args "$port"
@@ -254,12 +244,12 @@ print_launch_command() {
     local launcher session_name plan_json env_count
     launcher="$(yomux_macos_server_launcher)"
     session_name="$(yomux_macos_server_tmux_session "$port")"
-    plan_json="$("$python_bin" "$repo_root/tools/instance_isolation.py" plan-direct --port "$port")" || die "port $port launch refused by instance-isolation preflight"
+    plan_json="$("$go_binary" --operator plan-direct --root "$repo_root" --port "$port")" || die "port $port launch refused by instance-isolation preflight"
     env_count="${#extra_env[@]}"
     printf 'launchctl bootout %q 2>/dev/null || true\n' "$(yomux_macos_launch_target "$port")"
     printf 'env -u TMUX -u TMUX_PANE tmux kill-session -t %q 2>/dev/null || true\n' "=$session_name"
     printf 'env -u TMUX -u TMUX_PANE tmux new-session -d -s %q -c %q /bin/bash -c %q bash %q %q %q %q %q %q %q %q' \
-      "$session_name" "$repo_root" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yomux.py" "$log_path" "$plan_json" "$env_count"
+      "$session_name" "$repo_root" "$launcher" "$repo_root" "$PATH" "$server_shell" "$go_binary" "$go_binary" "$log_path" "$plan_json" "$env_count"
     for item in "${extra_env[@]}"; do
       printf ' %q' "$item"
     done
@@ -280,13 +270,13 @@ shell_command_for() {
   # that client socket instead of the user's shared default server. Managed launches
   # always clear YOMUX_TMUX_SOCKET below; isolated fixtures launch their own process
   # directly with a private socket instead of going through this operator path.
-  printf 'cd %q && exec env TMUX= TMUX_PANE= TERM=%q PYTHONUNBUFFERED=%q MALLOC_ARENA_MAX=%q PATH=%q' "$repo_root" "$TERM" "$PYTHONUNBUFFERED" "$MALLOC_ARENA_MAX" "$PATH"
+  printf 'cd %q && exec env TMUX= TMUX_PANE= TERM=%q MALLOC_ARENA_MAX=%q PATH=%q' "$repo_root" "$TERM" "$MALLOC_ARENA_MAX" "$PATH"
   for item in "${extra_env[@]}"; do
     local key="${item%%=*}"
     local value="${item#*=}"
     printf ' %s=%q' "$key" "$value"
   done
-  printf ' %q %q' "$python_bin" "${repo_root}/yomux.py"
+  printf ' %q --launch --root %q' "$go_binary" "$repo_root"
   for item in "${server_args[@]}"; do
     printf ' %q' "$item"
   done
@@ -379,10 +369,13 @@ launch_process_is_alive() {
 probe_healthz() {
   local port="$1"
   local scheme="https"
+  local probe_host="${host:-localhost}"
+  case "$probe_host" in ""|0.0.0.0|::) probe_host=localhost ;; esac
+  [[ "$probe_host" != *:* || "$probe_host" == \[*\] ]] || probe_host="[$probe_host]"
   if [[ "$http_mode" -eq 1 ]]; then
     scheme="http"
   fi
-  curl -sk -o /dev/null -w '%{http_code}' "${scheme}://localhost:${port}/healthz" 2>/dev/null || true
+  curl -sk -o /dev/null -w '%{http_code}' "${scheme}://${probe_host}:${port}/healthz" 2>/dev/null || true
 }
 
 wait_for_port() {
@@ -473,25 +466,14 @@ preflight_log_sinks() {
 
 product_root_is_available() {
   local port="$1"
-  (cd -- "$repo_root" && PYTHONDONTWRITEBYTECODE=1 "$python_bin" -c '
-import os
-import sys
-from tools.instance_isolation import apply_early_instance_environment
-from tools.instance_isolation import normalize_yomux_environment
-from yomux_lib.infra.root_paths import resolve_yomux_roots, runtime_root
-from yomux_lib.infra.instance_locks import instance_root_is_available
-apply_early_instance_environment(["--port", sys.argv[1]])
-values = normalize_yomux_environment(os.environ)
-roots = resolve_yomux_roots(values, default_runtime_dir=runtime_root(environ=values))
-raise SystemExit(0 if instance_root_is_available(roots) else 1)
-' "$port")
+  "$go_binary" --operator root-available --root "$repo_root" --port "$port"
 }
 
 restart_port() {
   local port="$1"
   local log_path
   local previous_listener_pids
-  if ! yomux_validate_instance_isolation "$repo_root" "$python_bin" "$port"; then
+  if ! yomux_validate_instance_isolation "$repo_root" "$go_binary" "$port"; then
     die "port $port launch refused by instance-isolation preflight"
   fi
   log_path="$(log_path_for "$port")"
@@ -510,15 +492,20 @@ restart_port() {
   launched_pid=""
 
   if [[ "$force_start" -eq 1 && "$(uname -s)" == "Darwin" ]]; then
-    # The Python launch path performs the one identity-checked replacement.
+    # The native owner proves identity before changing the supervisor.
     # Only remove the launchd wrapper here; a second force pass could kill a
     # different instance after the first replacement has already completed.
+    local proof_args=(--operator verify-replacement --root "$repo_root" --port "$port")
+    [[ "$http_mode" -eq 0 ]] || proof_args+=(--http)
+    [[ -z "$cert_path" ]] || proof_args+=(--cert "$cert_path" --key "$key_path")
+    proof_args+=(--host "$host")
+    "$go_binary" "${proof_args[@]}" || die "listener replacement proof failed"
     yomux_bootout_macos_server "$port"
   fi
 
   printf '\n[%s] boot.sh launching port %s from %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$port" "$repo_root" >> "$log_path"
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    yomux_submit_macos_server "$repo_root" "$python_bin" "$server_shell" "$PATH" "$port" "$log_path" "${#extra_env[@]}" "${extra_env[@]}" "${server_args[@]}"
+    yomux_submit_macos_server "$repo_root" "$go_binary" "$server_shell" "$PATH" "$port" "$log_path" "${#extra_env[@]}" "${extra_env[@]}" "${server_args[@]}"
   else
     launch_server "$log_path"
   fi
@@ -531,6 +518,9 @@ restart_port() {
     release_port_restart_lock "$port"
     return 1
   fi
+  local ready_args=(--operator ready --root "$repo_root" --host "$host" --port "$port" --timeout 20s)
+  [[ "$http_mode" -eq 0 ]] || ready_args+=(--http)
+  "$go_binary" "${ready_args[@]}" || { release_port_restart_lock "$port"; return 1; }
   release_port_restart_lock "$port"
 }
 
@@ -546,11 +536,11 @@ if [[ "$check_assets" -eq 1 ]]; then
   exit 0
 fi
 
-log_dir="$("$python_bin" "$repo_root/tools/instance_isolation.py" resolve-product-path "$(product_env_name LOG_DIR)" "$log_dir")" \
+log_dir="$("$go_binary" --operator resolve-product-path --root "$repo_root" -- "$(product_env_name LOG_DIR)" "$log_dir")" \
   || die "log directory refused by product-root policy"
-restart_lock_base="$("$python_bin" "$repo_root/tools/instance_isolation.py" resolve-product-path TMPDIR "$restart_lock_base")" \
+restart_lock_base="$("$go_binary" --operator resolve-product-path --root "$repo_root" -- TMPDIR "$restart_lock_base")" \
   || die "restart lock directory refused by product-root policy"
-if ! yomux_validate_root_environment "$repo_root" "$python_bin"; then
+if ! yomux_validate_root_environment "$repo_root" "$go_binary"; then
   die "startup root validation failed before listener mutation"
 fi
 

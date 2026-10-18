@@ -95,6 +95,7 @@ type AgentStatusResult struct {
 	Status                 AgentStatus
 	Evidence               []string
 	QueuedFollowupQuestion bool
+	AttentionKind          string
 	AttentionSignature     string
 	Reason                 string
 	RawStatus              string
@@ -211,6 +212,10 @@ func classifyPaneStatus(pane AgentStatusPane, request AgentStatusRequest) AgentS
 	case "approval", "needs-approval", "needs-input", "attention", "interrupted":
 		result.Status = AgentStatusAsk
 		result.Evidence = []string{"structured-ask-status"}
+		result.AttentionKind = agentAttentionKind(pane.VisibleText)
+		if raw == "approval" || raw == "needs-approval" {
+			result.AttentionKind = "approval"
+		}
 		return result
 	case "working":
 		result.Status = AgentStatusRun
@@ -363,7 +368,9 @@ func classifyVisibleAgentText(text string) AgentStatusResult {
 		return unavailable("conflicting-pane-evidence")
 	}
 	if ask {
-		return result(AgentStatusAsk, []string{"prompt-or-approval"})
+		classified := result(AgentStatusAsk, []string{"prompt-or-approval"})
+		classified.AttentionKind = agentAttentionKindFromEvidence(approvalText, currentComposerQuestion(lines[tailStart:]))
+		return classified
 	}
 	if run {
 		classified := result(AgentStatusRun, []string{"working-screen"})
@@ -380,6 +387,24 @@ func classifyVisibleAgentText(text string) AgentStatusResult {
 		return result(AgentStatusIdle, []string{"idle-prompt"})
 	}
 	return unavailable("ambiguous-pane-evidence")
+}
+
+func agentAttentionKind(text string) string {
+	kind := classifyVisibleAgentText(text).AttentionKind
+	if kind == "" {
+		return "unknown"
+	}
+	return kind
+}
+
+func agentAttentionKindFromEvidence(promptText string, composerQuestion bool) string {
+	if composerQuestion {
+		return "question"
+	}
+	if containsAny(promptText, "enter to select", "esc to cancel", "yes, and don't ask", "yes/no", "approve this", "approve command", "approval required", "approval needed", "allow this", "would you like to run the following") {
+		return "approval"
+	}
+	return "unknown"
 }
 
 func codexQueuedFollowupQuestionAfter(lines []string, workingFooter int) bool {
@@ -599,7 +624,12 @@ func result(status AgentStatus, evidence []string) AgentStatusResult {
 	if len(evidence) > MaxAgentStatusEvidence {
 		evidence = evidence[:MaxAgentStatusEvidence]
 	}
-	return AgentStatusResult{Status: status, Evidence: append([]string(nil), evidence...)}
+	classified := AgentStatusResult{Status: status, Evidence: append([]string(nil), evidence...)}
+	if status == AgentStatusAsk {
+		// Persisted pause evidence need not distinguish a question from approval.
+		classified.AttentionKind = "unknown"
+	}
+	return classified
 }
 
 func resultAt(status AgentStatus, evidence []string, observedAt time.Time) AgentStatusResult {
@@ -1188,6 +1218,9 @@ func (c *AgentStatusCollector) collect(parent context.Context, fact HostFactCont
 			rosterEntry["attention_acknowledged"] = entry.attentionSettled
 		}
 		rosterEntry["queued_followup_question"] = result.QueuedFollowupQuestion
+		if result.Status == AgentStatusAsk {
+			rosterEntry["attention_kind"] = result.AttentionKind
+		}
 		if entry.completionSettled {
 			rosterEntry["completion_settled"] = true
 		}

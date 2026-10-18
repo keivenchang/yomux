@@ -32,11 +32,12 @@ from tests.browser_helpers.browser_layout import install_live_runtime_boot_error
 from tests.browser_helpers.browser_layout import register_browser_new_document_script
 from tests.browser_helpers.browser_layout import WebDriverWait
 from tests.gate_harness import GateAuthCredentials
-from tests.gate_harness import GateLiveServer
+from tests.isolated_dev_server import IsolatedDevServer
+from tests.isolated_dev_server import assert_isolated_dev_server_port
 from tests.gate_harness import gate_auth_credentials  # noqa: F401
-from tests.gate_harness import gate_authenticated_live_server  # noqa: F401
+from tests.native_gate_fixtures import gate_authenticated_live_server  # noqa: F401
 from tests.gate_harness import gate_http_port  # noqa: F401
-from tests.gate_harness import gate_live_server  # noqa: F401
+from tests.native_gate_fixtures import gate_live_server  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.gate_harness import repeat
@@ -250,7 +251,7 @@ class E2EBrowserHarness:
     def __init__(
         self,
         driver,
-        runtime: GateLiveServer,
+        runtime: IsolatedDevServer,
         *,
         test_id: str,
         evidence_root: Path,
@@ -676,8 +677,8 @@ class E2EBrowserHarness:
 
 
 @contextmanager
-def _e2e_browser_context(request, browser, runtime: GateLiveServer):
-    assert 7900 <= runtime.port <= 7999, runtime.port
+def _e2e_browser_context(request, browser, runtime: IsolatedDevServer):
+    assert_isolated_dev_server_port(runtime.port)
     evidence_root = Path(os.environ.get(E2E_EVIDENCE_ROOT_ENV, str(DEFAULT_E2E_EVIDENCE_ROOT)))
     harness = E2EBrowserHarness(
         browser,
@@ -690,20 +691,18 @@ def _e2e_browser_context(request, browser, runtime: GateLiveServer):
 
 
 @pytest.fixture
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-def e2e_browser(request, browser, gate_live_server: GateLiveServer) -> E2EBrowserHarness:
-    """Provide the real app in Chrome on isolated 7900s resources."""
+def e2e_browser(request, browser, gate_live_server: IsolatedDevServer) -> E2EBrowserHarness:
+    """Provide the real app in Chrome on fixture-owned resources."""
 
     with _e2e_browser_context(request, browser, gate_live_server) as harness:
         yield harness
 
 
 @pytest.fixture
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 def authenticated_e2e_browser(
     request,
     browser,
-    gate_authenticated_live_server: GateLiveServer,
+    gate_authenticated_live_server: IsolatedDevServer,
     gate_auth_credentials: GateAuthCredentials,
 ) -> E2EBrowserHarness:
     """Provide a real Chrome session established through the product login form."""

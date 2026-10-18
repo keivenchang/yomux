@@ -2,6 +2,10 @@
 
 This page keeps the durable user-visible rules. The selected backend's capability catalog determines which product areas are available. Exact geometry, event ordering, and regression assertions belong in the current browser and Node tests.
 
+## Supported runtime
+
+Go owns the supported runtime. Shared browser shells and saved layout aliases do not establish that a server feature exists. Search & Runs event search and run history, background AI activity summaries, watched pull requests, and hosted GitHub/Linear enrichment are retired. Native chat, agent conversations, terminal transcripts, local Finder/Git views, and per-session event logs retain their own capability and route owners. The current route and retirement inventory is in [`GO_MIGRATION.md`](../../GO_MIGRATION.md).
+
 ## Software updates
 
 - The update notice appears after an eligible `version.yaml` bump reaches `origin/main`; ordinary commits without a higher product version stay silent. The configured major/minor/patch/none preference controls notices, and `none` disables update checks.
@@ -12,6 +16,7 @@ This page keeps the durable user-visible rules. The selected backend's capabilit
 ## Layout and navigation
 
 - Keep panes and tabs usable across desktop, narrow-window, and touch layouts. Preserve the user's active selection and restored layout when switching between surfaces.
+- When switching Tabber from Normal to Advanced, retain Tabber as the selected home tab if it was active before the switch.
 - Pane header buttons and tab-close controls use the same dimensions and styling on mobile, touch, and desktop layouts. Do not enlarge their hit targets or header rows for touch; native touch taps use the same actions as desktop clicks.
 - When a tmux session exits outside YOmux, remove its tab and reconcile its pane within five seconds while preserving the saved layout placeholder.
 - Session rename accepts one submission while its reply is pending. The submit button visibly disables, the existing tab displays the proposed name, and rejection restores the original name and re-enables submission. Accepted renames preserve the new tab, active pane, and roster when an older roster arrives.
@@ -21,7 +26,9 @@ This page keeps the durable user-visible rules. The selected backend's capabilit
 
 ## Terminal and status
 
+- Mouse-reporting terminal panes use xterm's negotiated mouse protocol for ordinary desktop wheel input and preserve native Page Up/Down bytes. This path works without the optional Tmux diagnostics snapshot. Existing Codex/OpenCode scroll controls keep their explicit application routes. Shift+wheel and Shift+Page Up/Down select tmux history. Claude keeps its conversation history inside the application while using an alternate screen; tmux copy mode can therefore show 0/0 even when Claude has older messages. Use ordinary scrolling or unshifted Page Up/Down (Fn+Up/Down on Mac) for that conversation, and Esc to leave tmux copy mode.
 - Terminal input, selection, copy, paste, links, and touch gestures must preserve the terminal application's own behavior where it owns the interaction. Keyboard delivery must remain available during resize, attach, and secondary pane updates. Network ping is distinct from native-key-to-visible-character latency.
+- In Codex panes, ordinary wheel and trackpad scrolling moves through the conversation while keeping the prompt fixed. YOmux delivers server-generated mouse reports as literal input to the validated live pane. Page Up/Down (Fn+Up/Down on Mac) sends native application keys and also scrolls the Codex conversation. These application-scroll actions are passive: they do not acknowledge attention or record typing, and they leave copy mode before delivery. Shift+wheel and Shift+Page Up/Down scroll tmux history instead; Esc exits copy mode, and ordinary application scrolling returns to Codex. The Keyboard Shortcuts and Legends popup must explain this distinction and identify Fn+Up/Down on Mac.
 - Terminal resizing uses native tmux copy-mode reflow. YOmux does not reposition copy cursors during resize; native reflow may move the scrolled viewport, including to the bottom. Navigation from another browser, server, or native tmux client remains authoritative.
 - Terminal URL and file-reference discovery stays within the visible viewport and at most eight physical rows per wrapped token. Redraw scheduling does no buffer scans, and a token that crosses the row limit remains unlinked.
 - Agent status comes from the selected pane or window. Exclude verified internal Tabber window-view aliases from process attribution so activity stays keyed to the source session. Do not create duplicate rows or carry activity across a reused tmux target.
@@ -39,6 +46,7 @@ This page keeps the durable user-visible rules. The selected backend's capabilit
 ## Finder, Differ, and editor
 
 - Finder and Differ share tree-row, sorting, status, selection, and toolbar behavior. Each surface keeps its own session-file payload; Finder metadata must not change Differ or Repo Diff rows.
+- Finder, Differ, and Tabber sort selectors keep the full longest option visible, including the native dropdown indicator; narrow toolbars reserve that width before text truncates.
 - Opening a file editor, preview, or Repo Diff tab through a user action, clicking into it, explicitly reloading it, or editing its content updates that item's Tabber activity date immediately. The activity snapshot keeps the date across browser reloads; restoring an editor automatically during reload does not count as activity, and scrolling does not update activity.
 - Tabber applies authoritative tmux session renames to its visible row and click target as soon as the roster update arrives, including renames made by another browser.
 - In Advanced mode, right-clicking a file editor, diff editor, or Differ tab opens the shared tab menu with Close. Closing an editor uses the same dirty-file confirmation and buffer cleanup as its close button; closing Differ removes it from the active layout.

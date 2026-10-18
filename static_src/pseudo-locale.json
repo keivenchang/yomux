@@ -1,0 +1,16 @@
+{
+  "token_pattern": "\\{[A-Za-z_][A-Za-z0-9_.-]*\\}|\\{[A-Za-z_][A-Za-z0-9_.-]*:[^{}\\s]+\\}|`[^`\\n]+`|https?://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+|/(?:static|assets?)/[A-Za-z0-9._~@+%/-]+|</?[A-Za-z][^>]*>|~/(?:[A-Za-z0-9_.{}@+-]+/)*[A-Za-z0-9_.{}@+-]*|\\b(?:Ctrl|Cmd)(?:[-+][A-Za-z0-9_.]+)+\\b",
+  "accent_from": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
+  "accent_to": "áƀçđéƒǧĥíĵķłɱñóƥɋřšťúṽŵẋýžÁƁÇĐÉƑǦĤÍĴĶŁⱮÑÓƤɊŘŠŤÚṼŴẊÝŽ",
+  "placeholder_pattern": "\\{[A-Za-z_][A-Za-z0-9_.-]*\\}",
+  "protected_token_pattern": "\\{[A-Za-z_][A-Za-z0-9_.-]*:[^{}\\s]+\\}|`[^`\\n]+`|https?://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+|/(?:static|assets?)/[A-Za-z0-9._~@+%/-]+|</?[A-Za-z][^>]*>|~/(?:[A-Za-z0-9_.{}@+-]+/)*[A-Za-z0-9_.{}@+-]*|\\b(?:Ctrl|Cmd)(?:[-+][A-Za-z0-9_.]+)+\\b",
+  "translatable_code_keys": [
+    "yoagent.prompt.format"
+  ],
+  "optional_blank_translations": {
+    "brand.wordmark.second": [
+      "zh-Hans",
+      "zh-Hant"
+    ]
+  }
+}
