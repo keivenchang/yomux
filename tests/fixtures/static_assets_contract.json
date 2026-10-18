@@ -1,0 +1,45 @@
+{
+  "baseline": {
+    "builder_blob": "a5f0898c0b9df733ede071a347323b7bdcd26048",
+    "builder_path": "tools/static_build.py",
+    "source_commit": "c1c3ad9cde20f58c9571eb32c5f5d7a68469237a",
+    "source_state": "working tree with frontend changes before commit"
+  },
+  "sha256": {
+    "emoji-data.js": "ddbb8e55806e4ac11638564da232c9120c95bdd199be1199ccdb58a31e304084",
+    "locales/ar.json": "841a16db7863147fea58da30f0ad5bb4c0103b5bf5aba884c14b27c56768f183",
+    "locales/de.json": "576de409ce7f9c3080b013811c67f75e801fced75ea54487340b8f42d50428d1",
+    "locales/en-XA.json": "976942b3ff836dde15c25b51f02a366f74964c675b81326b6e87a3c8b4f6ee8a",
+    "locales/en.json": "b37ed259e2f96e9ae3840989a6495771d85f9ccf9933f4e03e0e67d575e7a487",
+    "locales/es.json": "6410af107c3dc5e605d9880d5e6813bf1edc49497b243354e2e6cded3d70de07",
+    "locales/fr.json": "1e17bb90cb34dcd01e55b459b0a3af49b243b64e66f1c28384ed55479adb2607",
+    "locales/he.json": "e3c2b3fa7cdcb40f7d6fa5cd742be647961f1967610a0d970b80c78b000e66ec",
+    "locales/hi.json": "ada24d99b12f30c16594cfa5efdb60ea499c1ab6751a449de1455f41c342d312",
+    "locales/it.json": "a1554a8c0439b01ee73a10b559407f71df6ef4de0f298a916da91d7ca1e42934",
+    "locales/ja.json": "6995ee9c768b471e39a722768fd8199ec883e3d8c82631fc8a16e73f4afa570e",
+    "locales/ko.json": "dd15a297bc13a9ab340d7eedba18e3b2a9a2b7431f5ad817a42f1f9626618cdc",
+    "locales/nl.json": "0aa25debd38c581f6761850c8a82b94b40b78bcc1f5db07035bfbe0d1f10b308",
+    "locales/pl.json": "e923e622b1c22399e611a133c0636c0b976d8308fe85524b3941091fd13c018f",
+    "locales/pt-BR.json": "f16bb671a03d18a96474b75935a0782a3a4ad2b5c27356144fa80a77d9b70cce",
+    "locales/ru.json": "e6e8f5aa3fca2815bdee7f42d2227bdf6b37acd4d59ca54b2fd00a25669b1d1c",
+    "locales/th.json": "efc7683512ce7c5d7532359dc0db7f0517c7f9668ad90de5ccdd026ec217d70f",
+    "locales/tr.json": "548bcfe4aa319c7aa37d40e8f27c7b4b403050b964adca79d1490584d5937ab4",
+    "locales/vi.json": "ce0da9151e44281c939ac6ff7cfe23fb78db2f1ce4b838167b947db1df7d96df",
+    "locales/zh-Hans.json": "9945b404dd156252dd1f50b9a79d6bcbc295c6cc05deae1bb84eb09cf04a9b45",
+    "locales/zh-Hant.json": "140c11f22782a748faefcda13d7d80becf52a8ceda2a9dedfaa9a80753403d6a",
+    "yomux.css": "437567920be37624d6fb1161d1b1ad568c88dc72a02eef8607e54ede00ee88bd",
+    "yomux.js": "2ec1128bb3c9dc8e7cf8dc3896d16f9690665bf81d7ed5b4383212c57936dc97"
+  },
+  "reviewed_text_changes": {
+    "yomux.js": [
+      {
+        "baseline": "const selfSigned = `python3 yomux.py --port ${port} --self-signed`;",
+        "current": "const selfSigned = `./boot.sh --force ${port}`;"
+      },
+      {
+        "baseline": "const cert = `python3 yomux.py --port ${port} --cert /path/fullchain.pem --key /path/privkey.pem`;",
+        "current": "const cert = `./boot.sh --force ${port} --cert /path/fullchain.pem --key /path/privkey.pem`;"
+      }
+    ]
+  }
+}

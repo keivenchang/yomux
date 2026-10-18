@@ -21,7 +21,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.gate_harness import gate_http_port  # noqa: F401
-from tests.gate_harness import gate_live_server  # noqa: F401
+from tests.native_gate_fixtures import gate_live_server  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.gate_harness import load_gate_browser
@@ -320,169 +320,18 @@ def _process_group_exists(process_group_id: int) -> bool:
     return process_group_has_serving_member(process_group_id)
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_r1_create_session_reaches_roster_and_rendered_tab_within_measured_budget(browser, gate_live_server):
-    (gate_live_server.paths.workspace_dir / f"project{NEW_SESSION}").mkdir()
-    load_gate_browser(browser, gate_live_server)
-    elapsed_samples: list[float] = []
-
-    for sample in range(CREATE_SAMPLE_COUNT):
-        result = _create_session_in_browser(browser, "term", terminal="bash")
-        assert result["roster"] is True and result["tab"] is True and result["terminal"] is True, result
-        elapsed_samples.append(max(float(result["rosterMs"]), float(result["renderedMs"])) / 1000.0)
-        if sample + 1 < CREATE_SAMPLE_COUNT:
-            _kill_session_in_browser(browser)
-
-    ordered = sorted(elapsed_samples)
-    measurements = {
-        "samples_seconds": elapsed_samples,
-        "median_seconds": statistics.median(elapsed_samples),
-        "p95_nearest_rank_seconds": ordered[max(0, (95 * len(ordered) + 99) // 100 - 1)],
-        "max_seconds": max(elapsed_samples),
-        "budget_seconds": CREATE_TRANSITION_BUDGET_SECONDS,
-    }
-    print(f"R1 baseline: {measurements}")
-    assert max(elapsed_samples) <= CREATE_TRANSITION_BUDGET_SECONDS, measurements
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_r2_launch_claude_mock_is_live_and_detected_as_claude(browser, gate_live_server, monkeypatch):
-    _prepare_launch_runtime(monkeypatch, gate_live_server)
-    load_gate_browser(browser, gate_live_server)
-    created = _create_session_in_browser(browser, "claude")
-    assert created["terminal"] is True, created
-    _assert_agent_detected(browser, gate_live_server, "claude")
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_r3_launch_codex_mock_is_live_and_detected_as_codex(browser, gate_live_server, monkeypatch):
-    _prepare_launch_runtime(monkeypatch, gate_live_server)
-    load_gate_browser(browser, gate_live_server)
-    created = _create_session_in_browser(browser, "codex")
-    assert created["terminal"] is True, created
-    _assert_agent_detected(browser, gate_live_server, "codex")
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_r3a_launch_opencode_mock_is_live_and_detected_as_opencode(browser, gate_live_server, monkeypatch):
-    _prepare_launch_runtime(monkeypatch, gate_live_server)
-    load_gate_browser(browser, gate_live_server)
-    created = _create_session_in_browser(browser, "opencode")
-    assert created["terminal"] is True, created
-    _assert_agent_detected(browser, gate_live_server, "opencode")
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_r4_browser_xterm_input_receives_mock_output(browser, gate_live_server, monkeypatch):
-    _prepare_launch_runtime(monkeypatch, gate_live_server)
-    load_gate_browser(browser, gate_live_server)
-    _create_session_in_browser(browser, "claude")
-    _assert_agent_detected(browser, gate_live_server, "claude")
-    WebDriverWait(browser, 8).until(
-        lambda driver: driver.execute_script(
-            "return Boolean(document.querySelector(`#term-${arguments[0]} textarea`)"
-            " && terminals.get(arguments[0])?.socket?.readyState === WebSocket.OPEN);",
-            NEW_SESSION,
-        )
-    )
-
-    browser.find_element("css selector", f'.dockview-pane-tab[data-pane-tab="{NEW_SESSION}"]').click()
-    terminal_screen = WebDriverWait(browser, 8).until(
-        lambda driver: driver.find_element("css selector", f"#term-{NEW_SESSION} .xterm-screen")
-    )
-    terminal_screen.click()
-    WebDriverWait(browser, 8).until(
-        lambda driver: driver.execute_script(
-            "return document.activeElement === document.querySelector(`#term-${arguments[0]} textarea`);",
-            NEW_SESSION,
-        )
-    )
-    ActionChains(browser).send_keys("/status").send_keys(Keys.ENTER).perform()
-    observed, panes = wait_for_isolated_tmux_panes(
-        gate_live_server.tmux,
-        (NEW_SESSION,),
-        lambda captures: "Session status" in captures.get(NEW_SESSION, "") and "Tokens out:" in captures.get(NEW_SESSION, ""),
-        timeout=5,
-    )
-    assert observed, panes
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_r5_reload_preserves_session_attachment_and_agent_detection(browser, gate_live_server, monkeypatch):
-    _prepare_launch_runtime(monkeypatch, gate_live_server)
-    load_gate_browser(browser, gate_live_server)
-    _create_session_in_browser(browser, "claude")
-    _assert_agent_detected(browser, gate_live_server, "claude")
-
-    browser.refresh()
-    attachment = run_when_browser_ready(
-        browser,
-        """
-        return {
-          roster: sessions.includes(arguments[0]),
-          tab: Boolean(document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"]`)),
-          terminal: Boolean(document.querySelector(`#term-${CSS.escape(arguments[0])} textarea`)),
-          socketOpen: terminals.get(arguments[0])?.socket?.readyState === WebSocket.OPEN,
-        };
-        """,
-        NEW_SESSION,
-        globals_required={"sessionAgentKind": "function", "refreshSessionMetadata": "function"},
-        dom_anchors=("#grid",),
-        timeout=8,
-    )
-    WebDriverWait(browser, 8).until(
-        lambda driver: driver.execute_script(
-            "return terminals.get(arguments[0])?.socket?.readyState === WebSocket.OPEN;",
-            NEW_SESSION,
-        )
-    )
-    attachment["socketOpen"] = browser.execute_script(
-        "return terminals.get(arguments[0])?.socket?.readyState === WebSocket.OPEN;",
-        NEW_SESSION,
-    )
-    assert attachment == {"roster": True, "socketOpen": True, "tab": True, "terminal": True}, attachment
-    _assert_agent_detected(browser, gate_live_server, "claude")
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_r6_kill_removes_row_and_process_group_without_touching_another_socket(browser, gate_live_server, monkeypatch):
-    _prepare_launch_runtime(monkeypatch, gate_live_server)
-    load_gate_browser(browser, gate_live_server)
-    _create_session_in_browser(browser, "claude")
-    _assert_agent_detected(browser, gate_live_server, "claude")
-    pane_pid, process_group_id = _pane_process_group(gate_live_server.tmux)
-    assert pane_pid > 1 and process_group_id > 1
-    retirement_identity = capture_tmux_session_retirement(NEW_SESSION)
-
-    foreign_socket = gate_live_server.tmux.socket_dir / "foreign-s"
-    _start_foreign_socket_session(gate_live_server.tmux, foreign_socket)
-    try:
-        _kill_session_in_browser(browser)
-        join_tmux_session_retirement(retirement_identity, timeout=0)
-        assert run_isolated_tmux(gate_live_server.tmux, "has-session", "-t", f"{NEW_SESSION}:").returncode != 0
-        assert _foreign_socket_has_session(gate_live_server.tmux, foreign_socket) == 0
-    finally:
-        subprocess.run(
-            (gate_live_server.tmux.tmux_binary, "-S", str(foreign_socket), "kill-server"),
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
 
 
 @pytest.mark.no_browser

@@ -44,7 +44,6 @@ from tools.product_environment import product_env_suffix
 from tools.product_environment import product_env_names
 from yomux_lib.background_scheduler import pid_is_alive as background_scheduler_pid_is_alive
 from yomux_lib.infra.host_identity import process_state
-from yomux_lib.stats_current import service as service_module
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -67,7 +66,6 @@ def linux_reference_platform(monkeypatch):
 
 def test_python_imports_are_module_scoped():
     roots = [
-        REPO_ROOT / "yomux.py",
         REPO_ROOT / "yomux_lib",
         REPO_ROOT / "tools",
         REPO_ROOT / "tests",
@@ -170,7 +168,7 @@ def test_default_check_lanes_keep_full_pytest_gate():
     # it ran that ~20s node suite twice concurrently), e2e tests launch real tmux + mock agents, and
     # browser tests need Selenium/Chrome. Each slow class has its own default lane so failures name the
     # failing subsystem instead of hiding under "pytest full".
-    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("nonbrowser"), "-n", nonbrowser_workers, "-m", "not node_bridge and not gate_serial and not e2e and not browser and not deprecated_python_server", "-q"]
+    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("nonbrowser"), "-n", nonbrowser_workers, "-m", "not node_bridge and not gate_serial and not e2e and not browser", "-q"]
     assert pytest_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(nonbrowser_workers))))
     assert check.MOCK_TRANSCRIPT_FILES == ("tests/test_mock_transcripts.py",)
     assert set(check.MOCK_TRANSCRIPT_FILES).issubset(check.pytest_files("nonbrowser"))
@@ -182,15 +180,15 @@ def test_default_check_lanes_keep_full_pytest_gate():
     assert "tests/cross_surface_state.test.js" in check.NODE_LAYOUT_FILES
     boot_lane = next(lane for lane in lanes if lane.name == "pytest-boot")
     assert boot_lane.default is False
-    assert boot_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot and not deprecated_python_server", "-q"]
+    assert boot_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot", "-q"]
     assert boot_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
     browser_lane = next(lane for lane in lanes if lane.name == "pytest-browser")
     assert browser_lane.default is True
-    assert browser_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot and not deprecated_python_server", "-q"]
+    assert browser_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot", "-q"]
     assert browser_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
-    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", *check.pytest_files("browser"), "-n", browser_workers, "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden and not deprecated_python_server", "-q"]
+    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", *check.pytest_files("browser"), "-n", browser_workers, "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden", "-q"]
     assert browser_lane.steps[1].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(browser_workers))))
-    assert browser_lane.steps[2].args == ["python3", "-m", "pytest", *check.pytest_files("golden"), "-m", "visual_golden and not deprecated_python_server", "-q"]
+    assert browser_lane.steps[2].args == ["python3", "-m", "pytest", *check.pytest_files("golden"), "-m", "visual_golden", "-q"]
     assert browser_lane.steps[2].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
     gate_serial_lane = next(lane for lane in lanes if lane.name == "pytest-gate-serial")
     assert gate_serial_lane.run_last is True
@@ -199,7 +197,7 @@ def test_default_check_lanes_keep_full_pytest_gate():
     e2e_lane = next(lane for lane in lanes if lane.name == "pytest-e2e")
     assert e2e_lane.default is True
     assert e2e_lane.steps[0].args == [
-        "python3", "-m", "pytest", *check.pytest_files("e2e"), "-n", e2e_workers, "-m", "e2e and not deprecated_python_server",
+        "python3", "-m", "pytest", *check.pytest_files("e2e"), "-n", e2e_workers, "-m", "e2e",
         *[arg for nodeid in test_plan.BAZEL_GO_BROWSER_TESTS for arg in ("--deselect", nodeid)], "-q",
     ]
     assert e2e_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(e2e_workers))))
@@ -226,7 +224,6 @@ def test_every_default_pytest_step_enforces_the_go_only_server_boundary():
             assert "No enabled tests" in step.args[-1]
             continue
         assert ("YOMUX_CHECK_GO_ONLY", "1") in step.env, (step_id, step.env)
-        assert any("deprecated_python_server" in arg for arg in step.args), (step_id, step.args)
         assert ("YOMUX_TEST_CPU_COUNT", "unlimited") in step.env, (step_id, step.env)
 
 
@@ -311,7 +308,7 @@ def test_focused_pytest_lanes_retain_only_nonduplicated_entry_points():
         "pytest",
         *check.pytest_files("boot"),
         "-m",
-        "boot and not deprecated_python_server",
+        "boot",
         "-q",
     ]
     assert lanes["pytest-boot"].steps[0] is lanes["pytest-browser"].steps[0]
@@ -1058,7 +1055,7 @@ def test_canonical_catalog_covers_every_collected_node_once(tmp_path):
     collected = {row["nodeid"] for row in collection_rows}
     collected_base = {nodeid.split("[", 1)[0] for nodeid in collected}
     enabled_static = {nodeid for path in (REPO_ROOT / "tests").glob("test_*.py")
-                      for nodeid, _phase in test_catalog.test_definitions(path, run_deprecated_python=False)}
+                      for nodeid, _phase in test_catalog.test_definitions(path)}
     missing = [nodeid for nodeid in test_config.SLOWEST_FIRST_TESTS if nodeid in enabled_static and nodeid not in collected_base]
     assert missing == []
     check = load_check_module()
@@ -1942,16 +1939,6 @@ def _forwarding_loop(allowlist: list[str], environ: dict[str, str]) -> list[str]
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_docker_run_tests_forwards_the_stats_persistence_arm_variable():
-    """The persistence A/B selects its arm at statsd start, inside the test container.
-
-    An arm variable missing from the allowlist does not fail loudly: both arms run identical
-    code and the experiment reports a clean null, which at a low base rate is indistinguishable
-    from a real null. The name is read from its sole owner rather than restated here.
-    """
-
-    assert product_env_suffix(service_module.APPEND_FLUSH_ENV_NAME) in _certification_env_allowlist()
 
 
 def test_docker_run_tests_forwards_the_go_stats_browser_selector():
@@ -1973,21 +1960,6 @@ def test_docker_run_tests_forwards_go_only_server_guard():
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_the_forwarding_loop_only_passes_names_the_allowlist_contains():
-    """The control the allowlist doc names: one input, two allowlists, only that differing.
-
-    This proves the forwarding MECHANISM rather than asserting it. It does not launch a
-    container, so it does not prove the container then honours `-e`; that half is docker's
-    contract and is exercised by every containerised run.
-    """
-
-    name = service_module.APPEND_FLUSH_ENV_NAME
-    environ = {name: "0"}
-    with_name = _forwarding_loop(["TEST_MOCK_TRANSCRIPTS", product_env_suffix(name)], environ)
-    without_name = _forwarding_loop(["TEST_MOCK_TRANSCRIPTS"], environ)
-    assert with_name == ["-e", name], with_name
-    assert without_name == [], without_name
 
 
 def test_certification_step_runs_every_named_unit_serially_with_its_admission_env():
@@ -1996,7 +1968,6 @@ def test_certification_step_runs_every_named_unit_serially_with_its_admission_en
 
     for nodeid in check.CERTIFICATION_NODE_IDS:
         assert nodeid in step.args, (nodeid, step.args)
-    assert "--run-deprecated-python" in step.args, step.args
     # Serial by construction: the phase must never hand its units to an xdist pool.
     assert "-n" not in step.args, step.args
     assert ["-p", "no:xdist"] == step.args[step.args.index("-p"):step.args.index("-p") + 2], step.args
@@ -3797,13 +3768,13 @@ def test_bazel_go_race_declares_every_runtime_fixture_root():
     stats_text = (REPO_ROOT / "internal" / "stats" / "BUILD.bazel").read_text(encoding="utf-8")
     fixture_block = root_text.split('name = "browser_scenario_fixture_inputs"', 1)[1].split("\n)\n\n", 1)[0]
     tool_block = root_text.split('name = "integration_python_tools"', 1)[1].split("\n)\n\n", 1)[0]
-    python_runtime_block = root_text.split('name = "python_runtime"', 1)[1].split("\n)\n\n", 1)[0]
+    python_support_block = root_text.split('name = "python_test_support"', 1)[1].split("\n)\n\n", 1)[0]
     stats_pair = stats_text.split('name = "stats",', 1)[1].split("\n)", 1)[0]
     assert '"tests/fixtures/current_model_usage/**/*.jsonl"' in fixture_block
     assert '"//tools/versiongen:main.go"' in tool_block
     assert 'tools/**/*.py' not in tool_block
     assert '"tools/static_build.py"' in tool_block
-    assert '"yomux_lib/**/*.py"' in python_runtime_block
+    assert '"yomux_lib/**/*.py"' in python_support_block
     assert '"//:go_stats_test_support"' in stats_pair
     assert 'glob(["testdata/**"])' in stats_pair
 

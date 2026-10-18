@@ -5,8 +5,6 @@ import io
 import json
 from types import MethodType, SimpleNamespace
 from urllib.parse import urlencode
-from yomux_lib import http_routes
-from yomux_lib import server
 
 def login_cookie(runtime, credentials) -> str:
     body = urlencode({"username": credentials.username, "password": credentials.password, "next": "/api/ping"}).encode()
@@ -19,18 +17,3 @@ def login_cookie(runtime, credentials) -> str:
         connection.close()
     assert response.status == 303, response.status
     return next(value.split(";", 1)[0] for value in cookies if "yomux_auth_" in value and "Max-Age=0" not in value)
-
-def capturing_route_request(app, path: str, method: str = "GET", body: bytes = b""):
-    handler = server.Handler.__new__(server.Handler)
-    handler.path = path; handler._route_response = None; handler._route_response_written = False; handler._api_request_id = ""
-    handler.headers = {"Content-Length": str(len(body))} if body else {}; handler.rfile = io.BytesIO(body)
-    handler.server = SimpleNamespace(app=app, dev=False); handler.close_connection = False
-    handler.require_auth = lambda role="readonly": True; handler.auth_readonly = lambda: False
-    handler.auth_identity = lambda: SimpleNamespace(role="admin", username="tester")
-    handler.redirect_plaintext_to_https_if_needed = lambda parsed: False
-    writes = []
-    def capture(_self, data, status=HTTPStatus.OK, *, json_encode_ms=0.0, product_metadata=None):
-        del json_encode_ms, product_metadata
-        writes.append((json.loads(data), HTTPStatus(int(status))))
-    handler._write_json_representation = MethodType(capture, handler)
-    return lambda: http_routes.dispatch_http_route(handler, method), writes

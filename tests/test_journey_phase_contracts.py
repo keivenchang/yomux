@@ -15,7 +15,6 @@ from tests.helpers.journey_phases import YOCHAT_PHASES
 
 
 TARGETS = (
-    (Path("tests/test_browser_layout.py"), "test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout", STATS_LOGS_PHASES),
     (Path("tests/test_browser_layout.py"), "test_yochat_live_panel_unicode_status_search_and_emoji_geometry", YOCHAT_PHASES),
 )
 

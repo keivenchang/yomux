@@ -10,7 +10,7 @@ from threading import Thread
 from typing import Mapping
 from typing import Sequence
 
-from yomux_lib.server import TmuxWebtermHTTPServer
+from http.server import ThreadingHTTPServer as FixtureHTTPServer
 
 
 def basic_auth_header(username: str, password: str) -> dict[str, str]:
@@ -102,7 +102,7 @@ def request_fixture_http_header_list(
 class FixtureHttpServer:
     """Own one ephemeral loopback server and its serving thread."""
 
-    server: TmuxWebtermHTTPServer
+    server: FixtureHTTPServer
     thread: Thread
     label: str
 
@@ -115,7 +115,7 @@ class FixtureHttpServer:
         label: str = "fixture HTTP server",
         thread_name: str = "fixture-http-server",
     ) -> FixtureHttpServer:
-        server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app, tls_context=tls_context)
+        server = FixtureHTTPServer(("127.0.0.1", 0), app, tls_context=tls_context)
         thread = Thread(target=server.serve_forever, name=thread_name, daemon=True)
         thread.start()
         return cls(server, thread, label)

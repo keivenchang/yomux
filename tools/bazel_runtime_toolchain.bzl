@@ -68,11 +68,12 @@ def _repository_impl(ctx):
         # The Docker contract qualifies these absolute image-owned paths and
         # keys its cache by the immutable image digest before action lookup.
         python = ctx.attr.diagnostic_python or str(ctx.which("python3") or "")
-        if not python:
-            fail("native diagnostics require Python on PATH or YOMUX_DIAGNOSTIC_PYTHON")
         shell = "/bin/bash"
 
-    ctx.file("python", "#!" + shell + '\nexec "' + python + '" "$@"\n', executable = True)
+    # Registering the developer toolchain must not require an interpreter for
+    # native product builds. A Python test action still fails explicitly.
+    python_command = 'exec "' + python + '" "$@"' if python else 'echo "Python developer tooling requires python3 or YOMUX_DIAGNOSTIC_PYTHON" >&2; exit 127'
+    ctx.file("python", "#!" + shell + "\n" + python_command + "\n", executable = True)
     ctx.file("BUILD.bazel", '''load("@yomux//:tools/bazel_runtime_toolchain.bzl", "runtime_toolchain")
 package(default_visibility = ["//visibility:public"])
 exports_files(["python"])

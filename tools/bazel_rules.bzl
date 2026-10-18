@@ -56,13 +56,15 @@ runtime_tree = rule(
 
 def _frontend_impl(ctx):
     output = ctx.actions.declare_directory(ctx.label.name)
-    runtime = ctx.toolchains["//:runtime_toolchain_type"]
+    args = ctx.actions.args()
+    args.add("--source-root", ".")
+    args.add("--output-directory", output.path)
+    args.add("--bazel-output")
     ctx.actions.run(
-        executable = runtime.python,
-        inputs = depset(ctx.files.srcs + [ctx.file.generator, ctx.file.builder], transitive = [runtime.groups["common"]]),
+        executable = ctx.executable.builder,
+        inputs = ctx.files.srcs,
         outputs = [output],
-        arguments = [ctx.file.generator.path, "frontend", output.path, ctx.file.builder.path],
-        env = {"PYTHONDONTWRITEBYTECODE": "1", "TZ": "America/Los_Angeles"},
+        arguments = [args],
         mnemonic = "FrontendBuild",
     )
     return [DefaultInfo(files = depset([output]))]
@@ -71,10 +73,8 @@ frontend_assets = rule(
     implementation = _frontend_impl,
     attrs = {
         "srcs": attr.label_list(allow_files = True),
-        "builder": attr.label(allow_single_file = True, default = "//:tools/static_build.py"),
-        "generator": attr.label(allow_single_file = True, default = "//:tools/bazel_generate.py"),
+        "builder": attr.label(executable = True, cfg = "exec", default = "//tools/staticgen:staticgen"),
     },
-    toolchains = ["//:runtime_toolchain_type"],
 )
 
 def _version_impl(ctx):

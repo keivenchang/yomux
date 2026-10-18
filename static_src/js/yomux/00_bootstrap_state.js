@@ -943,6 +943,7 @@ const terminalFitBottomReservePx = 2;
 const terminalWheelPageFraction = 0.85;
 const terminalWheelPixelLinePx = 35;
 const terminalWheelMaxLinesPerEvent = 12;
+const terminalCodexWheelSpeed = 0.5;
 const maxSessionTabs = bootstrap.maxSessionTabs;
 const linearIssueBaseUrl = String(bootstrap.linearIssueBaseUrl || 'https://linear.app/issue').replace(/\/+$/, '');
 const basePaneKeys = ['left', 'right'];

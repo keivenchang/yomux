@@ -1240,6 +1240,10 @@ async function runCrossSurfaceStateSuite() {
       {kind: 'claude', state: 'needs-input', window_index: 0, window_label: '0:claude', current: true, window_active: true, screen_text: 'waiting', attention_key: attentionKey},
     ]});
     assert.equal(mouseReportApi.terminalDataShouldAcknowledgeAttentionForTest('\x1b[<35;12;7M'), false, 'xterm mouse-report bytes are not treated as user text for attention acknowledgement');
+    for (const page of ['\x1b[5~', '\x1b[6~', '\x1b[5;2~', '\x1b[6;5~']) {
+      assert.equal(mouseReportApi.terminalDataShouldAcknowledgeAttentionForTest(page, {explicitInput: true}), false, 'native page navigation stays passive');
+      assert.equal(mouseReportApi.terminalDataShouldAcknowledgeAttentionForTest(page + 'a', {explicitInput: true}), true, 'typing after navigation remains activity');
+    }
     assert.equal(mouseReportApi.handleTerminalDataForTest('1', '\x1b[<35;12;7M'), true, 'xterm mouse-report bytes are still forwarded to the terminal backend');
     assert.equal(socketMessages[0]?.data, '\x1b[<35;12;7M', 'xterm mouse-report bytes stay a transport concern');
     assert.equal(mouseReportApi.attentionAcknowledgementKeyIsRecordedForTest(attentionKey), false, 'xterm mouse-report bytes do not acknowledge red/yellow agent attention');
@@ -3927,6 +3931,9 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(api.keyboardShortcutsHtml().includes('Ctrl+K Enter'), 'shortcut overlay renders the platform Pin Tab chord on PC/Linux');
     assert.ok(api.keyboardShortcutsHtml().includes('Previous / next tab') && api.keyboardShortcutsHtml().includes('Meta+← / Meta+→'), 'shortcut overlay documents Meta+Arrow pane-tab navigation');
     assert.ok(api.keyboardShortcutsHtml().includes('Page tmux scrollback') && api.keyboardShortcutsHtml().includes('Ctrl+↑ / Ctrl+↓'), 'shortcut overlay documents tmux page scrolling with the platform app modifier');
+    const scrollHelp = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['shortcuts.terminalScrollHelp'];
+    assert.ok(api.keyboardShortcutsHtml().includes(scrollHelp), 'the initial keyboard help explains application and tmux-history scrolling');
+    assert.ok(api.keyboardShortcutsHtml().includes('Exit tmux copy mode') && api.keyboardShortcutsHtml().includes('Esc'), 'reopening keyboard help explains how to leave tmux copy mode');
     assert.ok(api.keyboardShortcutsHtml().includes('Drag a tab'), 'shortcut overlay is honest that tab/pane layout changes are pointer-driven');
     assert.ok(api.keyboardShortcutsHtml().includes('Ctrl+Backspace / Ctrl+Delete'), 'shortcut overlay documents both close-tab fallback keys');
     assert.ok(api.keyboardShortcutsHtml().includes('Select all rows') && api.keyboardShortcutsHtml().includes('Ctrl+A'), 'shortcut overlay documents Finder/Differ select-all');

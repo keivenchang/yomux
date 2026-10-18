@@ -1547,6 +1547,8 @@
   "shortcuts.section.menus": "Меню, палитры и средства выбора",
   "shortcuts.section.tabsPanes": "Вкладки / Панели",
   "shortcuts.section.terminal": "Терминал",
+  "shortcuts.exitTmuxCopyMode": "Выйти из режима копирования tmux",
+  "shortcuts.terminalScrollHelp": "Прокручивайте или используйте Fn+Вверх/Вниз, чтобы прокручивать приложение. Удерживайте Shift при прокрутке, чтобы просматривать историю tmux.",
   "shortcuts.switchTmuxWindow": "Предыдущая/следующая вкладка",
   "shortcuts.toggleComment": "Переключить комментарий строки",
   "shortcuts.toggleFinder": "Переключить {name}",

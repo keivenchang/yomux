@@ -1493,6 +1493,8 @@
   "shortcuts.section.menus": "Menüler, paletler ve seçiciler",
   "shortcuts.section.tabsPanes": "Sekmeler / Paneller",
   "shortcuts.section.terminal": "Uçbirim",
+  "shortcuts.exitTmuxCopyMode": "tmux kopyalama kipinden çık",
+  "shortcuts.terminalScrollHelp": "Uygulamayı kaydırmak için kaydırma tekerleğini veya Fn+Yukarı/Aşağı tuşlarını kullanın. tmux geçmişini görmek için kaydırırken Shift tuşunu basılı tutun.",
   "shortcuts.switchTmuxWindow": "Önceki / sonraki tab",
   "shortcuts.toggleComment": "Satır yorumunu değiştir",
   "shortcuts.toggleFinder": "Aç {name}",

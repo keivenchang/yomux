@@ -4011,6 +4011,7 @@ function terminalDataWithoutPassiveReports(data, options = {}) {
     .replace(/\x1bP[01]\$r[^\x1b\x9c]*(?:\x1b\\|\x9c)/g, '')
     .replace(/\x1b\](?:4;\d+|1\d);(?:rgb|rgba):[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)/g, '')
     .replace(/\x1b\[[IO]/g, '')
+    .replace(/\x1b\[[56](?:;[2-8])?~/g, '')
     .replace(/\x1b\[<\d+(?:;\d+){2}[mM]/g, '')
     .replace(/\x1b\[M[\s\S]{3}/g, '');
 }
@@ -4420,7 +4421,10 @@ function handleTerminalDataMeasured(session, data, options = {}) {
   const userInput = options.userInput !== false
     && (options.userInput === true || explicitInput || hasTypedText)
     && terminalDataShouldAcknowledgeAttention(filtered, {explicitInput: explicitInput || options.userInput === true});
-  socket.send(JSON.stringify({type: 'input', data: filtered, user_input: userInput}));
+  // Legacy xterm mouse reports contain byte values that must not be UTF-8 encoded.
+  socket.send(options.binary === true
+    ? Uint8Array.from(filtered, char => char.charCodeAt(0))
+    : JSON.stringify({type: 'input', data: filtered, user_input: userInput}));
   clientPerfEnd(sendPerf, {bytes: utf8ByteLength(filtered)});
   if (userInput) noteTabberTerminalInput(session);
   current.lastInputSentAt = performanceNow();
@@ -4906,6 +4910,10 @@ function consumeTerminalControlMessage(session, data) {
   if (typeof data !== 'string' || data.charCodeAt(0) !== 123) return false;
   let message = null;
   try { message = JSON.parse(data); } catch (_) { return false; }
+  if (message?.type === 'application-scroll-error') {
+    statusErr(esc(t('common.requestFailed')));
+    return true;
+  }
   return Boolean(message && message.type === 'refresh-ack');
 }
 
@@ -5267,6 +5275,7 @@ function startTerminal(session) {
     recordTerminalMobileInputTrace(session, 'on-data', {bytes: utf8ByteLength(data)});
     handleTerminalData(session, data);
   });
+  term.onBinary?.(data => handleTerminalData(session, data, {binary: true, bypassMobileAccessoryModifiers: true, userInput: false}));
   if (focusedTerminal === session && terminalPaneIsActive(session)) focusTerminalDom(session);
   connectTerminalSocket(session, item);
 }

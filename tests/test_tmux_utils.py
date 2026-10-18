@@ -252,7 +252,7 @@ def test_launchers_declare_the_default_server_intent_for_control_mode(monkeypatc
     assert 'product_env_unset "$env_suffix"' in launcher
     assert 'source "$repo/tools/startup_common.sh" || exit 2; yomux_normalize_environment;' in launcher
     assert 'export "$assignment"' in launcher
-    assert '"$repo/tools/instance_isolation.py" exec --plan-json "$plan_json"' in launcher
+    assert '"$native_binary" --operator exec --root "$repo" --plan-json "$plan_json"' in launcher
     boot_source = (root / "boot.sh").read_text(encoding="utf-8")
     assert 'yomux_server_launch_environment "$backend" "$go_binary"' in boot_source
     startup_source = (root / "tools" / "startup_common.sh").read_text(encoding="utf-8")

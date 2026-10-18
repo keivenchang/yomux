@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/keivenchang/yomux/internal/testsupport"
+
 	"os"
 	"path/filepath"
 	"sync"
@@ -291,88 +291,6 @@ func TestCheckpointMigrationPairsBackupAndFencesOldWriter(t *testing.T) {
 	backups, err := filepath.Glob(path + ".pre-checkpoints-*")
 	if err != nil || len(backups) != 1 {
 		t.Fatalf("backups=%v %v", backups, err)
-	}
-}
-
-func TestCheckpointMigrationPythonRejectionAndPairedRollback(t *testing.T) {
-	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-	testsupport.RequireDeprecatedPythonBackend(t)
-	ctx := context.Background()
-	w, path := checkpointTestWriter(t)
-	if _, err := w.AppendWithCheckpoints(ctx, writerBatch(), []Checkpoint{{Key: "new", Kind: "transcript", Version: 1}}); err != nil {
-		t.Fatal(err)
-	}
-	var backup string
-	if err := w.db.QueryRow("SELECT source_digest FROM migration_reconciliation WHERE migration_id='go-checkpoints-v1'").Scan(&backup); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	script := filepath.Join(t.TempDir(), "migration.py")
-	if err := os.WriteFile(script, []byte(`import sys
-from yomux_lib.stats_current.storage import Store, SchemaTooNewError
-try:
-    store = Store.open(sys.argv[1], include_browser_diagnostics=False)
-except SchemaTooNewError:
-    assert sys.argv[2] == "reject"
-    print("rejected")
-else:
-    assert sys.argv[2] == "accept"
-    store.close()
-    print("accepted")
-`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	python := pythonExecutable(t)
-	runPython(t, python, script, path, "reject")
-	recovery := filepath.Join(t.TempDir(), "migrated")
-	if err := os.Mkdir(recovery, 0700); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{path, path + "-wal", path + "-shm", filepath.Join(filepath.Dir(path), writerFenceFilename)} {
-		if _, err := os.Stat(name); os.IsNotExist(err) {
-			continue
-		} else if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Rename(name, filepath.Join(recovery, filepath.Base(name))); err != nil {
-			t.Fatal(err)
-		}
-	}
-	saved, err := os.ReadFile(filepath.Join(backup, filepath.Base(path)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, saved, 0600); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(filepath.Join(backup, "cursor-manifest.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var manifest map[string]string
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		t.Fatal(err)
-	}
-	for original, name := range manifest {
-		data, err := os.ReadFile(filepath.Join(backup, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(original, data, 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	runPython(t, python, script, path, "accept")
-	preserved, err := OpenReadOnly(ctx, filepath.Join(recovery, filepath.Base(path)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer preserved.Close()
-	facts, err := preserved.ReadUsageAtoms(ctx, 0, 100, 10)
-	if err != nil || len(facts) != 1 {
-		t.Fatalf("preserved migrated facts=%v %v", facts, err)
 	}
 }
 

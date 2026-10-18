@@ -625,10 +625,10 @@ func validateCurrentAgentRoster(value any) error {
 		return invalid("observation", "payload", "agent_status.agents exceeds its bound")
 	}
 	validStates := map[string]bool{"ask": true, "run": true, "transition": true, "idle": true, "error": true, "unavailable": true}
-	allowedFields := map[string]bool{"id": true, "kind": true, "state": true, "session": true, "pane": true, "observed_at": true, "working_stopped_ts": true, "transition_id": true, "cooldown_attention_key": true, "completion_settled": true, "process_instance_id": true, "attention_signature": true, "attention_key": true, "attention_acknowledged": true, "queued_followup_question": true}
+	allowedFields := map[string]bool{"id": true, "kind": true, "state": true, "session": true, "pane": true, "observed_at": true, "working_stopped_ts": true, "transition_id": true, "cooldown_attention_key": true, "completion_settled": true, "process_instance_id": true, "attention_signature": true, "attention_key": true, "attention_acknowledged": true, "queued_followup_question": true, "attention_kind": true}
 	for _, row := range rows {
 		observedAt, hasObservedAt := row["observed_at"]
-		if len(row) < 5 || len(row) > len(allowedFields) || len(row) == 6 && !hasObservedAt {
+		if len(row) < 5 || len(row) > len(allowedFields) {
 			return invalid("observation", "payload", "agent_status.agents contains an invalid row")
 		}
 		for name := range row {
@@ -643,6 +643,12 @@ func validateCurrentAgentRoster(value any) error {
 		}
 		if !validStates[row["state"].(string)] {
 			return invalid("observation", "payload", "agent_status.agents contains an invalid state")
+		}
+		if value, present := row["attention_kind"]; present {
+			kind, valid := value.(string)
+			if !valid || (kind != "approval" && kind != "question" && kind != "unknown") {
+				return invalid("observation", "payload", "agent_status.agents.attention_kind must be approval, question, or unknown")
+			}
 		}
 		if hasObservedAt && !currentNonNegativeNumber(observedAt) {
 			return invalid("observation", "payload", "agent_status.agents.observed_at must be a non-negative finite number")

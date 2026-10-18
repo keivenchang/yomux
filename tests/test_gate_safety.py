@@ -13,7 +13,7 @@ from tests.browser_helpers.browser_console import validate_server_log_ring_paylo
 from tests.browser_helpers.browser_console import validate_server_log_ring_transition
 from tests.gate_harness import gate_http_request
 from tests.gate_harness import gate_http_port  # noqa: F401
-from tests.gate_harness import gate_live_server  # noqa: F401
+from tests.native_gate_fixtures import gate_live_server  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 from yomux_lib.approval import auto_approve_worker
@@ -173,61 +173,3 @@ def _write_malformed_settings(path: Path) -> bytes:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(malformed)
     return malformed
-
-
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_p9_malformed_settings_are_preserved_and_surfaced_without_default_substitution(
-    gate_live_server,
-    monkeypatch,
-):
-    settings_path = settings_module.SETTINGS_PATH
-    assert settings_path.is_relative_to(gate_live_server.paths.config_dir)
-    original = _write_malformed_settings(settings_path)
-    monkeypatch.setattr(
-        gate_live_server.app,
-        "settings_payload",
-        lambda: settings_module.settings_payload(settings_path),
-    )
-
-    response = gate_http_request(gate_live_server, "/api/settings")
-    payload = response.json()
-
-    assert settings_path.read_bytes() == original
-    assert response.status == HTTPStatus.SERVICE_UNAVAILABLE, payload
-    assert payload["settings"] is None, payload
-    assert payload["error"]["code"] == "settings_file_malformed", payload
-    assert isinstance(payload["error"].get("reason"), str) and payload["error"]["reason"].strip(), payload
-    _retire_expected_settings_failure(gate_live_server, response, "GET /api/settings")
-
-
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_p9_malformed_settings_never_trigger_chat_retention_from_defaults(
-    gate_live_server,
-    monkeypatch,
-):
-    settings_path = settings_module.SETTINGS_PATH
-    original = _write_malformed_settings(settings_path)
-    prune_calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        gate_live_server.app,
-        "settings_payload",
-        lambda: settings_module.settings_payload(settings_path),
-    )
-    monkeypatch.setattr(
-        gate_live_server.app.chat_store,
-        "prune_if_due",
-        lambda **kwargs: prune_calls.append(kwargs),
-    )
-
-    response = gate_http_request(
-        gate_live_server,
-        "/api/chat/bootstrap?browser_instance_id=gate-p9",
-    )
-
-    assert settings_path.read_bytes() == original
-    assert prune_calls == [], prune_calls
-    assert response.status == HTTPStatus.SERVICE_UNAVAILABLE, response.body
-    assert response.json()["error"]["code"] == "settings_file_malformed", response.json()
-    _retire_expected_settings_failure(gate_live_server, response, "GET /api/chat/bootstrap")

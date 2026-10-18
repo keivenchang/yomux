@@ -27,7 +27,7 @@ def _shipped_javascript_sources() -> dict[Path, str]:
     }
 
 
-def _production_python_sources() -> dict[Path, str]:
+def _retained_python_sources() -> dict[Path, str]:
     return {
         path.relative_to(REPO_ROOT): path.read_text(encoding="utf-8")
         for path in sorted((REPO_ROOT / "yomux_lib").rglob("*.py"))
@@ -107,24 +107,12 @@ def test_every_observed_model_and_pricing_dimension_reaches_report_and_renderer(
         assert row.model in rendered
 
 
-def test_every_queued_http_producer_has_a_registered_terminal_proof():
-    discovered = {
-        (producer.path, producer.function)
-        for producer in discover_queued_http_producers(_production_python_sources())
-    }
-    registered_rows = [
-        (contract.owner_path, contract.queued_producer_function)
-        for contract in TERMINAL_STATE_CONTRACTS
-        if contract.queued_producer_function is not None
-    ]
-
-    assert discovered
-    assert len(registered_rows) == len(set(registered_rows))
-    assert discovered == set(registered_rows)
+def test_retired_python_http_producers_are_absent():
+    assert discover_queued_http_producers(_retained_python_sources()) == ()
 
 
 def test_queued_http_producer_discovery_rejects_an_unregistered_acknowledgement():
-    sources = _production_python_sources()
+    sources = _retained_python_sources()
     sources[Path("yomux_lib/synthetic_queue.py")] = """
 from http import HTTPStatus
 

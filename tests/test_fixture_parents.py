@@ -11,21 +11,6 @@ from tests.helpers.prompt_corpus import PromptCorpus
 from tests.helpers.prompt_corpus import PromptCorpusPreset
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_fixture_http_server_binds_ephemeral_port_preserves_headers_and_stops_thread(monkeypatch):
-    app = SimpleNamespace(sessions=[], dangerously_yolo=False)
-    monkeypatch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")
-    runtime = FixtureHttpServer.start(app, label="fixture-parent characterization")
-    try:
-        assert runtime.port > 0
-        response = runtime.request("GET", "/api/ping")
-        assert response.status == 200
-        assert json.loads(response.body)["state"] == "ready"
-        assert header_values(response.headers, "Content-Type") == ("application/json; charset=utf-8",)
-    finally:
-        runtime.close()
-    assert not runtime.thread.is_alive()
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.

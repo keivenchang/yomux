@@ -74,13 +74,14 @@ product_env_print() {
 }
 
 product_env_fingerprint() {
-  local fingerprint python_bin="${PYTHON:-python3}"
+  local fingerprint
   if command -v sha256sum >/dev/null 2>&1; then
-    fingerprint="$(printf '%s' "$1" | sha256sum)"
+    fingerprint="$(printf '%s' "$1" | sha256sum)" || return
   elif command -v shasum >/dev/null 2>&1; then
-    fingerprint="$(printf '%s' "$1" | shasum -a 256)"
+    fingerprint="$(printf '%s' "$1" | shasum -a 256)" || return
   else
-    fingerprint="$(printf '%s' "$1" | "$python_bin" -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')" || return
+    echo "YOmux environment normalization requires sha256sum or shasum" >&2
+    return 1
   fi
   printf '%s' "${fingerprint%% *}"
 }
@@ -98,7 +99,7 @@ product_env_normalize() {
       if [[ "$prior_aliases" != *",$product_key="* ]]; then
         used_legacy=1
       else
-        fingerprint="$(product_env_fingerprint "${!product_key}")"
+        fingerprint="$(product_env_fingerprint "${!product_key}")" || return
         if [[ "$prior_aliases" != *",$product_key=$fingerprint,"* ]]; then used_legacy=1; fi
       fi
     fi
@@ -110,7 +111,7 @@ product_env_normalize() {
     if [[ "$processed" == *",$product_setting,"* ]]; then continue; fi
     processed="$processed$product_setting,"
     product_env "$product_setting" product_value || continue
-    fingerprint="$(product_env_fingerprint "$product_value")"
+    fingerprint="$(product_env_fingerprint "$product_value")" || return
     for product_prefix in "$PRODUCT_ENV_CANONICAL_PREFIX" "${PRODUCT_ENV_LEGACY_PREFIXES[@]}"; do
       product_key="$product_prefix$product_setting"
       printf -v "$product_key" '%s' "$product_value"

@@ -5,14 +5,12 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -90,55 +88,6 @@ func TestAuditSSEFlushFailure(t *testing.T) {
 	}
 }
 
-func TestAuditRendererCancellationAndShutdown(t *testing.T) {
-	root := t.TempDir()
-	module := filepath.Join(root, "yomux_lib")
-	if err := os.Mkdir(module, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(module, "__init__.py"), nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(module, "web.py"), []byte("def html_page(*args, **kwargs):\n import time\n time.sleep(60)\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	renderer, err := startPythonHomeRenderer(root, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer renderer.close()
-	ctx, cancel := context.WithCancel(context.Background())
-	s := &server{pythonHTMLState: pythonHTMLState{homeRenderer: renderer}}
-	admitted, release, err := s.admitPythonRender(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-	if _, _, err := s.admitPythonRender(ctx); err == nil {
-		t.Fatal("admission not bounded")
-	}
-	done := make(chan error, 1)
-	go func() {
-		_, err := renderer.renderContext(admitted, map[string]any{"sessions": []string{}, "role": "admin", "username": "test", "language": "", "capabilities": map[string]any{}, "stats_only": false, "backend": "Go", "dangerously_yolo": false})
-		done <- err
-	}()
-	cancel()
-	s.shutdown()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("cancel succeeded")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("shutdown blocked on renderer")
-	}
-	select {
-	case <-renderer.done:
-	default:
-		t.Fatal("child not reaped")
-	}
-}
-
 func TestAuditPaneSelectionOrder(t *testing.T) {
 	rows := []string{"session\t0\told\t0\t%1\t/tmp\tbash\ttitle\t0\t1\t0", "session\t1\tcurrent\t0\t%2\t/tmp\tbash\ttitle\t0\t1\t1"}
 	s := &server{}
@@ -161,79 +110,6 @@ func TestAuditStatsStreamReleasesDemandOnFlushFailure(t *testing.T) {
 	}
 	if response.Body.Len() != 0 {
 		t.Fatal("snapshot attempted after failed initial flush")
-	}
-}
-
-func TestAuditRendererRejectsMalformedAndOversizedReplies(t *testing.T) {
-	for _, source := range []string{"def html_page(*args, **kwargs):\n print('not-json',flush=True)\n return 'page'\n", "def html_page(*args, **kwargs):\n return 'x' * (8*1024*1024)\n"} {
-		root := t.TempDir()
-		module := filepath.Join(root, "yomux_lib")
-		if err := os.Mkdir(module, 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(module, "__init__.py"), nil, 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(module, "web.py"), []byte(source), 0600); err != nil {
-			t.Fatal(err)
-		}
-		renderer, err := startPythonHomeRenderer(root, t.TempDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		request := map[string]any{"sessions": []string{}, "role": "admin", "username": "test", "language": "", "capabilities": map[string]any{}, "stats_only": false, "backend": "Go", "dangerously_yolo": false}
-		_, err = renderer.renderContext(context.Background(), request)
-		renderer.close()
-		if err == nil {
-			t.Fatal("invalid reply accepted")
-		}
-	}
-}
-
-func TestAuditOneShotCancellationClosesInheritedStdout(t *testing.T) {
-	root := t.TempDir()
-	pidFile := filepath.Join(root, "child.pid")
-	s := &server{root: root, config: root}
-	defer s.shutdown()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		_, err := s.renderPythonPage(ctx, "import subprocess,sys,time\np=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])\nopen(sys.argv[1],'w').write(str(p.pid))\ntime.sleep(60)", pidFile)
-		done <- err
-	}()
-	deadline := time.NewTimer(3 * time.Second)
-	defer deadline.Stop()
-	ticker := time.NewTicker(time.Millisecond)
-	defer ticker.Stop()
-	for {
-		raw, err := os.ReadFile(pidFile)
-		if err == nil && len(raw) > 0 {
-			pid, err := strconv.Atoi(string(raw))
-			if err != nil {
-				t.Fatal(err)
-			}
-			process, err := os.FindProcess(pid)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer process.Kill()
-			break
-		}
-		select {
-		case <-ticker.C:
-		case <-deadline.C:
-			t.Fatal("child did not start")
-		}
-	}
-	cancel()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("cancel accepted")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("inherited stdout exceeded cancellation bound")
 	}
 }
 

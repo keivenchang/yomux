@@ -1493,6 +1493,8 @@
   "shortcuts.section.menus": "選單、命令面板和選擇器",
   "shortcuts.section.tabsPanes": "分頁／窗格",
   "shortcuts.section.terminal": "終端機",
+  "shortcuts.exitTmuxCopyMode": "退出 tmux 複製模式",
+  "shortcuts.terminalScrollHelp": "捲動或按 Fn+上/下捲動應用程式。捲動時按住 Shift 可瀏覽 tmux 歷史記錄。",
   "shortcuts.switchTmuxWindow": "上一個 / 下一個分頁",
   "shortcuts.toggleComment": "切換行註解",
   "shortcuts.toggleFinder": "切換{name}",

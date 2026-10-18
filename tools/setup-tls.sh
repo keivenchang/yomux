@@ -5,13 +5,12 @@
 #   1. Creates a local CA once (~/.local/share/yomux-ca), reuses it thereafter.
 #   2. Issues a server leaf cert covering localhost + every non-docker LAN IP +
 #      this host's name (+ any extra --san you pass), signed by that CA.
-#   3. Installs the leaf where YOmux serves it (STATE_DIR/tls/self-signed.*),
-#      backing up whatever was there.
+#   3. Writes the leaf to STATE_DIR/tls/self-signed.*, backing up an existing leaf.
 #   4. Trusts the CA in THIS machine's trust store (Linux/macOS), if it can.
 #   5. Prints the CA path + fingerprint + client-import instructions.
 #
-# After running, RESTART the server(s) so they load the new cert:
-#   bash <checkout>/boot.sh <port>
+# Restart with the explicit --cert and --key command printed below.
+# The native server's default certificate directory is separate.
 #
 # Usage:
 #   tools/setup-tls.sh [--san NAME_OR_IP]... [--no-trust] [--dry-run]
@@ -25,8 +24,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$REPO_ROOT/tools/startup_common.sh"
+yomux_validate_backend
 yomux_normalize_environment
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+NATIVE_BINARY="$(yomux_go_binary "$REPO_ROOT")"
 STATE_DIR=""
 CA_DIR="$(product_env_print CA_DIR "$HOME/.local/share/yomux-ca")"
 LEAF_DAYS="$(product_env_print LEAF_DAYS "825")"
@@ -37,6 +37,9 @@ EXTRA_SANS=()
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*"; }
+print_restart_command() {
+  printf '  %q --force --port PORT --cert %q --key %q\n' "$REPO_ROOT/boot.sh" "$TLS_DIR/self-signed.crt" "$TLS_DIR/self-signed.key"
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -51,14 +54,13 @@ while [ $# -gt 0 ]; do
 done
 
 command -v openssl >/dev/null || die "openssl not found"
-command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found"
-CA_DIR="$("$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-product-path "$(product_env_name CA_DIR)" "$CA_DIR")" \
+CA_DIR="$("$NATIVE_BINARY" --operator resolve-product-path --root "$REPO_ROOT" -- "$(product_env_name CA_DIR)" "$CA_DIR")" \
   || die "CA directory refused by product-root policy"
 if [ -z "$STATE_DIR" ]; then
-  STATE_DIR="$("$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-state-dir)" \
+  STATE_DIR="$("$NATIVE_BINARY" --operator resolve-state-dir --root "$REPO_ROOT")" \
     || die "state directory refused by product-root policy"
 else
-  STATE_DIR="$(env "$(product_env_name STATE_DIR)=$STATE_DIR" "$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-state-dir)" \
+  STATE_DIR="$(env "$(product_env_name STATE_DIR)=$STATE_DIR" "$NATIVE_BINARY" --operator resolve-state-dir --root "$REPO_ROOT")" \
     || die "state directory refused by product-root policy"
 fi
 TLS_DIR="$STATE_DIR/tls"
@@ -66,7 +68,7 @@ TLS_DIR="$STATE_DIR/tls"
 # --- Reuse the server's portable SAN owner, then append explicit extras.
 build_san() {
   local out e
-  out="$("$PYTHON_BIN" "$REPO_ROOT/tools/tls_san.py")"
+  out="$("$NATIVE_BINARY" --operator tls-san --root "$REPO_ROOT")"
   for e in "${EXTRA_SANS[@]}"; do
     if printf '%s' "$e" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$|:'; then
       out="$out,IP:$e"
@@ -85,6 +87,8 @@ if [ "$DRY_RUN" = 1 ]; then
   note "[dry-run] CA:        $CA_DIR/rootCA.crt (create if missing)"
   note "[dry-run] leaf ->    $TLS_DIR/self-signed.{crt,key} (${LEAF_DAYS}d)"
   note "[dry-run] trust:     $([ "$INSTALL_TRUST" = 1 ] && echo "install into local store" || echo "skipped")"
+  note "[dry-run] restart with this leaf (replace PORT):"
+  print_restart_command
   exit 0
 fi
 
@@ -117,7 +121,7 @@ printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\nbasicConstraints=critica
 openssl x509 -req -in "$tmp/leaf.csr" -CA "$CA_DIR/rootCA.crt" -CAkey "$CA_DIR/rootCA.key" \
   -CAcreateserial -days "$LEAF_DAYS" -sha256 -extfile "$tmp/leaf.ext" -out "$tmp/leaf.crt" 2>/dev/null
 
-# --- Install where YOmux serves it (back up any existing cert first). ---
+# --- Preserve the existing leaf before writing the explicit launch identity. ---
 stamp="$(date +%Y%m%d-%H%M%S)"
 for f in self-signed.crt self-signed.key; do
   [ -f "$TLS_DIR/$f" ] && \cp -f "$TLS_DIR/$f" "$TLS_DIR/$f.bak.$stamp"
@@ -150,10 +154,11 @@ fi
 echo
 note "CA (give this to client machines): $CA_DIR/rootCA.crt"
 openssl x509 -in "$CA_DIR/rootCA.crt" -noout -fingerprint -sha256 | sed 's/^/  /'
+note ""
+note "Next:"
+note "  1. Restart with the explicit certificate and key (replace PORT):"
+print_restart_command
 cat <<EOF
-
-Next:
-  1. Restart the server(s) to load the new cert:  bash <checkout>/boot.sh <port>
   2. On each CLIENT machine, trust the CA once (then every port is warning-free):
        scp $(hostname):$CA_DIR/rootCA.crt ~/yolomux-local-ca.crt
        # macOS:  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/yolomux-local-ca.crt

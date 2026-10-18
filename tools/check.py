@@ -7,8 +7,7 @@ The default run starts independent lanes in parallel so agents and humans do not
 serialize py_compile, static checks, Node checks, full pytest, and whitespace
 checks by hand. Use --serial when debugging order or when interleaved process
 load makes a failure hard to read. Focused pytest lanes are available with
---lane. Defaults select Go/backend drivers, frontend, and required tooling; legacy
-Python backend tests require --run-deprecated-python.
+--lane. Defaults select Go/backend drivers, frontend, and required tooling; all tests drive current Go behavior or developer tools.
 
 Development runs record host pressure without refusing functional tests. Use
 --certify to add the exclusive latency-certification phase, or --certification-only
@@ -142,14 +141,10 @@ EXIT_NOT_CERTIFIABLE = 4
 # The last entry is the phase's own negative control: it proves the qualifier still separates a
 # quiet host from a loaded one on this box. It runs last because it deliberately loads the host.
 CERTIFICATION_NODE_IDS = (
-    "tests/test_gate_tmux.py::test_s1_certification_keystroke_wall_latency_holds_the_fixed_user_ceiling",
-    "tests/test_gate_tmux.py::test_s1_certification_tab_activation_native_echo_holds_fixed_user_ceilings",
     "tests/test_gate_tmux.py::test_go_activation_certification_meets_highlight_paint_and_echo_budgets",
     "tests/test_gate_interaction.py::test_i3a_certification_drag_preview_holds_the_fixed_ceiling",
     "tests/test_gate_interaction.py::test_i3b_certification_dockview_load_layout_holds_the_fixed_ceiling",
     "tests/test_gate_interaction.py::test_i3c_certification_terminal_navigation_ack_holds_the_fixed_ceiling",
-    "tests/test_chat_store.py::test_chat_store_operation_wall_latency_certification",
-    "tests/test_gate_stats_range.py::test_stats_24h_http_wall_latency_certification",
     "tests/test_check_runner.py::test_certification_host_qualifier_refuses_a_genuinely_loaded_host",
 )
 CERTIFICATION_JUNIT_NAME = "certification-junit.xml"
@@ -294,11 +289,8 @@ class StepResult:
 
 def py_compile_files() -> list[str]:
     return [
-        "yomux.py",
-        "yolomux.py",
         "tools/tmux_wall.py",
         "tools/auto_approve_tmux.py",
-        "tools/yostats_contention_benchmark.py",
         "tools/yostats_active_browser_window.py",
         *sorted(str(path.relative_to(REPO_ROOT)) for path in (REPO_ROOT / "yomux_lib").rglob("*.py")),
     ]
@@ -499,7 +491,7 @@ def bazel_job_count(*, serial: bool = False, cpu_percent: int | None = None) -> 
     return str(max(1, total_budget - pytest_cpu_budget))
 
 
-def step_catalog(*, serial: bool = False, cpu_percent: int | None = None, run_deprecated_python: bool = False) -> dict[StepId, Step]:
+def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dict[StepId, Step]:
     nonbrowser_workers, browser_workers, e2e_workers = pytest_worker_counts(serial=serial, cpu_percent=cpu_percent)
     bazel_jobs = bazel_job_count(serial=serial, cpu_percent=cpu_percent)
     bazel_memory = bazel_memory_limit_mb(serial=serial, cpu_percent=cpu_percent)
@@ -522,33 +514,25 @@ def step_catalog(*, serial: bool = False, cpu_percent: int | None = None, run_de
         StepId.NODE_WALL_SYNTAX: Step("node --check static/tmux-wall.js", ["node", "--check", "static/tmux-wall.js"]),
         StepId.NODE_LAYOUT: Step("node tests/layout_url.test.js", ["node", "tests/layout_url.test.js", *NODE_LAYOUT_FILES]),
         StepId.BAZEL_GO: Step(lane_spec("bazel-go").label, ["tools/run_bazel_tests.sh", "--jobs", bazel_jobs, "--memory-mb", bazel_memory]),
-        StepId.PYTEST_NONBROWSER: Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser", run_deprecated_python=run_deprecated_python), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not gate_serial and not e2e and not browser and not deprecated_python_server", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "0" if run_deprecated_python else "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), nonbrowser_memory))),
-        StepId.PYTEST_GATE_SERIAL: Step("pytest timing-sensitive serial", ["python3", "-m", "pytest", *pytest_files("gate_serial", run_deprecated_python=run_deprecated_python), "-m", "gate_serial and not deprecated_python_server", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "0" if run_deprecated_python else "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), final_serial_memory))),
-        StepId.PYTEST_BOOT: Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot", run_deprecated_python=run_deprecated_python), "-m", "boot and not deprecated_python_server", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "0" if run_deprecated_python else "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), parallel_single_worker_memory))),
-        StepId.PYTEST_BROWSER: Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser", run_deprecated_python=run_deprecated_python), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden and not deprecated_python_server", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "0" if run_deprecated_python else "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), browser_memory))),
-        StepId.PYTEST_BROWSER_GOLDEN: Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden", run_deprecated_python=run_deprecated_python), "-m", "visual_golden and not deprecated_python_server", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "0" if run_deprecated_python else "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), parallel_single_worker_memory))),
-        StepId.PYTEST_E2E: Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e", run_deprecated_python=run_deprecated_python), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e and not deprecated_python_server", *[arg for nodeid in BAZEL_GO_BROWSER_TESTS for arg in ("--deselect", nodeid)], "-q"], env=(("YOMUX_CHECK_GO_ONLY", "0" if run_deprecated_python else "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), e2e_memory))),
+        StepId.PYTEST_NONBROWSER: Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser"), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not gate_serial and not e2e and not browser", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), nonbrowser_memory))),
+        StepId.PYTEST_GATE_SERIAL: Step("pytest timing-sensitive serial", ["python3", "-m", "pytest", *pytest_files("gate_serial"), "-m", "gate_serial", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), final_serial_memory))),
+        StepId.PYTEST_BOOT: Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot"), "-m", "boot", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), parallel_single_worker_memory))),
+        StepId.PYTEST_BROWSER: Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), browser_memory))),
+        StepId.PYTEST_BROWSER_GOLDEN: Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden"), "-m", "visual_golden", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), parallel_single_worker_memory))),
+        StepId.PYTEST_E2E: Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e"), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", *[arg for nodeid in BAZEL_GO_BROWSER_TESTS for arg in ("--deselect", nodeid)], "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), e2e_memory))),
         StepId.WHITESPACE: Step("git diff --check", ["git", "-c", f"safe.directory={REPO_ROOT}", "diff", "--check"]),
     }
 
     for step_id, phases in STEP_PHASES.items():
-        if phases and not any(pytest_files(phase, run_deprecated_python=run_deprecated_python) for phase in phases):
-            catalog[step_id] = Step(catalog[step_id].label, ["python3", "-c", "print('No enabled tests in this phase; deprecated Python tests require --run-deprecated-python')"])
-    if run_deprecated_python:
-        catalog[StepId.BAZEL_GO].args.extend(["--", "--test_env=YOMUX_RUN_DEPRECATED_PYTHON=1"])
-        for step in catalog.values():
-            if step.args[:3] != ["python3", "-m", "pytest"]:
-                continue
-            step.args.append("--run-deprecated-python")
-            marker_index = step.args.index("-m") + 1
-            step.args[marker_index] = step.args[marker_index].replace(" and not deprecated_python_server", "")
+        if phases and not any(pytest_files(phase) for phase in phases):
+            catalog[step_id] = Step(catalog[step_id].label, ["python3", "-c", "print('No enabled tests in this phase')"])
     return catalog
 
 
-def lanes(*, serial: bool = False, cpu_percent: int | None = None, run_deprecated_python: bool = False) -> list[Lane]:
+def lanes(*, serial: bool = False, cpu_percent: int | None = None) -> list[Lane]:
     # Commands are built once and referenced through typed IDs. Focused aliases,
     # prerequisites, and phase ownership therefore cannot drift into copies.
-    catalog = step_catalog(serial=serial, cpu_percent=cpu_percent, run_deprecated_python=run_deprecated_python)
+    catalog = step_catalog(serial=serial, cpu_percent=cpu_percent)
     validate_lane_specs(catalog)
     return [
         Lane(
@@ -1739,7 +1723,7 @@ def certification_step(evidence_dir: Path) -> Step:
         # without it no reported case can be matched back to a requested node id. That failure is
         # fail-closed - every unit reads as not-collected and the phase refuses - but it refuses a
         # run whose units all actually passed, so the family is pinned rather than inferred.
-        ["python3", "-m", "pytest", *CERTIFICATION_NODE_IDS, "--run-deprecated-python", "-p", "no:xdist", "-o", "junit_family=xunit1", f"--junit-xml={junit_path}", "-rs", "-q"],
+        ["python3", "-m", "pytest", *CERTIFICATION_NODE_IDS, "-p", "no:xdist", "-o", "junit_family=xunit1", f"--junit-xml={junit_path}", "-rs", "-q"],
         tuple(
             [(name, "1") for name in latency_calibration.CERTIFICATION_ENV_NAMES]
             + [
@@ -2116,7 +2100,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--certify", action="store_true", help="run functional checks followed by explicit controlled-load latency certification")
     parser.add_argument("--certification-only", action="store_true", help="run only the exclusive latency-certification phase, skipping every functional lane")
     parser.add_argument("--certification-evidence-dir", default=None, metavar="/tmp/DIR", help="override the automatic certification evidence directory under /tmp")
-    parser.add_argument("--run-deprecated-python", action="store_true", help="also run legacy Python backend and coexistence tests for explicit maintenance")
     parser.add_argument("--execution", choices=bazel_execution_contract.EXECUTION_MODES, default="auto",
                         help="execution backend; native is diagnostic, qualified-native requires a verified offline bundle")
     args = parser.parse_args(argv)
@@ -2137,8 +2120,8 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    if args.serial or args.cpu_percent is not None or args.run_deprecated_python:
-        available = lanes(serial=args.serial, cpu_percent=args.cpu_percent, run_deprecated_python=args.run_deprecated_python)
+    if args.serial or args.cpu_percent is not None:
+        available = lanes(serial=args.serial, cpu_percent=args.cpu_percent)
 
     if args.list_lanes:
         for lane in available:

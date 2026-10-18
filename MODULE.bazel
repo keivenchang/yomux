@@ -42,6 +42,16 @@ go_sdk.download(
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
+
+# Existing chat databases contain FTS5 write triggers, so all native SQLite
+# consumers need the same feature set even before chat is enabled.
+go_deps.gazelle_override(
+    directives = [
+        "gazelle:go_copts -DSQLITE_ENABLE_FTS5",
+        "gazelle:go_clinkopts -lm",
+    ],
+    path = "github.com/mattn/go-sqlite3",
+)
 use_repo(go_deps, "com_github_mattn_go_sqlite3", "in_gopkg_yaml_v3", "org_golang_x_sys", "org_golang_x_text")
 
 runtime = use_extension("//:tools/bazel_runtime_toolchain.bzl", "runtime")

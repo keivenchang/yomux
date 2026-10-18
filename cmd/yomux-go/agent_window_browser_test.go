@@ -87,12 +87,8 @@ func TestAgentWindowMetadataRefreshBrowser(t *testing.T) {
 	initial["session_identity"] = goTmuxSessionIdentity("working", topology.identities["working"])
 	s.metadataPayload = map[string]any{"sessions": map[string]any{"working": initial}, "session_order": []string{"working"}, "topology_generation": topology.generation, "metadata_generation": uint64(1)}
 	s.metadataGeneration, s.metadataBuiltAt = 1, time.Now()
-	renderer, err := startPythonHomeRenderer(root, private)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer renderer.close()
-	html, err := renderer.render(map[string]any{"sessions": []string{"working"}, "role": "admin", "username": "fixture", "language": "en", "capabilities": s.capabilities.Snapshot(), "stats_only": false, "backend": "Go fixture", "dangerously_yolo": false, "tmux_topology": map[string]any{"generation": topology.generation, "epoch": s.metadataEpoch()}})
+	t.Cleanup(s.closeNativePages)
+	html, err := s.renderNativeHome(httptest.NewRequest(http.MethodGet, "/", nil), authUser{username: "fixture", role: "admin"}, topology)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +137,11 @@ func TestAgentWindowMetadataRefreshBrowser(t *testing.T) {
 	defer cancel()
 	python := exec.CommandContext(ctx, "python3", "-c", workingBrowserScript, httpServer.URL, private)
 	python.Dir = root
-	python.Env = testsupport.SyntheticEnvironment("HOME="+private, "TMPDIR="+private, "PYTHONPATH="+root)
+	pythonPath := root
+	if inheritedPythonPath := os.Getenv("PYTHONPATH"); inheritedPythonPath != "" {
+		pythonPath += string(os.PathListSeparator) + inheritedPythonPath
+	}
+	python.Env = testsupport.SyntheticEnvironment("HOME="+private, "TMPDIR="+private, "PYTHONPATH="+pythonPath)
 	output, err := python.CombinedOutput()
 	if err != nil {
 		t.Fatalf("browser transition: %v\n%s", err, output)

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.isolated_dev_server import go_test_server_binary
 from yomux_lib.infra import common
 from yomux_lib.local_services import rpc
 from tools.product_environment import product_env_name
@@ -184,7 +185,7 @@ def test_cli_reports_outside_codex_override_without_a_traceback(tmp_path: Path):
     ):
         env.pop(key, None)
     result = subprocess.run(
-        [sys.executable, str(Path(__file__).parents[1] / "yomux.py"), "--backend", "python", "--print-runtime-report"],
+        [str(go_test_server_binary(Path(__file__).resolve().parents[1])), "--operator", "validate-roots", "--root", str(Path(__file__).resolve().parents[1])],
         env=env,
         text=True,
         capture_output=True,
@@ -192,7 +193,7 @@ def test_cli_reports_outside_codex_override_without_a_traceback(tmp_path: Path):
     )
 
     assert result.returncode == 2
-    assert "ERROR: YOMUX_CODEX_HOME resolves outside YOMUX_ROOT: /outside/codex" in result.stderr
+    assert "CODEX_HOME resolves outside YOMUX_ROOT" in result.stderr
     assert "Traceback" not in result.stderr
     assert not root.exists()
 

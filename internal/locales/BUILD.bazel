@@ -1,0 +1,29 @@
+load("@rules_go//go:def.bzl", "go_library")
+load("//:tools/bazel_rules.bzl", "go_test_pair")
+
+exports_files(["BUILD.bazel"])
+
+go_library(
+    name = "locales_lib",
+    srcs = ["registry.go"],
+    importpath = "github.com/keivenchang/yomux/internal/locales",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test_pair(
+    name = "locales",
+    srcs = ["registry_test.go"],
+    embed = [":locales_lib"],
+)
+
+filegroup(
+    name = "qualified_sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.lock",
+            "**/*.log",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)

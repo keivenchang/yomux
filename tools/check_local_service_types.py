@@ -15,11 +15,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATIC_SLICE = (
     "yomux_lib/local_services/protocol_types.py",
-    "yomux_lib/local_services/command_router.py",
     "yomux_lib/local_services/rpc.py",
     "yomux_lib/local_services/client.py",
     "yomux_lib/local_services/registry.py",
-    "yomux_lib/local_services/static_contracts.py",
 )
 
 

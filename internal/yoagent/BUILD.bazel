@@ -1,0 +1,53 @@
+load("@rules_go//go:def.bzl", "go_library")
+load("//:tools/bazel_rules.bzl", "go_test_pair")
+
+exports_files(["BUILD.bazel"])
+
+go_library(
+    name = "yoagent_lib",
+    srcs = [
+        "conversation.go",
+        "job_engine.go",
+        "jobs.go",
+        "model_intents.go",
+        "skills.go",
+        "store.go",
+    ],
+    importpath = "github.com/keivenchang/yomux/internal/yoagent",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/atomicfile:atomicfile_lib",
+        "//internal/decimal:decimal_lib",
+        "//internal/locales:locales_lib",
+        "//internal/mutablefs:mutablefs_lib",
+        "@com_github_mattn_go_sqlite3//:go_default_library",
+        "@in_gopkg_yaml_v3//:go_default_library",
+    ],
+)
+
+go_test_pair(
+    name = "yoagent",
+    srcs = [
+        "conversation_test.go",
+        "job_engine_test.go",
+        "jobs_test.go",
+        "model_intents_test.go",
+        "skills_test.go",
+        "store_test.go",
+    ],
+    data = ["//:agent_conversation_test_inputs"],
+    embed = [":yoagent_lib"],
+    deps = ["@rules_go//go/runfiles"],
+)
+
+filegroup(
+    name = "qualified_sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.lock",
+            "**/*.log",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)

@@ -1,0 +1,29 @@
+load("@rules_go//go:def.bzl", "go_library")
+load("//:tools/bazel_rules.bzl", "go_test_pair")
+
+exports_files(["BUILD.bazel"])
+
+go_library(
+    name = "decimal_lib",
+    srcs = ["round.go"],
+    importpath = "github.com/keivenchang/yomux/internal/decimal",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test_pair(
+    name = "decimal",
+    srcs = ["round_test.go"],
+    embed = [":decimal_lib"],
+)
+
+filegroup(
+    name = "qualified_sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.lock",
+            "**/*.log",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)

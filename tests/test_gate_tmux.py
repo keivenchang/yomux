@@ -33,14 +33,13 @@ from tests.browser_helpers.browser_layout import start_browser_server
 from tests.browser_helpers.browser_layout import start_isolated_browser_app
 from tests.browser_helpers.browser_layout import stop_browser_fixture
 from tests.gate_harness import gate_http_port  # noqa: F401
-from tests.gate_harness import gate_live_server  # noqa: F401
+from tests.native_gate_fixtures import gate_live_server  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.gate_harness import load_gate_terminal_only_browser
 from tests.tmux_runtime import clear_isolated_product_environment
 from tests.tmux_runtime import patch_isolated_product_environment
 from tests.tmux_runtime import run_isolated_tmux
-from yomux_lib.server import TmuxWebtermHTTPServer
 from yomux_lib.tmux import tmux_utils
 
 
@@ -71,59 +70,14 @@ class TerminalOutputPressure:
     duration_seconds: float
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_d1_repeated_enter_posts_rename_exactly_once(browser, gate_live_server):
-    evidence = gate_harness.held_rename_roster_probe(browser, gate_live_server)
-    assert evidence["held"]["calls"] == evidence["final"]["calls"] == 1, evidence
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_d2_successful_repeated_enter_rename_never_surfaces_error(browser, gate_live_server):
-    evidence = gate_harness.held_rename_roster_probe(browser, gate_live_server)
-    assert evidence["final"]["error"] == "", evidence
-    assert evidence["target"] in evidence["final"]["sessions"], evidence
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.parametrize("reject", [False, True])
-@pytest.mark.browser
-def test_d3_submit_control_is_visibly_disabled_then_reenabled_on_both_outcomes(browser, gate_live_server, reject):
-    evidence = gate_harness.held_rename_roster_probe(browser, gate_live_server, reject=reject)
-    assert evidence["held"]["disabled"] and evidence["held"]["opacity"] < 1, evidence
-    assert evidence["final"]["disabled"] is False, evidence
-    assert bool(evidence["final"]["error"]) == reject, evidence
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_d4_rename_survives_released_stale_roster_without_reversal(browser, gate_live_server):
-    evidence = gate_harness.held_rename_roster_probe(browser, gate_live_server, stale=True)
-    assert evidence["target"] in evidence["final"]["sessions"], evidence
-    assert evidence["session"] not in evidence["final"]["sessions"], evidence
-    assert evidence["target"] in evidence["final"]["layout"], evidence
-    assert evidence["target"] in evidence["final"]["tabText"], evidence
-    assert evidence["target"] in evidence["final"]["active"], evidence
-    assert evidence["session"] not in evidence["final"]["active"], evidence
-    assert evidence["final"]["focused"] == evidence["target"], evidence
-    assert evidence["session"] not in evidence["final"]["serverSessions"], evidence
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.parametrize("reject", [False, True])
-@pytest.mark.browser
-def test_d10_rename_optimistically_changes_tab_before_reply_and_has_bounded_reconciliation(browser, gate_live_server, reject):
-    evidence = gate_harness.held_rename_roster_probe(browser, gate_live_server, reject=reject)
-    assert evidence["target"] in evidence["held"]["tabText"], evidence
-    expected = evidence["session"] if reject else evidence["target"]
-    assert expected in evidence["final"]["tabText"], evidence
-    assert expected in evidence["final"]["sessions"], evidence
 
 
 def _tmux(socket_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -139,38 +93,6 @@ def _request(port: int, path: str) -> tuple[int, bytes]:
     return result
 
 
-@pytest.mark.no_browser
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_gate_d5_kill_session_only_affects_registered_tmux_socket(monkeypatch, tmp_path, make_tmux_webterm_app, no_control_socket, isolated_yoagent_conversation_state):
-    if shutil.which("tmux") is None:
-        pytest.skip("tmux is not installed")
-    socket_root = Path(os.environ["YOLOMUX_TEST_ROOT"])
-    socket_one = socket_root / "d5-one.sock"
-    socket_two = socket_root / "d5-two.sock"
-    session = f"yt-{uuid.uuid4().hex[:12]}"
-    for socket_path in (socket_one, socket_two):
-        created = _tmux(socket_path, "new-session", "-d", "-s", session, "exec " + fixture_command("bash", "--noprofile", "--norc"))
-        assert created.returncode == 0, created.stderr or created.stdout
-    patch_isolated_product_environment(monkeypatch, {
-        "YOMUX_TMUX_SOCKET": str(socket_one),
-        "YOMUX_TEST_AUTH_BYPASS": "1",
-    })
-    app = make_tmux_webterm_app([session])
-    server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        status, _ = _request(server.server_address[1], f"/api/kill-session?{urlencode({'session': session})}")
-        assert status == HTTPStatus.OK
-        assert _tmux(socket_one, "has-session", "-t", f"{session}:").returncode != 0
-        assert _tmux(socket_two, "has-session", "-t", f"{session}:").returncode == 0
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
-        for socket_path in (socket_one, socket_two):
-            _tmux(socket_path, "kill-server")
 
 
 @pytest.mark.no_browser
@@ -191,36 +113,6 @@ def test_gate_d6_destructive_default_server_policy_is_explicit(monkeypatch):
         tmux_utils.tmux_command(["kill-server"])
 
 
-@pytest.mark.gate_serial
-@pytest.mark.no_browser
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session(monkeypatch, tmp_path, make_tmux_webterm_app, no_control_socket, isolated_yoagent_conversation_state):
-    if shutil.which("tmux") is None:
-        pytest.skip("tmux is not installed")
-    socket_path = Path(os.environ["YOLOMUX_TEST_ROOT"]) / "d7.sock"
-    session = f"yt-{uuid.uuid4().hex[:12]}"
-    created = _tmux(socket_path, "new-session", "-d", "-s", session, "exec " + fixture_command("bash", "--noprofile", "--norc"))
-    assert created.returncode == 0, created.stderr or created.stdout
-    patch_isolated_product_environment(monkeypatch, {
-        "YOMUX_TMUX_SOCKET": str(socket_path),
-        "YOMUX_TEST_AUTH_BYPASS": "1",
-    })
-    app = make_tmux_webterm_app([session])
-    server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        started_at = time.monotonic()
-        status, _ = _request(server.server_address[1], f"/api/kill-session?{urlencode({'session': session})}")
-        assert time.monotonic() - started_at < 0.5
-        assert status == HTTPStatus.OK
-        assert _tmux(socket_path, "has-session", "-t", f"{session}:").returncode != 0
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
-        _tmux(socket_path, "kill-server")
 
 
 def _start_terminal_output_pressure(runtime, session: str, *, duration_seconds: float = TERMINAL_PRESSURE_DURATION_SECONDS) -> None:
@@ -1218,155 +1110,14 @@ def _run_tab_activation_native_echo_journey(browser, monkeypatch, tmp_path) -> d
         stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
-@pytest.mark.browser
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_s1_tab_activation_keeps_native_echo_live_while_cached_differ_renders(browser, monkeypatch, tmp_path):
-    evidence = _run_tab_activation_native_echo_journey(browser, monkeypatch, tmp_path)
-    print({key: evidence[key] for key in ("quiet", "quiet_timeline", "static_replacements", "busy", "phase_two", "phase_two_transition", "phase_two_state", "quiet_transition", "busy_transition", "busy_render_timeline", "differ_rows", "held_delay_ms")})
-    assert evidence["delivery"]["samples"] == 40, evidence["delivery"]
-    assert evidence["delivery"]["markers"] == [f"<E:{index:04d}>" for index in range(1, 41)], evidence["delivery"]
-    assert evidence["differ_pending_at_first_busy_key"]["treePending"], evidence
-    assert evidence["differ_rows"] >= 5000, evidence
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_s1_certification_tab_activation_native_echo_holds_fixed_user_ceilings(certification_phase_only, request, browser, monkeypatch, tmp_path):
-    """Certify native visible echo in quiet and busy real-xterm tab activations."""
-
-    calibration = latency_calibration.run_browser_latency_calibration(browser)
-    calibration_qualification = latency_calibration.browser_calibration_qualification(calibration)
-    qualification = latency_calibration.merged_qualification(certification_phase_only, calibration_qualification)
-    evidence = _run_tab_activation_native_echo_journey(browser, monkeypatch, tmp_path)
-    certified = latency_calibration.certify_verdicts(
-        nodeid=request.node.nodeid,
-        label="s1-tab-activation-visible-echo",
-        verdicts=evidence["verdicts"],
-        qualification=qualification,
-        extra_evidence={
-            "accepted_ceilings_ms": {"p95": 50.0, "p99": 100.0},
-            "quiet_samples_ms": evidence["quiet_samples_ms"],
-            "differ_busy_samples_ms": evidence["busy_samples_ms"],
-            "cached_phase_two_samples_ms": evidence["phase_two_samples_ms"],
-            "cached_phase_two_transition": evidence["phase_two_transition"],
-            "cached_phase_two_state": evidence["phase_two_state"],
-            "static_replacements": evidence["static_replacements"],
-            "quiet_timeline": evidence["quiet_timeline"],
-            "held_delay_negative_control_ms": evidence["held_delay_ms"],
-            "negative_control_verdicts": evidence["negative_control_verdicts"],
-            "sample_count_per_condition": 20,
-            "native_markers_delivered_in_order": evidence["delivery"]["markers"],
-            "differ_rows_rendered": evidence["differ_rows"],
-            "differ_pending_at_first_busy_key": evidence["differ_pending_at_first_busy_key"],
-            "pending_color": evidence["pending_color"],
-            "legacy_pending_color": evidence["legacy_pending_color"],
-            "stale_callback_pending_state": evidence["stale_callback_pending_state"],
-            "busy_pending_color": evidence["busy_pending_color"],
-            "quiet_transition": evidence["quiet_transition"],
-            "busy_transition": evidence["busy_transition"],
-            "busy_render_timeline": evidence["busy_render_timeline"],
-            "browser_calibration": calibration,
-        },
-    )
-    print({"quiet": evidence["quiet"], "busy": evidence["busy"], "heldDelayMs": evidence["held_delay_ms"], "verdicts": evidence["verdicts"], "artifact": certified["artifact"]})
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_s1_keystroke_delivery_is_complete_under_terminal_output_pressure(browser, gate_live_server):
-    """Every one of 120 native keys reaches xterm, the websocket and the session while it streams 4 KiB every 20 ms.
-
-    Release-blocking correctness, safe to run in the parallel browser lane: every assertion is a count
-    or a byte total, so an oversubscribed renderer cannot change the verdict. The user-visible wall
-    ceiling that used to be fused in here is certified separately - see the certification test below.
-    """
-
-    session = _focus_gate_terminal(browser, gate_live_server)
-    observed = _keystroke_round(
-        browser,
-        gate_live_server,
-        session,
-        label="pressured",
-        sample_count=KEYSTROKE_LATENCY_SAMPLE_COUNT,
-        pressure=True,
-    )
-    print(f"S1 delivery: {_keystroke_summary(observed)}")
-    _assert_keystroke_delivery_complete(observed)
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_s1_keystroke_delivery_survives_a_deterministic_renderer_cpu_slowdown(browser, gate_live_server):
-    """A deterministic renderer CPU slowdown must change wall latency only, never delivery.
-
-    The standing proof that the split is real. The same round under a 10x slowdown measured max 11.1 ms
-    - a red under the old fused ceiling - with 120/120 keys delivered, 120 one-byte sends and no focus
-    repair. This keeps a cheaper 4x version in the release-blocking lane so the delivery contract stays
-    insensitive to renderer scheduling; it deliberately asserts no latency.
-    """
-
-    session = _focus_gate_terminal(browser, gate_live_server)
-    established_pressure = _establish_terminal_output_pressure(
-        browser,
-        gate_live_server,
-        session,
-        duration_seconds=KEYSTROKE_SLOWDOWN_CONTROL_PRESSURE_SECONDS,
-    )
-    browser.execute_cdp_cmd("Emulation.setCPUThrottlingRate", {"rate": KEYSTROKE_SLOWDOWN_CONTROL_RATE})
-    try:
-        observed = _keystroke_round(
-            browser,
-            gate_live_server,
-            session,
-            label=f"cpu-slowdown-{KEYSTROKE_SLOWDOWN_CONTROL_RATE}x",
-            sample_count=KEYSTROKE_SLOWDOWN_CONTROL_SAMPLE_COUNT,
-            pressure=True,
-            pressure_seconds=KEYSTROKE_SLOWDOWN_CONTROL_PRESSURE_SECONDS,
-            established_pressure=established_pressure,
-        )
-    finally:
-        browser.execute_cdp_cmd("Emulation.setCPUThrottlingRate", {"rate": 1})
-    print(f"S1 delivery under CPU slowdown: {_keystroke_summary(observed)}")
-    _assert_keystroke_delivery_complete(observed)
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.no_browser
-def test_s1_cpu_slowdown_starts_only_after_pressure_is_established(monkeypatch):
-    """The parallel completeness control must not throttle its pressure-readiness prerequisite."""
-
-    calls: list[object] = []
-    pressure = TerminalOutputPressure(session="fixture-session", duration_seconds=45.0)
-
-    class Browser:
-        def execute_cdp_cmd(self, command, payload):
-            calls.append((command, payload))
-
-    def establish(_browser, _runtime, session, *, duration_seconds):
-        calls.append(("establish", session, duration_seconds))
-        return pressure
-
-    def sample(_browser, _runtime, session, **options):
-        calls.append(("sample", session, options["established_pressure"]))
-        return _complete_delivery_observation(KEYSTROKE_SLOWDOWN_CONTROL_SAMPLE_COUNT)
-
-    monkeypatch.setattr(sys.modules[__name__], "_focus_gate_terminal", lambda _browser, _runtime: pressure.session)
-    monkeypatch.setattr(sys.modules[__name__], "_establish_terminal_output_pressure", establish)
-    monkeypatch.setattr(sys.modules[__name__], "_keystroke_round", sample)
-
-    test_s1_keystroke_delivery_survives_a_deterministic_renderer_cpu_slowdown(Browser(), object())
-
-    assert calls == [
-        ("establish", pressure.session, KEYSTROKE_SLOWDOWN_CONTROL_PRESSURE_SECONDS),
-        ("Emulation.setCPUThrottlingRate", {"rate": KEYSTROKE_SLOWDOWN_CONTROL_RATE}),
-        ("sample", pressure.session, pressure),
-        ("Emulation.setCPUThrottlingRate", {"rate": 1}),
-    ]
 
 
 @pytest.mark.no_browser
@@ -1461,187 +1212,16 @@ def _certification_verdict(summary: dict[str, object], certified_statistic: str)
 certification_phase_only = latency_calibration.certification_phase_fixture()
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_s1_certification_keystroke_wall_latency_holds_the_fixed_user_ceiling(certification_phase_only, request, browser, gate_live_server):
-    """Certify the user-visible keystroke wall latency on a quiet and a pressured round in ONE browser.
-
-    Requirement for the exclusive phase that owns this node:
-      ceiling        - a fixed 3.0 ms from explicit key input to xterm term.onData, identical on every
-                       host. No calibration, load factor or host measurement may widen it; a slower
-                       machine authorising a slower product is exactly the antipattern being removed.
-      statistic      - nearest-rank p99 of the 120 per-key samples in each round.
-      qualification  - two independent inputs, both from latency_calibration and neither able to move
-                       the ceiling. The host qualifier (windowed PSI, procs_running, disk busy and a
-                       CPU work unit, measured by `certification_phase_only` before any fixture is
-                       built) and the pre-page renderer calibration must BOTH admit; either one
-                       refusing produces NOT CERTIFIABLE with its raw evidence. The per-key MAXIMUM is
-                       additionally certified only when the renderer calibration is at or below the
-                       recorded reference (latency_calibration.CALIBRATION_REFERENCE_MS p75); on a
-                       renderer inside admission but past the reference the maximum is recorded in the
-                       artifact and the certified statistic falls back to p99, because one sample under
-                       a contended scheduler measures the host.
-      rounds         - quiet and pressured, same browser, same page load, both must hold the ceiling.
-      delivery       - both rounds must also satisfy the full delivery contract; certification may
-                       never be reached by typing fewer keys.
-    """
-
-    calibration = latency_calibration.run_browser_latency_calibration(browser)
-    calibration_qualification = latency_calibration.browser_calibration_qualification(calibration)
-    qualification = latency_calibration.merged_qualification(certification_phase_only, calibration_qualification)
-    certified_statistic = _certified_latency_statistic(calibration_qualification["at_reference"])
-
-    session = _focus_gate_terminal(browser, gate_live_server)
-    rounds = [
-        _keystroke_round(browser, gate_live_server, session, label="quiet", sample_count=KEYSTROKE_LATENCY_SAMPLE_COUNT, pressure=False),
-        _keystroke_round(browser, gate_live_server, session, label="pressured", sample_count=KEYSTROKE_LATENCY_SAMPLE_COUNT, pressure=True),
-    ]
-    for observed in rounds:
-        _assert_keystroke_delivery_complete(observed)
-
-    verdicts = [_certification_verdict(_keystroke_summary(observed), certified_statistic) for observed in rounds]
-    print(f"S1 certification: statistic={certified_statistic} qualified={qualification['qualified']} rounds={verdicts}")
-    certified = latency_calibration.certify_verdicts(
-        nodeid=request.node.nodeid,
-        label="s1-keystroke-wall-latency",
-        verdicts=verdicts,
-        qualification=qualification,
-        extra_evidence={
-            "ceiling_ms": KEYSTROKE_LATENCY_CEILING_MS,
-            "certified_statistic": certified_statistic,
-            "sample_count": KEYSTROKE_LATENCY_SAMPLE_COUNT,
-        },
-    )
-    print(f"S1 certification artifact: {certified['artifact']}")
 
 
 def _negative_control_reasons(observed: dict[str, object]) -> list[str]:
     return [failure.split(":", 1)[0] for failure in _keystroke_delivery_failures(observed)]
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_s1_negative_control_dropped_keystroke_fails_delivery_completeness(browser, gate_live_server):
-    """A single key that never reaches xterm must red the retained delivery contract."""
-
-    session = _focus_gate_terminal(browser, gate_live_server)
-    dropped_key = KEYSTROKE_LATENCY_SAMPLE_COUNT // 2
-    browser.execute_script(
-        """
-        const session = arguments[0];
-        const dropIndex = Number(arguments[1]);
-        const original = window.handleTerminalData;
-        if (typeof original !== 'function') throw new Error('handleTerminalData is not reachable for injection');
-        let seen = 0;
-        window.handleTerminalData = function (targetSession, data, options) {
-          if (targetSession === session) {
-            seen += 1;
-            if (seen === dropIndex) return false;
-          }
-          return original(targetSession, data, options);
-        };
-        """,
-        session,
-        dropped_key,
-    )
-    observed = _keystroke_round(
-        browser,
-        gate_live_server,
-        session,
-        label="negative-control-dropped-key",
-        sample_count=KEYSTROKE_LATENCY_SAMPLE_COUNT,
-        pressure=True,
-    )
-    reasons = _negative_control_reasons(observed)
-    print(f"S1 negative control (dropped key {dropped_key}): reasons={reasons} summary={_keystroke_summary(observed)}")
-    # One lost key is visible independently on the key counter, the socket and xterm's own data event.
-    assert reasons == ["keystroke-delivery", "websocket-send", "term-on-data"], {"reasons": reasons, "summary": _keystroke_summary(observed)}
-    assert observed["counts"][-1] == KEYSTROKE_LATENCY_SAMPLE_COUNT - 1, observed["counts"]
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_s1_negative_control_stolen_focus_fails_the_focus_invariant(browser, gate_live_server):
-    """Focus leaving and returning to the terminal mid-burst must red the retained focus invariant."""
-
-    session = _focus_gate_terminal(browser, gate_live_server)
-    steal_after_key = 5
-
-    def steal_focus(index: int) -> None:
-        if index != steal_after_key:
-            return
-        browser.execute_script(
-            """
-            const session = arguments[0];
-            const textarea = document.querySelector(`#term-${CSS.escape(session)} textarea`);
-            if (!textarea) throw new Error('terminal textarea is not mounted: ' + session);
-            textarea.blur();
-            textarea.focus();
-            """,
-            session,
-        )
-
-    observed = _keystroke_round(
-        browser,
-        gate_live_server,
-        session,
-        label="negative-control-stolen-focus",
-        sample_count=KEYSTROKE_LATENCY_SAMPLE_COUNT,
-        pressure=True,
-        after_key=steal_focus,
-    )
-    reasons = _negative_control_reasons(observed)
-    print(f"S1 negative control (stolen focus): reasons={reasons} summary={_keystroke_summary(observed)}")
-    # Delivery is untouched, so the focus invariant is the only thing that can catch this.
-    assert reasons == ["focus-invariant"], {"reasons": reasons, "summary": _keystroke_summary(observed)}
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.browser
-def test_s1_negative_control_stalled_websocket_fails_send_completeness(browser, gate_live_server):
-    """A transport that stops accepting input mid-burst must red the retained websocket contract.
-
-    xterm still emits every key and keydownToTermData still records it, so this is exactly the state a
-    delivery test that only counted keys would call green.
-    """
-
-    session = _focus_gate_terminal(browser, gate_live_server)
-    stall_after_key = KEYSTROKE_LATENCY_SAMPLE_COUNT // 2
-
-    def stall_socket(index: int) -> None:
-        if index != stall_after_key:
-            return
-        browser.execute_script(
-            """
-            const session = arguments[0];
-            const item = terminals.get(session);
-            if (!item?.socket) throw new Error('terminal socket is not mounted: ' + session);
-            Object.defineProperty(item.socket, 'readyState', {configurable: true, get: () => WebSocket.CLOSING});
-            """,
-            session,
-        )
-
-    observed = _keystroke_round(
-        browser,
-        gate_live_server,
-        session,
-        label="negative-control-stalled-websocket",
-        sample_count=KEYSTROKE_LATENCY_SAMPLE_COUNT,
-        # Output pressure has its own positive control. This negative control injects one
-        # transport defect and must not acquire a second, scheduler-sensitive precondition.
-        pressure=False,
-        after_key=stall_socket,
-    )
-    reasons = _negative_control_reasons(observed)
-    print(f"S1 negative control (stalled websocket): reasons={reasons} summary={_keystroke_summary(observed)}")
-    # Every key still counted; only the transport contract can see the stall.
-    assert reasons == ["websocket-send"], {"reasons": reasons, "summary": _keystroke_summary(observed)}
-    assert observed["counts"] == list(range(1, KEYSTROKE_LATENCY_SAMPLE_COUNT + 1)), observed["counts"]
-    assert observed["ws_send_count"] == stall_after_key, observed["ws_send_count"]
 
 
 def _complete_delivery_observation(sample_count: int = 4) -> dict[str, object]:

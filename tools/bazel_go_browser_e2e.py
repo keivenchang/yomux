@@ -62,7 +62,7 @@ def synthetic_server_environment(overrides: dict[str, str]) -> dict[str, str]:
 def resolve_source_root() -> Path:
     configured = product_env('E2E_SOURCE_ROOT', "", environ=os.environ).strip()
     source_root = Path(configured) if configured else Path.cwd()
-    required = (source_root / "static/yomux.js", source_root / "tools", source_root / "yomux_lib")
+    required = (source_root / "static/yomux.js", source_root / "tools", source_root / "yomux_lib", source_root / "assets/runtime")
     if not all(path.exists() for path in required):
         missing = ", ".join(str(path) for path in required if not path.exists())
         raise RuntimeError(f"E2E source root is missing required assets: {missing}")
@@ -213,6 +213,7 @@ def main(binary: str) -> None:
         binary_hash = sha256_file(Path(binary))
         shutil.copytree(source_root / "tools", private_source_root / "tools")
         shutil.copytree(source_root / "yomux_lib", private_source_root / "yomux_lib")
+        shutil.copytree(source_root / "assets/runtime", private_source_root / "assets/runtime")
         finder_root = private_source_root / "finder-fixture"
         (finder_root / "nested").mkdir(parents=True)
         (finder_root / "note.md").write_text("hello from finder\n", encoding="utf-8")

@@ -14,5 +14,5 @@ sdk_version="$(bazel_go_sdk_version)"
 if [ -n "$sdk_version" ]; then
   bazel_args+=("--@rules_go//go/toolchain:sdk_version=$sdk_version")
 fi
-bazel_args+=("$@" //cmd/yomux-go:yomux-go)
+bazel_args+=("$@" //cmd/yomux-go:yomux-go //tools/staticgen:staticgen)
 exec bazel "${bazel_args[@]}"

@@ -70,12 +70,25 @@ func (s *server) mergeTabberActivity(activity map[string]any) {
 	}
 }
 
-var terminalPassiveInput = regexp.MustCompile(`\x1b(?:\[M[\s\S]{3}|\[<?[0-9;?=>]*[ -/]*[cRntyIOmM]|\][^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*(?:\x1b\\))`)
+var terminalPassiveInput = regexp.MustCompile(`\x1b(?:\[[56](?:;[2-8])?~|\[<?[0-9;?=>]*[ -/]*[cRntyIOmM]|\][^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*(?:\x1b\\))`)
 
 var terminalModifiedF3 = regexp.MustCompile(`\x1b\[1;[2-8]R`)
 
 func terminalInputIsActivity(data []byte, explicit ...bool) bool {
 	text := string(data)
+	// Legacy mouse coordinates are three raw bytes, which can accidentally form a UTF-8 rune.
+	// Consume bytes before applying the rune-based terminal response expressions.
+	var keyboard strings.Builder
+	for {
+		start := strings.Index(text, "\x1b[M")
+		if start < 0 || start+6 > len(text) {
+			keyboard.WriteString(text)
+			break
+		}
+		keyboard.WriteString(text[:start])
+		text = text[start+6:]
+	}
+	text = keyboard.String()
 	if len(explicit) > 0 && explicit[0] {
 		text = terminalModifiedF3.ReplaceAllString(text, "key")
 	}

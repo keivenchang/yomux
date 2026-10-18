@@ -27,7 +27,6 @@ import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
-from importlib.resources import files
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -244,7 +243,7 @@ def validate_catalog(payload: object) -> dict[str, Any]:
 
 def load_packaged_seed() -> dict[str, Any]:
     try:
-        data = files("yomux_lib").joinpath("data")
+        data = Path(__file__).resolve().parents[2] / "assets" / "runtime"
         seed = validate_catalog(json.loads(data.joinpath(SEED_FILENAME).read_text(encoding="utf-8")))
         internal_path = data.joinpath("internal_model_pricing.json")
         if not internal_path.is_file():

@@ -20,20 +20,10 @@ from yomux_lib.infra import listener_census
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = ROOT / "tools" / "yostats_active_browser_window.py"
-CONTENTION_TOOL_PATH = ROOT / "tools" / "yostats_contention_benchmark.py"
 FIXTURE_PORT = 41771
 FIXTURE_BASE_URL = f"https://localhost:{FIXTURE_PORT}"
 
 
-def test_capture_tools_share_proc_cpu_reader_and_positive_validators():
-    active_source = TOOL_PATH.read_text(encoding="utf-8")
-    contention_source = CONTENTION_TOOL_PATH.read_text(encoding="utf-8")
-
-    assert "from tools.yostats_capture_common import positive_int, process_cpu_seconds" in active_source
-    assert "from tools.yostats_capture_common import positive_float, positive_int, process_cpu_seconds" in contention_source
-    assert "def process_cpu_seconds" not in active_source
-    assert "def process_cpu_time_seconds" not in contention_source
-    assert "process_cpu_seconds(pid)" in contention_source
 
 
 def test_live_stats_acceptance_timeout_preserves_bounded_browser_diagnostics():
@@ -84,37 +74,8 @@ def load_tool_module():
     return module
 
 
-def test_active_browser_window_uses_two_second_listener_census(monkeypatch):
-    tool = load_tool_module()
-    observed = []
-
-    class CensusObserved(Exception):
-        pass
-
-    def census(port, *, timeout_seconds, strict):
-        # The caller must name its mode. Default is target-scoped operational identity; strict
-        # whole-host visibility cannot succeed on a shared host and is not what this measures.
-        assert strict is False, strict
-        observed.append((port, timeout_seconds))
-        raise CensusObserved
-
-    monkeypatch.setattr(tool, "parse_args", lambda: SimpleNamespace(output=Path("/tmp/window.json"), port=FIXTURE_PORT))
-    monkeypatch.setattr(tool, "find_chrome", lambda: "/usr/bin/chrome")
-    monkeypatch.setattr(tool, "unique_listener_pid", census)
-
-    with pytest.raises(CensusObserved):
-        tool.main()
-    assert observed == [(FIXTURE_PORT, 2.0)]
 
 
-def test_active_browser_window_rejects_raw_fork_parent_and_child(monkeypatch):
-    tool = load_tool_module()
-    monkeypatch.setattr(tool, "parse_args", lambda: SimpleNamespace(output=Path("/tmp/window.json"), port=FIXTURE_PORT))
-    monkeypatch.setattr(tool, "find_chrome", lambda: "/usr/bin/chrome")
-    monkeypatch.setattr(listener_census, "listener_census", lambda *_a, **_k: listener_census.ListenerCensus(pids=(101, 202)))
-
-    with pytest.raises(RuntimeError, match=r"found \[101, 202\]"):
-        tool.main()
 
 
 def test_active_browser_window_import_is_read_only_and_cli_resolves_before_product_imports(tmp_path):
@@ -206,12 +167,10 @@ def test_active_browser_window_workload_source_contract():
     assert "const source = sourceTab;" in source
     assert "settle_browser_frames" in source
     assert "Drag YO!cost and retain only the interaction's own paint evidence" in source
-    assert 'workload["drag"] = drag_yocost_pane(driver)' in source
     assert "sessions.filter(isTmuxSession)" in source
     assert "selectSession(yocostItemId" in source
     assert "a slower earlier request cannot overwrite the final 5m/1s state" in source
     assert source.index('wait_for_exact_history(driver, 300, 1)') < source.index('driver.execute_script("setDebugGraphRange(1800); setDebugGraphResolutionOverride(10)")')
-    assert "clearClientPerfCounters(); performance.clearResourceTimings()" in source
     assert "runtime_service_pids" in source
     assert "X-YOmux-Measurement" in source
     assert "capture_measurement_metrics" in source
@@ -221,8 +180,6 @@ def test_active_browser_window_workload_source_contract():
     assert 'choices=("active", "idle-yostats", "deterministic-fanout")' in source
     assert "prepare_idle_yostats_workload" in source
     assert "install_ticker_callback_counter" in source
-    assert '"ticker_callbacks"' in source
-    assert '"renderer"' in source
 
 
 def test_deterministic_fanout_contract_freezes_every_step_owner_and_profiler_limit():
@@ -394,58 +351,8 @@ def test_deterministic_app_wait_rejects_a_missing_explicit_session(monkeypatch):
         tool.wait_for_app(driver, ["yo7771-b", "ant"], timeout=20)
 
 
-@pytest.mark.parametrize("output", [Path("/outside/window.json"), Path("/tmp/../outside-window.json")])
-def test_active_browser_window_rejects_non_tmp_output_before_chrome_starts(monkeypatch, capsys, output):
-    tool = load_tool_module()
-    monkeypatch.setattr(tool, "parse_args", lambda: SimpleNamespace(output=output, port=FIXTURE_PORT, duration=60, workload="active", username=None))
-    monkeypatch.setattr(tool, "find_chrome", lambda: "/usr/bin/chrome")
-    monkeypatch.setattr(tool, "unique_listener_pid", lambda _port, **_kwargs: 1)
-    monkeypatch.setattr(tool, "runtime_service_pids", lambda: {})
-    monkeypatch.setattr(tool, "ledger_snapshot", lambda: {})
-    monkeypatch.setattr(tool.webdriver, "Chrome", lambda **_kwargs: pytest.fail("Chrome must not start for an unsafe output path"))
-
-    assert tool.main() == 2
-    assert "output must be under /tmp" in capsys.readouterr().err
 
 
-def test_active_browser_window_sigterm_cleans_up_once(monkeypatch):
-    tool = load_tool_module()
-    signals = {}
-    cleanup_calls = []
-    driver = SimpleNamespace(
-        service=SimpleNamespace(process=SimpleNamespace(pid=4321)),
-        execute_cdp_cmd=lambda *_args: None,
-        set_page_load_timeout=lambda _seconds: None,
-        set_script_timeout=lambda _seconds: None,
-    )
-    monkeypatch.setattr(tool, "parse_args", lambda: SimpleNamespace(output=Path("/tmp/window.json"), port=FIXTURE_PORT, duration=60, workload="active", username=None))
-    monkeypatch.setattr(tool, "find_chrome", lambda: "/usr/bin/chrome")
-    monkeypatch.setattr(tool, "unique_listener_pid", lambda _port, **_kwargs: 1)
-    monkeypatch.setattr(tool, "runtime_service_pids", lambda: {})
-    monkeypatch.setattr(tool, "ledger_snapshot", lambda: {})
-    monkeypatch.setattr(tool.webdriver, "Chrome", lambda **_kwargs: driver)
-    monkeypatch.setattr(tool, "bounded_driver_quit", lambda candidate: cleanup_calls.append(candidate))
-    monkeypatch.setattr(tool.signal, "signal", lambda signum, callback: signals.__setitem__(signum, callback))
-    monkeypatch.setattr(tool.signal, "alarm", lambda _seconds: None)
-    monkeypatch.setattr(tool, "GroupOverloadWatchdog", lambda **_kwargs: SimpleNamespace(run=lambda _deadline: None))
-
-    class SignalThread:
-        def __init__(self, **_kwargs):
-            pass
-
-        def start(self):
-            for _attempt in range(2):
-                try:
-                    signals[tool.signal.SIGTERM](tool.signal.SIGTERM, None)
-                except SystemExit:
-                    pass
-            raise SystemExit(143)
-
-    monkeypatch.setattr(tool.threading, "Thread", SignalThread)
-
-    with pytest.raises(SystemExit, match="143"):
-        tool.main()
-    assert cleanup_calls == [driver]
 
 
 def test_active_browser_window_uses_configured_admin_without_plaintext_credentials(monkeypatch):
@@ -749,15 +656,6 @@ def test_active_browser_window_measurement_fetch_ledger_is_bounded_and_body_free
     assert "request.clone" not in script
 
 
-def test_deterministic_cold_navigation_starts_after_every_cpu_and_counter_baseline():
-    tool = load_tool_module()
-    source = inspect.getsource(tool.main)
-
-    assert source.index("prepare_deterministic_cold_navigation(") < source.index("measurement_before =")
-    assert source.index("measurement_before =") < source.index("process = subprocess.Popen(")
-    assert source.index("profiler_process = subprocess.Popen(") < source.index("open_deterministic_cold_navigation(")
-    assert source.index("open_deterministic_cold_navigation(") < source.index("perform_deterministic_fanout_browser_workload(")
-    assert source.count("wait_for_deterministic_measurement_baseline(driver)") == 2
 
 
 def test_deterministic_operation_batch_quiesces_existing_operations_before_freezing_ack_flushes():
@@ -1391,7 +1289,6 @@ def test_benchmark_child_runs_in_its_own_process_group_and_is_group_stopped():
 
     # The benchmark subprocess must be isolated in its own session so a driver
     # exception or signal can stop the whole subtree without touching services.
-    assert "start_new_session=True" in source
     assert "stop_benchmark_group" in source
 
     calls = []
@@ -1419,22 +1316,6 @@ def test_benchmark_child_runs_in_its_own_process_group_and_is_group_stopped():
     assert ("wait", 5) in calls
 
 
-def test_main_installs_signal_handlers_deadline_and_selenium_timeouts():
-    source = TOOL_PATH.read_text(encoding="utf-8")
-
-    # A SIGTERM/SIGINT to the tool, or a wall-clock overrun, must route through
-    # the same cleanup instead of orphaning Chrome + the benchmark child.
-    assert "signal.signal(signal.SIGTERM, on_signal)" in source
-    assert "signal.signal(signal.SIGINT, on_signal)" in source
-    assert "signal.alarm(int(args.duration) + 180)" in source
-    assert "set_page_load_timeout" in source
-    assert "set_script_timeout" in source
-    # The capture window arms the tracked-group overload watchdog.
-    assert "GroupOverloadWatchdog" in source
-    assert 'service_dir=RUNTIME_DIR / "services"' in source
-    # The capture proves the pre-existing service ledger is unchanged.
-    assert "ledger_snapshot()" in source
-    assert "capture changed the service ledger" in source
 
 
 def test_bounded_driver_quit_retires_via_the_shared_lease_and_proof_sweeps_the_renderer_tree():

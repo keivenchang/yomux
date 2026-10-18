@@ -1,34 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""One isolated YOmux dev server: a real `yolomux.py` process a test owns end to end.
+"""Own one native Go test server, its ephemeral port, private tmux, and writable roots.
 
-WHY THIS EXISTS SEPARATELY FROM `gate_harness.gate_live_server`. `gate_live_server` builds the
-app and the HTTP server INSIDE the pytest process. That is the right tool for almost everything,
-and it is not the right tool for a restart sequence, for a poisoned service that has to be
-self-recovered by a real supervisor, or for "port A's teardown left port B's files untouched" --
-all three need a separate OS process with its own lifetime, its own state root, and its own
-signal handling.
-
-WHAT ISOLATION MEANS HERE, and every clause is load-bearing:
-
-  * EPHEMERAL PORT. `HttpPortLease.reserve()` with no candidate range binds port 0, so the kernel
-    picks it. `7110`-`7113` (and `8880`-`8883` on macOS) are the operator's live servers and an
-    automated test must never reach them; `assert_isolated_dev_server_port` refuses them outright
-    rather than trusting the kernel to be tactful.
-  * PRIVATE TMUX SOCKET. `start_isolated_tmux_runtime` owns a socket directory below `YOLOMUX_TEST_ROOT`
-    and fixture-created `yt-<pid>-<uuid>-N` sessions, so the server can never see, drive, or kill
-    a session belonging to the person running the tests.
-  * ITS OWN CONFIG AND STATE ROOT, AND ITS OWN `config/auth.yaml`. This is the detail that has
-    cost real time twice. A dev server on a non-default port derives a private root under `/tmp`
-    (`tools/instance_isolation.resolve_instance_environment`), and this harness derives one
-    itself and passes it explicitly. Either way the instance reads the auth config INSIDE that
-    root -- NOT `~/.config/yomux` -- so a browser cookie or session minted against the
-    operator's instance authenticates against nothing here. Use `auth_bypass=True` (the default,
-    matching the coexistence gate) or write `paths.config_dir / "auth.yaml"` yourself and log in
-    through the real form; there is no third option and no cookie to borrow.
-  * TORN DOWN CLEANLY. SIGINT, then SIGTERM, then SIGKILL, each signal delivered only to a
-    process whose start identity still matches the one captured at spawn, so a recycled PID can
-    never be signalled by this fixture. The tmux runtime and the root directory go with it.
+Operator ports are forbidden. The process generation is checked before every
+teardown signal so this fixture cannot stop a recycled or unrelated process.
 """
 
 from __future__ import annotations
@@ -372,7 +347,7 @@ def signal_server_exactly(
 
 @dataclass
 class IsolatedDevServer:
-    """A running `yolomux.py` process plus everything a test needs to talk to it and end it."""
+    """A running native Go process plus the resources its test owns."""
 
     label: str
     source_root: Path
@@ -526,15 +501,17 @@ def start_isolated_dev_server(
         ]
         if exec_plan_json is not None:
             # Launch through the real per-row exec mode the supported launcher uses:
-            # `instance_isolation.py exec --plan-file <p> -- <server cmd>` applies the
+            # `yomux-go --operator exec --plan-file <p> -- <server cmd>` applies the
             # captured RowPlan to the environment, then runs the server under it. The
             # plan lives inside this instance's own root so it cannot escape isolation.
             plan_path = paths.root / "row-plan.json"
             plan_path.write_text(exec_plan_json, encoding="utf-8")
             command = [
-                sys.executable,
-                str(source_root / "tools" / "instance_isolation.py"),
+                str(go_test_server_binary(source_root)),
+                "--operator",
                 "exec",
+                "--root",
+                str(source_root),
                 "--plan-file",
                 str(plan_path),
                 "--",

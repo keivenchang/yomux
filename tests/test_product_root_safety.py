@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 from tests.helpers.fixture_tools import fixture_executable
+from tests.isolated_dev_server import go_test_server_binary
 import os
 from pathlib import Path
+import shlex
 from tools.tmux_paths import short_temp_base, short_fixture_path
 import shutil
 import subprocess
@@ -46,6 +48,10 @@ CONFIGURED_PATH_KEYS = (
     "PYTHONPYCACHEPREFIX",
     "TMPDIR",
 )
+
+
+def _native_environment(environment):
+    return {**environment, "YOMUX_GO_BINARY": str(go_test_server_binary(ROOT))}
 
 
 def _identity() -> common.HostIdentity:
@@ -185,17 +191,16 @@ def test_cli_refuses_relative_product_roots_before_writing_to_cwd(tmp_path: Path
     env.pop("YOLOMUX_ROOT", None)
 
     result = subprocess.run(
-        [sys.executable, str(ROOT / "yomux.py"), "--backend", "python", "--print-runtime-report"],
+        [str(go_test_server_binary(ROOT)), "--operator", "validate-roots", "--root", str(ROOT)],
         cwd=cwd,
-        env=env,
+        env=_native_environment(env),
         text=True,
         capture_output=True,
         check=False,
     )
 
     assert result.returncode == 2
-    assert _diagnostic_name(relative_key) in result.stderr
-    assert "relative-product-root" in result.stderr
+    assert relative_key.removeprefix("YOLOMUX_") in result.stderr
     assert "absolute" in result.stderr
     assert "Traceback" not in result.stderr
     assert list(cwd.iterdir()) == []
@@ -288,13 +293,14 @@ def test_cli_refuses_relative_home_before_default_roots_write_to_cwd(tmp_path: P
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONPYCACHEPREFIX": str(tmp_path / "pycache"),
     }
-    for key in ("YOLOMUX_ROOT", *PRODUCT_ROOT_KEYS, "CODEX_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"):
-        env.pop(key, None)
+    for key in tuple(env):
+        if key.startswith(("YOMUX_", "YOLOMUX_", "XDG_")) or key == "CODEX_HOME":
+            env.pop(key, None)
 
     result = subprocess.run(
-        [sys.executable, str(ROOT / "yomux.py"), "--backend", "python", "--print-runtime-report"],
+        [str(go_test_server_binary(ROOT)), "--operator", "validate-roots", "--root", str(ROOT)],
         cwd=cwd,
-        env=env,
+        env=_native_environment(env),
         text=True,
         capture_output=True,
         check=False,
@@ -422,7 +428,7 @@ def test_rooted_package_import_refuses_outside_artifact_overrides_before_writing
     result = subprocess.run(
         [sys.executable, "-c", "import yomux_lib"],
         cwd=tmp_path,
-        env=env,
+        env=_native_environment(env),
         text=True,
         capture_output=True,
     )
@@ -445,7 +451,7 @@ def test_package_import_exposes_canonical_roots_to_legacy_readers(tmp_path: Path
     result = subprocess.run(
         [sys.executable, "-c", "import os, yomux_lib; print(os.environ['YOLOMUX_RUNTIME_DIR'])"],
         cwd=tmp_path,
-        env=environment,
+        env=_native_environment(environment),
         text=True,
         capture_output=True,
     )
@@ -531,7 +537,7 @@ def test_shared_start_lock_rejects_unsafe_root_before_writing(tmp_path: Path) ->
                 sys.executable,
             ],
             cwd=cwd,
-            env=env,
+            env=_native_environment(env),
             text=True,
             capture_output=True,
         )
@@ -562,6 +568,8 @@ def test_boot_rejects_unsafe_root_before_stopping_existing_listener(tmp_path: Pa
         for configured_key in (*CONFIGURED_PATH_KEYS, "XDG_CONFIG_HOME", "XDG_STATE_HOME"):
             if configured_key != "HOME":
                 env.pop(configured_key, None)
+                if configured_key.startswith("YOLOMUX_"):
+                    env.pop(configured_key.replace("YOLOMUX_", "YOMUX_", 1), None)
         if unsafe_kind == "relative":
             env["YOLOMUX_ROOT"] = "relative-root"
         elif unsafe_kind == "outside":
@@ -576,7 +584,7 @@ def test_boot_rejects_unsafe_root_before_stopping_existing_listener(tmp_path: Pa
         result = subprocess.run(
             [str(ROOT / "boot.sh"), str(port)],
             cwd=tmp_path,
-            env=env,
+            env=_native_environment(env),
             text=True,
             capture_output=True,
         )
@@ -584,7 +592,7 @@ def test_boot_rejects_unsafe_root_before_stopping_existing_listener(tmp_path: Pa
         assert result.returncode != 0
         assert "startup root validation failed" in result.stderr
         if unsafe_kind == "outside-and-deep":
-            assert f"{product_env_name('CONFIG_DIR')} resolves outside {product_env_name('ROOT')}" in result.stderr
+            assert "CONFIG_DIR resolves outside YOMUX_ROOT" in result.stderr
             assert "too deep for product socket" not in result.stderr
         assert listener.poll() is None
         assert list(tmp_path.iterdir()) == []
@@ -611,13 +619,13 @@ def test_boot_rejects_relative_log_dir_before_stopping_existing_listener(tmp_pat
         result = subprocess.run(
             [str(ROOT / "boot.sh"), "--log-dir", "relative-logs", str(port)],
             cwd=tmp_path,
-            env=os.environ,
+            env=_native_environment(os.environ),
             text=True,
             capture_output=True,
         )
 
         assert result.returncode != 0
-        assert "YOMUX_LOG_DIR" in result.stderr
+        assert "LOG_DIR" in result.stderr
         assert "absolute" in result.stderr
         assert listener.poll() is None
         assert list(tmp_path.iterdir()) == []
@@ -647,13 +655,14 @@ def test_boot_checks_absolute_log_sink_before_stopping_existing_listener(tmp_pat
         result = subprocess.run(
             [str(ROOT / "boot.sh"), "--log-dir", str(blocker / "logs"), str(port)],
             cwd=tmp_path,
-            env=os.environ,
+            env=_native_environment(os.environ),
             text=True,
             capture_output=True,
         )
 
         assert result.returncode != 0
-        assert "log path is not writable" in result.stderr
+        assert "not a directory" in result.stderr
+        assert "log directory refused by product-root policy" in result.stderr
         assert listener.poll() is None
         assert blocker.read_text(encoding="utf-8") == "block\n"
     finally:
@@ -669,10 +678,8 @@ def test_boot_rejects_tmpdir_inside_checkout_before_listener_or_worktree_mutatio
     shutil.copy2(ROOT / "boot.sh", checkout / "boot.sh")
     shutil.copy2(ROOT / "tools" / "startup_common.sh", tools_dir / "startup_common.sh")
     shutil.copy2(ROOT / "tools" / "product_environment.sh", tools_dir / "product_environment.sh")
-    shutil.copy2(ROOT / "tools" / "instance_isolation.py", tools_dir / "instance_isolation.py")
-    shutil.copy2(ROOT / "tools" / "go_binary.py", tools_dir / "go_binary.py")
-    shutil.copy2(ROOT / "tools" / "product_environment.py", tools_dir / "product_environment.py")
     shutil.copy2(ROOT / "tools" / "product_namespace.json", tools_dir / "product_namespace.json")
+    shutil.copy2(ROOT / "version.yaml", checkout / "version.yaml")
     before = sorted(path.relative_to(checkout) for path in checkout.rglob("*"))
     listener = subprocess.Popen(
         [
@@ -695,6 +702,7 @@ def test_boot_rejects_tmpdir_inside_checkout_before_listener_or_worktree_mutatio
                 **os.environ,
                 "HOME": str(tmp_path / "home"),
                 "TMPDIR": str(checkout),
+                "YOMUX_GO_BINARY": str(go_test_server_binary(ROOT)),
             },
             text=True,
             capture_output=True,
@@ -728,13 +736,47 @@ def test_setup_tls_dry_run_rejects_relative_output_roots_before_writing(
     arguments = [str(ROOT / "tools" / "setup-tls.sh"), "--dry-run", "--state-dir", state_dir, "--ca-dir", ca_dir]
     arguments[arguments.index(option) + 1] = value
 
-    result = subprocess.run(arguments, cwd=tmp_path, env=environment, text=True, capture_output=True)
+    result = subprocess.run(arguments, cwd=tmp_path, env=_native_environment(environment), text=True, capture_output=True)
 
     assert result.returncode != 0
-    expected_key = _diagnostic_name(key)
+    expected_key = key.removeprefix("YOLOMUX_")
     assert expected_key in result.stderr
     assert "absolute" in result.stderr
     assert list(tmp_path.iterdir()) == []
+
+
+def test_setup_tls_dry_run_prints_escaped_native_certificate_restart(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state with 'quoted' name"
+    ca_dir = tmp_path / "ca"
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(("YOMUX_", "YOLOMUX_"))}
+    result = subprocess.run(
+        [str(ROOT / "tools/setup-tls.sh"), "--dry-run", "--no-trust", "--state-dir", str(state_dir), "--ca-dir", str(ca_dir)],
+        cwd=tmp_path, env=_native_environment(environment), text=True, capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    command = next(line for line in result.stdout.splitlines() if "--cert" in line)
+    assert shlex.split(command) == [str(ROOT / "boot.sh"), "--force", "--port", "PORT", "--cert", str(state_dir / "tls/self-signed.crt"), "--key", str(state_dir / "tls/self-signed.key")]
+    assert not state_dir.exists() and not ca_dir.exists()
+
+
+@pytest.mark.parametrize("selectors", [
+    {"YOMUX_BACKEND": "python"},
+    {"YOLOMUX_BACKEND": "python"},
+    {"YOMUX_BACKEND": "go", "YOLOMUX_BACKEND": "python"},
+    {"YOMUX_BACKEND": "auto", "YOLOMUX_BACKEND": "invalid"},
+])
+def test_setup_tls_rejects_raw_backend_before_root_mutation(tmp_path: Path, selectors) -> None:
+    state_dir = tmp_path / "state"
+    ca_dir = tmp_path / "ca"
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(("YOMUX_", "YOLOMUX_"))}
+    environment.update(selectors)
+    result = subprocess.run(
+        [str(ROOT / "tools/setup-tls.sh"), "--state-dir", str(state_dir), "--ca-dir", str(ca_dir), "--no-trust"],
+        cwd=tmp_path, env=environment, text=True, capture_output=True,
+    )
+    assert result.returncode == 2, result.stderr
+    assert "unsupported" in result.stderr and "Python server is retired" in result.stderr
+    assert not state_dir.exists() and not ca_dir.exists()
 
 
 def test_setup_tls_rejects_relative_environment_ca_before_default_state_import(tmp_path: Path) -> None:
@@ -750,13 +792,13 @@ def test_setup_tls_rejects_relative_environment_ca_before_default_state_import(t
     result = subprocess.run(
         [str(ROOT / "tools" / "setup-tls.sh"), "--dry-run"],
         cwd=cwd,
-        env=env,
+        env=_native_environment(env),
         text=True,
         capture_output=True,
     )
 
     assert result.returncode != 0
-    assert "YOMUX_CA_DIR" in result.stderr
+    assert "CA_DIR" in result.stderr
     assert "absolute" in result.stderr
     assert not (tmp_path / "runtime").exists()
 
@@ -777,13 +819,13 @@ def test_setup_tls_rejects_relative_environment_state_before_product_import(tmp_
     result = subprocess.run(
         [str(ROOT / "tools" / "setup-tls.sh"), "--dry-run"],
         cwd=tmp_path,
-        env=env,
+        env=_native_environment(env),
         text=True,
         capture_output=True,
     )
 
     assert result.returncode != 0
-    assert product_env_name("STATE_DIR") in result.stderr
+    assert "STATE_DIR" in result.stderr
     assert not home.exists()
 
 
@@ -791,19 +833,20 @@ def test_setup_tls_rooted_dry_run_refuses_outside_cli_state_without_writing(tmp_
     root = short_temp_base() / ("x" * 100)
     outside = tmp_path / "outside"
     env = dict(os.environ)
-    for key in ("YOLOMUX_ROOT", *PRODUCT_ROOT_KEYS, "CODEX_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "PYTHONPYCACHEPREFIX", "TMPDIR"):
-        env.pop(key, None)
+    for key in tuple(env):
+        if key.startswith(("YOMUX_", "YOLOMUX_", "XDG_")) or key in {"CODEX_HOME", "PYTHONPYCACHEPREFIX", "TMPDIR"}:
+            env.pop(key, None)
     env.update({"YOLOMUX_ROOT": str(root), "PYTHONDONTWRITEBYTECODE": "1"})
     result = subprocess.run(
         [str(ROOT / "tools" / "setup-tls.sh"), "--dry-run", "--state-dir", str(outside)],
         cwd=tmp_path,
-        env=env,
+        env=_native_environment(env),
         text=True,
         capture_output=True,
     )
 
     assert result.returncode != 0
-    assert f"{product_env_name('STATE_DIR')} resolves outside {product_env_name('ROOT')}" in result.stderr
+    assert "STATE_DIR resolves outside YOMUX_ROOT" in result.stderr
     assert not root.exists()
     assert not outside.exists()
 
@@ -817,13 +860,14 @@ def test_setup_tls_default_dry_run_writes_no_product_state(tmp_path: Path) -> No
         "PYTHONDONTWRITEBYTECODE": "1",
         "YOLOMUX_HOST_ARTIFACT_DIR": str(tmp_path / "artifacts"),
     }
-    for key in ("YOLOMUX_ROOT", *PRODUCT_ROOT_KEYS, "CODEX_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"):
-        env.pop(key, None)
+    for key in tuple(env):
+        if key.startswith(("YOMUX_", "YOLOMUX_", "XDG_")) or key == "CODEX_HOME":
+            env.pop(key, None)
 
     result = subprocess.run(
         [str(ROOT / "tools" / "setup-tls.sh"), "--dry-run"],
         cwd=tmp_path,
-        env=env,
+        env=_native_environment(env),
         text=True,
         capture_output=True,
     )
@@ -848,7 +892,7 @@ def test_setup_tls_empty_canonical_ca_value_overrides_legacy_value(tmp_path: Pat
     result = subprocess.run(
         [str(ROOT / "tools" / "setup-tls.sh"), "--dry-run"],
         cwd=tmp_path,
-        env=env,
+        env=_native_environment(env),
         text=True,
         capture_output=True,
     )
@@ -873,7 +917,7 @@ def test_check_refuses_relative_tool_lock_before_writing(tmp_path: Path) -> None
     result = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "check.py"), "--lane", "static"],
         cwd=cwd,
-        env=env,
+        env=_native_environment(env),
         text=True,
         capture_output=True,
     )
@@ -906,7 +950,7 @@ def test_check_refuses_unsafe_root_environment_before_package_writes(tmp_path: P
     result = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "check.py"), "--lane", "static"],
         cwd=cwd,
-        env=env,
+        env=_native_environment(env),
         text=True,
         capture_output=True,
     )

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testObservation() Observation {
@@ -20,6 +21,12 @@ func TestCurrentAgentRosterAllowsBoundedObservationTime(t *testing.T) {
 		valid bool
 	}{
 		{"historical", nil, true},
+		{"approval attention", map[string]any{"observed_at": 123.5, "attention_kind": "approval"}, true},
+		{"question attention", map[string]any{"observed_at": 123.5, "attention_kind": "question"}, true},
+		{"unknown attention", map[string]any{"observed_at": 123.5, "attention_kind": "unknown"}, true},
+		{"empty attention", map[string]any{"observed_at": 123.5, "attention_kind": ""}, false},
+		{"unrecognized attention", map[string]any{"observed_at": 123.5, "attention_kind": "input"}, false},
+		{"non-string attention", map[string]any{"observed_at": 123.5, "attention_kind": true}, false},
 		{"current", map[string]any{"observed_at": 123.5}, true},
 		{"settled completion", map[string]any{"observed_at": 123.5, "completion_settled": true}, true},
 		{"process instance", map[string]any{"observed_at": 123.5, "process_instance_id": "process:abc"}, true},
@@ -46,6 +53,31 @@ func TestCurrentAgentRosterAllowsBoundedObservationTime(t *testing.T) {
 				t.Fatalf("roster validation = %v, want valid=%v", err, tc.valid)
 			}
 		})
+	}
+}
+
+func TestCurrentAgentRosterOptionalFieldCombinations(t *testing.T) {
+	optional := []struct {
+		name  string
+		value any
+	}{
+		{"observed_at", 123.5}, {"working_stopped_ts", 100.0},
+		{"transition_id", "transition:abc"}, {"cooldown_attention_key", "cooldown:abc"},
+		{"completion_settled", true}, {"process_instance_id", "process:abc"},
+		{"attention_signature", "signature:abc"}, {"attention_key", "attention:abc"},
+		{"attention_acknowledged", true}, {"queued_followup_question", false},
+		{"attention_kind", "unknown"},
+	}
+	for subset := 0; subset < 1<<len(optional); subset++ {
+		row := map[string]any{"id": "agent", "kind": "codex", "state": "ask", "session": "work", "pane": "%1"}
+		for index, field := range optional {
+			if subset&(1<<index) != 0 {
+				row[field.name] = field.value
+			}
+		}
+		if err := validateCurrentAgentRoster([]map[string]any{row}); err != nil {
+			t.Fatalf("optional subset %b rejected: %v", subset, err)
+		}
 	}
 }
 
@@ -256,5 +288,67 @@ func TestCurrentFamilyValidationIsWriteOnlyAndCompatibilityAware(t *testing.T) {
 	}
 	if err := currentWriter.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAgentStatusCollectorPersistsMixedWorkingAndAttentionRoster(t *testing.T) {
+	for _, test := range []struct{ kind, attentionKind string }{
+		{"codex", "approval"}, {"codex", "question"}, {"codex", "unknown"}, {"opencode", "unknown"},
+	} {
+		t.Run(test.kind+"/"+test.attentionKind, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "stats.sqlite3")
+			writer, err := OpenWriter(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Close()
+			writer.EnableCurrentFamilyValidation()
+			clock := &agentStatusTestClock{now: time.Unix(200, 0)}
+			inventory := func(context.Context) ([]AgentRecord, []error) {
+				return []AgentRecord{
+					{PID: 10, Kind: "codex", StartedIdentity: "proc:10", TmuxSession: "work", TmuxWindow: "0", TmuxPaneID: "%0"},
+					{PID: 11, Kind: test.kind, StartedIdentity: "proc:11", TmuxSession: "work", TmuxWindow: "1", TmuxPaneID: "%1"},
+				}, nil
+			}
+			classifier := func(_ context.Context, request AgentStatusRequest) AgentStatusResult {
+				if request.PaneTarget == "%0" {
+					return AgentStatusResult{Status: AgentStatusRun, ObservedAt: clock.Now()}
+				}
+				if test.kind == "opencode" {
+					return ClassifyAgentStatus(ctx, AgentStatusRequest{Kind: "opencode"}, AgentStatusSources{
+						OpenCodeState: func(context.Context, AgentStatusRequest) (string, []string, error) {
+							return "paused", []string{"queued-input"}, nil
+						},
+					})
+				}
+				return AgentStatusResult{Status: AgentStatusAsk, AttentionKind: test.attentionKind, ObservedAt: clock.Now()}
+			}
+			collector := NewAgentStatusCollector(inventory, classifier, writer, clock, AgentStatusCollectorConfig{
+				EpochID: "mixed", EpochStartedAt: 100, SourceID: "fixture", OwnerGeneration: 1,
+			})
+			collector.RunOnce(ctx)
+			if counters := collector.Counters(); counters.AcceptedObservations != 1 || counters.Errors != 0 {
+				t.Fatalf("mixed roster was not committed: %+v", counters)
+			}
+			snapshot, err := ReadAgentStatus(ctx, path, AgentStatusQuery{Now: clock.Now()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !snapshot.Available || len(snapshot.Agents) != 2 {
+				t.Fatalf("mixed roster snapshot = %+v", snapshot)
+			}
+			states := map[string]string{}
+			for _, value := range snapshot.Agents {
+				row := value.(map[string]any)
+				states[row["pane"].(string)] = row["state"].(string)
+				if row["pane"] == "%1" && row["attention_kind"] != test.attentionKind {
+					t.Fatalf("persisted attention kind = %#v", row)
+				}
+			}
+			if states["%0"] != "run" || states["%1"] != "ask" {
+				t.Fatalf("mixed states = %#v", states)
+			}
+		})
 	}
 }

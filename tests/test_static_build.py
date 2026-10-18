@@ -829,7 +829,6 @@ def test_current_yostats_diagnostics_browser_tests_use_shared_observable_waits()
     tree = ast.parse(source)
     names = {
         "test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narrow_layout",
-        "test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout",
     }
     function_sources = {
         node.name: ast.get_source_segment(source, node) or ""
@@ -1825,3 +1824,66 @@ def test_light_mode_lint_tree_is_clean():
     # with a reason. This is the enforceable "light-mode coverage is an invariant" gate.
     violations = lint_light_mode_pairs()
     assert violations == [], "light-mode pairing regressions:\n  " + "\n  ".join(violations)
+
+
+def _preserve_build_globals(monkeypatch):
+    for name in ("REPO_ROOT", "OUTPUT_ROOT", "LOCALES_SRC", "LOCALES_OUT", "ASSETS", "SHIPPED_LOCALES", "PLURAL_CATEGORIES_BY_LOCALE", "_PSEUDO_SPEC", "_PSEUDO_ACCENTS", "I18N_PLACEHOLDER_PATTERN", "I18N_PLACEHOLDER_RE", "I18N_PROTECTED_TOKEN_RE", "I18N_PSEUDO_TOKEN_RE", "I18N_TRANSLATABLE_CODE_KEYS", "I18N_OPTIONAL_NONENGLISH_TRANSLATIONS"):
+        monkeypatch.setattr(sb, name, vars(sb)[name])
+
+
+def _build_metadata_fixture(tmp_path):
+    source = tmp_path / "source"
+    (source / "static_src").mkdir(parents=True)
+    (source / "assets/runtime").mkdir(parents=True)
+    (source / "static_src/build-manifest.json").write_text(json.dumps({"fixture.js": ["first.js"]}))
+    (source / "first.js").write_text("selected root")
+    spec = dict(sb._PSEUDO_SPEC, accent_from="a", accent_to="Z")
+    (source / "static_src/pseudo-locale.json").write_text(json.dumps(spec))
+    (source / "assets/runtime/locale-registry.json").write_text(json.dumps([{"code": "fixture", "plural_categories": ["other"]}]))
+
+    return source
+
+
+def test_selected_source_root_reloads_all_shared_metadata(tmp_path, monkeypatch):
+    _preserve_build_globals(monkeypatch)
+    source = _build_metadata_fixture(tmp_path)
+
+    def selected_main(_arguments):
+        assert sb.ASSETS == {"fixture.js": ["first.js"]}
+        assert "selected root" in sb.build_asset("fixture.js")
+        assert sb.pseudo_value("a") == "⟦Z·⟧"
+        assert sb.SHIPPED_LOCALES == ("fixture",)
+        assert sb.PLURAL_CATEGORIES_BY_LOCALE == {"fixture": frozenset({"other"})}
+        return 0
+
+    monkeypatch.setattr(sb, "_main", selected_main)
+    assert sb.main(["--source-root", str(source), "--output-directory", str(tmp_path / "output")]) == 0
+    watched = set(sb.watched_source_paths(["fixture.js"]))
+    assert {source / "static_src/build-manifest.json", source / "static_src/pseudo-locale.json", source / "assets/runtime/locale-registry.json", source / "first.js"} <= watched
+    (source / "static_src/build-manifest.json").write_text(json.dumps({"fixture.js": ["second.js"]}))
+    sb.reload_build_inputs()
+    assert source / "second.js" in sb.watched_source_paths(["fixture.js"])
+    assert source / "first.js" not in sb.watched_source_paths(["fixture.js"])
+
+
+def test_watch_reloads_added_removed_and_temporarily_invalid_manifest(tmp_path, monkeypatch, capsys):
+    _preserve_build_globals(monkeypatch)
+    source = _build_metadata_fixture(tmp_path)
+    monkeypatch.setattr(sb, "REPO_ROOT", source)
+    monkeypatch.setattr(sb, "LOCALES_SRC", source / "static_src/locales")
+    sb.reload_build_inputs()
+    calls = []
+    monkeypatch.setattr(sb, "build_once", lambda assets: calls.append(list(assets)) or [])
+    edits = iter([json.dumps({"added.js": ["added-part.js"]}), "{", json.dumps({"final.js": ["final-part.js"]})])
+
+    def next_edit(_interval):
+        try:
+            text = next(edits)
+        except StopIteration:
+            raise KeyboardInterrupt
+        (source / "static_src/build-manifest.json").write_text(text)
+
+    monkeypatch.setattr(sb.time, "sleep", next_edit)
+    assert sb.watch_loop(["fixture.js"], all_assets=True) == 0
+    assert calls == [["fixture.js"], ["added.js"], ["final.js"]]
+    assert "invalid shared build metadata" in capsys.readouterr().err

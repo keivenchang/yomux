@@ -19,8 +19,4 @@ SUBSYSTEM_COMPATIBILITY = {
         "_tabber_window_button_html": "tests.helpers.agent_status_fixtures.tabber_window_button_html",
         "_working_agent_glyph_html": "tests.helpers.agent_status_fixtures.working_agent_glyph_html",
     },
-    "tests.test_app": {
-        "_StubOperationReservation": "tests.helpers.operation_reservations.StubOperationReservation",
-        "_reservation_must_not_release": "tests.helpers.operation_reservations.reservation_must_not_release",
-    },
 }

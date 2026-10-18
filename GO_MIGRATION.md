@@ -1,38 +1,23 @@
 # YOmux Go Backend Status
 
-This document records the Go backend capabilities implemented in this tree and owns the migration inventory. Go is the target backend and the default server for managed/operator launches, including `boot.sh`, `make run`, and `yomux-dev-start`. Python is a deprecated temporary fallback. Every currently supported Python-only product behavior must be ported to Go before Python removal; it must not disappear just because its old server is removed. The removal gate also includes the shared HTML renderer, runtime dependencies, contributor/build tooling, and companion tools that still require Python. The current late-October 2026 removal date is a target, conditional on closing this inventory and proving the Go-only build and runtime path. Go exposes only the capabilities and routes it owns; unsupported behavior stays unavailable until its Go owner is implemented.
+Go owns the product runtime. `make setup` builds the native server, publishes browser assets, and installs `yomux` and `yolomux` below `PREFIX` (default `~/.local`). Installed commands execute the binary and assets under `PREFIX/lib/yomux`. Their `install-source.json` records the verified Git checkout for self-update. Startup uses the installed files; updates require the recorded checkout to remain available. Python remains available for developer tools, mocks, fixture builders, and test controllers; it is not a product installation or startup prerequisite.
 
-## Migration Rule
+## Retirement Decision
 
-Treat each Python-only product feature as a Go migration gap unless the user explicitly decides to retire that feature. Track its Go owner, capability, route, tests, and user-facing behavior here or in one linked active work queue. Python may remain during migration, but it receives no new product behavior. The final Python-removal gate must show that supported user-facing behavior, runtime entrypoints, required tooling, the HTML renderer, and companion utilities no longer depend on Python.
+`boot.sh <port>` runs the managed lifecycle. `--backend go`, `--backend auto`, and `--golang` select Go. Python selections through either environment prefix, `--deprecated-python`, and invalid backend values are rejected before product roots, leases, or listeners change. A missing or unexecutable Go binary fails without fallback. `--sessions`, Python transcript/runtime reports, the Python development reloader, optional login decoys, firewall escalation, and unavailable integrations are retired. Unsupported API routes retain their typed unavailable responses.
 
-## Launch And Backend Selection
-
-Managed launchers select Go by default. `yomux-dev-start` passes `--backend go` explicitly. To run the deprecated Python server, opt in explicitly:
-
-```bash
-./boot.sh --deprecated-python 7221
-```
-
-Build, validate, and start a Go instance with:
+## Native Launch
 
 ```bash
 make setup
-tools/build_go.sh
-tools/run_bazel_tests.sh --jobs "$(getconf _NPROCESSORS_ONLN)"
-./boot.sh 7221
+./boot.sh --port 7111
 ```
 
-`boot.sh` finds the canonical Bazel output at `bazel-bin/cmd/yomux-go/yomux-go_/yomux-go`, applies shared startup and port ownership checks without a CPU, memory, or OS load-average gate, invokes `python3 yomux.py --backend go`, and then the Python CLI replaces itself with the Go process while carrying host, port, checkout root, and environment-selected config/state. `--golang` and `--backend go` remain aliases. `--backend python` is rejected by managed `boot.sh`; use `--deprecated-python`. Managed startup binds `0.0.0.0` by default. Direct execution of the Go binary defaults to `127.0.0.1`, so use the launcher for operator runs. Direct `python3 yomux.py` also selects Go unless `--backend python` is explicit.
+One `yomux-go` process owns HTTP/TLS and authentication, terminal WebSocket and event streams, Finder/Differ, settings, stats, chat, and agent conversations, jobs, watches, skills, and reviewed sends. Finder may start a private native index worker. Product startup does not launch the retired Python web server or its daemons.
 
-A Go process launched by an older managed launcher may not hold the shared root and port leases. Gracefully stop that verified listener once before migrating it; new managed Go processes retain those leases across `exec`, so later `boot.sh --force <port>` restarts can replace them safely.
+`yomux-go --operator` owns root planning, captured `unset`/`assign` plans, executable/version checks, listener census, authenticated readiness, session discovery, profile dispatch, and native asset publication. Mutable roots and existing persistence formats remain instance-owned. Explicit profiles preserve their configuration, state, certificates, and ports. Installation records the source checkout separately from the installed resource root. Self-update verifies that source, builds the selected revision with native tools, refreshes the same installation prefix, and restarts the installed binary.
 
-Go owns TLS after the `exec`: by default it generates a self-signed certificate with Go's crypto library under `${TMPDIR:-/tmp}/yomux-go-tls-<port>/`. The managed Python launcher forwards `--http`, `--cert`, and `--key`, and maps `--dang` to Go's `--dangerously-yolo`. Python-only `--sessions`, transcript-report, runtime-report, and `--dev` options return a clear error on Go. The Go binary also accepts its own `--cert`, `--key`, `--http`, and `--dangerously-yolo` flags for fixture/direct use, but a direct launch does not replace `boot.sh` lifecycle and isolation checks.
-All operator launch forms use the machine-wide default tmux server for the launching Unix user. Managed launchers remove inherited `TMUX`, `TMUX_PANE`, and `YOMUX_TMUX_SOCKET` routing before starting Python or Go, so `tmux list-sessions` and the Go/Python session APIs see every session on that server. Direct Python, Go, and companion-tool entrypoints apply the same normalization for ordinary launches; an explicit `YOMUX_TMUX_SOCKET` is preserved only when an isolated test or fixture deliberately supplies it. A different Unix user's tmux server is not implicitly accessible.
-
-The Go server still requires Python runtime dependencies and this checkout's generated static assets. It invokes `python3` to render `login_html()` and `html_page()` from `yomux_lib.web`; replacing this renderer is required for the final Go-only runtime.
-
-Automated tests must not use an operator port. `tools/run_bazel_tests.sh` starts disposable Docker state and fixture-owned ports. Port 7221 is reserved for a final manual check after the Dockerized gate. The operator runtime on port 7220 is outside automated test workflows and should only be restarted or smoke-tested as an explicit operator action.
+Runtime JSON lives in `assets/runtime/`; built-in agent skill/context files remain packaged as data. `make build` publishes generated browser assets under the shared checkout writer declaration. The private-output `tools/staticgen` executable remains the Bazel and self-update builder.
 
 ## Architecture Decision
 
@@ -49,7 +34,7 @@ flowchart LR
   finder --> fs["descriptor-bound filesystem and Git"]
   stats --> db["stats-v9.sqlite3"]
   stats --> collectors["host, agent-status, token, and OpenCode collectors"]
-  listener --> python["python3: shared login/application HTML rendering"]
+  listener --> pages["Native templates, localization, settings, and bootstrap"]
 ```
 
 One `yomux-go` process owns:
@@ -70,16 +55,28 @@ The Go process does not start or talk to Python `statsd`, `indexd`, `batchd`, `s
 
 | Owner | Responsibility |
 | --- | --- |
-| `cmd/yomux-go/main.go` | Listener, TLS/auth, tmux PTY/WebSocket, core routes, event broker, operation journal, diagnostics, Python HTML rendering, startup, and shutdown |
+| `cmd/yomux-go/main.go` | Listener, TLS/auth, tmux PTY/WebSocket, core routes, event broker, operation journal, diagnostics, startup, and shutdown |
 | `cmd/yomux-go/finder_jobs.go` | Bounded interactive, background, bulk, and streaming Finder admission and operation completion |
 | `cmd/yomux-go/differ_routes.go` | Session-file request identity, persistent cache, Git-backed Differ data, and cache refresh |
+| `cmd/yomux-go/settings_native.go` | Shared-schema settings validation, migration, atomic persistence, pricing history, and POSIX writer locking |
 | `cmd/yomux-go/stats_runtime.go` | YO!stats route adapters, runtime collectors, migration, snapshots, deltas, streams, pricing, readiness, and diagnostics |
 | `internal/capabilities` | One capability catalog used by bootstrap, route admission, and diagnostics |
 | `internal/finder` | Descriptor-bound filesystem access, listing, read/raw/info, watch, search, Git diff/history/commit/blame, mutations, upload, archive, and HTML preview |
 | `internal/stats` | SQLite writer/readers, schema, observations, snapshots, rings, lifecycle materialization, host collection, agent status, token collection, pricing, and OpenCode |
 | `internal/work` | Bounded worker/queue scheduler used inside the Go process |
-| `static_src/` and `static/` | Shared browser source and generated bundle used by both backends |
-| `yomux_lib.web` | Shared HTML/login renderer currently invoked by both launch modes |
+| `static_src/` and `static/` | Browser source and generated bundle served by Go |
+| `cmd/yomux-go/pages_native.go` and `pages/` | Native home/login/setup templates, escaping, localization, agent notices, and bootstrap data |
+| `cmd/yomux-go/runtime_environment.go` | Shared native command discovery, child environments, and bounded command output |
+| `cmd/yomux-go/launch_native.go` | Native launch plans, operator probes, profile dispatch, leases, and verified replacement |
+| `internal/chat` and `cmd/yomux-go/chat_*.go` | Chat storage, history, presence, questions, events, and authenticated HTTP handlers |
+| `internal/yoagent` and `cmd/yomux-go/yoagent_*.go` | Agent conversations, skills, jobs, watches, reviewed sends, and native CLI transport |
+| `yomux_lib.web` | Source-only developer renderer and fixture support; not a product server |
+
+## Settings Ownership
+
+Go reads, saves, and reconciles settings without starting Python. `cmd/yomux-go/settings_native.go` owns validation, migration, atomic YAML persistence, and effective-dated pricing history for HTTP requests and startup reconciliation. Defaults, choices, bounds, descriptions, and migration values live in `assets/runtime/settings-schema.json`; retained Python tooling reads the same asset.
+
+Writers use the existing adjacent POSIX record lock so independent processes preserve each other's updates. Go also serializes writers within its process. Malformed YAML is preserved and reported; it does not replace the last valid Finder index policy. The native settings contract includes fixed baseline fixtures, writes and restart reconciliation with Python absent from `PATH`, pricing history, concurrent independent patches, and lock contention. Cross-host locking and macOS runtime acceptance remain separate rollout checks.
 
 ## Capability Contract
 
@@ -99,11 +96,7 @@ The current catalog marks these capabilities available:
 
 * `yolo.auto-approve.v1`
 
-The current catalog marks these pane capabilities unavailable:
-
-* `pane.chat.v1`
-
-* `pane.agent.v1`
+The server enables `pane.chat.v1` and `pane.agent.v1` after their native stores initialize. `core.integrations.v1` remains unavailable. Watched pull requests and hosted GitHub/Linear enrichment are retired. Go does not register `/api/search`, `/api/run-history`, `/api/activity-summary`, or `/api/watched-prs`; the corresponding Search & Runs, background-summary, and integration services are outside the supported feature set. Native bootstrap disables background activity summaries. Terminal transcripts and per-session event logs retain their registered handlers.
 
 Any unregistered `/api/*` request receives HTTP `501` with `error: feature_unavailable` and the mapped capability name. Unsupported product code must not silently return an empty Python-shaped payload.
 
@@ -141,7 +134,7 @@ The following routes have concrete handlers in `cmd/yomux-go`.
 
 * `/api/auto-approve`, `/api/yolo-rules`, `/api/yolo-rules/open`, `/api/yolo-rules/reload`
 
-The shared browser must capability-gate other Python terminal/session paths. Go publishes per-window completion timestamps and transition identities through session metadata and Tabber activity; `POST /api/attention-ack` stores bounded acknowledgements and publishes `attention_acks_changed` so other tabs converge. `yolo.auto-approve.v1` owns the authenticated per-session toggle and status route. Its worker uses the shared Python/Go target lock, pins tmux session and pane identity plus the live agent process, and suspends when fresh status or terminal evidence is unavailable. It applies the configured `approve`, `decline`, `block`, `ask`, `notify`, and `off` actions to supported Claude and Codex prompts, honors `yolo.dry_run`, and retries only the exact current Codex capacity notice with `continue\n\n` at a minimum three-second interval. Self-update uses the `core.updates.v1` capability; YO!agent remains unavailable in Go. Go's Tabber activity route is admitted by the machine-wide tmux roster, so every live session gets one top-level row before pane metadata or agent enrichment arrives. Transcript routes accept an optional `pane_target` or `window`; without either, Go resolves the active tmux pane. This prevents a session containing multiple Claude, Codex, or OpenCode windows from returning the first unrelated transcript.
+The shared browser must capability-gate unavailable terminal/session paths. Go publishes per-window completion timestamps and transition identities through session metadata and Tabber activity; `POST /api/attention-ack` stores bounded acknowledgements and publishes `attention_acks_changed` so other tabs converge. `yolo.auto-approve.v1` owns the authenticated per-session toggle and status route. Its worker uses the shared target lock, pins tmux session and pane identity plus the live agent process, and suspends when fresh status or terminal evidence is unavailable. It applies the configured `approve`, `decline`, `block`, `ask`, `notify`, and `off` actions to supported Claude and Codex prompts, honors `yolo.dry_run`, and retries only the exact current Codex capacity notice with `continue\n\n` at a minimum three-second interval. Self-update uses the `core.updates.v1` capability. Native chat and agent handlers own their browser routes after successful initialization. Go's Tabber activity route is admitted by the machine-wide tmux roster, so every live session gets one top-level row before pane metadata or agent enrichment arrives. Transcript routes accept an optional `pane_target` or `window`; without either, Go resolves the active tmux pane. This prevents a session containing multiple Claude, Codex, or OpenCode windows from returning the first unrelated transcript.
 
 ### Finder, Editor, And Differ
 
@@ -183,7 +176,19 @@ When the Go token collector enables database checkpoints, it upgrades that same 
 
 Before upgrading, Go holds the database writer lease and legacy cursor locks, makes a consistent SQLite backup, and copies the paired cursor files and writer fence into an adjacent `<database>.pre-checkpoints-*` directory. `cursor-manifest.json` maps original paths to backup files. The `go-checkpoints-v1` row in `migration_reconciliation` records the backup directory in `source_digest`. Pending legacy cursor work is replayed from committed progress.
 
-To roll back, stop the Go owner first. Preserve the migrated database, its WAL/SHM sidecars, current writer fence, and current cursor files in a separate recovery directory. Restore the backed-up database and every file listed in its cursor manifest to their original paths before starting Python. Do not leave migrated WAL/SHM files beside the restored database. Retain both backup sets so rollback does not discard newer facts.
+The removed Python server is not a supported rollback target. For recovery to an explicitly selected compatible Go build, stop the current owner first and preserve the migrated database, WAL/SHM sidecars, writer fence, and cursor files separately. Restore a consistent backup and its complete cursor manifest only after checking the selected build's schema and writer-protocol compatibility. Keep migrated sidecars away from the restored database and retain both backup sets so recovery preserves newer facts.
+
+### Chat And Agent
+
+Native chat registers `/api/chat/bootstrap`, `/api/chat/page`, `/api/chat/delta`, `/api/chat/context`, `/api/chat/search`, `/api/chat/send`, `/api/chat/yoagent`, `/api/chat/typing`, and `/api/chat/read`. Native agent configuration and actions register the following routes:
+
+* `/api/agent-auth`, `/api/yoagent/skills`, `/api/yoagent/skill-files`, `/api/yoagent/skill-files/upsert`, `/api/yoagent/skill-files/delete`
+
+* `/api/yoagent/jobs`, `/api/yoagent/jobs/`, `/api/yoagent/conversation`, `/api/yoagent/chat`, `/api/yoagent/chat/`
+
+* `/api/yoagent/actions/preview-send`, `/api/yoagent/actions/execute-send`, `/api/yoagent/waits/`, `/api/yoagent/prewarm`, `/api/yoagent/reset`
+
+The server enables chat and agent capabilities only after their stores initialize. Their native owners retain conversations, jobs, watches, skills, and reviewed-send state; removing Python does not authorize deleting that state.
 
 ## Completed Delivery Slices
 
@@ -258,19 +263,19 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 
 ## Remaining Gaps
 
-* YO!chat and YO!agent remain Python-only and must be ported to Go before Python removal; Go now serves the global tmux roster/activity API used by Tabber.
+* Native YO!chat uses `internal/chat` for persisted history, presence, questions, and events. Native YO!agent uses `internal/yoagent` and the installed Claude/Codex CLI for conversations, skills, jobs, watches, and reviewed sends. Hosted integrations are retired; final runtime acceptance remains open.
 
 * Go update detection and managed self-update now use root `version.yaml`, the `core.updates.v1` capability, cached `/api/update-status`, persistent `/api/self-update/status`, and `boot.sh` for selected-instance replacement. The installer refuses dirty, diverged, or changed checkouts and prepares the pinned binary and browser assets before activation. Native Darwin qualification remains a release acceptance step.
 
-* Go HTML rendering still depends on a Python subprocess and Python package environment; both are removal blockers.
+* Home, login, setup, settings HTTP requests, and startup settings reconciliation use Go. Managed launch planning and installed product commands use native owners. Self-update prepares assets through the native static builder.
 
-* Go credential admission is durable and shared across form, Basic API, and WebSocket paths. Network reservations, successful refunds, username cooldowns, hard locks, HMAC identifiers, and bounded in-flight claims live in a separate state-rooted SQLite store. Go accepts the documented policy override keys; the Python recovery CLI, throttle diagnostics, decoy, and firewall escalation remain unavailable and need explicit Go migration dispositions before Python removal.
+* Go credential admission is durable and shared across form, Basic API, and WebSocket paths. Network reservations, successful refunds, username cooldowns, hard locks, HMAC identifiers, and bounded in-flight claims live in a separate state-rooted SQLite store. Go accepts the documented policy override keys; the Python recovery CLI, throttle diagnostics, decoy, and firewall escalation are explicitly retired.
 
 * Go consumes `YOMUX_CONFIG_DIR`, `YOMUX_STATE_DIR`, `YOMUX_ROOT`, and `YOMUX_STATS_DATABASE`, and admits its config/journal directory and auth/stats WAL stores only on supported local filesystems unless the explicit emergency override is set. Go does not implement Python's `YOMUX_RUNTIME_DIR`/`YOMUX_CACHE_DIR` service topology or automatic host partition. Event/operation journals, cookie auth material, background-owner records, and the default stats database remain config-rooted; the session-files cache and credential-admission database use the state root. A canonical config lifetime lease prevents independent event brokers from sharing those journals. Use the managed launcher so each preview gets private local roots.
 
-* Go YO!stats owns its storage and collectors in process; it does not implement the legacy Python statsd RPC/lifecycle topology. Keep both backends on isolated roots while comparing them.
+* Go YO!stats owns its storage and collectors in process; it does not implement the legacy Python statsd RPC/lifecycle topology. The retired Python daemon topology is outside the supported runtime.
 
-* Go stores Claude/Codex transcript and OpenCode parser progress in versioned checkpoints in the YO!stats database. Migration imports legacy cursor sidecars and pairs them with a database backup; unchanged Python may reject schema 10. The broader Python-versus-Go recovery and output comparison remains incomplete.
+* Go stores Claude/Codex transcript and OpenCode parser progress in versioned checkpoints in the YO!stats database. Migration imports legacy cursor sidecars and pairs them with a database backup; unchanged Python may reject schema 10. Historical fixtures retain their provenance; the removed server is not a live test oracle.
 
 * Runtime agent/OpenCode discovery currently uses Linux adapters. Cross-platform parity is not established.
 
@@ -290,14 +295,14 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 
 5. Verify the listener, `/healthz`, capability snapshot, and exact browser workflow against the rebuilt bundle.
 
-6. Keep the deprecated Python server as an explicit temporary fallback while Go migration work continues. Remove it only after the supported-feature inventory is closed, every Python runtime/build/tool dependency is replaced or eliminated, and the exact Go-only gate and browser journeys pass; late October 2026 remains the target, not permission to drop open behavior.
+6. Accept retirement only after the exact final candidate passes the native launch matrix, setup/build/update without Python, supported browser journeys, package/import audit, and full repository gate. Verify the selected 7111 lifecycle first; preserve 7110 and existing agents. Broader fleet rollout requires a separate acceptance decision. A documented native owner does not establish that these checks passed.
 
 ## Related Documents
 
-* [`README.md`](README.md): operator quickstart and dual-backend overview.
+* [`README.md`](README.md): operator quickstart and native runtime overview.
 
 * [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md): prerequisites, source layout, build, tests, and restart commands.
 
-* [`docs/specs/BACKEND_ARCHITECTURE.md`](docs/specs/BACKEND_ARCHITECTURE.md): concise Python and Go process ownership overview.
+* [`docs/specs/BACKEND_ARCHITECTURE.md`](docs/specs/BACKEND_ARCHITECTURE.md): current native process ownership and filesystem boundary.
 
 * [`docs/specs/GUI.md`](docs/specs/GUI.md): shared user-interface behavior and verification rules.

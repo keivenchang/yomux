@@ -1520,6 +1520,8 @@
   "shortcuts.section.menus": "Menu, tavolozze e selezionatori",
   "shortcuts.section.tabsPanes": "Tabulazioni / Pannelli",
   "shortcuts.section.terminal": "Terminale",
+  "shortcuts.exitTmuxCopyMode": "Uscire dalla modalità copia di tmux",
+  "shortcuts.terminalScrollHelp": "Scorri o usa Fn+Su/Giù per scorrere l’applicazione. Tieni premuto Shift mentre scorri per consultare la cronologia di tmux.",
   "shortcuts.switchTmuxWindow": "Precedente / successivo tab",
   "shortcuts.toggleComment": "Commento a toggle line",
   "shortcuts.toggleFinder": "Attiva/disattiva {name}",

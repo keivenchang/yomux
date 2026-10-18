@@ -918,136 +918,16 @@ def running_build_factory(
         )
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_o1_two_builds_serve_together_without_blocking_or_sharing_state(
-    v0610_source: Path,
-    running_build_factory: Callable[..., RunningBuild],
-) -> None:
-    old = running_build_factory("old", v0610_source, legacy_service_capture=True)
-    rebuilt = running_build_factory("rebuilt", REPO_ROOT)
-    _assert_survivor_does_not_touch_stopped_peer(old, rebuilt)
-
-    old_reverse = running_build_factory("old-reverse", v0610_source, legacy_service_capture=True)
-    rebuilt_reverse = running_build_factory("rebuilt-reverse", REPO_ROOT)
-    _assert_survivor_does_not_touch_stopped_peer(rebuilt_reverse, old_reverse)
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_o2_rebuilt_process_never_writes_or_write_locks_v0610_artifacts(
-    running_build_factory: Callable[..., RunningBuild],
-    tmp_path: Path,
-) -> None:
-    state_dir = tmp_path / "o2-v0610-state"
-    before = _seed_v0610_artifacts(state_dir)
-    rebuilt = running_build_factory("rebuilt-old-state", REPO_ROOT, state_dir=state_dir)
-
-    _assert_healthy(rebuilt)
-    after = _artifact_hashes(state_dir)
-    changed = sorted(name for name in OLD_ARTIFACTS if after[name] != before[name])
-    locked = _sqlite_write_lock_failures(state_dir)
-
-    assert not changed, f"rebuilt process changed old artifact bytes: {changed}"
-    assert not locked, f"rebuilt process holds SQLite write locks on old artifacts: {locked}"
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_o3_new_stats_schema_uses_a_new_versioned_file_beside_v6(
-    running_build_factory: Callable[..., RunningBuild],
-    tmp_path: Path,
-) -> None:
-    state_dir = tmp_path / "o3-versioned-state"
-    before = _seed_v0610_artifacts(state_dir)
-    rebuilt = running_build_factory("rebuilt-versioned", REPO_ROOT, state_dir=state_dir)
-
-    _assert_healthy(rebuilt)
-    _trigger_stats(rebuilt)
-    newer = _newer_stats_artifacts(state_dir)
-
-    assert newer, "rebuilt first run did not create stats-v<schema>.sqlite3 with schema greater than 6"
-    assert _artifact_hashes(state_dir)["stats-v6.sqlite3"] == before["stats-v6.sqlite3"]
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_o4_v0610_still_serves_after_rebuilt_process_used_the_same_state(
-    v0610_source: Path,
-    running_build_factory: Callable[..., RunningBuild],
-    tmp_path: Path,
-) -> None:
-    shared_state = tmp_path / "o4-shared-state"
-    rebuilt = running_build_factory("rebuilt-before-downgrade", REPO_ROOT, state_dir=shared_state)
-    _assert_healthy(rebuilt)
-    _assert_build_wrote_own_stats(rebuilt)
-    rebuilt.stop()
-
-    old = running_build_factory(
-        "old-after-rebuilt",
-        v0610_source,
-        state_dir=shared_state,
-        legacy_service_capture=True,
-    )
-    _assert_healthy(old)
-    assert old.process.poll() is None
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_o5_concurrent_builds_observe_disjoint_sockets_and_locks(
-    v0610_source: Path,
-    running_build_factory: Callable[..., RunningBuild],
-) -> None:
-    old = running_build_factory("old-identities", v0610_source, legacy_service_capture=True)
-    rebuilt = running_build_factory("rebuilt-identities", REPO_ROOT)
-    _assert_healthy(old)
-    _assert_healthy(rebuilt)
-    _assert_build_wrote_own_stats(old)
-    _assert_build_wrote_own_stats(rebuilt)
-
-    old_sockets = _runtime_socket_paths(old)
-    rebuilt_sockets = _runtime_socket_paths(rebuilt)
-    old_locks = _runtime_lock_paths(old)
-    rebuilt_locks = _runtime_lock_paths(rebuilt)
-
-    assert old_sockets and rebuilt_sockets
-    assert old_locks and rebuilt_locks
-    assert old_sockets.isdisjoint(rebuilt_sockets), (old_sockets, rebuilt_sockets)
-    assert old_locks.isdisjoint(rebuilt_locks), (old_locks, rebuilt_locks)
-    _assert_observed_paths_confined(
-        old.label,
-        old_sockets,
-        (old.paths.root, old.tmux.socket_dir),
-    )
-    _assert_observed_paths_confined(
-        rebuilt.label,
-        rebuilt_sockets,
-        (rebuilt.paths.root, rebuilt.tmux.socket_dir),
-    )
-    _assert_observed_paths_confined(old.label, old_locks, (old.paths.root,))
-    _assert_observed_paths_confined(rebuilt.label, rebuilt_locks, (rebuilt.paths.root,))
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_o6_first_run_creates_new_artifacts_without_adopting_or_removing_old(
-    running_build_factory: Callable[..., RunningBuild],
-    tmp_path: Path,
-) -> None:
-    state_dir = tmp_path / "o6-first-run-state"
-    before = _seed_v0610_artifacts(state_dir)
-    assert not _newer_stats_artifacts(state_dir)
-    rebuilt = running_build_factory("rebuilt-first-run", REPO_ROOT, state_dir=state_dir)
-
-    _assert_healthy(rebuilt)
-    _trigger_stats(rebuilt)
-    newer = _newer_stats_artifacts(state_dir)
-    after = _artifact_hashes(state_dir)
-
-    assert newer, "first run did not create a new-version stats artifact beside v6"
-    assert set(after) == set(before)
-    assert after == before, "first run adopted, rewrote, renamed, or removed an old artifact"
 
 
 def test_o6_exact_member_barrier_signals_pidfd_not_reused_numeric_pid(

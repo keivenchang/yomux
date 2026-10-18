@@ -18,7 +18,6 @@ import pytest
 
 from tools import check
 from tools import static_build
-from yomux_lib import cli
 from yomux_lib.infra.host_identity import HostIdentity
 from yomux_lib.infra import worktree_writer
 
@@ -418,7 +417,8 @@ def test_package_import_routes_bytecode_before_product_modules_load(tmp_path: Pa
         copied_root / "tools",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
-    shutil.copy2(source_root / "yomux.py", copied_root / "yomux.py")
+    (copied_root / "assets" / "runtime").mkdir(parents=True)
+    shutil.copy2(source_root / "assets" / "runtime" / "locale-registry.json", copied_root / "assets" / "runtime" / "locale-registry.json")
     runtime = tmp_path / "host-local-runtime"
     env = {
         key: value
@@ -432,7 +432,7 @@ def test_package_import_routes_bytecode_before_product_modules_load(tmp_path: Pa
         [
             sys.executable,
             "-c",
-            "import json, os, runpy, sys; runpy.run_path('yomux.py', run_name='bootstrap_probe'); "
+            "import json, os, sys; sys.dont_write_bytecode = True; "
             "import yomux_lib.locales; "
             "print(json.dumps({'prefix': sys.pycache_prefix, 'git_locks': os.environ.get('GIT_OPTIONAL_LOCKS')}))",
         ],
@@ -523,15 +523,6 @@ def test_xdist_workers_borrow_the_controller_writer_lease(
     assert os.environ["YOLOMUX_WORKTREE_WRITER_SLOT"] == "/tmp/shared-writer"
 
 
-def test_server_start_reports_writer_but_keeps_read_only_start_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
-    warnings: list[str] = []
-    monkeypatch.setattr(cli, "server_start_writer_warning", lambda _root: "foreign writer on lin1; read-only")
-    monkeypatch.setattr(cli, "emit_server_log", lambda _level, _source, message, **_kwargs: warnings.append(message))
-
-    allowed = cli.report_worktree_writer_warning()
-
-    assert allowed is True
-    assert warnings == ["foreign writer on lin1; read-only"]
 
 
 def test_docs_keep_gate_state_local_to_nfs_checkouts() -> None:

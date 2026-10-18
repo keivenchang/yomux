@@ -8,7 +8,7 @@ The Git tags are the source for exact release contents and historical gate resul
 - [Backend architecture](specs/BACKEND_ARCHITECTURE.md)
 - [Go capabilities and migration gaps](../GO_MIGRATION.md)
 
-`GO_MIGRATION.md` also defines the Python-removal gate: supported Python-only behavior and Python runtime/tooling dependencies must be ported or replaced before removal.
+`GO_MIGRATION.md` records the retirement decision and acceptance checks. Go owns the supported product runtime; Python-only behavior outside that feature set is retired. Python developer tools, mocks, and test controllers remain source-only. Runtime acceptance still requires verification against the final candidate.
 
 Current [navigation behavior](specs/GUI.md) includes Normal/Advanced Tabber, stable row order during hover, live activity updates, reorder on pointer exit, and relative Ago defaults with persistent date controls. These describe current behavior; tagged releases remain the authority for shipped history.
 
@@ -16,6 +16,6 @@ Current [navigation behavior](specs/GUI.md) includes Normal/Advanced Tabber, sta
 
 - **0.7.x:** added filesystem/Git views, indexing, YO!stats, OpenCode support, and later Markdown editing; see tags `v0.7.0`–`v0.7.35` (there is no `v0.7.27`).
 - **0.8.x:** focused on Markdown editing, Finder/Differ responsiveness, terminal behavior, and refresh cost; tags run from `v0.8.1` through `v0.8.10` with gaps.
-- **0.9.x:** began the Go migration. `v0.9.1` is the first tag containing the Go backend; `v0.9.4` includes Git-history/cache, editor, and release-renderer fixes. Go is now the default for managed server launches. The deprecated Python server is a temporary explicit fallback; its late-October 2026 removal target is conditional on the Go migration inventory and Python dependency removal gate in [`GO_MIGRATION.md`](../GO_MIGRATION.md).
+- **0.9.x:** began the Go migration. `v0.9.1` is the first tag containing the Go backend; `v0.9.4` includes Git-history/cache, editor, and release-renderer fixes. Those releases retained an explicit Python fallback during migration. Current launch and retirement requirements are in [`GO_MIGRATION.md`](../GO_MIGRATION.md).
 
 - **0.10.x:** unified Normal and Advanced Tabber window rows, added New Chat and per-window kill actions, kept agent status displays consistent, repaired terminal refresh sizing and Finder cancellation, and removed recursive controls from YO!stats pop-outs. The 0.10.6 release also preserves distinct session identities, rejects obsolete Lookback responses, keeps mobile minimize controls compact, reports unavailable macOS memory observations, refreshes provider pricing with durable retry state, and requires Python 3.11 or newer.

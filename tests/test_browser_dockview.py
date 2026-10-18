@@ -22,7 +22,7 @@ def test_advanced_mode_navigation_and_balanced_transition(browser, tmp_path):
     )
     wait = WebDriverWait(browser, 10)
     wait.until(lambda driver: driver.execute_script("return typeof setTabberMode === 'function' && !!dockviewLayoutState.api"))
-    browser.execute_script("setTabberMode('normal'); window.__advancedRetainedTerminal = terminals.get('one');")
+    browser.execute_script("setTabberMode('normal'); setFocusedPanelItem('one'); window.__advancedRetainedTerminal = terminals.get('one');")
     wait.until(lambda driver: driver.execute_script("return document.body.classList.contains('tabber-mode-normal')"))
     normal_chrome = browser.execute_script("""
       const display = selector => getComputedStyle(document.querySelector(selector)).display;
@@ -61,6 +61,46 @@ def test_advanced_mode_navigation_and_balanced_transition(browser, tmp_path):
     browser.find_element('css selector', '[data-tabber-advanced]').click()
     wait.until(lambda driver: driver.execute_script("return !tabberIsAdvanced() && activePaneItems().filter(isTmuxSession).length <= 1"))
     assert browser.find_element('css selector', '[data-tabber-advanced]').is_displayed()
+
+
+def test_startup_tip_navigation_glyphs_are_centered_in_their_buttons(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    alignment = browser.execute_script("""
+      const toast = document.createElement('div');
+      toast.className = 'toast';
+      toast.style.cssText = 'position:fixed;left:0;top:0;z-index:99999';
+      const group = startupHelperNavigationGroup(0, 14, () => {});
+      toast.append(group);
+      document.body.append(toast);
+      try {
+        return [...group.querySelectorAll('button')].map(button => {
+          const buttonRect = button.getBoundingClientRect();
+          const range = document.createRange();
+          range.selectNodeContents(button);
+          const textRect = range.getBoundingClientRect();
+          return {justify: getComputedStyle(button).justifyContent,
+            offset: textRect.left + textRect.width / 2 - (buttonRect.left + buttonRect.width / 2)};
+        });
+      } finally {
+        toast.remove();
+      }
+    """)
+    assert len(alignment) == 2, alignment
+    assert all(button['justify'] == 'center' and abs(button['offset']) <= 1 for button in alignment), alignment
+
+
+def test_advanced_toggle_keeps_tabber_selected_when_it_was_active(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser, tmp_path, "?sessions=one,two&layout=left&tabs=left:__tabber__",
+        sessions=["one", "two"], grid_width=1800, grid_height=800,
+        settings={"general": {"default_tabber_mode": "normal"}},
+    )
+    wait = WebDriverWait(browser, 10)
+    wait.until(lambda driver: driver.execute_script("return typeof setTabberMode === 'function' && !!dockviewLayoutState.api"))
+    browser.execute_script("setTabberMode('normal')")
+    wait.until(lambda driver: driver.execute_script("return activePaneItems().includes('__tabber__')"))
+    browser.find_element('css selector', '.dockview-pane-header-actions [data-tabber-advanced]').click()
+    wait.until(lambda driver: driver.execute_script("return tabberIsAdvanced() && activePaneItems().includes('__tabber__')"))
 
 
 def test_narrow_normal_tabber_opens_in_the_single_content_pane(browser, tmp_path):
@@ -492,276 +532,10 @@ def test_dockview_clicking_xterm_tab_mounts_visible_terminal(browser, tmp_path):
     }
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_dockview_real_xterm_tab_switch_accepts_input_and_output(browser, monkeypatch, tmp_path):
-    runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=2)
-    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
-    try:
-        first, second = runtime.sessions
-        query = urlencode({
-            "sessions": ",".join(runtime.sessions),
-            "layout": "left",
-            "tabs": f"left:{first},{second}",
-        })
-        browser.get(f"http://127.0.0.1:{server.server_address[1]}/?{query}")
-        assert_live_runtime_boot_healthy(browser, "real-xterm-dockview-switch", timeout=12)
-        tabber_opened = browser.execute_async_script(
-            "const done=arguments[arguments.length-1]; openTabberActivityOverview().then(() => Promise.all([loadAutoStatuses.request, tabberActivityState.request])).then(() => done(true), error => done({error:String(error)}));"
-        )
-        assert tabber_opened is True, tabber_opened
-        viewport_before = browser.execute_script(
-            "return {x: window.scrollX, y: window.scrollY, top: document.querySelector('.topbar').getBoundingClientRect().top};"
-        )
-        browser.execute_script(
-            """
-            window.__yomuxTabSwitchPhaseTwoDelayMs = 300;
-            window.__phaseTwo = [];
-            window.__initialActivationPaints = clientPerfSummary().find(counter => counter.name === 'tabActivationPaint')?.count || 0;
-            window.__originalSessionSideSync = noteFileExplorerChangesSessionInteraction;
-            noteFileExplorerChangesSessionInteraction = (...args) => {
-              window.__phaseTwo.push(String(args[0] || ''));
-              return window.__originalSessionSideSync(...args);
-            };
-            """
-        )
-        for index, session in enumerate((second, first, second)):
-            if index == 2:
-                assert browser.execute_script(
-                    "return itemInLayout(arguments[0]) && !activeSessions.includes(arguments[0]);", session,
-                ), "Tabber must exercise the background-tab activation path"
-            selector = (
-                f'#panel-__tabber__ .file-tree-row[data-tabber-type="normal"][data-tabber-session="{session}"] .file-tree-name'
-                if index == 2 else f'.dockview-pane-tab[data-pane-tab="{session}"]'
-            )
-            click_visible_selector(browser, selector)
-            assert browser.execute_script(
-                "return document.activeElement === terminals.get(arguments[0])?.term?.textarea;",
-                session,
-            ), "tab activation must focus the real xterm textarea before deferred session-side work"
-            WebDriverWait(browser, 12).until(
-                lambda driver: driver.execute_script(
-                    """
-                    const item = terminals.get(arguments[0]);
-                    const screen = item?.container?.querySelector('.xterm-screen');
-                    const textarea = item?.container?.querySelector('.xterm-helper-textarea');
-                    return item?.socket?.readyState === WebSocket.OPEN
-                      && Boolean(textarea)
-                      && Boolean(screen)
-                      && screen.getBoundingClientRect().width > 40
-                      && screen.getBoundingClientRect().height > 40;
-                    """,
-                    session,
-                )
-            )
-            WebDriverWait(browser, 5).until(
-                lambda driver: driver.execute_script(
-                    "return document.activeElement === terminals.get(arguments[0])?.term?.textarea;",
-                    session,
-                )
-            )
-            if index == 0:
-                assert browser.execute_script("return window.__phaseTwo.length") == 0, "xterm focus must land before the deliberately delayed session-side sync"
-            marker = f"dockview-switch-input-{index}"
-            ready_path = tmp_path / f"dockview-switch-{index}.ready"
-            acknowledgment_path = tmp_path / f"dockview-switch-{index}.ack"
-            command = (
-                f"printf ready > {shlex.quote(str(ready_path))}; "
-                f"IFS= read -r terminal_value; "
-                f"printf '%s\\n' \"$terminal_value\" > {shlex.quote(str(acknowledgment_path))}; "
-                "printf 'backend-ack\\n'"
-            )
-            armed = run_isolated_tmux(runtime.tmux, "send-keys", "-t", f"{session}:", command, "Enter")
-            assert armed.returncode == 0, armed.stderr or armed.stdout
-            WebDriverWait(browser, 12).until(lambda _driver: ready_path.is_file())
-            browser.execute_cdp_cmd("Input.insertText", {"text": marker})
-            browser.execute_cdp_cmd(
-                "Input.dispatchKeyEvent",
-                {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "text": "\r", "unmodifiedText": "\r"},
-            )
-            browser.execute_cdp_cmd(
-                "Input.dispatchKeyEvent",
-                {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13},
-            )
-            WebDriverWait(browser, 12).until(
-                lambda driver: driver.execute_script(
-                    """
-                    const item = terminals.get(arguments[0]);
-                    const buffer = item?.term?.buffer?.active;
-                    const lines = buffer
-                      ? Array.from({length: buffer.length}, (_, row) => buffer.getLine(row)?.translateToString(true) || '')
-                      : [];
-                    return lines.some(line => line.trim() === 'backend-ack');
-                    """,
-                    session,
-                )
-            )
-            WebDriverWait(browser, 12).until(lambda _driver: acknowledgment_path.is_file())
-            assert acknowledgment_path.read_text(encoding="utf-8") == f"{marker}\n"
-            WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
-                "return !document.querySelector('.pane-tab.tab-activation-pending') && (clientPerfSummary().find(counter => counter.name === 'tabActivationPaint')?.count || 0) - window.__initialActivationPaints === arguments[0]",
-                index + 1,
-            ))
-            assert browser.execute_script(
-                "return {x: window.scrollX, y: window.scrollY, top: document.querySelector('.topbar').getBoundingClientRect().top};"
-            ) == viewport_before, "native terminal focus must preserve the viewport and topbar geometry"
-    finally:
-        browser.execute_script(
-            """
-            if (window.__originalSessionSideSync) noteFileExplorerChangesSessionInteraction = window.__originalSessionSideSync;
-            delete window.__originalSessionSideSync;
-            delete window.__yomuxTabSwitchPhaseTwoDelayMs;
-            delete window.__initialActivationPaints;
-            """
-        )
-        stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_dockview_delayed_tab_activation_still_focuses_terminal(browser, monkeypatch, tmp_path):
-    runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=2)
-    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
-    try:
-        first, second = runtime.sessions
-        query = urlencode({
-            "sessions": ",".join(runtime.sessions),
-            "layout": "left",
-            "tabs": f"left:{first},{second}",
-        })
-        browser.get(f"http://127.0.0.1:{server.server_address[1]}/?{query}")
-        assert_live_runtime_boot_healthy(browser, "delayed-dockview-tab-focus", timeout=12)
-        WebDriverWait(browser, 8).until(
-            lambda driver: driver.execute_script(
-                "return Array.from(document.querySelectorAll('.dockview-pane-tab')).some(node => node.dataset.paneTab === arguments[0]);",
-                second,
-            )
-        )
-        point = browser.execute_script(
-            """
-            const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"]`);
-            const rect = tab.getBoundingClientRect();
-            return {x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)};
-            """,
-            second,
-        )
-        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", **point, "button": "none"})
-        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", **point, "button": "left", "buttons": 1, "clickCount": 1})
-        expired = browser.execute_async_script(
-            """
-            const done = arguments[arguments.length - 1];
-            const target = arguments[0];
-            const heldAt = performance.now();
-            (async () => {
-              try {
-                await window.__yomuxTestWaitFor(
-                  () => performance.now() - heldAt >= Math.max(DOCKVIEW_PRE_ACTIVATION_CAPTURE_TTL_MS, DOCKVIEW_PENDING_ACTIVATION_TTL_MS)
-                    && !panelNodes.get(arguments[1])?._dockviewPreActivationCaptured
-                    && dockviewLayoutState.pendingUserPanelActivation !== target,
-                  {timeoutMs: 5000, description: 'pre-activation capture expiry'},
-                );
-                done(true);
-              } catch (error) { done({error: String(error?.stack || error)}); }
-            })();
-            """,
-            second,
-            first,
-        )
-        assert expired is True, expired
-        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", **point, "button": "left", "buttons": 0, "clickCount": 1})
-        metrics = browser.execute_async_script(
-            """
-            const done = arguments[arguments.length - 1];
-            const target = arguments[0];
-            (async () => {
-              try {
-                await window.__yomuxTestWaitFor(
-                  () => document.activeElement === terminals.get(target)?.term?.textarea,
-                  {timeoutMs: 5000, description: 'delayed Dockview tab terminal focus'},
-                );
-                done({active: activeItemForSide('left'), focused: document.activeElement === terminals.get(target)?.term?.textarea});
-              } catch (error) {
-                done({error: String(error?.stack || error)});
-              }
-            })();
-            """,
-            second,
-        )
-        assert "error" not in metrics and metrics == {"active": second, "focused": True}, metrics
-    finally:
-        stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_dockview_prosemirror_failure_does_not_block_xterm_switch(browser, monkeypatch, tmp_path):
-    runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=2)
-    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
-    try:
-        first, second = runtime.sessions
-        path = "/home/test/yolomux.dev/DOCKVIEW-PM-FAILURE.md"
-        query = "?" + urlencode({
-            "sessions": ",".join(runtime.sessions),
-            "layout": "left",
-            "tabs": f"left:{first},{second}",
-        })
-        browser.get(f"http://127.0.0.1:{server.server_address[1]}/{query}")
-        assert_live_runtime_boot_healthy(browser, "dockview-prosemirror-failure-switch", timeout=12)
-        metrics = browser.execute_async_script(
-            """
-            const done = arguments[arguments.length - 1];
-            const path = arguments[0];
-            (async () => {
-              try {
-                const item = fileEditorItemFor(path);
-                const source = '<span class="unsupported">View failure</span>';
-                setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
-                setFileEditorViewMode(path, 'preview', item);
-                addFileEditorTabItem(path, item);
-                const panel = createFileEditorPanel(item);
-                panel.classList.add('active-pane');
-                panel.style.width = '980px';
-                panel.style.height = '560px';
-                panelNodes.set(item, panel);
-                document.getElementById('grid').append(panel);
-                const originalLoader = window.loadProseMirrorApi;
-                window.loadProseMirrorApi = () => Promise.reject(new Error('ProseMirror did not initialize'));
-                renderFileEditorPanel(panel, item);
-                await window.__yomuxTestWaitFor(() => panel._pmError && panel.querySelector('.file-editor-prosemirror-error'), {timeoutMs: 12000, description: 'failed ViewEditor state'});
-                window.loadProseMirrorApi = originalLoader;
-                done({item, error: panel._pmError, state: panel.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState || ''});
-              } catch (error) {
-                done({failure: String(error?.stack || error)});
-              }
-            })();
-            """,
-            path,
-        )
-        assert "failure" not in metrics and "ProseMirror ViewEditor failed" in metrics["error"] and metrics["state"] == "error", metrics
-        click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{first}"]')
-        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return activeItemForSide('left') === arguments[0];", first))
-        WebDriverWait(browser, 5).until(
-            lambda driver: driver.execute_script(
-                "return terminalIsVisible(arguments[0], terminals.get(arguments[0])?.container) && document.activeElement === terminals.get(arguments[0])?.term?.textarea;",
-                first,
-            )
-        )
-        result = browser.execute_script(
-            """
-            const panel = panelNodes.get(arguments[0]);
-            return {
-              error: panel?._pmError || '',
-              state: panel?.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState || '',
-              errors: jsDebugFailureEvents('error'),
-              rejections: jsDebugFailureEvents('rejection'),
-            };
-            """,
-            metrics["item"],
-        )
-        assert "ProseMirror ViewEditor failed" in result["error"] and result["state"] == "error", result
-        assert result["errors"] == [] and result["rejections"] == [], result
-    finally:
-        stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
 def test_dockview_tmux_menu_retargets_after_terminal_tab_click(browser, tmp_path):

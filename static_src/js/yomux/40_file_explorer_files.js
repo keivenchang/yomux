@@ -6587,14 +6587,15 @@ function advancedTabberLayoutSlots(active = visualActivePaneItem(), sourceSlots 
   // A selected window view keeps its existing terminal instead of reopening its source session.
   const source = tabberViewDescriptorForSession(active)?.sourceSession;
   const selected = source && roster.includes(source) ? roster.map(item => item === source ? active : item) : roster;
+  const homeActive = [finderItemId, differItemId, tabberItemId].includes(active) ? active : finderItemId;
   const withHome = mode => {
     const next = layoutWithSidePaneItems(layoutSlotsForItems(selected, mode, {active, preferredSlots: ['right']}),
     [finderItemId, differItemId, tabberItemId], {
-      side: paneSideLeft, forceCreate: true, active: finderItemId,
+      side: paneSideLeft, forceCreate: true, active: homeActive,
       widthPercent: sidePaneWidthPercent(paneSideLeft, sourceSlots),
     });
     const home = sidePaneSlot(paneSideLeft, next);
-    if (home) next[home] = paneStateWithTabsForSlot(home, [finderItemId, differItemId, tabberItemId], finderItemId, next);
+    if (home) next[home] = paneStateWithTabsForSlot(home, [finderItemId, differItemId, tabberItemId], homeActive, next);
     return next;
   };
   const split = withHome('split');

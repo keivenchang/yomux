@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="{{.Locale}}" dir="{{.Direction}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{{t "setup.documentTitle"}}</title>
+<link rel="icon" data-yomux-favicon href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%2399d441'/%3E%3Ctext x='32' y='47' text-anchor='middle' font-family='Arial,sans-serif' font-size='46' font-weight='900' fill='%23111827'%3EY%3C/text%3E%3C/svg%3E" type="image/svg+xml">
+<link rel="stylesheet" href="{{asset "brand.css"}}">
+<link rel="stylesheet" href="{{asset "setup-auth.css"}}">
+</head>
+<body>
+<main>
+  {{localePicker "setup-locale"}}
+  <h1>{{t "setup.setUp"}} {{brand "brand-title setup-brand setup-brand-waiting" "span"}}</h1>
+  {{.SecurityHTML}}
+  <p>{{t "common.edit"}} <code>{{.AuthPath}}</code></p>
+  <pre>users:
+  - username: "{{.Login}}"
+    password: "your-admin-password"
+    role: "admin"
+  - username: "guest"
+    password: "guest"
+    role: "readonly"</pre>
+  {{.AgentNoticeHTML}}
+  <p id="setupStatus" class="setup-status">{{t "setup.waiting"}}<span class="setup-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span></p>
+</main>
+<script>window.__setupStrings = {{.SetupStrings}};</script>
+<script src="{{asset "preauth-locale.js"}}"></script>
+<script src="{{asset "setup-auth.js"}}"></script>
+</body>
+</html>

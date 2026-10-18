@@ -26,6 +26,7 @@ import (
 	"github.com/keivenchang/yomux/internal/finder"
 	"github.com/keivenchang/yomux/internal/productenv"
 	"github.com/keivenchang/yomux/internal/stats"
+	"github.com/keivenchang/yomux/internal/tailfile"
 )
 
 const (
@@ -1115,47 +1116,7 @@ func readTranscriptTail(path string, lines int) (string, error) {
 }
 
 func readTranscriptTailWithByteLimit(path string, lines int, byteLimit int64) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return "", err
-	}
-	maxBytes := int64(lines) * 64 * 1024
-	if maxBytes < 64*1024 {
-		maxBytes = 64 * 1024
-	}
-	if byteLimit > 0 && maxBytes > byteLimit {
-		maxBytes = byteLimit
-	}
-	start := info.Size() - maxBytes
-	if start < 0 {
-		start = 0
-	}
-	if _, err := file.Seek(start, io.SeekStart); err != nil {
-		return "", err
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxBytes))
-	if err != nil {
-		return "", err
-	}
-	text := string(data)
-	if start > 0 {
-		if newline := strings.IndexByte(text, '\n'); newline >= 0 {
-			text = text[newline+1:]
-		}
-	}
-	parts := strings.SplitAfter(text, "\n")
-	if len(parts) > 0 && parts[len(parts)-1] == "" {
-		parts = parts[:len(parts)-1]
-	}
-	if len(parts) > lines {
-		parts = parts[len(parts)-lines:]
-	}
-	return strings.Join(parts, ""), nil
+	return tailfile.Read(path, lines, byteLimit)
 }
 
 func formatTranscriptItem(item map[string]any) string {
@@ -1404,6 +1365,7 @@ func activityStatusObservedAt(seconds float64) time.Time {
 type goAgentStatusOverride struct {
 	processInstanceID      string
 	state                  string
+	attentionKind          string
 	observedAt             time.Time
 	workingStoppedTS       float64
 	transitionID           string
@@ -1442,7 +1404,7 @@ func activityAgentStatusOverrides(snapshot stats.AgentStatusSnapshot) map[string
 		}
 		workingStoppedTS, _ := row["working_stopped_ts"].(float64)
 		result[key] = goAgentStatusOverride{
-			state: liveAgentWindowState(state), observedAt: observedAt, processInstanceID: stringValue(row["process_instance_id"]),
+			state: liveAgentWindowState(state), attentionKind: stringValue(row["attention_kind"]), observedAt: observedAt, processInstanceID: stringValue(row["process_instance_id"]),
 			workingStoppedTS:     workingStoppedTS,
 			transitionID:         stringValue(row["transition_id"]),
 			cooldownAttentionKey: stringValue(row["cooldown_attention_key"]),
@@ -1526,6 +1488,7 @@ func (s *server) applyAgentStatusLifecycle(sessions map[string]any, overrides ma
 				agent["attention_acknowledged"] = acknowledged || override.attentionAcknowledged
 			}
 			agent["status"] = override.state
+			agent["attention_kind"] = override.attentionKind
 			agent["status_observed_at"] = float64(override.observedAt.UnixNano()) / 1e9
 			delete(agent, "working_stopped_ts")
 			delete(agent, "transition_id")

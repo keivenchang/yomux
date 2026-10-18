@@ -1,0 +1,13 @@
+{
+  "punctuation": "?;՞؟፧？",
+  "trailing_closers": "\"'”’»）)]}",
+  "leading_exclusions": "\"'“‘«([{",
+  "url_or_code_pattern": "(?:https?://|`[^`]*`)",
+  "compact_prefix_locales": [
+    "ja",
+    "ko",
+    "th",
+    "zh-Hans",
+    "zh-Hant"
+  ]
+}

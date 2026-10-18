@@ -66,8 +66,8 @@ func TestRepositoryTreeContainsPricingInputs(t *testing.T) {
 	root := RepoRoot(t)
 	want := []string{
 		"yomux_lib/__init__.py",
-		"yomux_lib/data/model_pricing.json",
-		"yomux_lib/data/internal_model_pricing.json",
+		"assets/runtime/model_pricing.json",
+		"assets/runtime/internal_model_pricing.json",
 	}
 	for _, relative := range want {
 		if _, err := os.Stat(filepath.Join(root, relative)); err != nil {

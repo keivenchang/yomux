@@ -90,18 +90,19 @@ function updateNotifyLevelPreferenceChoices() {
   return choices.map(value => ({value, label: t(`pref.updates.notify_level.${value}`)}));
 }
 
-const YOAGENT_CLAUDE_MODEL_LABEL_KEYS = {
-  'claude-fable-5': 'pref.yoagent.claude_model.fable',
-  'claude-opus-4-8': 'pref.yoagent.claude_model.opus',
-  'claude-sonnet-4-6': 'pref.yoagent.claude_model.sonnet',
-  'claude-haiku-4-5': 'pref.yoagent.claude_model.haiku',
+const YOAGENT_CLAUDE_MODEL_LABELS = {
+  'claude-fable-5-1': 'Claude Fable 5.1',
+  'claude-opus-5-5': 'Claude Opus 5.5',
+  'claude-sonnet-5-5': 'Claude Sonnet 5.5',
+  'claude-haiku-5-5': 'Claude Haiku 5.5',
 };
 
-const YOAGENT_CODEX_MODEL_LABEL_KEYS = {
-  'gpt-5.3-codex-spark': 'pref.yoagent.codex_model.gpt53spark',
-  'gpt-5.4-mini': 'pref.yoagent.codex_model.gpt54mini',
-  'gpt-5.4': 'pref.yoagent.codex_model.gpt54',
-  'gpt-5.5': 'pref.yoagent.codex_model.gpt55',
+const YOAGENT_CODEX_MODEL_LABELS = {
+  'gpt-6.1-sol': 'GPT-6.1-Sol',
+  'gpt-6-astra': 'GPT-6-Astra',
+  'gpt-6-sol': 'GPT-6-Sol',
+  'gpt-6-luna': 'GPT-6-Luna',
+  'gpt-5.6-sol': 'GPT-5.6-Sol',
 };
 
 function settingCatalogEntry(path) {
@@ -142,20 +143,20 @@ function settingChoiceMetadata(path) {
   return metadata && typeof metadata === 'object' ? metadata : {};
 }
 
-function modelPreferenceChoices(path, fallbackValues, labelKeys) {
+function modelPreferenceChoices(path, fallbackValues, fallbackLabels) {
   const choices = Array.isArray(clientSettingsPayload?.choices?.[path])
     ? clientSettingsPayload.choices[path]
     : fallbackValues;
   const catalogLabels = settingChoiceLabels(path);
-  return choices.map(value => ({value, label: catalogLabels[value] || (labelKeys[value] ? t(labelKeys[value]) : preferenceChoiceLabel(value))}));
+  return choices.map(value => ({value, label: catalogLabels[value] || fallbackLabels[value] || preferenceChoiceLabel(value)}));
 }
 
 function yoagentClaudeModelPreferenceChoices() {
-  return modelPreferenceChoices('yoagent.claude_model', Object.keys(YOAGENT_CLAUDE_MODEL_LABEL_KEYS), YOAGENT_CLAUDE_MODEL_LABEL_KEYS);
+  return modelPreferenceChoices('yoagent.claude_model', Object.keys(YOAGENT_CLAUDE_MODEL_LABELS), YOAGENT_CLAUDE_MODEL_LABELS);
 }
 
 function yoagentCodexModelPreferenceChoices() {
-  return modelPreferenceChoices('yoagent.codex_model', Object.keys(YOAGENT_CODEX_MODEL_LABEL_KEYS), YOAGENT_CODEX_MODEL_LABEL_KEYS);
+  return modelPreferenceChoices('yoagent.codex_model', Object.keys(YOAGENT_CODEX_MODEL_LABELS), YOAGENT_CODEX_MODEL_LABELS);
 }
 
 function effortPreferenceLabel(value) {
@@ -283,8 +284,8 @@ function preferenceSections() {
       preferenceSettingItem('general.default_tabber_mode', {
         type: 'radio',
         choices: modelPreferenceChoices('general.default_tabber_mode', ['normal', 'advanced'], {
-          normal: 'pref.general.default_tabber_mode.normal',
-          advanced: 'pref.general.default_tabber_mode.advanced',
+          normal: t('pref.general.default_tabber_mode.normal'),
+          advanced: t('pref.general.default_tabber_mode.advanced'),
         }),
       }),
       preferenceSettingItem('appearance.date_time_hour_cycle', {type: 'radio', choices: [

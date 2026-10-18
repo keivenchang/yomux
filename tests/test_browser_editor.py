@@ -1,3 +1,5 @@
+import json
+
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 from tests.browser_helpers.browser_console import assert_only_expected_browser_network_error
@@ -1336,7 +1338,8 @@ def test_markdown_prosemirror_blockquoted_fence_keeps_event_loop_responsive(brow
 
 
 def test_markdown_prosemirror_renders_readme_mermaid_fences_read_only(browser, tmp_path):
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    fixture = json.loads((REPO_ROOT / "tests/fixtures/markdown_readme_mermaid_contract.json").read_text(encoding="utf-8"))
+    readme = fixture["markdown"]
     diagrams = re.findall(r"```mermaid\s*\n(.*?)\n```", readme, flags=re.DOTALL)
     assert len(diagrams) == 3
     assert len(re.findall(r"```(?:bash|yaml)\s*\n", readme)) >= 10
@@ -8048,8 +8051,12 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
               firstScroller.scrollTop = Math.min(9000, firstScroller.scrollHeight - firstScroller.clientHeight - 10);
               await frame();
               await frame();
-              // Flush pending viewport measurement before sampling the pixels compared after recreation.
-              panel._cmView.lineBlockAtHeight(firstScroller.scrollTop);
+              // Long-document height estimates can still change after animation frames.
+              // Sample only after CodeMirror has applied its viewport measurement.
+              await new Promise(resolve => panel._cmView.requestMeasure({{
+                read: view => view.lineBlockAtHeight(view.scrollDOM.scrollTop),
+                write: () => resolve(),
+              }}));
               const savedTop = firstScroller.scrollTop;
               captureFileEditorPanelViewState(item, panel);
               const savedSnapshot = Boolean(fileEditorViewState.get(item)?.scrollSnapshot);

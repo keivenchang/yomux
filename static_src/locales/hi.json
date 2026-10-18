@@ -1493,6 +1493,8 @@
   "shortcuts.section.menus": "मेनू, पैलेट और पिकर",
   "shortcuts.section.tabsPanes": "टैब/पैन",
   "shortcuts.section.terminal": "टर्मिनल",
+  "shortcuts.exitTmuxCopyMode": "tmux कॉपी मोड से बाहर निकलें",
+  "shortcuts.terminalScrollHelp": "ऐप्लिकेशन में स्क्रॉल करने के लिए स्क्रॉल करें या Fn+ऊपर/नीचे दबाएँ। tmux इतिहास देखने के लिए स्क्रॉल करते समय Shift दबाए रखें।",
   "shortcuts.switchTmuxWindow": "पिछला/अगला टैब",
   "shortcuts.toggleComment": "लाइन कमेंट toggle करें",
   "shortcuts.toggleFinder": "{name} toggle करें",

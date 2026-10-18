@@ -7,13 +7,19 @@ exports_files(["BUILD.bazel"])
 
 go_library(
     name = "atomicfile_lib",
-    srcs = ["atomicfile.go"],
+    srcs = [
+        "atomicfile.go",
+        "lock.go",
+    ],
     importpath = "github.com/keivenchang/yomux/internal/atomicfile",
 )
 
 go_test_pair(
     name = "atomicfile",
-    srcs = ["atomicfile_test.go"],
+    srcs = [
+        "atomicfile_test.go",
+        "lock_test.go",
+    ],
     embed = [":atomicfile_lib"],
 )
 

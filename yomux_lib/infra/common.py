@@ -77,10 +77,10 @@ UPDATE_NOTIFY_LEVELS: tuple[str, ...] = ("major", "minor", "patch", "none")
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
-SUMMARY_CODEX_MODEL = product_env('SUMMARY_MODEL', "gpt-5.5", environ=os.environ)
+SUMMARY_CODEX_MODEL = product_env('SUMMARY_MODEL', "gpt-6.1-sol", environ=os.environ)
 SUMMARY_CODEX_EFFORT = product_env('SUMMARY_EFFORT', "low", environ=os.environ)
 SUMMARY_CODEX_SERVICE_TIER = product_env('SUMMARY_SERVICE_TIER', "fast", environ=os.environ)
-YOAGENT_CLAUDE_SUMMARY_MODEL = product_env('YOAGENT_CLAUDE_SUMMARY_MODEL', "claude-haiku-4-5", environ=os.environ)
+YOAGENT_CLAUDE_SUMMARY_MODEL = product_env('YOAGENT_CLAUDE_SUMMARY_MODEL', "claude-haiku-5-5", environ=os.environ)
 def resolve_yomux_roots(
     environ: Mapping[str, str] | None = None,
     *,

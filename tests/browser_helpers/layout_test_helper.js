@@ -138,14 +138,14 @@ function canonicalWorkGraphFixture(session, info = {}) {
   return {...info, work_graph: graph, project: undefined, window_metadata: (info.window_metadata || []).map(({git, ...row}) => row)};
 }
 
+const serverSettingsSchema = JSON.parse(fs.readFileSync(require('path').join(__dirname, '..', '..', 'assets', 'runtime', 'settings-schema.json'), 'utf8'));
+
 function serverDefaultSettings(...keys) {
-  // Numeric defaults come from the ONE owner, yomux_lib/workspace/settings.py
-  // DEFAULT_SETTINGS; the fixture inherits instead of keeping a drifting copy.
-  const source = fs.readFileSync(require('path').join(__dirname, '..', '..', 'yomux_lib', 'workspace', 'settings.py'), 'utf8');
+  // Browser fixtures inherit the same schema as Go and retained Python tooling.
+  const defaults = serverSettingsSchema.DEFAULT_SETTINGS.performance;
   return Object.fromEntries(keys.map(key => {
-    const match = source.match(new RegExp(`"${key}": ([0-9.]+),`));
-    if (!match) throw new Error(`layout_test_helper: default "${key}" not found in yomux_lib/workspace/settings.py DEFAULT_SETTINGS`);
-    return [key, Number(match[1])];
+    if (typeof defaults[key] !== 'number') throw new Error(`layout_test_helper: numeric default "${key}" not found in settings-schema.json`);
+    return [key, defaults[key]];
   }));
 }
 
@@ -179,8 +179,8 @@ const DEFAULT_TEST_SETTINGS = Object.freeze({
   notifications: Object.freeze({
     toast_duration_ms: 10000,
   }),
-  // Performance defaults are READ from the single owner (yomux_lib/workspace/settings.py
-  // DEFAULT_SETTINGS) instead of hand-copied here: this block previously drifted in
+  // Performance defaults are read from the shared settings schema
+  // instead of hand-copied here: this block previously drifted in
   // lockstep-edit fashion whenever a default changed. A missing key throws so a
   // renamed setting fails loudly rather than silently diverging.
   performance: Object.freeze(serverDefaultSettings(
@@ -3775,6 +3775,7 @@ async function runSuites(suites) {
 }
 
 module.exports = {
+  serverSettingsSchema,
   assert,
   fs,
   UI_PINS,

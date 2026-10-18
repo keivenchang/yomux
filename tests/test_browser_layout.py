@@ -27,7 +27,6 @@ from tests.gate_harness import claim_fixture_client_event_demand
 from tools.static_build import build_asset
 from yomux_lib.local_services import client as local_service_client_module
 from yomux_lib.server_logs import ServerLogRing
-from yomux_lib.watchd_client import WatchClient
 
 
 def test_browser_wait_timeout_has_one_xdist_only_floor(): browser_harness_lifecycle.assert_browser_wait_timeout_has_one_xdist_only_floor()
@@ -623,31 +622,6 @@ def test_isolated_tmux_runtime_supports_named_commands_dimensions_and_cleanup(mo
     assert not socket_dir.exists()
 
 
-def test_agent_prompt_browser_cases_share_the_isolated_tmux_runtime_owner():
-    source = Path(__file__).read_text(encoding="utf-8")
-    function_sources = {}
-    for test_name in (
-        "test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser",
-        "test_real_agent_prompts_render_ask_attention_in_live_server",
-    ):
-        match = re.search(rf"^def {re.escape(test_name)}\(", source, re.MULTILINE)
-        assert match is not None
-        start = match.start()
-        end = source.find("\ndef test_", start + 1)
-        function_source = source[start:end if end >= 0 else len(source)]
-        function_sources[test_name] = function_source
-        assert "start_isolated_tmux_runtime(" in function_source
-        assert "run_isolated_tmux(" in function_source
-        assert "wait_for_isolated_tmux_panes(" in function_source
-        assert "stop_isolated_tmux_runtime(" in function_source
-        assert "subprocess.run(" not in function_source
-        assert "def tmux_cmd(" not in function_source
-    real_source = function_sources["test_real_agent_prompts_render_ask_attention_in_live_server"]
-    assert "getattr(" not in real_source
-    assert "except Exception:" not in real_source
-    assert "window.__yomuxTestWaitFor" in real_source
-    assert "ui_deadline" not in real_source
-    assert "time.sleep(0.5)" not in real_source
 
 
 def test_branch_list_title_uses_separate_dark_and_light_theme_tokens(browser, tmp_path):
@@ -3258,1075 +3232,6 @@ def test_current_stats_api_sse_log_preserves_reader_scroll_in_place_and_on_rebui
     assert result["bottomDistance"] <= 1, result
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(browser, tmp_path, monkeypatch):
-    journey = JourneySentinel(STATS_LOGS_PHASES)
-    journey.enter("shared-runtime-setup")
-    secret = "fixture-api-token-never-log"
-    socket_path = tmp_path / "watchd-producer.sock"
-    watchd_client = WatchClient(socket_path=socket_path)
-    watchd_logs = ServerLogRing()
-
-    def fail_watchd_request(*_args, **_kwargs):
-        raise TimeoutError("watchd wait_revision response-read timeout after 2.2s")
-
-    with monkeypatch.context() as producer_patch:
-        producer_patch.setattr(local_service_client_module, "local_service_request", fail_watchd_request)
-        producer_patch.setattr(local_service_client_module, "emit_server_log", watchd_logs.emit)
-        watchd_response = watchd_client.wait_revision("fixture-epoch", 7, timeout=1.2)
-    watchd_records = watchd_logs.payload()["logs"]
-    assert watchd_response["_transport_error"] == "timeout"
-    assert len(watchd_records) == 1
-    watchd_record = watchd_records[0]
-    assert watchd_record["source"] == "local-service:watchd"
-    assert watchd_record["category"] == "transport"
-    assert watchd_record["route"] == "local-service:watchd"
-    assert watchd_record["event"] == "wait_revision"
-    assert watchd_record["delivery"] == "timeout"
-    assert watchd_record["requestId"]
-    assert "action=wait_revision" in watchd_record["message"]
-    assert "client_elapsed_ms=" in watchd_record["message"]
-    assert "TimeoutError: watchd wait_revision response-read timeout" in watchd_record["message"]
-
-    register_browser_new_document_script(
-        browser,
-        """
-        Object.defineProperty(globalThis, 'YOmuxStatsCurrent', {
-          configurable: true,
-          get() { return null; },
-          set(value) { globalThis.__logsFixtureStatsCurrent = value; },
-        });
-        """,
-    )
-    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1")
-    WebDriverWait(browser, 8).until(
-        lambda driver: driver.execute_script(
-            """
-            return typeof recordJsDebugEvent === 'function'
-              && typeof applyLayoutSlots === 'function'
-              && typeof debugLogsTextForClipboard === 'function'
-              && document.querySelector('.js-debug-panel') === null;
-            """
-        )
-    )
-    metrics = browser.execute_async_script(
-        r"""
-        const done = arguments[arguments.length - 1];
-        const watchdRecord = arguments[0];
-        const originalFetch = window.fetch;
-        const originalApiFetchJson = apiFetchJson;
-        const originalApiFetchJsonQuiet = apiFetchJsonQuiet;
-        const originalRunDebugCopy = runDebugCopy;
-        const originalDateNow = Date.now;
-        const originalStatsCurrent = globalThis.YOmuxStatsCurrent;
-        const statsCurrentModule = globalThis.__logsFixtureStatsCurrent;
-        const style = document.createElement('style');
-        style.textContent = `
-          [data-js-debug-log-list] {
-            height: 96px !important;
-            max-height: 96px !important;
-            overflow: auto !important;
-          }
-          [data-js-debug-log-entry] { min-height: 72px !important; }
-        `;
-        document.head.appendChild(style);
-        const requests = {logs: 0, stats: 0, activity: 0};
-        const secret = 'fixture-api-token-never-log';
-        const tokenized = label => `${label}?token=${secret}`;
-        const countSecret = value => JSON.stringify(value).split(secret).length - 1;
-        const serverRecords = [];
-        let failNextStatsSnapshot = false;
-        let failNextActivity = false;
-        let initialPhase = null;
-        const logsPayload = () => ({
-          ok: true,
-          epoch: 'fixture-server-log-epoch',
-          logs: serverRecords.flatMap(record => [record, record]),
-          sequence: serverRecords.at(-1)?.id || 0,
-          capacity: 500,
-          dropped: {count: 0, first_id: null, last_id: null, by_level: {}},
-        });
-        window.fetch = (url, options = {}) => {
-          const path = new URL(String(url), location.href).pathname;
-          if (path === '/api/logs') {
-            requests.logs += 1;
-            return Promise.resolve(new Response(JSON.stringify(logsPayload()), {
-              status: 200,
-              headers: {'Content-Type': 'application/json'},
-            }));
-          }
-          if (path === '/api/stats-snapshot' && failNextStatsSnapshot) {
-            failNextStatsSnapshot = false;
-            requests.stats += 1;
-            return Promise.resolve(new Response(JSON.stringify({error: 'stats snapshot unavailable <script>'}), {
-              status: 503,
-              statusText: 'Service Unavailable',
-              headers: {'Content-Type': 'application/json'},
-            }));
-          }
-          // The activity ledger behind the tabber activity graph is the one activity data source a
-          // browser can still fail against; /api/activity-summary is admission-disabled process-wide.
-          if (path === '/api/activity' && failNextActivity) {
-            failNextActivity = false;
-            requests.activity += 1;
-            return Promise.resolve(new Response(JSON.stringify({error: 'activity ledger unavailable <script>'}), {
-              status: 503,
-              statusText: 'Service Unavailable',
-              headers: {'Content-Type': 'application/json'},
-            }));
-          }
-          return originalFetch(url, options);
-        };
-        (async () => {
-          if (jsDebugCurrentObservationState.timer !== null) clearTimeout(jsDebugCurrentObservationState.timer);
-          jsDebugCurrentObservationState.timer = null;
-          const uploadCaptures = [];
-          apiFetchJsonQuiet = async (url, options = {}) => {
-            if (new URL(String(url), location.href).pathname !== '/api/stats-observations') {
-              return originalApiFetchJsonQuiet(url, options);
-            }
-            const body = JSON.parse(options.body);
-            uploadCaptures.push(body);
-            return {
-              ok: true,
-              accepted: body.observations.length,
-              duplicates: 0,
-              observation_receipts: body.observations.map(observation => ({
-                event_id: observation.event_id,
-                disposition: 'accepted',
-              })),
-            };
-          };
-          await flushJsDebugCurrentObservations();
-          uploadCaptures.length = 0;
-          clearJsDebugEvents();
-          Date.now = () => Date.parse('2026-01-15T12:34:55.000Z');
-          recordJsDebugStatsDiagnostic('warning', 'fixture warning <script>', {
-            category: 'fixture_warning',
-            requestId: tokenized('r-warning'),
-            route: '/api/fixture-warning',
-            eventType: 'fixture-warning',
-            deliveryOutcome: 'failed',
-          });
-          Date.now = () => Date.parse('2026-01-15T12:34:56.000Z');
-          recordJsDebugEvent('client_failure', {
-            category: 'fixture_error',
-            message: 'fixture error <script>',
-            requestId: tokenized('r-error'),
-            route: '/api/fixture-error',
-            eventType: 'fixture-error',
-            deliveryOutcome: 'failed',
-          });
-          const initialProducerEvents = jsDebugEvents.filter(event => (
-            event?.category === 'fixture_warning' || event?.category === 'fixture_error'
-          ));
-          Date.now = originalDateNow;
-          if (jsDebugCurrentObservationState.timer !== null) clearTimeout(jsDebugCurrentObservationState.timer);
-          jsDebugCurrentObservationState.timer = null;
-          await flushJsDebugCurrentObservations();
-          const initialHiddenPoll = await pollDebugLogs();
-          const initialHiddenRequests = requests.logs;
-          loadJsDebugStatsUiPreferences();
-          debugRuntimeState.subTab = 'logs';
-          saveJsDebugStatsUiPreferences();
-          applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
-            focusSession: debugPaneItemId,
-            prune: false,
-            forceFull: true,
-          });
-          await window.__yomuxTestWaitFor(
-            () => requests.logs === 1
-              && document.querySelectorAll('article[data-js-debug-log-entry]').length === 2,
-            {timeoutMs: 3000, intervalMs: 10, description: 'exact two-row rendered client Logs phase'},
-          );
-          const initialView = document.querySelector('[data-js-debug-subview="logs"]');
-          const initialPhaseRows = () => [...initialView.querySelectorAll('[data-js-debug-log-entry]')].map(row => ({
-            id: row.dataset.jsDebugLogId || '',
-            level: row.dataset.level || '',
-            source: row.querySelector('[data-js-debug-log-source]')?.textContent.trim() || '',
-            category: row.querySelector('[data-js-debug-log-category]')?.textContent.trim() || '',
-            message: row.querySelector('.js-debug-log-message')?.textContent || '',
-            requestId: row.querySelector('[data-js-debug-log-request-id]')?.textContent.trim() || '',
-            route: row.querySelector('[data-js-debug-log-route]')?.textContent.trim() || '',
-            event: row.querySelector('[data-js-debug-log-event]')?.textContent.trim() || '',
-            delivery: row.querySelector('[data-js-debug-log-delivery]')?.textContent.trim() || '',
-            articleChildren: row.querySelectorAll('article, script').length,
-          }));
-          const twoRows = initialPhaseRows();
-          const initialWarningButton = initialView.querySelector('[data-js-debug-log-level="warning"]');
-          const initialErrorButton = initialView.querySelector('[data-js-debug-log-level="error"]');
-          initialWarningButton.click();
-          const twoRowErrorOnly = initialPhaseRows();
-          initialWarningButton.click();
-          initialErrorButton.click();
-          const twoRowWarningOnly = initialPhaseRows();
-          initialErrorButton.click();
-          let initialCopied = '';
-          runDebugCopy = text => { initialCopied = String(text); return Promise.resolve(true); };
-          initialView.querySelector('[data-js-debug-logs-copy]').click();
-          await Promise.resolve();
-          runDebugCopy = originalRunDebugCopy;
-          const initialStorageSnapshot = {
-            local: Object.fromEntries(Object.keys(localStorage).map(key => [key, localStorage.getItem(key)])),
-            session: Object.fromEntries(Object.keys(sessionStorage).map(key => [key, sessionStorage.getItem(key)])),
-          };
-          initialPhase = {
-            hiddenPoll: initialHiddenPoll,
-            hiddenRequests: initialHiddenRequests,
-            rows: twoRows,
-            errorOnly: twoRowErrorOnly,
-            warningOnly: twoRowWarningOnly,
-            copied: initialCopied,
-            secretOccurrences: {
-              retainedClientCollection: countSecret(jsDebugEvents),
-              dom: countSecret(initialView.innerHTML),
-              clipboard: countSecret(initialCopied),
-              storage: countSecret(initialStorageSnapshot),
-              upload: countSecret(uploadCaptures),
-            },
-            uploadObservationCount: uploadCaptures.reduce((count, batch) => count + batch.observations.length, 0),
-            clientProducerIds: Object.fromEntries(
-              initialProducerEvents.map(event => [event.category, event.id]),
-            ),
-          };
-          applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
-          await window.__yomuxTestWaitFor(
-            () => !itemIsActivePaneTab(debugPaneItemId),
-            {timeoutMs: 2000, intervalMs: 10, description: 'two-row Logs phase closed'},
-          );
-          clearRuntimeInterval('debug-logs');
-          await window.__yomuxTestWaitFor(
-            () => jsDebugLogsState.inFlight === false,
-            {timeoutMs: 2000, intervalMs: 10, description: 'two-row Logs poll settled'},
-          );
-          jsDebugLogsState.payload = [];
-          jsDebugLogsState.error = '';
-          jsDebugLogsState.updatedAt = 0;
-          requests.logs = 0;
-          clearJsDebugEvents();
-          if (typeof statsCurrentModule?.createController !== 'function') {
-            throw new Error('fixture did not retain the YOmuxStatsCurrent module');
-          }
-          let statsNow = 0;
-          let nextStatsTimerId = 1;
-          const statsTimers = new Map();
-          const statsClock = {
-            now: () => statsNow,
-            setTimeout: (callback, delay) => {
-              const id = nextStatsTimerId++;
-              statsTimers.set(id, {at: statsNow + delay, callback});
-              return id;
-            },
-            clearTimeout: id => statsTimers.delete(id),
-          };
-          const advanceStatsClock = async milliseconds => {
-            const target = statsNow + milliseconds;
-            while (true) {
-              const due = [...statsTimers.entries()]
-                .filter(([_id, timer]) => timer.at <= target)
-                .sort((left, right) => left[1].at - right[1].at || left[0] - right[0])[0];
-              if (!due) break;
-              statsNow = due[1].at;
-              statsTimers.delete(due[0]);
-              due[1].callback();
-              await Promise.resolve();
-              await Promise.resolve();
-            }
-            statsNow = target;
-            await Promise.resolve();
-            await Promise.resolve();
-          };
-          const zeroCostDimensions = Object.fromEntries(
-            ['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other']
-              .map(name => [name, {tokens: 0, micro_usd: 0, api_list_micro_usd: 0}]),
-          );
-          const statsController = statsCurrentModule.createController({
-            capabilities: {
-              resolution_choices: [1, 10, 60, 300],
-              max_buckets: 600,
-              min_buckets: 12,
-              max_live_cadence_seconds: 60,
-              ranges: [{
-                range_seconds: 300,
-                auto_resolution_seconds: 1,
-                explicit_resolution_seconds: [1],
-                buckets: {1: 300},
-              }],
-            },
-            savedRange: 300,
-            savedResolution: 1,
-            clientId: 'rendered-logs-real-producer',
-            clock: statsClock,
-            onFailure: failure => recordJsDebugCurrentStatsFailure(failure),
-          });
-          Date.now = () => Date.parse('2026-01-15T12:34:57.000Z');
-          statsController.acceptSnapshot({
-            protocol_version: 2,
-            range_seconds: 300,
-            requested_resolution: 1,
-            resolution_seconds: 1,
-            window_start: 0,
-            window_end: 300,
-            generated_at: 300,
-            source_generation: 1,
-            cache_generation: 1,
-            rightmost_open: false,
-            buckets: [],
-            no_data: [],
-            cost_report: {
-              schema_version: 4,
-              total_micro_usd: 0,
-              total_api_list_micro_usd: 0,
-              total_tokens: 0,
-              dimensions: zeroCostDimensions,
-              priced: {atoms: 0, tokens: 0},
-              unpriced: {atoms: 0, tokens: 0},
-              models: [],
-              agents: [],
-              evidence: [],
-              catalog_revision: 0,
-              omissions: {models: 0, agents: 0, evidence: 0},
-              reasoning_available: false,
-            },
-          });
-          statsController.start();
-          await advanceStatsClock(4001);
-          statsController.stop();
-          Date.now = () => Date.parse('2026-01-15T12:34:58.000Z');
-          let statsSnapshotFailure = '';
-          try {
-            failNextStatsSnapshot = true;
-            await apiFetchJson(tokenized('/api/stats-snapshot'), {cache: 'no-store'});
-          } catch (error) {
-            statsSnapshotFailure = String(error?.message || error);
-          }
-          Date.now = () => Date.parse('2026-01-15T12:34:59.000Z');
-          failNextActivity = true;
-          await fetchTabberActivity({visible: true});
-          Date.now = originalDateNow;
-          // fetchTabberActivity keeps the last snapshot and swallows the rejection, so the retained
-          // api record is the only evidence the activity graph lost its data.
-          const activityEvent = jsDebugEvents.find(event => (
-            event?.type === 'api' && event?.endpoint === '/api/activity' && event?.status === 503
-          ));
-          const activityFailure = activityEvent === undefined ? null : {
-            endpoint: String(activityEvent.endpoint || ''),
-            status: activityEvent.status,
-            ok: activityEvent.ok,
-            method: String(activityEvent.method || ''),
-          };
-          // Two api producers share the 'api' category, so records are keyed by endpoint.
-          const producerKey = event => (
-            event?.type === 'api' ? `api:${event.endpoint}` : String(event?.category || event?.type || '')
-          );
-          const clientProducerEvents = jsDebugEvents.filter(event => (
-            event?.category === 'stats_stream'
-              || (event?.type === 'api'
-                && ['/api/stats-snapshot', '/api/activity'].includes(event?.endpoint)
-                && event?.status === 503)
-          ));
-          if (clientProducerEvents.length !== 3) {
-            throw new Error(`expected three client producer records, received ${clientProducerEvents.length}`);
-          }
-          serverRecords.push(watchdRecord);
-          if (jsDebugCurrentObservationState.timer !== null) clearTimeout(jsDebugCurrentObservationState.timer);
-          jsDebugCurrentObservationState.timer = null;
-          await flushJsDebugCurrentObservations();
-          const hiddenPoll = await pollDebugLogs();
-          const hiddenRequests = requests.logs;
-
-          loadJsDebugStatsUiPreferences();
-          debugRuntimeState.subTab = 'logs';
-          saveJsDebugStatsUiPreferences();
-          applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
-            focusSession: debugPaneItemId,
-            prune: false,
-            forceFull: true,
-          });
-          await window.__yomuxTestWaitFor(
-            () => itemIsActivePaneTab(debugPaneItemId)
-              && document.querySelector('[data-js-debug-subview="logs"]:not([hidden])'),
-            {timeoutMs: 2000, intervalMs: 10, description: 'three-producer Logs phase visible'},
-          );
-          await window.__yomuxTestWaitFor(
-            () => jsDebugLogsState.inFlight === false,
-            {timeoutMs: 2000, intervalMs: 10, description: 'three-producer automatic Logs poll settled'},
-          );
-          await pollDebugLogs({force: true});
-          try {
-            await window.__yomuxTestWaitFor(
-              () => requests.logs === 1
-                && document.querySelectorAll('article[data-js-debug-log-entry]').length === 4,
-              {timeoutMs: 3000, intervalMs: 10, description: 'rendered merged Logs rows'},
-            );
-              } catch (error) {
-                throw new Error(`${error.message}; state=${JSON.stringify({
-                  requests: requests.logs,
-                  rows: [...document.querySelectorAll('article[data-js-debug-log-entry]')].map(row => row.dataset.jsDebugLogId),
-                })}`);
-              }
-          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          refreshDebugPanelsFromEvents({force: true});
-          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          let panel = document.querySelector('.js-debug-panel');
-          let view = panel.querySelector('[data-js-debug-subview="logs"]');
-          let list = view.querySelector('[data-js-debug-log-list]');
-          const rowSnapshot = () => [...view.querySelectorAll('[data-js-debug-log-entry]')].map(row => ({
-            id: row.dataset.jsDebugLogId || '',
-            owner: row.dataset.jsDebugLogOwner || '',
-            level: row.dataset.level,
-            time: row.querySelector('time')?.textContent.trim() || '',
-            source: row.querySelector('[data-js-debug-log-source]')?.textContent.trim() || '',
-            category: row.querySelector('[data-js-debug-log-category]')?.textContent.trim() || '',
-            message: row.querySelector('.js-debug-log-message')?.textContent || '',
-            text: row.textContent.replace(/\s+/g, ' ').trim(),
-            requestId: row.querySelector('[data-js-debug-log-request-id]')?.textContent.trim() || '',
-            route: row.querySelector('[data-js-debug-log-route]')?.textContent.trim() || '',
-            event: row.querySelector('[data-js-debug-log-event]')?.textContent.trim() || '',
-            delivery: row.querySelector('[data-js-debug-log-delivery]')?.textContent.trim() || '',
-            tagName: row.tagName,
-            articleChildren: row.querySelectorAll('article, script').length,
-          }));
-          const initialRows = rowSnapshot();
-          const initialHtml = view.innerHTML;
-          const initialArticles = [...view.querySelectorAll('[data-js-debug-log-entry]')].map(row => row.outerHTML);
-          const levelGroup = view.querySelector('.js-debug-log-levels');
-          const freshSelection = {
-            levels: [...jsDebugLogsState.levels].sort(),
-            pressed: [...levelGroup.querySelectorAll('[data-js-debug-log-level]')]
-              .filter(button => button.getAttribute('aria-pressed') === 'true')
-              .map(button => button.dataset.jsDebugLogLevel)
-              .sort(),
-          };
-          const renderedSemantics = {
-            listTag: list.tagName,
-            listLabel: list.getAttribute('aria-label') || '',
-            levelGroupRole: levelGroup.getAttribute('role') || '',
-            levelGroupLabel: levelGroup.getAttribute('aria-label') || '',
-            rowTags: initialRows.map(row => row.tagName),
-          };
-          const normalizedRecords = debugMergedLogRecords();
-          const recognizedRecords = normalizedRecords.filter(record => (
-            clientProducerEvents.some(event => record.id === `client:${event.id}`)
-              || record.id === `server:${serverRecords[0].id}`
-          ));
-          const producerArticleCounts = Object.fromEntries(
-            recognizedRecords.map(record => [
-              record.id,
-              [...view.querySelectorAll('[data-js-debug-log-entry]')]
-                .filter(row => row.dataset.jsDebugLogId === record.id).length,
-            ]),
-          );
-
-          const warningButton = view.querySelector('[data-js-debug-log-level="warning"]');
-          const errorButton = view.querySelector('[data-js-debug-log-level="error"]');
-          warningButton.click();
-          const errorOnly = rowSnapshot();
-          warningButton.click();
-          errorButton.click();
-          const warningOnly = rowSnapshot();
-          errorButton.click();
-
-          list = view.querySelector('[data-js-debug-log-list]');
-          list.scrollTop = Math.min(60, list.scrollHeight - list.clientHeight);
-          const scrollBefore = list.scrollTop;
-          await pollDebugLogs({force: true});
-          list = view.querySelector('[data-js-debug-log-list]');
-          const scrollAfter = list.scrollTop;
-          const visibleRequests = requests.logs;
-
-          let copied = '';
-          runDebugCopy = text => { copied = String(text); return Promise.resolve(true); };
-          view.querySelector('[data-js-debug-logs-copy]').click();
-          await Promise.resolve();
-
-          panel.style.width = '260px';
-          panel.style.maxWidth = '260px';
-          const panelRect = panel.getBoundingClientRect();
-          const listRect = view.querySelector('[data-js-debug-log-list]').getBoundingClientRect();
-          const narrow = {
-            listInside: listRect.left >= panelRect.left - 1 && listRect.right <= panelRect.right + 1,
-            listBounded: listRect.width <= panelRect.width + 1,
-            rowsWrap: [...view.querySelectorAll('[data-js-debug-log-entry]')].every(row => getComputedStyle(row.querySelector('.js-debug-log-message')).overflowWrap === 'anywhere'),
-          };
-
-          applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
-          await window.__yomuxTestWaitFor(
-            () => !itemIsActivePaneTab(debugPaneItemId),
-            {timeoutMs: 2000, intervalMs: 10, description: 'YO!stats closed'},
-          );
-          const closePoll = await pollDebugLogs();
-          const requestsAfterClose = requests.logs;
-          applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
-            focusSession: debugPaneItemId,
-            prune: false,
-            forceFull: true,
-          });
-          await window.__yomuxTestWaitFor(
-            () => itemIsActivePaneTab(debugPaneItemId)
-              && document.querySelector('[data-js-debug-subview="logs"]:not([hidden])'),
-            {timeoutMs: 2000, intervalMs: 10, description: 'YO!stats reopened on Logs'},
-          );
-          panel = document.querySelector('.js-debug-panel');
-          view = panel.querySelector('[data-js-debug-subview="logs"]');
-          const reopenedRows = rowSnapshot();
-
-          view.querySelector('[data-js-debug-log-level="warning"]').click();
-          view.querySelector('[data-js-debug-log-level="error"]').click();
-          const emptySelection = {
-            size: jsDebugLogsState.levels.size,
-            rows: view.querySelectorAll('[data-js-debug-log-entry]').length,
-            pressed: [...view.querySelectorAll('[data-js-debug-log-level]')].filter(button => button.getAttribute('aria-pressed') === 'true').map(button => button.dataset.jsDebugLogLevel),
-          };
-          const storageSnapshot = {
-            local: Object.fromEntries(Object.keys(localStorage).map(key => [key, localStorage.getItem(key)])),
-            session: Object.fromEntries(Object.keys(sessionStorage).map(key => [key, sessionStorage.getItem(key)])),
-          };
-          const secretOccurrences = {
-            retainedClientRecords: countSecret(clientProducerEvents),
-            retainedClientCollection: countSecret(jsDebugEvents),
-            retainedServerCollection: countSecret(jsDebugLogsState.payload),
-            normalizedRecords: countSecret(normalizedRecords),
-            renderedArticles: countSecret(initialArticles),
-            clipboard: countSecret(copied),
-            persistence: countSecret(storageSnapshot),
-            upload: countSecret(uploadCaptures),
-          };
-          clearJsDebugEvents();
-          jsDebugLogsState.payload = [];
-          done({
-            hiddenPoll,
-            hiddenRequests,
-            visibleRequests,
-            closePoll,
-            requestsAfterClose,
-            initialRows,
-            initialHtml,
-            freshSelection,
-            renderedSemantics,
-            producerArticleCounts,
-            errorOnly,
-            warningOnly,
-            scrollBefore,
-            scrollAfter,
-            copied,
-            narrow,
-            reopenedRows,
-            emptySelection,
-            recognizedRecords,
-            clientProducerIds: Object.fromEntries(
-              clientProducerEvents.map(event => [producerKey(event), event.id]),
-            ),
-            clientProducerRequestIds: Object.fromEntries(
-              clientProducerEvents.map(event => [producerKey(event), event.requestId || '']),
-            ),
-            statsSnapshotFailure,
-            statsSnapshotRequests: requests.stats,
-            activityFailure,
-            activityRequests: requests.activity,
-            activitySummaryEnabled,
-            receiptBarrier: jsDebugCurrentObservationReceiptBarrier(),
-            producerReceipts: [...jsDebugCurrentObservationState.receipts.values()]
-              .filter(receipt => [...initialProducerEvents, ...clientProducerEvents]
-                .some(event => event.id === receipt.eventId))
-              .map(receipt => ({key: receipt.key, eventId: receipt.eventId, status: receipt.status})),
-            secretOccurrences,
-            secret,
-            initialPhase,
-          });
-        })().catch(error => done({error: String(error?.stack || error)})).finally(() => {
-          window.fetch = originalFetch;
-          apiFetchJson = originalApiFetchJson;
-          apiFetchJsonQuiet = originalApiFetchJsonQuiet;
-          runDebugCopy = originalRunDebugCopy;
-          Date.now = originalDateNow;
-          applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
-          globalThis.YOmuxStatsCurrent = originalStatsCurrent;
-          style.remove();
-          clearRuntimeInterval('debug-system');
-          clearRuntimeInterval('debug-logs');
-          if (jsDebugCurrentObservationState.timer !== null) clearTimeout(jsDebugCurrentObservationState.timer);
-          jsDebugCurrentObservationState.timer = null;
-          clearJsDebugEvents();
-          jsDebugLogsState.payload = [];
-        });
-        """,
-        watchd_record,
-    )
-    journey.enter("stats-and-logs-observations")
-    assert metrics.get("error") is None, metrics
-    initial_phase = metrics["initialPhase"]
-    redacted = "[redacted-secret]"
-    initial_producer_ids = initial_phase["clientProducerIds"]
-    assert initial_producer_ids["fixture_error"] == initial_producer_ids["fixture_warning"] + 1, metrics
-    expected_two_rows = [
-        {
-            "id": f"client:{initial_producer_ids['fixture_error']}",
-            "level": "error",
-            "source": "browser",
-            "category": "fixture_error",
-            "message": "fixture error <script>",
-            "requestId": f"r-error?token={redacted}",
-            "route": "/api/fixture-error",
-            "event": "fixture-error",
-            "delivery": "failed",
-            "articleChildren": 0,
-        },
-        {
-            "id": f"client:{initial_producer_ids['fixture_warning']}",
-            "level": "warning",
-            "source": "browser",
-            "category": "fixture_warning",
-            "message": "YO!stats: fixture warning <script>",
-            "requestId": f"r-warning?token={redacted}",
-            "route": "/api/fixture-warning",
-            "event": "fixture-warning",
-            "delivery": "failed",
-            "articleChildren": 0,
-        },
-    ]
-    assert initial_phase["hiddenPoll"] is False and initial_phase["hiddenRequests"] == 0, metrics
-    assert initial_phase["rows"] == expected_two_rows, metrics
-    assert initial_phase["errorOnly"] == expected_two_rows[:1], metrics
-    assert initial_phase["warningOnly"] == expected_two_rows[1:], metrics
-    assert initial_phase["secretOccurrences"] == {"retainedClientCollection": 0, "dom": 0, "clipboard": 0, "storage": 0, "upload": 0}, metrics
-    assert initial_phase["uploadObservationCount"] == 2, metrics
-    for row in expected_two_rows:
-        assert row["message"] in initial_phase["copied"], metrics
-        assert f"request={row['requestId']}" in initial_phase["copied"], metrics
-    assert metrics["hiddenPoll"] is False and metrics["hiddenRequests"] == 0, metrics
-    assert metrics["visibleRequests"] == 2, metrics
-    assert metrics["closePoll"] is False and metrics["requestsAfterClose"] == 2, metrics
-    row_fields = ("id", "owner", "level", "source", "category", "message", "requestId", "route", "event", "delivery")
-    row_contract = lambda row: {field: row[field] for field in row_fields}
-    client_producer_ids = metrics["clientProducerIds"]
-    assert client_producer_ids["stats_stream"] > initial_producer_ids["fixture_error"], metrics
-    assert client_producer_ids["api:/api/stats-snapshot"] == client_producer_ids["stats_stream"] + 1, metrics
-    assert client_producer_ids["api:/api/activity"] > client_producer_ids["api:/api/stats-snapshot"], metrics
-    assert metrics["statsSnapshotFailure"] == "stats snapshot unavailable <script>", metrics
-    assert metrics["statsSnapshotRequests"] == 1, metrics
-    # /api/activity-summary is admission-disabled process-wide, so the tabber activity ledger is the
-    # only activity-graph data source whose failure a browser can still record.
-    assert metrics["activitySummaryEnabled"] is False, metrics
-    assert metrics["activityFailure"] == {
-        "endpoint": "/api/activity",
-        "status": 503,
-        "ok": False,
-        "method": "GET",
-    }, metrics
-    assert metrics["activityRequests"] == 1, metrics
-    activity_api_message = metrics["initialRows"][1]["message"]
-    assert activity_api_message.startswith("GET /api/activity?"), metrics
-    assert " | HTTP 503" in activity_api_message, metrics
-    assert "timings=" in activity_api_message, metrics
-    stats_api_message = metrics["initialRows"][2]["message"]
-    assert stats_api_message.startswith(f"GET /api/stats-snapshot?token={redacted} | HTTP 503"), metrics
-    assert "timings=" in stats_api_message, metrics
-    stats_warning_row = {
-        "id": f"client:{client_producer_ids['stats_stream']}",
-        "owner": "client",
-        "level": "warning",
-        "source": "browser",
-        "category": "stats_stream",
-        "message": "YO!stats stream generation stalled for more than 3s",
-        "requestId": "",
-        "route": "/api/stats-stream",
-        "event": "stats-generation",
-        "delivery": "stalled",
-    }
-    stats_api_error_row = {
-        "id": f"client:{client_producer_ids['api:/api/stats-snapshot']}",
-        "owner": "client",
-        "level": "error",
-        "source": "browser",
-        "category": "api",
-        "message": stats_api_message,
-        "requestId": metrics["clientProducerRequestIds"]["api:/api/stats-snapshot"],
-        "route": "/api/stats-snapshot",
-        "event": "",
-        "delivery": "",
-    }
-    activity_api_error_row = {
-        "id": f"client:{client_producer_ids['api:/api/activity']}",
-        "owner": "client",
-        "level": "error",
-        "source": "browser",
-        "category": "api",
-        "message": activity_api_message,
-        "requestId": metrics["clientProducerRequestIds"]["api:/api/activity"],
-        "route": "/api/activity",
-        "event": "",
-        "delivery": "",
-    }
-    watchd_error_row = {
-        "id": f"server:{watchd_record['id']}",
-        "owner": "server",
-        "level": "error",
-        "source": "local-service:watchd",
-        "category": "transport",
-        "message": watchd_record["message"],
-        "requestId": watchd_record["requestId"],
-        "route": "local-service:watchd",
-        "event": "wait_revision",
-        "delivery": "timeout",
-    }
-    assert len(metrics["initialRows"]) == 4, metrics
-    assert [row_contract(row) for row in metrics["initialRows"]] == [
-        watchd_error_row,
-        activity_api_error_row,
-        stats_api_error_row,
-        stats_warning_row,
-    ], metrics
-    assert [row_contract(row) for row in metrics["errorOnly"]] == [
-        watchd_error_row,
-        activity_api_error_row,
-        stats_api_error_row,
-    ], metrics
-    assert [row_contract(row) for row in metrics["warningOnly"]] == [stats_warning_row], metrics
-    assert metrics["freshSelection"] == {"levels": ["error", "warning"], "pressed": ["error", "warning"]}, metrics
-    assert metrics["renderedSemantics"]["listTag"] == "DIV", metrics
-    assert metrics["renderedSemantics"]["listLabel"], metrics
-    assert metrics["renderedSemantics"]["levelGroupRole"] == "group", metrics
-    assert metrics["renderedSemantics"]["levelGroupLabel"], metrics
-    assert metrics["renderedSemantics"]["rowTags"] == ["ARTICLE", "ARTICLE", "ARTICLE", "ARTICLE"], metrics
-    assert metrics["producerArticleCounts"] == {
-        activity_api_error_row["id"]: 1,
-        stats_api_error_row["id"]: 1,
-        stats_warning_row["id"]: 1,
-        watchd_error_row["id"]: 1,
-    }, metrics
-    assert metrics["receiptBarrier"]["quiescent"] is True, metrics
-    assert metrics["receiptBarrier"]["accepted"] == 5, metrics
-    assert metrics["receiptBarrier"]["pending"] == 0 and metrics["receiptBarrier"]["retrying"] == 0, metrics
-    assert [receipt["eventId"] for receipt in metrics["producerReceipts"]] == [
-        initial_producer_ids["fixture_warning"],
-        initial_producer_ids["fixture_error"],
-        client_producer_ids["stats_stream"],
-        client_producer_ids["api:/api/stats-snapshot"],
-        client_producer_ids["api:/api/activity"],
-    ], metrics
-    assert len({receipt["key"] for receipt in metrics["producerReceipts"]}) == 5, metrics
-    assert {receipt["status"] for receipt in metrics["producerReceipts"]} == {"accepted"}, metrics
-    assert metrics["reopenedRows"] == metrics["initialRows"], metrics
-    assert [row["time"] for row in metrics["initialRows"]] == [
-        watchd_record["wallTime"],
-        "2026-01-15 04:34:59 PST",
-        "2026-01-15 04:34:58 PST",
-        "2026-01-15 04:34:57 PST",
-    ], metrics
-    assert metrics["scrollBefore"] > 0 and metrics["scrollAfter"] == metrics["scrollBefore"], metrics
-    assert all(row["articleChildren"] == 0 for row in metrics["initialRows"]), metrics
-    assert metrics["secret"] not in metrics["initialHtml"], metrics
-    assert metrics["secret"] not in metrics["copied"], metrics
-    for row in (activity_api_error_row, stats_api_error_row, stats_warning_row, watchd_error_row):
-        assert row["message"] in metrics["copied"], metrics
-        if row["requestId"]:
-            assert f"request={row['requestId']}" in metrics["copied"], metrics
-    assert metrics["secretOccurrences"] == {
-        "retainedClientRecords": 0,
-        "retainedClientCollection": 0,
-        "retainedServerCollection": 0,
-        "normalizedRecords": 0,
-        "renderedArticles": 0,
-        "clipboard": 0,
-        "persistence": 0,
-        "upload": 0,
-    }, metrics
-    assert len(metrics["recognizedRecords"]) == 4, metrics
-    # Both api producers carry the same classification tuple, so this compares a sorted list rather
-    # than a set: a set would silently accept three records where four are required.
-    assert sorted(
-        (record["owner"], record["level"], record["source"], record["category"])
-        for record in metrics["recognizedRecords"]
-    ) == sorted([
-        ("client", "warning", "browser", "stats_stream"),
-        ("client", "error", "browser", "api"),
-        ("client", "error", "browser", "api"),
-        ("server", "error", "local-service:watchd", "transport"),
-    ]), metrics
-    assert {record["route"] for record in metrics["recognizedRecords"]} == {
-        "/api/stats-stream",
-        "/api/stats-snapshot",
-        "/api/activity",
-        "local-service:watchd",
-    }, metrics
-    recognized_by_id = {record["id"]: record for record in metrics["recognizedRecords"]}
-    assert redacted not in json.dumps(recognized_by_id[stats_warning_row["id"]]), metrics
-    assert redacted in recognized_by_id[stats_api_error_row["id"]]["message"], metrics
-    assert redacted not in json.dumps(recognized_by_id[activity_api_error_row["id"]]), metrics
-    assert redacted not in json.dumps(recognized_by_id[watchd_error_row["id"]]), metrics
-    assert all(metrics["narrow"].values()), metrics
-    assert metrics["emptySelection"] == {"size": 0, "rows": 0, "pressed": []}, metrics
-
-    journey.enter("empty-filter-reload")
-    reload_url = browser.current_url.split("?", 1)[0] + "?sessions=1"
-    browser.get(reload_url)
-    wait_for_live_runtime_bundle(browser, timeout=8, expected_url=reload_url)
-    browser.execute_script(
-        """
-        window.__logsReloadOriginalStatsCurrent = globalThis.YOmuxStatsCurrent;
-        globalThis.YOmuxStatsCurrent = null;
-        applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
-          focusSession: debugPaneItemId,
-          prune: false,
-          forceFull: true,
-        });
-        """
-    )
-    reloaded = WebDriverWait(browser, 8).until(
-        lambda driver: driver.execute_script(
-            """
-            const view = document.querySelector('[data-js-debug-subview="logs"]');
-            if (!view || view.hidden) return false;
-            return {
-              levelSize: jsDebugLogsState.levels.size,
-              rows: view.querySelectorAll('[data-js-debug-log-entry]').length,
-              pressed: [...view.querySelectorAll('[data-js-debug-log-level]')].filter(button => button.getAttribute('aria-pressed') === 'true').map(button => button.dataset.jsDebugLogLevel),
-              secretOccurrences: JSON.stringify({
-                local: Object.fromEntries(Object.keys(localStorage).map(key => [key, localStorage.getItem(key)])),
-                session: Object.fromEntries(Object.keys(sessionStorage).map(key => [key, sessionStorage.getItem(key)])),
-              }).split('fixture-api-token-never-log').length - 1,
-            };
-            """
-        )
-    )
-    assert reloaded == {"levelSize": 0, "rows": 0, "pressed": [], "secretOccurrences": 0}, reloaded
-    browser.execute_script(
-        """
-        applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
-        globalThis.YOmuxStatsCurrent = window.__logsReloadOriginalStatsCurrent;
-        """
-    )
-
-    # The empty saved level set above hides rows while no records exist, so it cannot by itself prove
-    # the saved filter survived the reload.  Save a non-empty level set, reload with records present,
-    # and require the reloaded filter to drop the warning record and keep the error record.
-    journey.enter("persisted-filter-reload")
-    persisted_logs = ServerLogRing()
-    persisted_error = persisted_logs.emit(
-        "error",
-        "local-service:watchd",
-        "persisted-filter watchd upsert response-read timeout after 0.5s",
-        category="transport",
-        request_id="r-persisted-error",
-        route="local-service:watchd",
-        event="upsert",
-        delivery="timeout",
-    )
-    persisted_warning = persisted_logs.emit(
-        "warning",
-        "local-service:statusd",
-        "persisted-filter statusd refresh degraded",
-        category="transport",
-        request_id="r-persisted-warning",
-        route="local-service:statusd",
-        event="refresh",
-        delivery="degraded",
-    )
-    persisted_payload = persisted_logs.payload()
-    # Duplicate every record so the reloaded merge still has to collapse repeats into one row each.
-    persisted_payload["logs"] = [dict(entry) for entry in persisted_payload["logs"] for _ in range(2)]
-    browser.execute_script(
-        """
-        globalThis.YOmuxStatsCurrent = null;
-        applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
-          focusSession: debugPaneItemId,
-          prune: false,
-          forceFull: true,
-        });
-        """
-    )
-    try:
-        WebDriverWait(browser, 8).until(
-            lambda driver: driver.execute_script(
-                """
-                const view = document.querySelector('[data-js-debug-subview="logs"]');
-                return Boolean(view) && !view.hidden;
-                """
-            )
-        )
-    except TimeoutException:
-        raise AssertionError(
-            "Logs subview never reopened before the non-empty level-set reload: "
-            + json.dumps(browser.execute_script(
-                """
-                return {
-                  panel: document.querySelector('.js-debug-panel') !== null,
-                  subTab: typeof debugRuntimeState === 'object' && typeof debugRuntimeState.subTab === 'string' ? debugRuntimeState.subTab : '',
-                  views: [...document.querySelectorAll('[data-js-debug-subview]')]
-                    .map(view => ({name: view.dataset.jsDebugSubview, hidden: view.hidden})),
-                };
-                """
-            ))
-        )
-    saved_levels = browser.execute_script(
-        """
-        const view = document.querySelector('[data-js-debug-subview="logs"]');
-        view.querySelector('[data-js-debug-log-level="error"]').click();
-        const stored = JSON.parse(window.localStorage.getItem(jsDebugStatsUiPreferencesStorageKey) || '{}');
-        return {
-          levels: [...jsDebugLogsState.levels].sort(),
-          storedLevels: stored.logLevels,
-          storedSubTab: stored.subTab,
-          pressed: [...document.querySelectorAll('[data-js-debug-log-level]')]
-            .filter(button => button.getAttribute('aria-pressed') === 'true')
-            .map(button => button.dataset.jsDebugLogLevel)
-            .sort(),
-        };
-        """
-    )
-    assert saved_levels == {
-        "levels": ["error"],
-        "storedLevels": ["error"],
-        "storedSubTab": "logs",
-        "pressed": ["error"],
-    }, saved_levels
-    browser.get(reload_url)
-    wait_for_live_runtime_bundle(browser, timeout=8, expected_url=reload_url)
-    reloaded_poll = browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        const payload = arguments[0];
-        (async () => {
-          globalThis.YOmuxStatsCurrent = null;
-          applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
-            focusSession: debugPaneItemId,
-            prune: false,
-            forceFull: true,
-          });
-          await window.__yomuxTestWaitFor(
-            () => document.querySelector('[data-js-debug-subview="logs"]:not([hidden])') !== null,
-            {timeoutMs: 3000, intervalMs: 10, description: 'reloaded Logs subview visible'},
-          );
-          await window.__yomuxTestWaitFor(
-            () => jsDebugLogsState.inFlight === false,
-            {timeoutMs: 3000, intervalMs: 10, description: 'reloaded automatic Logs poll settled'},
-          );
-          const originalFetch = window.fetch;
-          window.__persistedLogsRequests = 0;
-          window.__persistedLogsRestoreFetch = () => { window.fetch = originalFetch; };
-          window.fetch = (url, options = {}) => {
-            if (new URL(String(url), location.href).pathname === '/api/logs') {
-              window.__persistedLogsRequests += 1;
-              return Promise.resolve(new Response(JSON.stringify(payload), {
-                status: 200,
-                headers: {'Content-Type': 'application/json'},
-              }));
-            }
-            return originalFetch(url, options);
-          };
-          const polled = await pollDebugLogs({force: true});
-          done({
-            polled,
-            logsError: jsDebugLogsState.error,
-            requests: window.__persistedLogsRequests,
-            payloadLength: jsDebugLogsState.payload.length,
-          });
-        })().catch(error => done({error: String(error?.stack || error)}));
-        """,
-        persisted_payload,
-    )
-    assert reloaded_poll == {
-        "polled": True,
-        "logsError": "",
-        "requests": 1,
-        "payloadLength": 4,
-    }, reloaded_poll
-    persisted_row_fields =("id", "owner", "level", "source", "category", "message", "requestId", "route", "event", "delivery")
-    persisted_rows_script = """
-        const view = document.querySelector('[data-js-debug-subview="logs"]');
-        if (!view || view.hidden) return false;
-        return {
-          levels: [...jsDebugLogsState.levels].sort(),
-          pressed: [...view.querySelectorAll('[data-js-debug-log-level]')]
-            .filter(button => button.getAttribute('aria-pressed') === 'true')
-            .map(button => button.dataset.jsDebugLogLevel)
-            .sort(),
-          serverRecordCount: jsDebugLogsState.payload.length,
-          rows: [...view.querySelectorAll('article[data-js-debug-log-entry]')].map(row => ({
-            id: row.dataset.jsDebugLogId || '',
-            owner: row.dataset.jsDebugLogOwner || '',
-            level: row.dataset.level || '',
-            source: row.querySelector('[data-js-debug-log-source]')?.textContent.trim() || '',
-            category: row.querySelector('[data-js-debug-log-category]')?.textContent.trim() || '',
-            message: row.querySelector('.js-debug-log-message')?.textContent || '',
-            requestId: row.querySelector('[data-js-debug-log-request-id]')?.textContent.trim() || '',
-            route: row.querySelector('[data-js-debug-log-route]')?.textContent.trim() || '',
-            event: row.querySelector('[data-js-debug-log-event]')?.textContent.trim() || '',
-            delivery: row.querySelector('[data-js-debug-log-delivery]')?.textContent.trim() || '',
-          })),
-          viewText: view.textContent,
-        };
-    """
-    persisted_error_row = {
-        "id": f"server:{persisted_error['id']}",
-        "owner": "server",
-        "level": "error",
-        "source": persisted_error["source"],
-        "category": persisted_error["category"],
-        "message": persisted_error["message"],
-        "requestId": persisted_error["requestId"],
-        "route": persisted_error["route"],
-        "event": persisted_error["event"],
-        "delivery": persisted_error["delivery"],
-    }
-    persisted_warning_row = {
-        "id": f"server:{persisted_warning['id']}",
-        "owner": "server",
-        "level": "warning",
-        "source": persisted_warning["source"],
-        "category": persisted_warning["category"],
-        "message": persisted_warning["message"],
-        "requestId": persisted_warning["requestId"],
-        "route": persisted_warning["route"],
-        "event": persisted_warning["event"],
-        "delivery": persisted_warning["delivery"],
-    }
-    persisted_probe = {}
-
-    def _persisted_logs_rendered(driver):
-        state = driver.execute_script(persisted_rows_script)
-        if state:
-            persisted_probe["state"] = state
-        return state if state and state["serverRecordCount"] >= 4 else False
-
-    try:
-        persisted_state = WebDriverWait(browser, 8).until(_persisted_logs_rendered)
-    except TimeoutException:
-        raise AssertionError(
-            "reloaded Logs never received the persisted server records: "
-            + json.dumps({
-                "probe": persisted_probe,
-                "logsRequests": browser.execute_script("return window.__persistedLogsRequests ?? null;"),
-                "panel": browser.execute_script("return document.querySelector('.js-debug-panel') !== null;"),
-            })
-        )
-    assert browser.execute_script("return window.__persistedLogsRequests;") == 1, persisted_state
-    assert persisted_state["levels"] == ["error"], persisted_state
-    assert persisted_state["pressed"] == ["error"], persisted_state
-    assert [
-        {field: row[field] for field in persisted_row_fields} for row in persisted_state["rows"]
-    ] == [persisted_error_row], persisted_state
-    assert persisted_warning["message"] not in persisted_state["viewText"], persisted_state
-    restored_state = browser.execute_script(
-        """
-        document.querySelector('[data-js-debug-subview="logs"] [data-js-debug-log-level="warning"]').click();
-        """
-        + persisted_rows_script
-    )
-    assert restored_state["levels"] == ["error", "warning"], restored_state
-    assert [
-        {field: row[field] for field in persisted_row_fields} for row in restored_state["rows"]
-    ] == [persisted_warning_row, persisted_error_row], restored_state
-    browser.execute_script(
-        """
-        window.__persistedLogsRestoreFetch();
-        clearRuntimeInterval('debug-logs');
-        applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
-        """
-    )
-    journey.manifest()
 
 
 def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone, *, stride=2):
@@ -7062,6 +5967,295 @@ def test_terminal_wheel_routes_alt_screen_lines_to_xterm_and_normal_lines_to_tmu
     assert_terminal_wheel_observation(terminal_wheel_observation(browser, tmp_path))
 
 
+@pytest.mark.parametrize("protocol", ["sgr", "legacy"])
+def test_real_xterm_native_wheel_and_page_keys_without_tmux_signals(browser, tmp_path, protocol):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const script = document.createElement('script');
+        script.src = '/static/vendor/xterm.js';
+        script.onload = done;
+        script.onerror = () => done('xterm failed to load');
+        document.head.appendChild(script);
+        """
+    )
+    metrics = browser.execute_async_script(
+        """
+        const protocol = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const container = document.createElement('div');
+        container.id = 'term-scroll-probe';
+        container.className = 'terminal';
+        container.style.cssText = 'position:fixed;left:20px;top:100px;width:900px;height:400px;z-index:999999';
+        document.body.appendChild(container);
+        window.__nativeScrollFrames = [];
+        const term = new Terminal({cols: 120, rows: 20, fontSize: 8});
+        const item = {term, container, socket: {readyState: WebSocket.OPEN,
+          send(raw) { window.__nativeScrollFrames.push(typeof raw === 'string' ? JSON.parse(raw)
+            : {type: 'input', data: String.fromCharCode(...raw), user_input: false, binary: true}); }}};
+        terminals.set('scroll-probe', item);
+        term.open(container);
+        term.onData(data => handleTerminalData('scroll-probe', data));
+        term.onBinary(data => handleTerminalData('scroll-probe', data, {binary: true, bypassMobileAccessoryModifiers: true, userInput: false}));
+        enableTerminalScroll('scroll-probe', term, container);
+        installTerminalCopyShortcut('scroll-probe', term, container);
+        tmuxSignalState = null;
+        transcriptMetadataState.payload.sessions['scroll-probe'] = {
+          agents: [{kind: 'claude', pane_target: '%11'}],
+          panes: [{target: '%11', active: true, window_active: true}],
+          selected_pane: {target: '%11'},
+        };
+        term.write('\\x1b[?1049h\\x1b[?1003h' + (protocol === 'sgr' ? '\\x1b[?1006h' : '\\x1b[?1006l'), () => {
+          term.focus();
+          window.__nativeScrollFrames.length = 0;
+          const rect = container.querySelector('.xterm-screen').getBoundingClientRect();
+          done({x: rect.left + 500, y: rect.top + 40, mouse: term.modes.mouseTrackingMode,
+            buffer: term.buffer.active.type, rows: container.querySelectorAll('.xterm-rows > div').length});
+        });
+        """,
+        protocol,
+    )
+    assert metrics["mouse"] == "any" and metrics["buffer"] == "alternate", metrics
+    assert metrics["rows"] == 20, metrics
+    for delta in [-120, 120]:
+        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": "mouseWheel", "x": metrics["x"], "y": metrics["y"], "deltaY": delta, "deltaX": 0,
+        })
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return window.__nativeScrollFrames.length >= 2"))
+    for key, code in [("PageUp", 33), ("PageDown", 34)]:
+        for event_type in ["keyDown", "keyUp"]:
+            browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": event_type, "key": key, "code": key, "windowsVirtualKeyCode": code})
+    frames = browser.execute_script("return window.__nativeScrollFrames")
+    assert len(frames) == 4 and all(frame["type"] == "input" for frame in frames), frames
+    if protocol == "sgr":
+        assert re.fullmatch(r"\x1b\[<64;\d+;\d+M", frames[0]["data"]), frames
+        assert frames[1]["data"] == frames[0]["data"].replace("<64;", "<65;"), frames
+    else:
+        assert frames[0]["binary"] is True, frames
+        assert ord(frames[0]["data"][4]) > 127, frames
+        assert frames[0]["data"].startswith("\x1b[M`"), frames
+        assert frames[1]["data"] == frames[0]["data"].replace("[M`", "[Ma"), frames
+    assert [frame["data"] for frame in frames[2:]] == ["\x1b[5~", "\x1b[6~"], frames
+    assert all(frame["user_input"] is False for frame in frames), frames
+
+
+def test_claude_alternate_screen_without_mouse_tracking_uses_page_keys(browser, tmp_path):
+    mouse_tracking_mode = "none"
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+            return document.querySelector('#term-1 .xterm') !== null
+              && terminals.get('1')?.term?.rows > 0
+              && socket?.readyState === WebSocket.OPEN;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const mouseTrackingMode = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const container = document.querySelector('#term-1');
+        const screen = container.querySelector('.xterm');
+        const item = terminals.get('1');
+        const socket = window.__bootSocketInstances.find(value => value.url.includes('/ws?session=1'));
+        const target = '%claude-scroll';
+        container.dataset.terminalPaneTarget = target;
+        transcriptMetadataState.payload.sessions['1'] = {
+          agents: [{kind: 'claude', pane_target: target}],
+          panes: [{target, pane_id: target, window: '0', pane: '0', window_active: true, active: true}],
+          selected_pane: {target, pane_id: target, window: '0', pane: '0'},
+        };
+        const signal = {windows: [{
+          key: '1:0', session: '1', window_index: '0', active: true,
+          panes: [{window_key: '1:0', session: '1', window_index: '0', pane_index: '0', target, pane_id: target,
+            current_command: 'claude', active: true, alternate_on: true, pid: 1234, dead: false}],
+        }]};
+        const wheelReports = [];
+        screen.addEventListener('wheel', event => wheelReports.push(event.deltaY));
+        Object.defineProperty(item.term, 'modes', {configurable: true, value: {mouseTrackingMode}});
+        tmuxSignalState = signal;
+        applyTmuxSignalsPayload({data: signal});
+        socket.sent.length = 0;
+        const rect = screen.getBoundingClientRect();
+        const cell = terminalCellDimensions(item.term, container);
+        const wheel = new WheelEvent('wheel', {
+          deltaY: -105, bubbles: true, cancelable: true,
+          clientX: rect.left + cell.width * 5.5, clientY: rect.top + cell.height * 4.5,
+        });
+        Object.defineProperty(wheel, 'wheelDeltaY', {value: -120});
+        screen.dispatchEvent(wheel);
+        setTimeout(() => {
+          const frames = socket.sent.map(message => { try { return JSON.parse(message); } catch (_error) { return null; } });
+          done({
+            mouseTrackingMode: item.term.modes.mouseTrackingMode,
+            wheelPrevented: wheel.defaultPrevented,
+            wheelReports,
+            applicationScroll: frames.filter(message => message?.type === 'application-scroll'),
+            inputFrames: frames.filter(message => message?.type === 'input'),
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
+          });
+        }, 60);
+        """,
+        mouse_tracking_mode,
+    )
+    assert metrics["mouseTrackingMode"] == mouse_tracking_mode, metrics
+    assert metrics["wheelPrevented"] is True, metrics
+    assert metrics["wheelReports"] == [], metrics
+    assert len(metrics["applicationScroll"]) == 1, metrics
+    scroll = metrics["applicationScroll"][0]
+    assert scroll["pane"] == "%claude-scroll", metrics
+    assert scroll["direction"] == "up" and scroll["count"] == 1, metrics
+    assert scroll["page"] is True, metrics
+    assert "global" not in scroll, metrics
+    assert metrics["inputFrames"] == [], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_claude_no_mouse_trackpad_page_scroll_is_independent_of_event_batching(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+            return document.querySelector('#term-1 .xterm') !== null
+              && terminals.get('1')?.term?.rows > 0
+              && socket?.readyState === WebSocket.OPEN;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const container = document.querySelector('#term-1');
+        const screen = container.querySelector('.xterm');
+        const item = terminals.get('1');
+        const socket = window.__bootSocketInstances.find(value => value.url.includes('/ws?session=1'));
+        const target = '%claude-scroll-batch';
+        container.dataset.terminalPaneTarget = target;
+        transcriptMetadataState.payload.sessions['1'] = {
+          agents: [{kind: 'claude', pane_target: target}],
+          panes: [{target, pane_id: target, window: '0', pane: '0', window_active: true, active: true}],
+          selected_pane: {target, pane_id: target, window: '0', pane: '0'},
+        };
+        const signal = {windows: [{
+          key: '1:0', session: '1', window_index: '0', active: true,
+          panes: [{window_key: '1:0', session: '1', window_index: '0', target, pane_id: target,
+            current_command: 'claude', active: true, alternate_on: true, pid: 1234, dead: false}],
+        }]};
+        item.term.modes = {mouseTrackingMode: 'none'};
+        tmuxSignalState = signal;
+        applyTmuxSignalsPayload({data: signal});
+        const pageLines = terminalScrollPageLines(item.term);
+        const dispatchWheel = deltaY => screen.dispatchEvent(new WheelEvent('wheel', {
+          deltaY, bubbles: true, cancelable: true,
+        }));
+        const dispatchDiscreteWheel = wheelDeltaY => {
+          const event = new WheelEvent('wheel', {
+            deltaY: wheelDeltaY < 0 ? -105 : 105, bubbles: true, cancelable: true,
+          });
+          Object.defineProperty(event, 'wheelDeltaY', {value: wheelDeltaY});
+          screen.dispatchEvent(event);
+        };
+        const scrollFrames = () => socket.sent.map(message => { try { return JSON.parse(message); } catch (_error) { return null; } })
+          .filter(message => message?.type === 'application-scroll');
+        const batches = [];
+        socket.sent.length = 0;
+        let previousCount = scrollFrames().length;
+        dispatchWheel(-pageLines * 2 * terminalWheelPixelLinePx);
+        batches.push(scrollFrames().slice(previousCount));
+        previousCount = scrollFrames().length;
+        for (let line = 0; line < pageLines * 2; line++) dispatchWheel(terminalWheelPixelLinePx);
+        batches.push(scrollFrames().slice(previousCount));
+        previousCount = scrollFrames().length;
+        dispatchWheel(-pageLines * 40 * terminalWheelPixelLinePx);
+        batches.push(scrollFrames().slice(previousCount));
+        previousCount = scrollFrames().length;
+        dispatchWheel(pageLines * terminalWheelPixelLinePx);
+        batches.push(scrollFrames().slice(previousCount));
+        previousCount = scrollFrames().length;
+        dispatchDiscreteWheel(-120);
+        dispatchDiscreteWheel(-120);
+        batches.push(scrollFrames().slice(previousCount));
+        previousCount = scrollFrames().length;
+        dispatchDiscreteWheel(-240);
+        batches.push(scrollFrames().slice(previousCount));
+        setTimeout(() => {
+          done({batches, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        }, 80);
+        """
+    )
+    assert metrics["batches"] == [
+        [{"type": "application-scroll", "pane": "%claude-scroll-batch", "direction": "up", "count": 2, "column": 1, "row": 1, "page": True}],
+        [
+            {"type": "application-scroll", "pane": "%claude-scroll-batch", "direction": "down", "count": 1, "column": 1, "row": 1, "page": True},
+            {"type": "application-scroll", "pane": "%claude-scroll-batch", "direction": "down", "count": 1, "column": 1, "row": 1, "page": True},
+        ],
+        [{"type": "application-scroll", "pane": "%claude-scroll-batch", "direction": "up", "count": 12, "column": 1, "row": 1, "page": True}],
+        [{"type": "application-scroll", "pane": "%claude-scroll-batch", "direction": "down", "count": 1, "column": 1, "row": 1, "page": True}],
+        [
+            {"type": "application-scroll", "pane": "%claude-scroll-batch", "direction": "up", "count": 1, "column": 1, "row": 1, "page": True},
+            {"type": "application-scroll", "pane": "%claude-scroll-batch", "direction": "up", "count": 1, "column": 1, "row": 1, "page": True},
+        ],
+        [{"type": "application-scroll", "pane": "%claude-scroll-batch", "direction": "up", "count": 2, "column": 1, "row": 1, "page": True}],
+    ], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_shift_wheel_forces_tmux_history_from_alternate_screen(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+            return document.querySelector('#term-1 .xterm') !== null
+              && terminals.get('1')?.term?.rows > 0
+              && socket?.readyState === WebSocket.OPEN;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const container = document.querySelector('#term-1');
+        const screen = container.querySelector('.xterm');
+        const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+        const pageLines = terminalScrollPageLines(terminals.get('1').term);
+        const signalState = alternateOn => ({windows: [{key: '1:0', session: '1', window_index: '0', active: true, panes: [{window_key: '1:0', session: '1', window_index: '0', pane_index: '0', target: '%11', pane_id: '%11', current_command: 'claude', active: true, alternate_on: alternateOn, pid: 1234, dead: false}]}]});
+        socket.sent.length = 0;
+        tmuxSignalState = signalState(true);
+        applyTmuxSignalsPayload({data: tmuxSignalState});
+        const alternateScreen = sessionPaneIsAlternateScreen('1');
+        const forwarded = [];
+        screen.addEventListener('wheel', event => forwarded.push({deltaX: event.deltaX, deltaY: event.deltaY, deltaMode: event.deltaMode}));
+        terminals.get('1').term.modes = {mouseTrackingMode: 'none'};
+        const plain = new WheelEvent('wheel', {deltaY: terminalScrollPageLines(terminals.get('1').term) * terminalWheelPixelLinePx, bubbles: true, cancelable: true});
+        screen.dispatchEvent(plain);
+        const shifted = new WheelEvent('wheel', {deltaY: -120, shiftKey: true, bubbles: true, cancelable: true});
+        screen.dispatchEvent(shifted);
+        setTimeout(() => {
+          const frames = socket.sent.map(message => { try { return JSON.parse(message); } catch (_error) { return null; } })
+            .filter(message => message?.type === 'tmux-scroll' || message?.type === 'input' || message?.type === 'application-scroll');
+          done({pageLines, alternateScreen, shiftedHorizontalSignedLines: terminalWheelSignedLines({deltaX: -120, deltaY: 0, shiftKey: true}, terminals.get('1').term.rows), plainPrevented: plain.defaultPrevented, shiftedPrevented: shifted.defaultPrevented, forwarded, frames, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        }, 60);
+        """
+    )
+    assert metrics["alternateScreen"] is True, metrics
+    assert metrics["shiftedHorizontalSignedLines"] == -metrics["pageLines"], metrics
+    assert metrics["plainPrevented"] is True, metrics
+    assert metrics["shiftedPrevented"] is True, metrics
+    assert metrics["forwarded"] == [], metrics
+    assert metrics["frames"] == [
+        {"type": "application-scroll", "pane": "%11", "direction": "down", "count": 1, "column": 1, "row": 1, "page": True},
+        {"type": "tmux-scroll", "direction": "up", "lines": metrics["pageLines"]},
+    ], metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
 def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_inertia(browser, tmp_path):
     browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 1})
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
@@ -7444,7 +6638,7 @@ def test_terminal_page_keys_route_by_screen_mode_and_shift_forces_scrollback(bro
         {"type": "tmux-scroll", "direction": "down", "lines": metrics["pageLines"]},
     ], metrics
     assert metrics["frames"][2:] == [
-        {"type": "input", "data": "\x1b[5~", "user_input": True},
+        {"type": "input", "data": "\x1b[5~", "user_input": False},
         {"type": "tmux-scroll", "direction": "down", "lines": metrics["pageLines"]},
     ], metrics
     assert metrics["openCodePage"] == {"accepted": False, "defaultPrevented": True}, metrics
@@ -7453,6 +6647,88 @@ def test_terminal_page_keys_route_by_screen_mode_and_shift_forces_scrollback(bro
     assert metrics["openCodeShiftFrameCount"] == 2, metrics
     assert metrics["openCodeWheels"] == [{"deltaY": -1, "deltaMode": 1}] * 3, metrics
     assert metrics["openCodeWheelPrevented"] is True, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+@pytest.mark.parametrize("mouse_tracking_mode", ["none", "any"])
+def test_codex_page_and_wheel_scrolling_use_application_route_in_both_screen_modes(browser, tmp_path, mouse_tracking_mode):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+            return document.querySelector('#term-1 .xterm') !== null
+              && terminals.get('1')?.term?.rows > 0
+              && socket?.readyState === WebSocket.OPEN;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const mouseTrackingMode = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const container = document.querySelector('#term-1');
+        const screen = container.querySelector('.xterm');
+        const item = terminals.get('1');
+        const socket = window.__bootSocketInstances.find(value => value.url.includes('/ws?session=1'));
+        const target = '%codex-scroll';
+        container.dataset.terminalPaneTarget = target;
+        transcriptMetadataState.payload.sessions['1'] = {
+          agents: [{kind: 'codex', pane_target: target}],
+          panes: [{target, pane_id: target, window: '0', pane: '0', window_active: true, active: true}],
+          selected_pane: {target, pane_id: target, window: '0', pane: '0'},
+        };
+        const signal = alternateOn => ({windows: [{key: '1:0', session: '1', window_index: '0', active: true, panes: [{
+          window_key: '1:0', session: '1', window_index: '0', pane_index: '0', target, pane_id: target,
+          current_command: 'codex', active: true, alternate_on: alternateOn, pid: 1234, dead: false,
+        }]}]});
+        const wheelReports = [];
+        screen.addEventListener('wheel', event => wheelReports.push([event.deltaY, event.deltaMode]));
+        item.term.modes = {mouseTrackingMode};
+        socket.sent.length = 0;
+        const outcomes = [];
+        for (const alternateOn of [false, true]) {
+          tmuxSignalState = signal(alternateOn);
+          applyTmuxSignalsPayload({data: tmuxSignalState});
+          const page = new KeyboardEvent('keydown', {key: 'PageUp', code: 'PageUp', bubbles: true, cancelable: true});
+          const pageAccepted = screen.dispatchEvent(page);
+          const wheel = new WheelEvent('wheel', {deltaY: -35, bubbles: true, cancelable: true});
+          screen.dispatchEvent(wheel);
+          outcomes.push({alternateOn, pageAccepted, pagePrevented: page.defaultPrevented, wheelPrevented: wheel.defaultPrevented});
+        }
+        tmuxSignalState = signal(true);
+        applyTmuxSignalsPayload({data: tmuxSignalState});
+        const singleNotchWheel = new WheelEvent('wheel', {deltaY: -1, deltaMode: 1, bubbles: true, cancelable: true});
+        screen.dispatchEvent(singleNotchWheel);
+        for (let index = 0; index < outcomes.length; index++) {
+          tmuxSignalState = signal(outcomes[index].alternateOn);
+          applyTmuxSignalsPayload({data: tmuxSignalState});
+          const shifted = new WheelEvent('wheel', {deltaY: 100, shiftKey: true, bubbles: true, cancelable: true});
+          screen.dispatchEvent(shifted);
+          outcomes[index].shiftedPrevented = shifted.defaultPrevented;
+        }
+        setTimeout(() => {
+          const frames = socket.sent.map(message => { try { return JSON.parse(message); } catch (_error) { return null; } })
+            .filter(message => message?.type === 'tmux-scroll' || message?.type === 'input' || message?.type === 'application-scroll');
+          done({outcomes, wheelReports, singleNotchWheelPrevented: singleNotchWheel.defaultPrevented, frames, pageLines: terminalScrollPageLines(item.term), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        }, 80);
+        """,
+        mouse_tracking_mode,
+    )
+    assert metrics["outcomes"] == [
+        {"alternateOn": False, "pageAccepted": False, "pagePrevented": True, "wheelPrevented": True, "shiftedPrevented": True},
+        {"alternateOn": True, "pageAccepted": False, "pagePrevented": True, "wheelPrevented": True, "shiftedPrevented": True},
+    ], metrics
+    assert metrics["wheelReports"] == [], metrics
+    assert metrics["singleNotchWheelPrevented"] is True, metrics
+    assert metrics["frames"] == [
+        {"type": "application-scroll", "pane": "%codex-scroll", "direction": "up", "count": 1, "column": 1, "row": 1, "page": True},
+        {"type": "application-scroll", "pane": "%codex-scroll", "direction": "up", "count": 1, "column": 1, "row": 1, "page": True},
+        {"type": "application-scroll", "pane": "%codex-scroll", "direction": "up", "count": 1, "column": 1, "row": 1, "global": True},
+        {"type": "application-scroll", "pane": "%codex-scroll", "direction": "up", "count": 1, "column": 1, "row": 1, "global": True},
+        {"type": "tmux-scroll", "direction": "down", "lines": metrics["pageLines"] * 2},
+    ], metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
@@ -7652,178 +6928,6 @@ def test_event_rows_follow_pane_width_with_scaled_localized_metadata(browser, tm
     assert metrics["wideDark"]["background"] != metrics["wideLight"]["background"], metrics
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser, monkeypatch, tmp_path):
-    paths = isolate_browser_runtime_paths(monkeypatch, tmp_path)
-    specs = {
-        "codex": {
-            "session": f"yb-codex-{os.getpid()}-{uuid.uuid4().hex[:8]}",
-            "user_input": "touch /tmp/yolomux-mock-approval",
-            "prompt_glyph": "›",
-            "question": "Would you like to run the following command?",
-            "expected_command": "touch /tmp/yolomux-mock-approval",
-        },
-        "claude": {
-            "session": f"yb-claude-{os.getpid()}-{uuid.uuid4().hex[:8]}",
-            "user_input": "sleep 10",
-            "prompt_glyph": "❯",
-            "question": "Do you want to proceed?",
-            "expected_command": None,
-        },
-    }
-    sessions = [spec["session"] for spec in specs.values()]
-    tmux_runtime = None
-    app = None
-    try:
-        tmux_runtime = start_isolated_tmux_runtime(
-            monkeypatch,
-            tmp_path,
-            session_commands={
-                spec["session"]: f"cd {REPO_ROOT} && exec python3 tools/mockers/{agent}.py --mock"
-                for agent, spec in specs.items()
-            },
-            columns=120,
-            rows=40,
-        )
-        booted, panes = wait_for_isolated_tmux_panes(
-            tmux_runtime,
-            sessions,
-            lambda captures: all(spec["prompt_glyph"] in captures[spec["session"]] for spec in specs.values()),
-        )
-        assert booted, f"mock agents did not boot to their input prompts:\n{panes}"
-
-        for spec in specs.values():
-            run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{spec['session']}:", spec["user_input"], "Enter")
-        prompted, panes = wait_for_isolated_tmux_panes(
-            tmux_runtime,
-            sessions,
-            lambda captures: all(
-                spec["user_input"] in captures[spec["session"]]
-                and ("Would you like to run the following command?" in captures[spec["session"]] or "Do you want to proceed?" in captures[spec["session"]])
-                for spec in specs.values()
-            ),
-        )
-        assert prompted, f"mock agents did not render approval prompts:\n{panes}"
-
-        app = TmuxWebtermApp(sessions, dangerously_yolo=False)
-        payloads = {}
-        for agent, spec in specs.items():
-            payload = app.auto_approve_session_status(spec["session"], capture_bare_session_when_roster=True)
-            payloads[spec["session"]] = payload
-            assert payload["prompt"]["visible"] is True
-            assert payload["screen"]["key"] == "approval"
-            assert payload["prompt"]["agent"] == agent
-            assert payload["prompt"]["text"] == spec["question"]
-            assert payload["prompt"]["command"] == spec["expected_command"]
-            assert payload["prompt"]["signature"]
-
-        auto_approve_payload = {
-            "session_order": sessions,
-            "sessions": payloads,
-            "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
-        }
-        load_live_runtime_boot_fixture(
-            browser,
-            tmp_path,
-            sessions=sessions,
-            transcript_sessions={spec["session"]: {"agents": [{"kind": agent}], "panes": []} for agent, spec in specs.items()},
-            auto_approve_payload=auto_approve_payload,
-        )
-        WebDriverWait(browser, 5).until(
-            lambda driver: driver.execute_script(
-                """
-                const sessions = arguments[0];
-                return sessions.every(session => document.getElementById(`panel-${session}`))
-                  && document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent === '2'
-                  && document.querySelector('#topbarActivity .topbar-activity-ask .agent-window-status-dot')?.classList.contains('status-indicator--attention');
-                """,
-                sessions,
-            )
-        )
-        metrics = browser.execute_script(
-            """
-            const sessions = arguments[0];
-            const topbar = document.getElementById('topbarActivity');
-            const sessionState = session => {
-              const panel = document.getElementById(`panel-${session}`);
-              const tab = document.getElementById(`panel-tab-${session}`);
-              const badge = tab?.querySelector('[data-prompt-attention-clear]');
-              return {
-                badgeText: badge?.textContent || '',
-                badgePresent: !!badge,
-                tabAttention: tab?.classList.contains('needs-attention') || false,
-                panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
-              };
-            };
-            const beforeSocketFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []);
-            const before = {
-              statusPulseDisabled: document.documentElement.classList.contains('status-pulse-disabled'),
-              sessions: Object.fromEntries(sessions.map(session => [session, sessionState(session)])),
-              topbarText: topbar?.textContent || '',
-              topbarAskCount: topbar?.querySelector('.topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
-              topbarAskHasSharedParent: topbar?.querySelector('.topbar-activity-ask .agent-window-status-dot')?.classList.contains('status-indicator') || false,
-              topbarAskHasAttentionModifier: topbar?.querySelector('.topbar-activity-ask .agent-window-status-dot')?.classList.contains('status-indicator--attention') || false,
-              topbarAskHasPulse: topbar?.querySelector('.topbar-activity-ask .agent-window-status-dot')?.classList.contains('attention-pulse') || false,
-            };
-            sessions.forEach(session => acknowledgeTerminalAttentionFromUserAction(session, 0, {delayMs: agentWindowActivityAcknowledgeDelayMs, localOnly: true}));
-            const afterSocketFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []);
-            const immediate = {
-              sessions: Object.fromEntries(sessions.map(session => [session, sessionState(session)])),
-              topbarText: topbar?.textContent || '',
-              topbarAskCount: topbar?.querySelector('.topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
-              acknowledgedStatusCount: document.querySelectorAll('.agent-window-status-dot.agent-window-status-dot--acknowledging.status-indicator--acknowledged').length,
-              acknowledgedStatusPulses: document.querySelectorAll('.agent-window-status-dot.agent-window-status-dot--acknowledging.attention-pulse').length,
-              newInputFrames: afterSocketFrames.slice(beforeSocketFrames.length).filter(frame => String(frame).includes('"type":"input"')).length,
-            };
-            return {before, immediate};
-            """,
-            sessions,
-        )
-        assert metrics["before"]["statusPulseDisabled"] is True
-        for session in sessions:
-            assert metrics["before"]["sessions"][session] == {
-                "badgeText": "",
-                "badgePresent": False,
-                "tabAttention": True,
-                "panelNeedsApproval": True,
-            }
-        assert metrics["before"]["topbarAskCount"] == "2"
-        assert metrics["before"]["topbarAskHasSharedParent"] is True
-        assert metrics["before"]["topbarAskHasAttentionModifier"] is True
-        assert metrics["before"]["topbarAskHasPulse"] is False
-        for session in sessions:
-            assert metrics["immediate"]["sessions"][session] == {
-                "badgeText": "",
-                "badgePresent": False,
-                "tabAttention": False,
-                "panelNeedsApproval": False,
-            }
-        assert metrics["immediate"]["topbarAskCount"] == "2"
-        assert metrics["immediate"]["acknowledgedStatusCount"] >= 2
-        assert metrics["immediate"]["acknowledgedStatusPulses"] == 0
-        assert metrics["immediate"]["newInputFrames"] == 0
-        WebDriverWait(browser, 5).until(
-            lambda driver: driver.execute_script(
-                """
-                const sessions = arguments[0];
-                return sessions.every(session => {
-                  const tab = document.getElementById(`panel-tab-${session}`);
-                  const panel = document.getElementById(`panel-${session}`);
-                  return (tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '') === ''
-                    && !tab?.classList.contains('needs-attention')
-                    && !panel?.classList.contains('needs-exec-pane');
-                })
-                  && document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent === '0';
-                """,
-                sessions,
-            )
-        )
-    finally:
-        if app is not None:
-            app.control_server.stop()
-        stop_isolated_tmux_runtime(tmux_runtime)
-        cleanup_isolated_browser_runtime_paths(paths)
 
 
 def test_topbar_status_actions_share_shell_and_pointer_keyboard_paint(browser, tmp_path):
@@ -8845,273 +7949,6 @@ def test_narrow_server_update_banner_stacks_message_and_actions(browser, tmp_pat
     assert metrics["banner"]["height"] <= metrics["message"]["height"] + metrics["actions"]["height"] + 48, metrics
 
 
-# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-@pytest.mark.deprecated_python_server
-@pytest.mark.e2e
-def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeypatch, tmp_path):
-    if os.environ.get("YOLOMUX_REAL_AGENT_SMOKE") != "1":
-        pytest.skip("set YOLOMUX_REAL_AGENT_SMOKE=1 to run real Claude/Codex prompt smoke")
-    codex_binary = shutil.which("codex")
-    claude_binary = shutil.which("claude")
-    if not codex_binary:
-        pytest.skip("codex is not installed")
-    if not claude_binary:
-        pytest.skip("claude is not installed")
-
-    paths = isolate_browser_runtime_paths(monkeypatch, tmp_path)
-    sessions = {
-        "codex": f"yr-codex-{os.getpid()}-{uuid.uuid4().hex[:6]}",
-        "claude": f"yr-claude-{os.getpid()}-{uuid.uuid4().hex[:6]}",
-    }
-    tmux_runtime = None
-
-    def wait_for_codex_sleep_prompt(session, timeout=120):
-        extra_submit_sent = False
-        def prompted(panes):
-            nonlocal extra_submit_sent
-            text = panes[session]
-            if "Would you like to run the following" in text and "sleep 10" in text:
-                return True
-            if not extra_submit_sent and "› Run sleep 10" in text:
-                run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{session}:", "C-m")
-                extra_submit_sent = True
-            return False
-        ready, panes = wait_for_isolated_tmux_panes(tmux_runtime, [session], prompted, timeout=timeout)
-        return ready, panes.get(session, "")
-
-    def wait_for_claude_plan_prompt(session, timeout=120):
-        extra_submit_sent = False
-        def prompted(panes):
-            nonlocal extra_submit_sent
-            text = panes[session]
-            if "Claude has written up a plan" in text and "Would you like to proceed?" in text:
-                return True
-            if not extra_submit_sent and "Add a temporary line to README.md" in text:
-                run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{session}:", "C-m")
-                extra_submit_sent = True
-            return False
-        ready, panes = wait_for_isolated_tmux_panes(tmux_runtime, [session], prompted, timeout=timeout)
-        return ready, panes.get(session, "")
-
-    app = None
-    server = None
-    thread = None
-    try:
-        codex_command = (
-            f"cd {REPO_ROOT} && exec codex --no-alt-screen "
-            f"--ask-for-approval untrusted --sandbox read-only -C {REPO_ROOT}"
-        )
-        claude_command = f"cd {REPO_ROOT} && exec claude --permission-mode plan --safe-mode"
-        tmux_runtime = start_isolated_tmux_runtime(
-            monkeypatch,
-            tmp_path,
-            session_commands={sessions["codex"]: codex_command, sessions["claude"]: claude_command},
-            columns=120,
-            rows=40,
-        )
-        codex_ready, codex_panes = wait_for_isolated_tmux_panes(
-            tmux_runtime,
-            [sessions["codex"]],
-            lambda panes: "›" in panes[sessions["codex"]] or "Codex" in panes[sessions["codex"]],
-            timeout=45,
-        )
-        codex_pane = codex_panes.get(sessions["codex"], "")
-        assert codex_ready, f"Codex did not reach an input prompt:\n{codex_pane}"
-        claude_ready, claude_panes = wait_for_isolated_tmux_panes(
-            tmux_runtime,
-            [sessions["claude"]],
-            lambda panes: "❯" in panes[sessions["claude"]] or "Claude Code" in panes[sessions["claude"]],
-            timeout=45,
-        )
-        claude_pane = claude_panes.get(sessions["claude"], "")
-        assert claude_ready, f"Claude did not reach an input prompt:\n{claude_pane}"
-
-        app = TmuxWebtermApp(list(sessions.values()), dangerously_yolo=False)
-        initial_payloads = {
-            agent: app.auto_approve_session_status(session, capture_bare_session_when_roster=True)
-            for agent, session in sessions.items()
-        }
-        assert initial_payloads["codex"]["prompt"]["visible"] is False, initial_payloads["codex"]
-        assert initial_payloads["claude"]["prompt"]["visible"] is False, initial_payloads["claude"]
-
-        server, thread = start_browser_server(monkeypatch, tmp_path, app, auth_bypass=True)
-        base_url = f"http://127.0.0.1:{server.server_address[1]}/"
-        browser.get(base_url + "?" + urlencode({"sessions": ",".join(sessions.values())}))
-        WebDriverWait(browser, 10).until(
-            lambda driver: driver.execute_script(
-                """
-                const sessions = arguments[0];
-                return sessions.every(session => document.getElementById(`panel-tab-${session}`))
-                  && typeof globalActivityCounts === 'function'
-                  && globalActivityCounts().ask === 0;
-                """,
-                list(sessions.values()),
-            )
-        )
-        initial_ui = browser.execute_script(
-            """
-            const sessions = arguments[0];
-            return {
-              ask: globalActivityCounts().ask,
-              badges: sessions.map(session => document.getElementById(`panel-tab-${session}`)?.querySelector('[data-prompt-attention-clear]')?.textContent || ''),
-              topbar: document.getElementById('topbarActivity')?.textContent || '',
-              topbarAskCount: document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
-            };
-            """,
-            list(sessions.values()),
-        )
-        assert initial_ui["ask"] == 0, initial_ui
-        assert initial_ui["badges"] == ["", ""], initial_ui
-
-        run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{sessions['codex']}:", "Run sleep 10", "Enter")
-        codex_prompted, codex_pane = wait_for_codex_sleep_prompt(sessions["codex"])
-        assert codex_prompted, f"Codex did not render the real sleep approval prompt:\n{codex_pane}"
-
-        run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{sessions['claude']}:", "Add a temporary line to README.md, then wait for approval before editing", "Enter")
-        claude_prompted, claude_pane = wait_for_claude_plan_prompt(sessions["claude"])
-        assert claude_prompted, f"Claude did not render the real plan approval prompt:\n{claude_pane}"
-
-        prompted_status_payload, prompted_status = app.build_auto_approve_status()
-        assert prompted_status == HTTPStatus.OK, prompted_status_payload
-        prompted_payloads = {
-            agent: prompted_status_payload["sessions"][session]
-            for agent, session in sessions.items()
-        }
-        assert prompted_payloads["codex"]["prompt"]["visible"] is True, prompted_payloads["codex"]
-        assert prompted_payloads["codex"]["screen"]["key"] == "approval", prompted_payloads["codex"]
-        assert prompted_payloads["codex"]["prompt"]["agent"] == "codex", prompted_payloads["codex"]
-        assert prompted_payloads["codex"]["prompt"]["prompt_kind"] == "shell-command", prompted_payloads["codex"]
-        assert prompted_payloads["claude"]["prompt"]["visible"] is True, prompted_payloads["claude"]
-        assert prompted_payloads["claude"]["screen"]["key"] == "approval", prompted_payloads["claude"]
-        assert prompted_payloads["claude"]["prompt"]["agent"] == "claude", prompted_payloads["claude"]
-
-        prompted_ui = browser.execute_async_script(
-            """
-            const sessions = arguments[0];
-            const done = arguments[arguments.length - 1];
-            (async () => {
-              const prompted = await window.__yomuxTestWaitFor(async () => {
-                  await refreshAutoStatuses();
-                  refreshActivePanelHeaders();
-                  updateTopbarActivityStatus();
-                  const counts = globalActivityCounts();
-                  const snapshot = {
-                    ok: counts.ask === sessions.length,
-                    counts,
-                    topbar: document.getElementById('topbarActivity')?.textContent || '',
-                    topbarAskCount: document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
-                    states: sessions.map(session => {
-                      const payload = autoApproveStates.get(session) || {};
-                      const state = sessionState(session);
-                      const tab = document.getElementById(`panel-tab-${session}`);
-                      const panel = document.getElementById(`panel-${session}`);
-                      return {
-                        session,
-                        promptVisible: payload.prompt?.visible === true,
-                        promptAgent: payload.prompt?.agent || '',
-                        screenKey: payload.screen?.key || '',
-                        stateKey: state?.key || '',
-                        stateAttention: state?.attention === true,
-                        badge: tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '',
-                        tabAttention: tab?.classList.contains('needs-attention') || false,
-                        panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
-                      };
-                    }),
-                    errors: jsDebugFailureEvents('error'),
-                    rejections: jsDebugFailureEvents('rejection'),
-                  };
-                  return snapshot.ok ? snapshot : false;
-              }, {timeoutMs: 15000, intervalMs: 500, description: 'real agent prompt attention UI'});
-              done(prompted);
-            })().catch(error => done({ok: false, error: String(error && error.stack || error)}));
-            """,
-            list(sessions.values()),
-        )
-        assert prompted_ui.get("ok") is True, prompted_ui
-        browser.execute_script(
-            """
-            if (!WebSocket.prototype.__askClearTracked) {
-              const nativeSend = WebSocket.prototype.send;
-              window.__askClearWsFrames = [];
-              WebSocket.prototype.send = function(data) {
-                window.__askClearWsFrames.push({url: String(this.url || ''), data: String(data || '')});
-                return nativeSend.call(this, data);
-              };
-              WebSocket.prototype.__askClearTracked = true;
-            } else {
-              window.__askClearWsFrames = [];
-            }
-            """
-        )
-        metrics = browser.execute_script(
-            """
-            const sessions = arguments[0];
-            function snapshot() {
-              return {
-                ask: globalActivityCounts().ask,
-                topbar: document.getElementById('topbarActivity')?.textContent || '',
-                topbarAskCount: document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
-                sessions: sessions.map(session => {
-                  const tab = document.getElementById(`panel-tab-${session}`);
-                  const panel = document.getElementById(`panel-${session}`);
-                  return {
-                    session,
-                    badge: tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '',
-                    tabAttention: tab?.classList.contains('needs-attention') || false,
-                    panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
-                  };
-                }),
-              };
-            }
-            const before = snapshot();
-            for (const session of sessions) {
-              clearPromptAttentionForSession(session, {delayMs: agentWindowActivityAcknowledgeDelayMs, localOnly: true});
-            }
-            const immediate = snapshot();
-            const inputFrames = (window.__askClearWsFrames || []).filter(frame => frame.data.includes('"type":"input"'));
-            return {before, immediate, inputFrames};
-            """,
-            list(sessions.values()),
-        )
-        assert metrics["before"]["ask"] == 2, metrics
-        assert metrics["before"]["topbarAskCount"] == "2", metrics
-        assert [item["badge"] for item in metrics["before"]["sessions"]] == ["", ""], metrics
-        assert [item["tabAttention"] for item in metrics["before"]["sessions"]] == [True, True], metrics
-        assert [item["panelNeedsApproval"] for item in metrics["before"]["sessions"]] == [True, True], metrics
-        assert metrics["immediate"]["ask"] == 2, metrics
-        assert metrics["immediate"]["topbarAskCount"] == "2", metrics
-        assert [item["badge"] for item in metrics["immediate"]["sessions"]] == ["", ""], metrics
-        assert [item["tabAttention"] for item in metrics["immediate"]["sessions"]] == [True, True], metrics
-        assert [item["panelNeedsApproval"] for item in metrics["immediate"]["sessions"]] == [True, True], metrics
-        assert metrics["inputFrames"] == [], metrics
-        WebDriverWait(browser, 5).until(
-            lambda driver: driver.execute_script(
-                """
-                const sessions = arguments[0];
-                return globalActivityCounts().ask === 0
-                  && document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent === '0'
-                  && sessions.every(session => {
-                    const tab = document.getElementById(`panel-tab-${session}`);
-                    const panel = document.getElementById(`panel-${session}`);
-                    return (tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '') === ''
-                      && !tab?.classList.contains('needs-attention')
-                      && !panel?.classList.contains('needs-exec-pane');
-                  });
-                """,
-                list(sessions.values()),
-            )
-        )
-    finally:
-        cleanup_phases = []
-        if server is not None and thread is not None:
-            cleanup_phases.append(("browser server", lambda: stop_browser_server(server, thread, browser=browser)))
-        elif app is not None:
-            cleanup_phases.append(("control server", app.control_server.stop))
-        cleanup_phases.extend((
-            ("tmux runtime", lambda: stop_isolated_tmux_runtime(tmux_runtime)),
-            ("runtime paths", lambda: cleanup_isolated_browser_runtime_paths(paths)),
-        ))
-        run_fixture_cleanup_phases("browser layout fixture", cleanup_phases)
 
 
 def test_yoagent_settings_operator_updates_live_gui_and_denies_readonly(browser, tmp_path):
@@ -13647,6 +12484,40 @@ def test_auto_approve_refresh_rebuilds_pane_tab_to_show_restored_yolo(browser, t
     assert result["statusDotKeyframeOpacities"] == ["0.16", "1", "0.16"], result
     assert result["errors"] == [], result
     assert result["rejections"] == [], result
+
+
+def test_file_explorer_sort_select_fits_recent_label_and_native_indicator(browser, tmp_path):
+    load_static_html_fixture(
+        browser,
+        tmp_path,
+        "file-explorer-sort-select.html",
+        page_html(
+            '<div class="sort-toolbar"><select class="file-explorer-sort-select">'
+            '<option selected>Recent</option><option>Oldest</option></select></div>',
+            extra_css="body { margin: 0; } .sort-toolbar { display: flex; width: 150px; }",
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const select = document.querySelector('.file-explorer-sort-select');
+        const style = getComputedStyle(select);
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        context.font = style.font;
+        const labelWidth = Math.max(...[...select.options].map(option => context.measureText(option.text).width));
+        const rect = select.getBoundingClientRect();
+        return {
+          width: rect.width,
+          labelWidth,
+          horizontalPadding: parseFloat(style.paddingLeft) + parseFloat(style.paddingRight),
+          horizontalBorder: parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth),
+          clientWidth: select.clientWidth,
+        };
+        """
+    )
+    minimum = metrics["labelWidth"] + metrics["horizontalPadding"] + metrics["horizontalBorder"] + 16
+    assert metrics["width"] >= minimum, {**metrics, "minimum": minimum}
+    assert metrics["clientWidth"] >= metrics["labelWidth"] + 16, metrics
 
 
 def test_finder_index_limit_preference_fits_default_value_and_spinner(browser, tmp_path):

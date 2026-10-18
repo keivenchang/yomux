@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -67,6 +68,42 @@ type goBackgroundOwner struct {
 
 var backgroundRoles = []string{"tabber-activity", "session-files", "search-index", "stats-sampler", "watch-roots"}
 
+var acceptedLaunchLeaseFDs []int
+
+func withInheritedLaunchDescriptors(listenerFD int, execute func() error) (result error) {
+	type descriptorFlags struct {
+		fd    int
+		flags uintptr
+	}
+	changed := []descriptorFlags{}
+	// Exec never returns on success. On failure, restore every descriptor's
+	// original flags, including when preparing a later descriptor fails.
+	defer func() {
+		for _, descriptor := range changed {
+			_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(descriptor.fd), syscall.F_SETFD, descriptor.flags)
+			if errno != 0 {
+				result = errors.Join(result, errno)
+			}
+		}
+	}()
+	descriptors := append([]int(nil), acceptedLaunchLeaseFDs...)
+	if listenerFD >= 0 {
+		descriptors = append(descriptors, listenerFD)
+	}
+	for _, fd := range descriptors {
+		flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_GETFD, 0)
+		if errno != 0 {
+			return errno
+		}
+		changed = append(changed, descriptorFlags{fd, flags})
+		_, _, errno = syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_SETFD, flags&^syscall.FD_CLOEXEC)
+		if errno != 0 {
+			return errno
+		}
+	}
+	return execute()
+}
+
 func acceptLaunchDescriptors(manifest string, listenerFD int) error {
 	if manifest == "" && listenerFD < 0 {
 		return nil
@@ -96,6 +133,7 @@ func acceptLaunchDescriptors(manifest string, listenerFD int) error {
 		seen[fd] = true
 		descriptors = append(descriptors, fd)
 	}
+	leaseCount := len(descriptors)
 	if listenerFD >= 0 {
 		listening, err := syscall.GetsockoptInt(listenerFD, syscall.SOL_SOCKET, syscall.SO_ACCEPTCONN)
 		if listenerFD < 3 || seen[listenerFD] || err != nil || listening != 1 {
@@ -103,7 +141,8 @@ func acceptLaunchDescriptors(manifest string, listenerFD int) error {
 		}
 		descriptors = append(descriptors, listenerFD)
 	}
-	// Python retains these descriptors across exec; only the server may keep them, not its terminal or worker children.
+	acceptedLaunchLeaseFDs = append([]int(nil), descriptors[:leaseCount]...)
+	// The launch parent retains these descriptors across exec; terminal and worker children must not inherit them.
 	for _, fd := range descriptors {
 		syscall.CloseOnExec(fd)
 	}
@@ -192,7 +231,13 @@ func newGoBackgroundOwner(config, root string, ports ...int) *goBackgroundOwner 
 		port = ports[0]
 	}
 	hostname, _ := os.Hostname()
-	stableHostID := readIdentityValue("HOST_ID", "/etc/machine-id", hostname)
+	stableHostID, hostIDErr := productHostPartitionID()
+	if hostIDErr != nil {
+		// Background identity remains available for diagnostics if the host ID
+		// source is temporarily unavailable, but the fallback must be visible.
+		slog.Error("stable host identity unavailable for background services", "error", hostIDErr)
+		stableHostID = hostname
+	}
 	bootID := readIdentityValue("", "/proc/sys/kernel/random/boot_id", "unknown-boot")
 	processStart := processStartIdentity(os.Getpid())
 	roles := map[string]map[string]any{}
@@ -820,13 +865,35 @@ func acquireDirectoryLease(root, filename string) (*os.File, error) {
 		return nil, err
 	}
 	path := filepath.Join(rootPath, filename)
+	if info, err := os.Stat(path); err == nil {
+		current := info.Sys().(*syscall.Stat_t)
+		for _, fd := range acceptedLaunchLeaseFDs {
+			var inherited syscall.Stat_t
+			if err := syscall.Fstat(fd, &inherited); err != nil {
+				return nil, err
+			}
+			if inherited.Dev == current.Dev && inherited.Ino == current.Ino {
+				if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+					return nil, fmt.Errorf("acquire inherited directory lease %s: %w", path, err)
+				}
+				duplicate, err := syscall.Dup(fd)
+				if err != nil {
+					return nil, err
+				}
+				syscall.CloseOnExec(duplicate)
+				return os.NewFile(uintptr(duplicate), path), nil
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
 	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open directory lease %s: %w", path, err)
 	}
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = lock.Close()
-		return nil, err
+		return nil, fmt.Errorf("acquire directory lease %s: %w", path, err)
 	}
 	payload, err := json.Marshal(map[string]any{"pid": os.Getpid(), "root": rootPath, "updated_at": time.Now().UnixMilli()})
 	if err != nil {
@@ -928,22 +995,15 @@ func (s *server) shutdown() {
 			s.serverCancel()
 		}
 		s.stopRequestAdmission()
+		s.closeNativePages()
 		s.requestWorkers.Wait()
+		if s.agentActions != nil {
+			s.agentActions.close()
+		}
 
 		if s.tmuxRosterWatchCancel != nil {
 			s.tmuxRosterWatchCancel()
 			<-s.tmuxRosterWatchDone
-		}
-		s.homeRendererMu.Lock()
-		s.htmlClosed = true
-		if s.htmlCancel != nil {
-			s.htmlCancel()
-		}
-		renderer := s.homeRenderer
-		s.homeRenderer = nil
-		s.homeRendererMu.Unlock()
-		if renderer != nil {
-			renderer.close()
 		}
 		if s.finderJobs != nil {
 			if !s.finderJobs.CloseWithTimeout(5 * time.Second) {
@@ -977,6 +1037,18 @@ func (s *server) shutdown() {
 			s.yolo.close()
 		}
 		s.stopBackgroundWork()
+		if s.chat != nil {
+			if err := s.chat.store.Close(); err != nil {
+				shutdownClean = false
+				slog.Error("chat store close failed", "error", err)
+			}
+		}
+		if s.yoagentState != nil {
+			if err := s.yoagentState.Close(); err != nil {
+				shutdownClean = false
+				slog.Error("YO!agent store close failed", "error", err)
+			}
+		}
 		if s.statsRuntimeRecorder != nil {
 			if err := s.statsRuntimeRecorder.Stop(); err != nil {
 				shutdownClean = false

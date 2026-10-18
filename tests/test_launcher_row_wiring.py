@@ -1,25 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""W1: the supported launcher resolves ONE clean row plan per row and reuses that
-exact captured plan for the server launch AND both authenticated probes, with no
-inherited global scheduler primary-port export.
-
-Two kinds of proof live here:
-
-  * SOURCE CONTRACT over the live launcher and the shared macOS launcher text: the
-    retired globals are gone, the row plan is captured once, and both probes run
-    through `instance_isolation.py exec --plan-file` with that same captured plan.
-  * ONE EPHEMERAL-PORT INTEGRATION test that actually starts a server through the
-    exec mode, verifies its isolated tmux session through the real launcher probe,
-    and tears down by exact process identity.
-"""
+"""Native managed rows reuse one captured plan for launch and authenticated discovery."""
 
 from __future__ import annotations
 
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from tools.tmux_paths import short_temp_base, short_temp_prefix
@@ -28,6 +15,7 @@ import pytest
 
 from tests.gate_harness import HttpPortLease
 from tests.isolated_dev_server import REPO_ROOT
+from tests.isolated_dev_server import go_test_server_binary
 from tests.isolated_dev_server import assert_isolated_dev_server_port
 from tests.isolated_dev_server import build_environment
 from tests.isolated_dev_server import build_paths
@@ -73,50 +61,28 @@ def test_launcher_has_no_inherited_global_primary_port_export() -> None:
 
 @_LAUNCHER_MISSING
 def test_launcher_captures_one_row_plan_and_reuses_it_for_server_and_both_probes() -> None:
-    """One plan is captured per row and the server launch plus BOTH probes run
-    through `instance_isolation.py exec --plan-file` with that same captured plan."""
     text = LAUNCHER.read_text(encoding="utf-8")
-
-    # The plan is resolved once per row and stored under the row's name.
-    assert "instance_isolation.py plan --port" in text
-    assert 'ROW_PLAN[$name]="$plan_file"' in text
-
-    # The Linux server launch runs the server through the exec mode under the plan.
-    assert 'launch_server "$dir" "$server_port" "$plan_file"' in text
-    assert 'instance_isolation.py exec --plan-file "$plan_file" --' in text
-    assert 'server_entrypoint="$dir/yomux.py"' in text
-    assert '-u "$server_entrypoint" --host' in text
-
-    # The session probe takes a plan-file argument and runs through the shared
-    # exec mode. Runtime ownership is enforced by the product-root lease, not a
-    # web-level peer probe.
-    assert 'launcher_probe.py --scheme https sessions' in text
-    assert text.count('instance_isolation.py exec --plan-file "$plan_file" --') >= 2
-
-    # The captured plan reaches the server and the sessions probe.
-    assert 'verify_sessions "$dir" "$server_port" "${ROW_PLAN[$name]:-}"' in text
+    assert '--operator plan --root "$dir" --port "$server_port" > "$plan_file"' in text
+    assert 'ROW_PLAN[$current_row_index]="$plan_file"' in text
+    assert '--operator exec --root "$dir" --plan-file "$plan_file" -- env' in text
+    assert '--operator sessions --root "$dir" --port "$server_port" --plan-file "$plan_file"' in text
+    assert '--operator verify-environment --root "$dir" --port "$server_port" --pid "$listener_pid" --plan-file "$plan_file"' in text
 
 
 @_LAUNCHER_MISSING
 def test_launcher_macos_carries_the_plan_through_the_shared_launcher() -> None:
-    """The macOS row also launches through the exec plan (via the shared launcher)."""
     text = LAUNCHER.read_text(encoding="utf-8")
-
-    assert 'product_env_assign "ROW_PLAN_FILE=$plan_file"' in text
+    assert '"$(product_env_name ROW_PLAN_FILE)=$plan_file"' in text
 
 
 def test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise() -> None:
-    """The shared macOS launcher never reads roots or a plan path from tmux's
-    retained environment; both launch paths pass one plan as an argument."""
     text = STARTUP_COMMON.read_text(encoding="utf-8")
-
     assert 'plan_json=$7; env_count=$8; shift 8' in text
     assert 'export "$assignment"' in text
     assert 'product_env_unset "$env_suffix"' in text
-    assert 'source "$repo/tools/startup_common.sh" || exit 2; yomux_normalize_environment;' in text
-    assert 'instance_isolation.py" exec --plan-json "$plan_json" --' in text
-    assert 'instance_isolation.py" plan-direct --port "$port"' in text
-    assert 'YOLOMUX_ROW_PLAN_FILE:-' not in text.split("yomux_macos_server_launcher()", 1)[1].split("yomux_submit_macos_server()", 1)[0]
+    assert '--operator exec --root "$repo" --plan-json "$plan_json" --' in text
+    assert '--launch --launch-plan-json "$plan_json" --root "$repo"' in text
+    assert '--operator plan-direct --root "$repo_root" --port "$port"' in text
 
 
 def test_isolated_server_environment_does_not_inherit_a_parent_root(monkeypatch, tmp_path) -> None:
@@ -159,7 +125,7 @@ def test_exec_launched_server_passes_the_real_session_probe_and_tears_down_by_pi
     lease.release()
 
     # A no-strip plan that keeps the harness's explicit isolation roots but marks
-    # this row a managed self-owner, so the app runs BackgroundScheduler.
+    # this row as a managed native instance.
     plan = RowPlan(unset=(), assign={INSTANCE_ENV: f"{port}:managed"})
 
     server = None
@@ -183,25 +149,10 @@ def test_exec_launched_server_passes_the_real_session_probe_and_tears_down_by_pi
         plan_path = paths.root / "row-plan.json"
         result = subprocess.run(
             [
-                sys.executable,
-                str(REPO_ROOT / "tools" / "instance_isolation.py"),
-                "exec",
-                "--plan-file",
-                str(plan_path),
-                "--",
-                sys.executable,
-                str(REPO_ROOT / "tools" / "launcher_probe.py"),
-                "--scheme",
-                "http",
-                "--host",
-                "127.0.0.1",
-                "--timeout",
-                "30",
-                "sessions",
-                "--port",
-                str(port),
-                "--sessions",
-                session_name,
+                str(go_test_server_binary(REPO_ROOT)),
+                "--operator", "sessions", "--root", str(REPO_ROOT),
+                "--plan-file", str(plan_path), "--http", "--host", "127.0.0.1",
+                "--timeout", "30s", "--port", str(port), "--sessions", session_name,
             ],
             env=env,
             capture_output=True,
@@ -209,7 +160,6 @@ def test_exec_launched_server_passes_the_real_session_probe_and_tears_down_by_pi
             timeout=90,
         )
         assert result.returncode == 0, (result.stdout, result.stderr, server.output[-20:])
-        assert f"sessions {port}: all 1 visible" in result.stdout, result.stdout
 
         # Teardown by exact PID identity.
         reaped = stop_and_reap_daemons(server)

@@ -25,7 +25,7 @@ from ..login_rate_limit import default_login_throttle_database_path
 from ..observability.pricing_catalog import PricingPaths
 from ..observability.pricing_catalog import default_pricing_cache_dir
 from ..search.file_index import default_index_dir
-from ..stats_current.service import default_database_path
+from ..stats_current.storage import default_database_path
 from ..stats_current.storage import DATABASE_FILENAME
 from . import common
 from .filesystem_preflight import FilesystemClassification

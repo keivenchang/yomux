@@ -38,16 +38,12 @@ def runtime_tree(output, pairs):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("tree", "frontend", "version"))
+    parser.add_argument("mode", choices=("tree", "version"))
     parser.add_argument("output", type=Path)
     parser.add_argument("inputs", nargs="*")
     args = parser.parse_args()
     if args.mode == "tree":
         runtime_tree(args.output, args.inputs)
-    elif args.mode == "frontend":
-        command = [sys.executable, args.inputs[0], "--source-root", ".", "--output-directory", str(args.output)]
-        subprocess.run(command, check=True)
-        subprocess.run([*command, "--check"], check=True)
     else:
         subprocess.run([sys.executable, args.inputs[0], "--source", args.inputs[1], "--output", str(args.output)], check=True)
     return 0

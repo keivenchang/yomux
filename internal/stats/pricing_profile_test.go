@@ -1,10 +1,6 @@
 package stats
 
 import (
-	"encoding/json"
-	"github.com/keivenchang/yomux/internal/testsupport"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -48,80 +44,6 @@ func TestResolveUsagePricingProfileMatchesSettingsTimeline(t *testing.T) {
 				t.Fatalf("pricing profile = %q, want %q", got, test.want)
 			}
 		})
-	}
-}
-
-func TestPythonAndGoPricingProfilesMatchSyntheticSettings(t *testing.T) {
-	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
-	testsupport.RequireDeprecatedPythonBackend(t)
-	settings := map[string]any{
-		"cost": map[string]any{
-			"openai_pricing_profile":             "default",
-			"_openai_pricing_profile_history":    []any{"0|default", "10|subscription", "20|default"},
-			"anthropic_pricing_profile":          "subscription",
-			"_anthropic_pricing_profile_history": []any{"0|default", "5|subscription"},
-		},
-		"yoagent": map[string]any{"invocation": "cli"},
-	}
-	cases := []struct {
-		provider, source, endpoint string
-		at                         float64
-	}{
-		{provider: "openai", source: "codex", at: 9},
-		{provider: "openai", source: "codex", at: 10},
-		{provider: "openai", source: "codex", at: 20},
-		{provider: "anthropic", source: "claude", at: 5},
-		{provider: "openai", source: "opencode", at: 15},
-		{provider: "openai", source: "YO!agent", endpoint: "yoagent", at: 15},
-	}
-	input := struct {
-		Settings map[string]any `json:"settings"`
-		Cases    []struct {
-			Provider string  `json:"provider"`
-			Source   string  `json:"source"`
-			Endpoint string  `json:"endpoint"`
-			At       float64 `json:"at"`
-		} `json:"cases"`
-	}{Settings: settings}
-	for _, test := range cases {
-		input.Cases = append(input.Cases, struct {
-			Provider string  `json:"provider"`
-			Source   string  `json:"source"`
-			Endpoint string  `json:"endpoint"`
-			At       float64 `json:"at"`
-		}{test.provider, test.source, test.endpoint, test.at})
-	}
-	encoded, err := json.Marshal(input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	root := t.TempDir()
-	inputPath := filepath.Join(root, "settings.json")
-	if err := os.WriteFile(inputPath, encoded, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	scriptPath := filepath.Join(root, "pricing_profile.py")
-	const script = `import json, sys
-from yomux_lib.workspace.settings import usage_pricing_profile
-value = json.load(open(sys.argv[1], encoding="utf-8"))
-print(json.dumps([usage_pricing_profile(value["settings"], provider=row["provider"], execution_source=row["source"], endpoint=row["endpoint"], observed_at=row["at"]) for row in value["cases"]]))
-`
-	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	output := runPython(t, pythonExecutable(t), scriptPath, inputPath)
-	var pythonProfiles []string
-	if err := json.Unmarshal([]byte(output), &pythonProfiles); err != nil {
-		t.Fatalf("decode Python pricing profiles %q: %v", output, err)
-	}
-	if len(pythonProfiles) != len(cases) {
-		t.Fatalf("Python returned %d profiles for %d cases", len(pythonProfiles), len(cases))
-	}
-	for index, test := range cases {
-		goProfile := ResolveUsagePricingProfile(settings, test.provider, test.source, test.endpoint, test.at)
-		if goProfile != pythonProfiles[index] {
-			t.Errorf("case %d (%s/%s at %g): Go profile %q, Python profile %q", index, test.provider, test.source, test.at, goProfile, pythonProfiles[index])
-		}
 	}
 }
 

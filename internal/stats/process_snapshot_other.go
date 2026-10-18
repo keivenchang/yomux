@@ -9,3 +9,5 @@ func darwinHostCPU() (uint64, uint64, bool)                   { return 0, 0, fal
 func darwinSystemLogicalCPUs() int                            { return 0 }
 func darwinProcessIdentity(int) (DarwinProcess, bool)         { return DarwinProcess{}, false }
 func DarwinProcessMetricsForPID(int) (ProcessCensusRow, bool) { return ProcessCensusRow{}, false }
+
+func darwinProcessIdentityFresh(int) (DarwinProcess, bool) { return DarwinProcess{}, false }

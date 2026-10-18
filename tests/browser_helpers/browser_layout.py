@@ -31,18 +31,15 @@ from tools import static_build
 from tools.instance_isolation import apply_yomux_environment_assignments
 from tools.instance_isolation import normalize_yomux_environment
 from yomux_lib import common
-from yomux_lib import app as app_module
 from yomux_lib import auto_approve_worker as auto_approve_worker_module
 from yomux_lib import control as control_module
 from yomux_lib import events as events_module
 from yomux_lib import settings as settings_module
 from yomux_lib import web
 from yomux_lib import yolo_rules as yolo_rules_module
-from yomux_lib import server_auth
 from yomux_lib.locales import locale_registry_payload
-from yomux_lib.http_routes import route_for_request
-from yomux_lib.app import TmuxWebtermApp
-from yomux_lib.server import TmuxWebtermHTTPServer
+from tests.helpers.route_contract import route_for_request
+from http.server import ThreadingHTTPServer as FixtureHTTPServer
 from yomux_lib.server_logs import SERVER_LOGS
 from yomux_lib.stats_current import resolution as stats_resolution
 from yomux_lib.stats_current import storage as stats_storage
@@ -60,6 +57,7 @@ from tests.browser_helpers.native_pointer import click_visible_selector
 from tests.browser_helpers.webdriver_lease import WebDriverLease
 from tests.browser_helpers.webdriver_lease import retire_all
 from tests.helpers.fixture_content_root import FixtureContentRoot
+from tests import isolated_dev_server as native_dev_server
 from tests.helpers.browser_boot import BROWSER_BOOT_PRESETS
 from tests.helpers.browser_boot import BROWSER_BOOT_ROUTES
 from tests.helpers.browser_boot import BrowserBootRoute
@@ -798,16 +796,10 @@ def isolate_browser_runtime_paths(monkeypatch, tmp_path):
         monkeypatch.setattr(module, "AUTO_APPROVE_LOCK_DIR", auto_approve_lock_dir)
         monkeypatch.setattr(module, "CONTROL_SOCKET_DIR", control_socket_dir)
     patch_imported_writable_constants(monkeypatch, old_roots)
-    monkeypatch.setattr(app_module, "ACTIVITY_PATH", activity_path)
-    monkeypatch.setattr(app_module, "ACTIVITY_HEARTBEATS_PATH", activity_heartbeats_path)
-    monkeypatch.setattr(app_module, "EVENT_LOG_PATH", event_log_path)
-    monkeypatch.setattr(app_module, "WATCH_INDEX_PATH", watch_index_path)
-    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", state_dir / "session-files-cache")
     monkeypatch.setattr(events_module, "STATE_PATH", state_path)
     monkeypatch.setattr(control_module, "CONTROL_SOCKET_DIR", control_socket_dir)
     monkeypatch.setattr(auto_approve_worker_module, "AUTO_APPROVE_LOCK_DIR", auto_approve_lock_dir)
     monkeypatch.setattr(settings_module, "SETTINGS_PATH", config_dir / "settings.yaml")
-    monkeypatch.setattr(app_module, "SETTINGS_PATH", config_dir / "settings.yaml")
     monkeypatch.setattr(yolo_rules_module, "YOLO_RULES_PATH", config_dir / "yolo-rules.yaml")
     return SimpleNamespace(config_dir=config_dir, state_dir=state_dir, runtime_dir=runtime_dir, control_socket_dir=control_socket_dir)
 
@@ -833,6 +825,9 @@ class FixtureRuntime:
     paths: object
 
     def close(self) -> None:
+        if isinstance(self.app, native_dev_server.IsolatedDevServer):
+            run_fixture_cleanup_phases("native browser", (("native server", self.app.stop), ("tmux runtime", lambda: stop_isolated_tmux_runtime(self.tmux))))
+            return
         run_fixture_cleanup_phases("isolated browser app", (
             ("app runtime", lambda: stop_fixture_app_runtime(self.app, label="isolated browser app")),
             ("tmux runtime", lambda: stop_isolated_tmux_runtime(self.tmux)),
@@ -847,21 +842,13 @@ class FixtureRuntime:
 
 
 def start_fixture_runtime(monkeypatch, tmp_path, options: FixtureRuntimeOptions) -> FixtureRuntime:
-    paths = None
-    tmux_runtime = None
+    paths = native_dev_server.build_paths(tmp_path / "native-browser")
+    tmux_runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path, session_count=options.session_count, session_cwd=options.session_cwd)
     try:
-        paths = isolate_browser_runtime_paths(monkeypatch, tmp_path)
-        tmux_runtime = start_isolated_tmux_runtime(
-            monkeypatch,
-            tmp_path,
-            session_count=options.session_count,
-            session_cwd=options.session_cwd,
-        )
-        app = TmuxWebtermApp(list(tmux_runtime.sessions), dangerously_yolo=options.dangerously_yolo)
+        app = native_dev_server.start_isolated_dev_server("native browser", REPO_ROOT, paths, tmux_runtime)
         return FixtureRuntime(app, list(tmux_runtime.sessions), tmux_runtime, paths)
-    except Exception:
+    except BaseException:
         stop_isolated_tmux_runtime(tmux_runtime)
-        cleanup_isolated_browser_runtime_paths(paths)
         raise
 
 
@@ -883,10 +870,11 @@ def stop_isolated_browser_app(runtime):
 
 
 def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False, pin_batchd_scheduler=None, paths=None):
+    if isinstance(app, native_dev_server.IsolatedDevServer):
+        return SimpleNamespace(server_address=("127.0.0.1", app.port), _native_owner=app), None
     auth_path = tmp_path / "auth.yaml"
     auth_path.write_text(browser_auth_yaml(), encoding="utf-8")
     monkeypatch.setattr(common, "AUTH_CONFIG_PATH", auth_path)
-    monkeypatch.setattr(server_auth, "current_language_pref", lambda: "system")
     if auth_bypass:
         monkeypatch.setenv(common.TEST_AUTH_BYPASS_ENV, "1")
     runtime = start_fixture_live_server(
@@ -916,6 +904,9 @@ def stop_browser_server(
     server_log_reader=None,
     wait_for_api_quiescence=True,
 ):
+    if hasattr(server, "_native_owner"):
+        server._native_owner.stop()
+        return
     invalid_browser_arguments = browser is not None and browsers
     runtime = getattr(server, "_fixture_gate_live_server", None)
     base_url = runtime.base_url if isinstance(runtime, GateLiveServer) else f"http://127.0.0.1:{server.server_address[1]}"

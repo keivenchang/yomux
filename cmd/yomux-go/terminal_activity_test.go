@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,19 @@ import (
 func TestTerminalInputActivityClassification(t *testing.T) {
 	if !terminalInputIsActivity([]byte("\x1b[1;2R"), true) {
 		t.Fatal("native modified F3 excluded")
+	}
+	for _, page := range []string{"\x1b[5~", "\x1b[6~", "\x1b[5;2~", "\x1b[6;5~"} {
+		if terminalInputIsActivity([]byte(page), true) || !terminalInputIsActivity([]byte(page+"a"), true) {
+			t.Errorf("page navigation activity classification: %q", page)
+		}
+	}
+	for column := 33; column <= 255; column++ {
+		for row := 33; row <= 255; row++ {
+			report := []byte{0x1b, '[', 'M', 0x60, byte(column), byte(row)}
+			if terminalInputIsActivity(report) || !terminalInputIsActivity(append(report, 'a')) {
+				t.Fatalf("legacy mouse activity classification at %d,%d", column, row)
+			}
+		}
 	}
 	for _, data := range []string{"", "\x1b[I", "\x1b[O", "\x1b[<0;4;8M", "\x1b[<0;4;8m", "\x1b[M !!", "\x1b[12;40R", "\x1b[?1;2c", "\x1b[4;600;800t", "\x1bP1$r0m\x1b\\", "\x1b]10;rgb:ffff/ffff/ffff\x07", "\x1b[200~\x1b[201~"} {
 		if terminalInputIsActivity([]byte(data)) {
@@ -33,6 +47,58 @@ func TestTerminalInputActivityClassification(t *testing.T) {
 		if !terminalInputIsActivity([]byte(data)) {
 			t.Errorf("keyboard/paste not counted: %q", data)
 		}
+	}
+}
+
+func TestTerminalTmuxScrollTargetsPaneBeforeCopyModeCommand(t *testing.T) {
+	var commands [][]string
+	s := &server{tmuxCommandContextFn: func(_ context.Context, args ...string) *exec.Cmd {
+		commands = append(commands, append([]string(nil), args...))
+		return exec.Command("true")
+	}}
+	s.handleMessage(io.Discard, nil, nil, nil, "fixture", "", []byte(`{"type":"tmux-scroll","direction":"up","lines":5}`), true, context.Background())
+	want := [][]string{
+		{"copy-mode", "-e", "-t", "=fixture:"},
+		{"send-keys", "-X", "-t", "=fixture:", "-N", "5", "scroll-up"},
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("tmux scroll commands = %#v, want %#v", commands, want)
+	}
+}
+
+func TestTerminalTmuxScrollWorksWithMouseEnabledOrDisabled(t *testing.T) {
+	for _, mouse := range []string{"off", "on"} {
+		t.Run(mouse, func(t *testing.T) {
+			socket := filepath.Join(t.TempDir(), "tmux.sock")
+			t.Setenv("YOMUX_TMUX_SOCKET", socket)
+			t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+			s := &server{ignoreSizeChecked: true}
+			if output, err := s.tmuxCommand("new-session", "-d", "-s", "fixture", "seq 1 1000; exec cat").CombinedOutput(); err != nil {
+				t.Fatalf("create isolated tmux session: %v %s", err, output)
+			}
+			t.Cleanup(func() { _ = s.tmuxCommand("kill-server").Run() })
+			for _, args := range [][]string{{"set-option", "-g", "history-limit", "2000"}, {"set-option", "-g", "mouse", mouse}} {
+				if output, err := s.tmuxCommand(args...).CombinedOutput(); err != nil {
+					t.Fatalf("configure isolated tmux: %v %s", err, output)
+				}
+			}
+			s.handleMessage(io.Discard, nil, nil, nil, "fixture", "", []byte(`{"type":"tmux-scroll","direction":"up","lines":5}`), true, context.Background())
+			output, err := s.tmuxCommand("display-message", "-p", "-t", "fixture:0.0", "#{pane_mode} #{scroll_position} #{history_size}").CombinedOutput()
+			if err != nil {
+				t.Fatalf("read tmux scroll position: %v %s", err, output)
+			}
+			if !strings.HasPrefix(string(output), "copy-mode 5 ") {
+				t.Fatalf("scroll-up left the viewport unchanged with mouse %s: %s", mouse, output)
+			}
+			s.handleMessage(io.Discard, nil, nil, nil, "fixture", "", []byte(`{"type":"tmux-scroll","direction":"down","lines":5}`), true, context.Background())
+			output, err = s.tmuxCommand("display-message", "-p", "-t", "fixture:0.0", "#{pane_mode}:#{scroll_position}:#{history_size}").CombinedOutput()
+			if err != nil {
+				t.Fatalf("read tmux bottom position: %v %s", err, output)
+			}
+			if !strings.HasPrefix(string(output), "::") {
+				t.Fatalf("scroll-down did not return to live output with mouse %s: %s", mouse, output)
+			}
+		})
 	}
 }
 
