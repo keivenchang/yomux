@@ -50,6 +50,8 @@ func TestGoCapacityRecoveryRequiresExactIdleCodexNoticeWithoutNewerPrompt(t *tes
 		want  bool
 	}{
 		{name: "exact idle notice and empty composer", state: "idle", text: emptyComposer, want: true},
+		{name: "extra whitespace after marker", state: "idle", text: "■  Selected model is at capacity. Please try a different model.\n›", want: true},
+		{name: "no whitespace after marker", state: "idle", text: "■Selected model is at capacity. Please try a different model.\n›", want: true},
 		{name: "current Codex composer placeholder", state: "idle", text: notice + "\n› Ask Codex to do anything\n\n  gpt-5.5 xhigh · ~/repo", want: true},
 		{name: "current Claude composer placeholder", state: "idle", text: notice + "\n› Ask Claude to do anything\n\n  Claude Code · ~/repo", want: true},
 		{name: "working pane", state: "run", text: emptyComposer},

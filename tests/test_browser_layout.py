@@ -4250,7 +4250,7 @@ def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(b
     assert working_energy_delta < yellow_energy_delta, visual_scores
 
 
-def test_recreated_working_status_ball_keeps_wall_clock_pulse_phase(browser, tmp_path):
+def test_recreated_working_status_ball_keeps_wall_clock_pulse_phase(browser, tmp_path, record_property):
     load_live_runtime_boot_fixture(browser, tmp_path)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -4262,6 +4262,12 @@ def test_recreated_working_status_ball_keeps_wall_clock_pulse_phase(browser, tmp
         const done = arguments[arguments.length - 1];
         (async () => {
           const duration = 1550;
+          const previousPulse = {
+            enabled: globalThis.yomuxEnableBroadStatusPulse,
+            period: agentStatusPulsePeriodMs,
+            clockDuration: attentionAnimationClockDurationMs,
+            rootStyle: document.documentElement.getAttribute('style'),
+          };
           globalThis.yomuxEnableBroadStatusPulse = false;
           agentStatusPulsePeriodMs = duration;
           document.documentElement.style.setProperty('--pulse-duration', `${duration / 1000}s`);
@@ -4278,42 +4284,72 @@ def test_recreated_working_status_ball_keeps_wall_clock_pulse_phase(browser, tmp
             acknowledged: false,
           };
           const {frame} = window.__yomuxTestHelpers;
-          const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
           const samples = [];
           let previousDot = null;
-          for (let index = 0; index < 5; index += 1) {
-            host.innerHTML = agentWindowActivityIconHtml('codex', 'working', 0, {
-              session: '1',
-              window_index: 0,
-              current: true,
-              statusOnly: true,
-              item,
-            });
-            await frame();
-            const dot = host.querySelector('.agent-window-status-dot');
-            const animation = dot?.getAnimations?.().find(value => value.animationName === 'agent-status-opacity-pulse');
-            const timing = animation?.effect?.getComputedTiming?.() || {};
-            const sampledAt = Date.now();
+          const samplePhase = (dot, animation) => {
+            // Animation progress and its expected phase must describe the same rendered frame.
+            const timelineMs = document.timeline.currentTime;
+            const sampledAt = performance.timeOrigin + timelineMs;
             const expectedProgress = ((sampledAt % duration) + duration) % duration / duration;
-            const progress = Number(timing.progress);
-            const phaseDistance = Math.min(Math.abs(progress - expectedProgress), 1 - Math.abs(progress - expectedProgress));
-            samples.push({
-              replaced: previousDot !== null && previousDot !== dot,
-              progress,
-              expectedProgress,
-              phaseDistance,
+            const progress = animation.effect.getComputedTiming().progress;
+            if (!Number.isFinite(progress)) throw new Error(`Pulse animation has no active progress: ${progress}`);
+            const difference = Math.abs(progress - expectedProgress);
+            return {
+              progress, expectedProgress,
+              phaseDistance: Math.min(difference, 1 - difference),
+              timelineMs, sampledAt, startTime: animation.startTime,
+              currentTime: animation.currentTime, pending: animation.pending,
+              playState: animation.playState,
               opacity: Number(getComputedStyle(dot).opacity),
               delay: getComputedStyle(dot).animationDelay,
-            });
-            previousDot = dot;
-            await pause(260);
+            };
+          };
+          let negativeControl;
+          try {
+            for (let index = 0; index < 5; index += 1) {
+              host.innerHTML = agentWindowActivityIconHtml('codex', 'working', 0, {
+                session: '1',
+                window_index: 0,
+                current: true,
+                statusOnly: true,
+                item,
+              });
+              // Hold one first frame to reproduce loaded-gate scheduling without a sleep.
+              if (index === 0) {
+                const heldUntil = performance.now() + 200;
+                while (performance.now() < heldUntil) {}
+              }
+              const dot = host.querySelector('.agent-window-status-dot');
+              const animation = dot.getAnimations().find(value => value.animationName === 'agent-status-opacity-pulse');
+              if (!animation) throw new Error('Working status ball has no pulse animation');
+              await animation.ready;
+              samples.push({replaced: previousDot !== null && previousDot !== dot, ...samplePhase(dot, animation)});
+              previousDot = dot;
+              if (index === 4) {
+                // A real phase error must still fail the same validator after playback starts.
+                animation.startTime -= duration / 4;
+                negativeControl = samplePhase(dot, animation);
+              } else {
+                const nextSampleAt = animation.currentTime + duration / 6;
+                while (animation.currentTime < nextSampleAt) await frame();
+              }
+            }
+            done({samples, negativeControl});
+          } finally {
+            host.remove();
+            globalThis.yomuxEnableBroadStatusPulse = previousPulse.enabled;
+            agentStatusPulsePeriodMs = previousPulse.period;
+            attentionAnimationClockDurationMs = previousPulse.clockDuration;
+            if (previousPulse.rootStyle === null) document.documentElement.removeAttribute('style');
+            else document.documentElement.setAttribute('style', previousPulse.rootStyle);
           }
-          host.remove();
-          done({samples});
         })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
         """
     )
+    record_property("pulse_phase", metrics)
     assert "error" not in metrics, metrics
+    assert all(not sample["pending"] and sample["playState"] == "running" and sample["startTime"] is not None for sample in metrics["samples"]), metrics
+    assert metrics["negativeControl"]["phaseDistance"] >= 0.08, metrics
     assert all(sample["replaced"] for sample in metrics["samples"][1:]), metrics
     assert all(sample["phaseDistance"] < 0.08 for sample in metrics["samples"]), metrics
     assert len({round(sample["progress"], 2) for sample in metrics["samples"]}) >= 4, metrics

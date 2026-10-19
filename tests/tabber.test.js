@@ -1698,6 +1698,54 @@ test('Dockview native click restores input without repeating consumed activation
 });
 
 async function runTabberSuite() {
+  await testAsync('activity completion publishes accepted products once and preserves independent changes', async () => {
+    const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+    const activitySource = fs.readFileSync('static_src/js/yomux/35_agent_window_activity.js', 'utf8');
+    const refreshes = [];
+    let accepted = true;
+    let failRefresh = true;
+    let payload = {agent_window_snapshot_revision:7, activity:{one:{active_recency_ts:1}}};
+    const context = vm.createContext({URLSearchParams, tabberSessionFileLookbackHours:24, tabberItemId:'tabber',
+      tabberActivityState:{requestGeneration:0, appliedGeneration:0, request:null},
+      normalizeSessionFileLookbackHours:value=>value, tabberActivityPayload:null,
+      apiFetchJson:async()=>payload, itemInLayout:()=>true,
+      applyTabberActivityPayload(value) {if(accepted) context.tabberActivityPayload=value; return accepted;},
+      refreshTabberPanels(options) {
+        if (failRefresh) {
+          failRefresh = false;
+          throw new Error('transient Tabber render failure');
+        }
+        refreshes.push(options);
+      },
+    });
+    const revisionStart = activitySource.indexOf('function agentWindowSnapshotRevision(');
+    const revisionEnd = activitySource.indexOf('\nfunction agentWindowSnapshotIsAuthoritative(', revisionStart);
+    vm.runInContext(activitySource.slice(revisionStart, revisionEnd), context);
+    const ownerStart = activitySource.indexOf('function refreshTabberPanelsForAgentWindowPublication(');
+    const ownerEnd = activitySource.indexOf('\nfunction refreshAgentWindowActivityDisplays(', ownerStart);
+    const signatureStart = activitySource.indexOf('function tabberActivityRenderSignature(');
+    const signatureEnd = activitySource.indexOf('\nfunction refreshTabberPanelsForAgentWindowPublication(', signatureStart);
+    const publicationStart = activitySource.indexOf('function tabberActivityPublicationSignature(', signatureStart);
+    vm.runInContext(activitySource.slice(signatureStart, publicationStart), context);
+    vm.runInContext(activitySource.slice(publicationStart, signatureEnd), context);
+    vm.runInContext(activitySource.slice(ownerStart, ownerEnd), context);
+    const start = source.indexOf('async function fetchTabberActivity(');
+    vm.runInContext(source.slice(start, source.indexOf('function warmTabberDataOnLaunch(', start)), context);
+    await assert.rejects(context.fetchTabberActivity({visible:true}), /transient Tabber render failure/);
+    await context.fetchTabberActivity({visible:true});
+    await context.fetchTabberActivity({visible:true});
+    assert.equal(refreshes.length, 1, 'a failed publication retries, then an identical product does not rebuild twice');
+    payload = {...payload, activity:{one:{active_recency_ts:2}}};
+    await context.fetchTabberActivity({visible:true});
+    assert.equal(refreshes.length, 2, 'activity can change independently of status revision');
+    accepted = false;
+    payload = {...payload, agent_window_snapshot_revision:8};
+    await context.fetchTabberActivity({visible:true});
+    assert.equal(refreshes.length, 2, 'rejected completion must not rebuild');
+    assert.deepEqual(refreshes.map(row=>row.requestGeneration), [2,4]);
+  });
+
+
   await testAsync('Lookback rejects held older ranges and drains one latest request in both modes', async () => {
     for (const mode of ['normal', 'advanced']) {
       const api = loadYomux('', ['one']);
@@ -4855,7 +4903,10 @@ async function runTabberSuite() {
     assert.equal(/\.tabber-row[^{}]*\.file-tree-date[^{}]*\{[^}]*display:\s*none/.test(css), false, 'Tabber never hides the <time> ago recency column for narrow panes');
     assert.ok(/function tabberActivityVisibleConsumer\(\)[\s\S]*fileExplorerMode === 'tabber'[\s\S]*document\.visibilityState !== 'hidden'/.test(source), 'Tabber activity polling only marks visible Tabber panes as subscribers');
     assert.ok(/async function fetchTabberActivity\(options = \{\}\)[\s\S]*params\.set\('visible', visible \? '1' : '0'\)/.test(source), 'Tabber activity requests include the visible-consumer flag');
-    assert.ok(/function refreshAgentWindowActivityDisplays\([^)]*\)[\s\S]*typeof itemInLayout === 'function'[\s\S]*itemInLayout\(tabberItemId\)[\s\S]*refreshTabberPanels\(\)/.test(source), 'activity changes repaint a mounted Tabber pane even when Dockview does not set the legacy Tabber mode flag');
+    assert.ok(/function tabberActivityRenderSignature\(payload = tabberActivityPayload\)[\s\S]*topology_generation[\s\S]*session_order[\s\S]*sessions[\s\S]*agent_window_status_fresh/.test(source), 'the shared render signature covers Tabber roster and activity fields');
+    assert.ok(/function tabberActivityPublicationSignature\(payload = tabberActivityPayload\)[\s\S]*agentWindowSnapshotRevision\(payload\)[\s\S]*tabberActivityRenderSignature\(payload\)/.test(source), 'activity publications distinguish revisions while reusing the shared render signature');
+    assert.ok(/function refreshTabberPanelsForAgentWindowPublication\(options = \{\}\)[\s\S]*lastPublication[\s\S]*refreshTabberPanels\(options\)/.test(source), 'status and activity publications share one revision-aware Tabber refresh owner');
+    assert.ok(/function refreshAgentWindowActivityDisplays\([^)]*\)[\s\S]*refreshTabberPanelsForAgentWindowPublication\(options\)/.test(source), 'status display updates use the shared revision-aware Tabber refresh owner');
     assert.ok(/function warmTabberDataOnLaunch\(\)[\s\S]*!tabberActivityVisibleConsumer\(\)[\s\S]*tabberLaunchWarmupStarted = true;[\s\S]*fetchTabberActivity\(\);[\s\S]*return true;/.test(source), 'Tabber launch warmup primes cached activity only for visible Tabber panes');
     assert.ok(/transcriptMetadataState\.loaded = true;[\s\S]*?warmTabberDataOnLaunch\(\)/.test(source), 'Tabber launch warmup runs as soon as transcript metadata is available');
     assert.ok(/function tabberAgentForWindow\(session, windowIndex, agentKey = ''\)/.test(source), 'Tabber can look up agent transcript activity by session/window');

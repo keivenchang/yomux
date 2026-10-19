@@ -185,6 +185,7 @@ body.theme-light .git-diff-panel {
 }
 .git-diff-worktree-summary > .git-diff-commit-description {
   min-width: 0;
+  padding-inline-start: calc(var(--space-4) + var(--space-1));
   overflow: visible;
   overflow-wrap: anywhere;
   text-overflow: clip;

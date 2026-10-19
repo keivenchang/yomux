@@ -564,6 +564,20 @@ func useMachineTmuxForOperatorLaunch() {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == finder.HistoryPrototypeHelperFlag {
+		if err := finder.RunHistoryPrototypeHelper(os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--diagnose-history-prototype" {
+		if err := runHistoryPrototypeDiagnostic(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		return
+	}
 	if err := validateNativeBackend(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)

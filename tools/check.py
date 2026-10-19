@@ -141,6 +141,7 @@ EXIT_NOT_CERTIFIABLE = 4
 # The last entry is the phase's own negative control: it proves the qualifier still separates a
 # quiet host from a loaded one on this box. It runs last because it deliberately loads the host.
 CERTIFICATION_NODE_IDS = (
+    "tests/test_browser_finder.py::test_finder_saved_restore_latency_certification",
     "tests/test_gate_tmux.py::test_go_activation_certification_meets_highlight_paint_and_echo_budgets",
     "tests/test_gate_interaction.py::test_i3a_certification_drag_preview_holds_the_fixed_ceiling",
     "tests/test_gate_interaction.py::test_i3b_certification_dockview_load_layout_holds_the_fixed_ceiling",
@@ -1281,6 +1282,14 @@ def lane_failed_nodes(lane: Lane, result_ok: bool, output: str) -> FailedNodes |
     return bounded_failed_nodes(node_ids, unresolved_rows=unresolved)
 
 
+def instrument_lane_for_evidence(lane: Lane, evidence_root: Path) -> Lane:
+    # The gate owns these paths; pytest's temporary-root cleanup must not remove failure evidence.
+    return replace(lane, steps=tuple(
+        replace(step, env=(*step.env, (product_env_name('E2E_EVIDENCE_DIR'), str(evidence_root / lane.name / str(index)))))
+        for index, step in enumerate(lane.steps)
+    ))
+
+
 def instrument_lane_for_performance(lane: Lane) -> Lane:
     """Ask every pytest step for the timing table persisted in the run report."""
 
@@ -2171,7 +2180,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
         return 2
     output_root = lane_output_root(report_path)
-    selected = [instrument_lane_for_performance(lane) for lane in selected]
+    selected = [instrument_lane_for_performance(instrument_lane_for_evidence(lane, output_root / "evidence")) for lane in selected]
 
     inotify_capacity = admit_inotify_capacity(selected)
     if inotify_capacity is not None and not inotify_capacity.admitted:

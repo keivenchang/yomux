@@ -602,3 +602,29 @@ def test_the_harness_offers_no_rate_design():
     assert not {name for name in exported if "significan" in name.lower()}, exported
     # What it does export is identity, admission, extraction and retention -- no inference.
     assert {"arm_equality_violations", "first_transition_timeline", "write_attempt", "arm_env_admission"} <= exported
+
+
+def test_failed_browser_attribution_preserves_the_original_test_failure(tmp_path, monkeypatch):
+    conftest = _conftest_module()
+    monkeypatch.setenv("YOMUX_E2E_EVIDENCE_DIR", str(tmp_path))
+
+    def crashed_browser(_script):
+        raise conftest.WebDriverException("fixture browser has retired")
+
+    item = SimpleNamespace(nodeid="tests/browser.py::failure", stash=pytest.Stash(), funcargs={
+        "browser": SimpleNamespace(generation=17, execute_script=crashed_browser),
+    })
+    conftest.pytest_runtest_call(item)
+    path = conftest._defect2_attribution_path()
+    monkeypatch.setenv("YOMUX_E2E_EVIDENCE_DIR", str(tmp_path / "changed-by-test"))
+    report = SimpleNamespace(when="call", failed=True, outcome="failed",
+                             user_properties=[("restart_lifecycle", {"stopped": {"last_clean_shutdown": True}})])
+    hook = conftest.pytest_runtest_makereport(item, None)
+    next(hook)
+    with pytest.raises(StopIteration):
+        hook.send(SimpleNamespace(get_result=lambda: report))
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert rows[-1]["browser_generation"] == 17
+    assert rows[-1]["outcome"] == "failed"
+    assert rows[-1]["browser_history_error"]["reason"] == "webdriver_unavailable"
+    assert rows[-1]["properties"]["restart_lifecycle"]["stopped"]["last_clean_shutdown"] is True

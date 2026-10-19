@@ -93,14 +93,15 @@ function createFileExplorerPanel(item = finderItemId) {
 // its own result independently.
 function startFinderPanelListing(panel, options = {}) {
   const firstPaint = !panel?.querySelector?.('.file-tree-row[data-path]');
-  if (firstPaint) beginFinderSessionFilesDiffBackfill();
+  const fastPaintGeneration = firstPaint ? beginFinderSessionFilesDiffBackfill()
+    : fileExplorerFinderSessionFilesState.fastPaintGeneration;
   const listing = refreshFileExplorerPanelTree(panel, {...options, deferSessionFilesDiff: firstPaint});
   void listing.then(async () => {
       // Keep the fast directory rows on screen for one complete browser paint. This also applies
       // to a warm session-files payload: cached +/- totals are slower metadata, so they must not
       // change the first-paint result merely because another owner finished earlier.
       scheduleAfterFileExplorerFirstPaint(() => {
-        finishFinderFastPaint();
+        finishFinderFastPaint(fastPaintGeneration);
       });
       if (options.preserveExpanded !== false) {
         const root = currentFileExplorerRoot();
@@ -115,7 +116,7 @@ function startFinderPanelListing(panel, options = {}) {
       }
     }).catch(error => {
       scheduleAfterFileExplorerFirstPaint(() => {
-        finishFinderFastPaint();
+        finishFinderFastPaint(fastPaintGeneration);
       });
       console.warn('Finder initial listing failed', error);
     },

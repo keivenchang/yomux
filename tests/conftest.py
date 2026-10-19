@@ -16,17 +16,20 @@ import os
 from pathlib import Path
 import re
 import socket
+import sys
 import tempfile
 import time
 import uuid
 
 import pytest
+from selenium.common.exceptions import WebDriverException
 from tools.product_environment import product_env
 from tools.tmux_paths import short_temp_base
 from tools.product_environment import product_env_name
 from tools.product_environment import product_env_names
 
 _attribution_json_dumps = json.dumps
+_attribution_path_key = pytest.StashKey[Path | None]()
 
 # This suite's fixtures explicitly select legacy YOLOMUX_* names in several
 # tests. Remove canonical ambient root aliases so those fixtures exercise the
@@ -223,15 +226,12 @@ def pytest_runtest_setup(item):
 # order -- and nothing in a normal run records that. This hook is the only route that crosses the
 # test-container boundary: docker/run-tests.sh forwards a fixed environment allowlist, and
 # YOMUX_E2E_EVIDENCE_DIR is the one path bind-mounted at an identical absolute path on both
-# sides. It is off unless tools/defect2_harness.py has created the directory, so an ordinary run
-# writes nothing and pays one directory check per test.
+# sides. Every gate container provisions this path; the harness reuses the same recorder.
 def _defect2_attribution_path():
     evidence_dir = product_env("E2E_EVIDENCE_DIR", "") or ""
     if not evidence_dir:
         return None
     directory = Path(evidence_dir) / "defect2-attempt"
-    if not directory.is_dir():
-        return None
     return directory / f"worker-{os.environ.get('PYTEST_XDIST_WORKER') or 'master'}.jsonl"
 
 
@@ -256,10 +256,53 @@ def pytest_runtest_logreport(report):
         "start": float(getattr(report, "start", 0.0)) or time.time(),
         "pid": os.getpid(),
     }
-    # Never let attribution break the run it is observing: a full disk or a vanished mount is a
-    # lost record, not a failed test.
+    _write_test_attribution(row)
+
+
+def _write_test_attribution(row, path=None):
+    path = path if path is not None else _defect2_attribution_path()
+    if path is None:
+        return
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(_attribution_json_dumps(row, sort_keys=True) + "\n")
-    except OSError:
+    except OSError as error:
+        print(f"Test attribution unavailable at {path}: {error}", file=sys.stderr)
+
+
+def pytest_runtest_call(item):
+    path = _defect2_attribution_path()
+    item.stash[_attribution_path_key] = path
+    lease = item.funcargs.get("browser")
+    _write_test_attribution({"event": "start", "nodeid": item.nodeid,
+                             "worker": os.environ.get("PYTEST_XDIST_WORKER") or "master",
+                             "browser_generation": lease.generation if lease else None,
+                             "pid": os.getpid(), "at": time.time()}, path)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if report.when != "call":
         return
+    path = item.stash.get(_attribution_path_key, _defect2_attribution_path())
+    if path is None:
+        return
+    lease = item.funcargs.get("browser")
+    row = {"event": "finish", "nodeid": item.nodeid, "outcome": report.outcome,
+           "worker": os.environ.get("PYTEST_XDIST_WORKER") or "master",
+           "browser_generation": lease.generation if lease else None,
+           "pid": os.getpid(), "at": time.time()}
+    if report.user_properties:
+        row["properties"] = dict(report.user_properties)
+    if report.failed and lease:
+        try:
+            row["browser_history"] = lease.execute_script("""
+              return {finder:typeof fileTreeRenderHistory === 'undefined' ? [] : fileTreeRenderHistory,
+                dockview:window.__tabSwitchPerf?.fullRefreshStacks || window.__tabSwitchRefreshHistory || []};
+            """)
+        except WebDriverException as error:
+            row["browser_history_error"] = {"reason": "webdriver_unavailable", "detail": str(error)}
+    _write_test_attribution(row, path)

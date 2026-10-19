@@ -73,7 +73,7 @@ func TestTerminalTmuxScrollWorksWithMouseEnabledOrDisabled(t *testing.T) {
 			t.Setenv("YOMUX_TMUX_SOCKET", socket)
 			t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
 			s := &server{ignoreSizeChecked: true}
-			if output, err := s.tmuxCommand("new-session", "-d", "-s", "fixture", "seq 1 1000; exec cat").CombinedOutput(); err != nil {
+			if output, err := s.tmuxCommand("new-session", "-d", "-s", "fixture", "seq 1 1000; echo YOMUX_SCROLL_FIXTURE_DONE; exec cat").CombinedOutput(); err != nil {
 				t.Fatalf("create isolated tmux session: %v %s", err, output)
 			}
 			t.Cleanup(func() { _ = s.tmuxCommand("kill-server").Run() })
@@ -82,6 +82,10 @@ func TestTerminalTmuxScrollWorksWithMouseEnabledOrDisabled(t *testing.T) {
 					t.Fatalf("configure isolated tmux: %v %s", err, output)
 				}
 			}
+			waitFixtureCondition(t, "completed tmux scroll fixture", 5*time.Second, func() bool {
+				output, err := s.tmuxCommand("capture-pane", "-p", "-t", "fixture:0.0").Output()
+				return err == nil && strings.Contains(string(output), "YOMUX_SCROLL_FIXTURE_DONE")
+			})
 			s.handleMessage(io.Discard, nil, nil, nil, "fixture", "", []byte(`{"type":"tmux-scroll","direction":"up","lines":5}`), true, context.Background())
 			output, err := s.tmuxCommand("display-message", "-p", "-t", "fixture:0.0", "#{pane_mode} #{scroll_position} #{history_size}").CombinedOutput()
 			if err != nil {

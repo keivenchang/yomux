@@ -1,9 +1,9 @@
 {
   "baseline": {
-    "builder_blob": "a5f0898c0b9df733ede071a347323b7bdcd26048",
+    "builder_blob": "086876818a40863150b206c390c032d2a38e7880",
     "builder_path": "tools/static_build.py",
-    "source_commit": "c1c3ad9cde20f58c9571eb32c5f5d7a68469237a",
-    "source_state": "working tree with frontend changes before commit"
+    "source_commit": "1810cb5bd68e315fccd0b9a8eaffa800f38a55a3",
+    "source_state": "working tree with yo7111 Tabber publication coalescing changes"
   },
   "sha256": {
     "emoji-data.js": "ddbb8e55806e4ac11638564da232c9120c95bdd199be1199ccdb58a31e304084",
@@ -27,8 +27,8 @@
     "locales/vi.json": "ce0da9151e44281c939ac6ff7cfe23fb78db2f1ce4b838167b947db1df7d96df",
     "locales/zh-Hans.json": "9945b404dd156252dd1f50b9a79d6bcbc295c6cc05deae1bb84eb09cf04a9b45",
     "locales/zh-Hant.json": "140c11f22782a748faefcda13d7d80becf52a8ceda2a9dedfaa9a80753403d6a",
-    "yomux.css": "437567920be37624d6fb1161d1b1ad568c88dc72a02eef8607e54ede00ee88bd",
-    "yomux.js": "2ec1128bb3c9dc8e7cf8dc3896d16f9690665bf81d7ed5b4383212c57936dc97"
+    "yomux.css": "39daa278f7ce5a792677649a3c5ef2bea35233774f545f36f547d4a76ae0f617",
+    "yomux.js": "096012d3a60591051fc7d8a5cae3a8cf89a0e3a30c0f0649de6f097c885fdcac"
   },
   "reviewed_text_changes": {
     "yomux.js": [

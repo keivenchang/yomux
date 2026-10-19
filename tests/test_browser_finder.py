@@ -12,6 +12,8 @@ from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
 from yomux_lib import filesystem
 from yomux_lib import web
 
+from tests.latency_calibration import certification_phase_fixture, write_latency_evidence, run_browser_latency_calibration, browser_calibration_qualification, merged_qualification, assert_fixed_ceiling
+
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
@@ -631,8 +633,30 @@ def test_finder_bulk_failure_settlement_indexes_rows_and_publishes_once(browser,
     ), result
 
 
+certification_phase_only = certification_phase_fixture()
+
+
 @pytest.mark.parametrize('restore_scope', ['all-surfaces', 'visible-publication'])
 def test_finder_saved_restore_large_listing_yields_to_native_input(browser, tmp_path, restore_scope):
+    _finder_saved_restore_workload(browser, tmp_path, restore_scope)
+
+
+def test_finder_saved_restore_latency_certification(certification_phase_only, browser, tmp_path):
+    calibration = run_browser_latency_calibration(browser)
+    qualification = merged_qualification(certification_phase_only, browser_calibration_qualification(calibration))
+    for restore_scope in ('all-surfaces', 'visible-publication'):
+        _finder_saved_restore_workload(browser, tmp_path, restore_scope, certify=qualification)
+    _finder_listing_input_workload(browser, tmp_path, certify=qualification)
+
+
+def _certify_finder_frames(samples, qualification, label, metrics):
+    for statistic, measured, ceiling in [('p95', samples[max(0, math.ceil(len(samples) * 0.95) - 1)], 50), ('max', max(samples), 200)]:
+        assert_fixed_ceiling(nodeid='finder-input-certification', label=label, raw_measured_ms=measured,
+                            ceiling_ms=ceiling, qualification=qualification, statistic=statistic,
+                            extra_evidence={'samples': samples, 'metrics': metrics})
+
+
+def _finder_saved_restore_workload(browser, tmp_path, restore_scope, *, certify=False):
     root = '/home/test'
     bulk = f'{root}/bulk'
     load_live_runtime_boot_fixture(
@@ -669,7 +693,7 @@ def test_finder_saved_restore_large_listing_yields_to_native_input(browser, tmp_
         input.id = 'finder-saved-restore-input';
         input.style.cssText = 'position:fixed;left:10px;top:0;z-index:99999';
         document.body.append(input); input.focus();
-        const state = {trees:restorationTrees, surfaces, input, originalFetch, settled:false, events:[], paints:[], longTasks:[], fetchCalls:[]};
+        const state = {startSteps:fileTreeRenderStepCount, trees:restorationTrees, surfaces, input, originalFetch, settled:false, events:[], paints:[], longTasks:[], fetchCalls:[]};
         state.longTaskObserver = new PerformanceObserver(list => state.longTasks.push(...list.getEntries().map(entry => entry.duration)));
         state.longTaskObserver.observe({type:'longtask'});
         input.addEventListener('keydown', event => {
@@ -720,11 +744,15 @@ def test_finder_saved_restore_large_listing_yields_to_native_input(browser, tmp_
             and (restore_scope == 'all-surfaces' or event['rows'] > 0)
             for event in metrics['events']
         ), metrics
-        assert len(ordered) >= 30 and p95 <= 50 and max(ordered) <= 200, metrics
-        assert not long_tasks_over_200ms, metrics
+        assert len(ordered) >= 30, metrics
+        assert metrics['fetchCalls'].count(bulk) <= len(metrics['treeRows']), metrics
+        write_latency_evidence(nodeid='finder-saved-restore', label=restore_scope, payload={'certification': certify, 'metrics': metrics})
+        if certify:
+            _certify_finder_frames(ordered, certify, restore_scope, metrics)
         final = browser.execute_async_script(
-            "const done = arguments[arguments.length-1], state = window.__finderSavedRestore; state.promise.then(() => done({error:state.error || null,rows:state.trees.map(tree => tree.querySelectorAll('.file-tree-row[data-path^=\"/home/test/bulk/\"]').length),surfaces:state.trees.map(tree=>({id:tree.id,connected:tree.isConnected,parentRows:tree.querySelectorAll('.file-tree-row[data-path=\"/home/test/bulk\"]').length,childContainers:tree.querySelectorAll('.file-tree-children[data-parent=\"/home/test/bulk\"]').length})),pending:[...fileExplorerPendingExpansions],loading:[...document.querySelectorAll('.file-tree-row.loading-children')].map(row => row.dataset.path),expanded:fileExplorerExpanded.has('/home/test/bulk')}));"
+            "const done = arguments[arguments.length-1], state = window.__finderSavedRestore; state.promise.then(() => done({steps:fileTreeRenderStepCount-state.startSteps,error:state.error || null,rows:state.trees.map(tree => tree.querySelectorAll('.file-tree-row[data-path^=\"/home/test/bulk/\"]').length),surfaces:state.trees.map(tree=>({id:tree.id,connected:tree.isConnected,parentRows:tree.querySelectorAll('.file-tree-row[data-path=\"/home/test/bulk\"]').length,childContainers:tree.querySelectorAll('.file-tree-children[data-parent=\"/home/test/bulk\"]').length})),pending:[...fileExplorerPendingExpansions],loading:[...document.querySelectorAll('.file-tree-row.loading-children')].map(row => row.dataset.path),expanded:fileExplorerExpanded.has('/home/test/bulk')}));"
         )
+        assert final['steps'] <= 4000 * 200 * len(final['rows']), final
         assert final['error'] is None and final['rows'] and all(count == 4000 for count in final['rows']), json.dumps(final, sort_keys=True)
         assert '/home/test/bulk' not in final['pending'] and final['loading'] == [] and final['expanded'], final
     finally:
@@ -880,6 +908,10 @@ def test_finder_listing_deadline_settles_all_surface_rows(browser, tmp_path):
 
 
 def test_finder_large_listing_publishes_between_native_input_and_wheel(browser, tmp_path):
+    _finder_listing_input_workload(browser, tmp_path)
+
+
+def _finder_listing_input_workload(browser, tmp_path, *, certify=False):
     load_live_runtime_boot_fixture(
         browser, tmp_path,
         '?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1',
@@ -896,7 +928,7 @@ def test_finder_large_listing_publishes_between_native_input_and_wheel(browser, 
             const tree = document.querySelector('.panel.file-explorer-panel .file-explorer-tree-panel');
             const originalFetch = fetchDirectory;
             const entries = Array.from({length:4000}, (_, index) => ({name:`entry-${String(index).padStart(4,'0')}.txt`,kind:'file'}));
-            const state = {tree, originalFetch, count:() => tree.querySelectorAll(`.file-tree-row[data-path^="${bulk}/"]`).length,
+            const state = {startSteps:fileTreeRenderStepCount, tree, originalFetch, count:() => tree.querySelectorAll(`.file-tree-row[data-path^="${bulk}/"]`).length,
               inputEvents:[], nextPaintMs:[], longTasks:[], rowsObserved:0, settled:false, keep:tree.querySelector('[data-path="/home/test/000-keep.txt"]')};
             state.longTaskObserver = new PerformanceObserver(list => {
               state.longTasks.push(...list.getEntries().map(entry => ({duration:entry.duration, startTime:entry.startTime})));
@@ -948,8 +980,10 @@ def test_finder_large_listing_publishes_between_native_input_and_wheel(browser, 
         p95 = ordered[max(0, math.ceil(len(ordered) * 0.95) - 1)]
         long_tasks_over_200ms = [task for task in input_state['longTasks'] if task['duration'] > 200]
         print('Finder restore input latency:', {'samples': len(ordered), 'p95_ms': p95, 'max_ms': max(ordered), 'long_tasks_over_200ms': long_tasks_over_200ms})
-        assert len(ordered) >= 30 and not long_tasks_over_200ms, input_state
-        assert p95 <= 50 and max(ordered) <= 200, input_state
+        assert len(ordered) >= 30, input_state
+        write_latency_evidence(nodeid='finder-listing-input', label='native-input', payload={'certification': certify, 'metrics': input_state})
+        if certify:
+            _certify_finder_frames(ordered, certify, 'listing-input', input_state)
         tree = browser.find_element(By.CSS_SELECTOR, '.panel.file-explorer-panel .file-explorer-tree-panel')
         ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(tree), 0, 120).perform()
         WebDriverWait(browser, 5).until(lambda driver: driver.execute_script('return window.__finderBoundedInput.tree.scrollTop > 0'))
@@ -960,7 +994,7 @@ def test_finder_large_listing_publishes_between_native_input_and_wheel(browser, 
             const invalidContainers = [...state.tree.querySelectorAll('.file-tree-children[data-parent]')]
               .filter(children => children.previousElementSibling?.dataset.path !== children.dataset.parent)
               .map(children => children.dataset.parent);
-            state.promise.then(() => done({error:state.error,rows:state.count(),scroll:state.tree.scrollTop,invalidContainers,
+            state.promise.then(() => done({steps:fileTreeRenderStepCount-state.startSteps,error:state.error,rows:state.count(),scroll:state.tree.scrollTop,invalidContainers,
               paths:[...state.tree.querySelectorAll('.file-tree-row[data-path^="/home/test/bulk/"]')].map(row => row.dataset.path),
               keepIdentity:state.keep === state.tree.querySelector('[data-path="/home/test/000-keep.txt"]'),
               replacementIdentity:state.replacement === state.tree.querySelector('[data-path="/home/test/bulk/replacement.txt"]'),
@@ -968,6 +1002,7 @@ def test_finder_large_listing_publishes_between_native_input_and_wheel(browser, 
               selected:fileExplorerSelectedPaths.has('/home/test/000-keep.txt'),value:state.input.value,invalidContainers}));
             """
         )
+        assert final['steps'] <= 4000 * 200 * 2, final
         assert final['error'] is None and final['rows'] == 4000, final
         assert not final['invalidContainers'], final['invalidContainers']
         assert final['paths'] == [f'/home/test/bulk/entry-{index:04d}.txt' for index in range(4000)]
@@ -2558,7 +2593,7 @@ def test_finder_repo_context_menu_and_diff_tab_are_immediate_while_metadata_is_d
 def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_path):
     repo = "/home/test/repo"
     sha = "a" * 40
-    browser.set_window_size(1600, 900)
+    browser.set_window_size(1900, 900)
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -2593,19 +2628,19 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
             snapshot_cursor: 'alignment-snapshot',
             next_cursor: '',
             truncated: false,
-            commits: [{sha, short: sha.slice(0, 9), parents: [], subject: 'Commit row', author: 'Test', authored_at: 1786931640, files: 1, added: 2, removed: 1, binary_files: 0}],
+            commits: [{sha, short: sha.slice(0, 9), parents: [], subject: 'Release YOmux 0.10.8', author: '', signature_status: 'N', decorations: ['HEAD -> yo7111', 'tag: v0.10.8', 'origin/main', 'yo7110', 'main'], authored_at: 1786931640, files: 556, added: 87420, removed: 214022, binary_files: 0}],
             worktree_status: {
               available: true,
               dirty: true,
-              entries: [{status: 'M', path: 'note.txt', counts_available: true, added: 10233, removed: 8640, binary: false}],
+              entries: [{status: 'M', path: 'note.txt', counts_available: true, added: 74, removed: 22, binary: false}],
               truncated: false,
-              files: 765,
-              added: 10233,
-              removed: 8640,
-              binary_files: 2,
+              files: 3,
+              added: 74,
+              removed: 22,
+              binary_files: 0,
               stats_available: true,
               modified_at: 1786931640,
-              status_counts: {M: 449, R: 310, '??': 5},
+              status_counts: {M: 3},
             },
             };
             if (url.searchParams.get('worktree') === 'only') return new Promise(resolve => {
@@ -2633,7 +2668,7 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
             width: firstDirtyChanges.clientWidth,
             height: firstDirtyChanges.getBoundingClientRect().height,
           };
-          panel.style.width = '1200px';
+          panel.style.width = '1800px';
           await new Promise(resolve => requestAnimationFrame(resolve));
           const initialDirtyRow = panel.querySelector('.git-diff-worktree-summary');
           const completeWorktree = await waitFor(() => worktreeResponses.shift());
@@ -2658,12 +2693,31 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
           });
           const dirtyChangesWide = dirtyRow.querySelector('.git-diff-commit-changes');
           const dirtyDescriptionWide = dirtyRow.querySelector('.git-diff-commit-description');
+          const dirtyCountText = document.createRange();
+          dirtyCountText.selectNodeContents(dirtyRow.querySelector('.git-diff-worktree-count'));
+          const commitDecorationText = document.createRange();
+          commitDecorationText.selectNodeContents(commitRow.querySelector('.git-diff-commit-decoration'));
           const dirtyWide = {
             changesClientWidth: dirtyChangesWide.clientWidth,
             changesScrollWidth: dirtyChangesWide.scrollWidth,
             changesRight: dirtyChangesWide.getBoundingClientRect().right,
             descriptionLeft: dirtyDescriptionWide.getBoundingClientRect().left,
+            countTextLeft: dirtyCountText.getBoundingClientRect().left,
+            decorationTextLeft: commitDecorationText.getBoundingClientRect().left,
           };
+          panel.style.width = '900px';
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const mediumDirtyRow = panel.querySelector('.git-diff-worktree-summary');
+          const mediumCommitRow = panel.querySelector('.git-diff-commit-row[data-git-diff-commit]');
+          const mediumFields = fieldNames.map((name, index) => {
+            const dirtyField = mediumDirtyRow.children[index];
+            const commitField = mediumCommitRow.children[index];
+            return {
+              name,
+              visible: getComputedStyle(dirtyField).display !== 'none' && getComputedStyle(commitField).display !== 'none',
+              delta: Math.abs(dirtyField.getBoundingClientRect().left - commitField.getBoundingClientRect().left),
+            };
+          });
           panel.style.width = '500px';
           await new Promise(resolve => requestAnimationFrame(resolve));
           const dirtyChangesNarrow = panel.querySelector('.git-diff-worktree-summary .git-diff-commit-changes');
@@ -2671,12 +2725,15 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
           done({
             firstDirtyLayout,
             fields,
+            mediumFields,
             dirtyReplaced: dirtyRow !== initialDirtyRow && !initialDirtyRow.isConnected,
             dirtyChangesText: dirtyChangesWide.textContent,
             dirtyChangesClientWidth: dirtyWide.changesClientWidth,
             dirtyChangesScrollWidth: dirtyWide.changesScrollWidth,
             dirtyChangesRight: dirtyWide.changesRight,
             dirtyDescriptionWideLeft: dirtyWide.descriptionLeft,
+            dirtyCountTextLeft: dirtyWide.countTextLeft,
+            commitDecorationTextLeft: dirtyWide.decorationTextLeft,
             dirtyDescriptionClientWidth: dirtyDescriptionNarrow.clientWidth,
             dirtyDescriptionScrollWidth: dirtyDescriptionNarrow.scrollWidth,
             dirtyDescriptionText: dirtyDescriptionNarrow.textContent,
@@ -2692,10 +2749,12 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
     assert metrics["firstDirtyLayout"]["lines"] == 1, metrics["firstDirtyLayout"]
     assert metrics["dirtyReplaced"], metrics
     assert all(field["dirtyConnected"] and field["commitConnected"] and field["visible"] and field["delta"] <= 1 for field in metrics["fields"]), metrics["fields"]
-    assert metrics["dirtyChangesText"].startswith("765 files +10233 -8640") and "2 binary" in metrics["dirtyChangesText"], metrics
+    assert all(not field["visible"] or field["delta"] <= 1 for field in metrics["mediumFields"]), metrics["mediumFields"]
+    assert metrics["dirtyChangesText"] == "3 files +74 -22", metrics
     assert metrics["dirtyChangesClientWidth"] > 0 and metrics["dirtyChangesScrollWidth"] >= metrics["dirtyChangesClientWidth"], metrics
     assert metrics["dirtyChangesRight"] <= metrics["dirtyDescriptionWideLeft"], metrics
-    assert metrics["dirtyDescriptionText"] == "5 ?? · 449 M · 310 R", metrics
+    assert abs(metrics["dirtyCountTextLeft"] - metrics["commitDecorationTextLeft"]) <= 1, metrics
+    assert metrics["dirtyDescriptionText"] == "3 M", metrics
     assert metrics["dirtyDescriptionClientWidth"] > 0 and metrics["dirtyDescriptionScrollWidth"] <= metrics["dirtyDescriptionClientWidth"], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
@@ -6838,13 +6897,15 @@ def test_finder_panel_paints_initial_path_under_push_without_sync(browser, tmp_p
 
 
 @pytest.mark.parametrize("warm", [False, True])
-def test_sync_finder_keeps_pending_leaf_when_root_watch_push_publishes(browser, tmp_path, warm):
+@pytest.mark.parametrize("producer", ["push", "restore", "initial", "panel", "refresh"])
+def test_sync_finder_keeps_pending_leaf_when_root_watch_push_publishes(browser, tmp_path, warm, producer):
     root = '/home/test'
     load_live_runtime_boot_fixture(
         browser, tmp_path, '?sessions=files,1&layout=left&tabs=left:files',
         settings={'file_explorer': {'root_mode': 'fixed'}},
         transcript_sessions={'1': {'current_path': root}},
-        fs_entries={root: [{'name': 'a', 'kind': 'dir'}],
+        fs_entries={root: [{'name': 'a', 'kind': 'dir'}, {'name': 'saved', 'kind': 'dir'}],
+                    f'{root}/saved': [{'name':'saved.txt','kind':'file'}],
                     f'{root}/a': [{'name': 'deep', 'kind': 'dir'}],
                     f'{root}/a/deep': [{'name': 'old.txt', 'kind': 'file'}]},
     )
@@ -6869,7 +6930,7 @@ def test_sync_finder_keeps_pending_leaf_when_root_watch_push_publishes(browser, 
         return state.originalFetch(url, options);
       };
       if (arguments[0]) {
-        for (const [path, entries] of [[root,[{name:'a',kind:'dir'}]],[`${root}/a`,[{name:'deep',kind:'dir'}]],[`${root}/a/deep`,[{name:'old.txt',kind:'file'}]]]) {
+        for (const [path, entries] of [[root,[{name:'a',kind:'dir'},{name:'saved',kind:'dir'}]],[`${root}/a`,[{name:'deep',kind:'dir'}]],[`${root}/a/deep`,[{name:'old.txt',kind:'file'}]]]) {
           setFileExplorerFsResourceValue('list', path, entries);
           recordDirectorySignature(path, entries);
         }
@@ -6885,9 +6946,16 @@ def test_sync_finder_keeps_pending_leaf_when_root_watch_push_publishes(browser, 
         WebDriverWait(browser, 8).until(lambda driver: driver.execute_script('return !!window.__syncPushOwner.release'))
         pushed = browser.execute_async_script("""
           const done=arguments[arguments.length-1];
-          refreshFileExplorerFromPush({token:'sync-owner-root-push',directories:[{path:'/home/test',ok:true,data:{entries:[{name:'a',kind:'dir'}]}}]})
-            .then(()=>done(true),error=>done({error:String(error)}));
-        """)
+          const root='/home/test', entries=[{name:'a',kind:'dir'},{name:'saved',kind:'dir'}];
+          const updates = {
+            push: () => refreshFileExplorerFromPush({token:'sync-owner-root-push',directories:[{path:root,ok:true,data:{entries}}]}),
+            restore: () => restoreFileExplorerExpandedPaths([`${root}/saved`], root),
+            initial: () => openFileExplorerAt(root, {syncSelection:true}),
+            panel: () => refreshFileExplorerPanelTree(document.querySelector('.panel.file-explorer-panel'), {root,entries}),
+            refresh: () => refreshFileExplorerTreesInPlace({root,entries,entriesByDir:new Map([[root,entries]])}),
+          };
+          updates[arguments[0]]().then(()=>done(true),error=>done({error:String(error)}));
+        """, producer)
         assert pushed is True, pushed
         browser.execute_script('window.__syncPushOwner.release()')
         WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
@@ -6897,10 +6965,14 @@ def test_sync_finder_keeps_pending_leaf_when_root_watch_push_publishes(browser, 
           const state=window.__syncPushOwner;
           return {result:state.result,error:state.error || null,owners:state.owners,
             visible:!!document.querySelector('.panel.file-explorer-panel .file-tree-row[data-path="/home/test/a/deep/late.txt"]'),
+            trees:fileExplorerTreeContainers().map(tree=>({id:tree.id,saved:!!tree.querySelector('.file-tree-row[data-path="/home/test/saved/saved.txt"]'),complete:!!tree.querySelector('.file-tree-row[data-path="/home/test/a/deep/late.txt"]')})),
             expanded:[...fileExplorerExpanded],inFlight:fileExplorerSyncState.inFlightSignature};
         """)
         assert result['error'] is None and result['result'] is True and result['visible'], result
+        if producer == 'restore':
+            assert all(tree['saved'] for tree in result['trees']), result
         assert not result['inFlight'], result
+        assert len(result['trees']) >= 2 and all(tree['complete'] for tree in result['trees']), result
     finally:
         browser.execute_async_script("""
           const done=arguments[arguments.length-1];

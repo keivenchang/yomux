@@ -554,7 +554,8 @@ def test_isolated_server_readiness_failure_reaps_child_and_releases_port_lease(m
         stop_isolated_tmux_runtime(runtime)
 
 
-def test_isolated_server_restart_failure_reaps_descendants_without_adopting_child(monkeypatch, tmp_path):
+@pytest.mark.parametrize("failure_stage", ["observation", "readiness"])
+def test_isolated_server_restart_failure_reaps_descendants_without_adopting_child(monkeypatch, tmp_path, failure_stage):
     source_root = Path(__file__).resolve().parents[1]
     paths = build_paths(tmp_path / "server")
     runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path / "tmux", session_count=1)
@@ -581,11 +582,20 @@ def test_isolated_server_restart_failure_reaps_descendants_without_adopting_chil
                 restart_descendant_batches.append(list(batch))
             return batch
 
+        observations = []
+
+        def observe_shutdown():
+            assert server.stopped and old_process.poll() is not None
+            observations.append(old_process.pid)
+            if failure_stage == "observation":
+                raise RuntimeError("controlled restart readiness failure")
+
         monkeypatch.setattr(isolated_server_module, "wait_until_serving", fail_readiness)
         monkeypatch.setattr(isolated_server_module, "process_descendants", record_descendants)
         monkeypatch.setattr(isolated_server_module, "reap_descendants", record_reap)
         with pytest.raises(RuntimeError, match="controlled restart readiness failure"):
-            server.restart()
+            server.restart(after_stop=observe_shutdown)
+        assert observations == [old_process.pid]
         assert server.stopped
         assert server.process is old_process
         assert old_process.poll() is not None

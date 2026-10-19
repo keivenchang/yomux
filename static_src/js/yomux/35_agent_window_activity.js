@@ -995,7 +995,41 @@ function agentWindowActivityRefreshSessions(options = {}) {
   return session ? [session] : (typeof sessions === 'undefined' ? [] : sessions);
 }
 
-function refreshAgentWindowActivityDisplays(sessionNames = sessions) {
+function tabberActivityRenderSignature(payload = tabberActivityPayload) {
+  return JSON.stringify([payload?.topology_generation, payload?.session_order, payload?.sessions,
+    payload?.activity, payload?.agents, payload?.agent_windows, payload?.agent_window_status_fresh]);
+}
+
+function tabberActivityPublicationSignature(payload = tabberActivityPayload) {
+  return JSON.stringify([agentWindowSnapshotRevision(payload), tabberActivityRenderSignature(payload)]);
+}
+
+function refreshTabberPanelsForAgentWindowPublication(options = {}) {
+  if (typeof refreshTabberPanels !== 'function'
+      || typeof itemInLayout !== 'function'
+      || typeof tabberItemId === 'undefined'
+      || options.refreshTabber === false
+      || !itemInLayout(tabberItemId)) return false;
+  const revisionValues = Array.isArray(options.revision) ? options.revision : [options.revision];
+  const revisions = [...new Set(revisionValues.map(Number).filter(value => Number.isInteger(value) && value > 0))];
+  const revisionSignature = JSON.stringify(revisions.sort((left, right) => left - right));
+  const previous = refreshTabberPanelsForAgentWindowPublication.lastPublication
+    || {revisionSignature: '', activitySignature: '', statusSignature: ''};
+  const activitySignature = tabberActivityRenderSignature();
+  const statusSignature = typeof autoApproveStates === 'undefined' ? '' : JSON.stringify([...autoApproveStates.entries()]);
+  // Only server publications coalesce. Local acknowledgement and timer callbacks must repaint
+  // even when their records have not changed since the previous render.
+  if (revisions.length > 0 && revisionSignature === previous.revisionSignature
+      && activitySignature === previous.activitySignature
+      && statusSignature === previous.statusSignature) return false;
+  refreshTabberPanels(options);
+  if (revisions.length > 0) {
+    refreshTabberPanelsForAgentWindowPublication.lastPublication = {revisionSignature, activitySignature, statusSignature};
+  }
+  return true;
+}
+
+function refreshAgentWindowActivityDisplays(sessionNames = sessions, options = {}) {
   const changedSessions = [...new Set((Array.isArray(sessionNames) ? sessionNames : []).map(String).filter(Boolean))];
   for (const [item, view] of tabberViewSessions) {
     if (changedSessions.includes(view.sourceSession)) changedSessions.push(item);
@@ -1011,10 +1045,7 @@ function refreshAgentWindowActivityDisplays(sessionNames = sessions) {
       updatePanelWindowStepButtons(session, transcriptMetadataState.payload.sessions?.[session]);
     }
   }
-  if (typeof refreshTabberPanels === 'function'
-      && typeof itemInLayout === 'function'
-      && typeof tabberItemId !== 'undefined'
-      && itemInLayout(tabberItemId)) refreshTabberPanels();
+  refreshTabberPanelsForAgentWindowPublication(options);
   scheduleAgentWindowActivityAnimationSync();
 }
 
