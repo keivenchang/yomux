@@ -208,6 +208,12 @@ func classifyPaneStatus(pane AgentStatusPane, request AgentStatusRequest) AgentS
 		stoppedAt = request.WorkingStoppedAt
 	}
 	result := AgentStatusResult{RawStatus: raw, Acknowledged: acknowledged, WorkingStoppedAt: stoppedAt}
+	if CapacityNoticeCurrent(pane.VisibleText) {
+		result.Status = AgentStatusError
+		result.Evidence = []string{"model-capacity-notice"}
+		result.AttentionKind = "unknown"
+		return result
+	}
 	switch raw {
 	case "approval", "needs-approval", "needs-input", "attention", "interrupted":
 		result.Status = AgentStatusAsk
@@ -263,6 +269,61 @@ func classifyPaneStatus(pane AgentStatusPane, request AgentStatusRequest) AgentS
 	result.Status = AgentStatusIdle
 	result.Evidence = []string{"settled-status"}
 	return result
+}
+
+// CapacityNoticeCurrent recognizes the visible Codex capacity failure only
+// while it remains the newest turn output above the live composer. Sharing this
+// predicate keeps status display and YO's optional retry worker in agreement.
+func CapacityNoticeCurrent(visible string) bool {
+	lines := strings.Split(strings.ReplaceAll(visible, "\r\n", "\n"), "\n")
+	composer := -1
+	for index := len(lines) - 1; index >= max(0, len(lines)-12); index-- {
+		if capacityComposerLine(strings.TrimSpace(lines[index])) {
+			composer = index
+			break
+		}
+	}
+	if composer < 0 {
+		return false
+	}
+	for index := composer - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if line == "" || capacityComposerFooterLine(line) || capacityRuleLine(line) {
+			continue
+		}
+		return capacityNoticeLine(line)
+	}
+	return false
+}
+
+func capacityNoticeLine(line string) bool {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "■") {
+		return false
+	}
+	line = strings.TrimLeft(strings.TrimPrefix(line, "■"), " \t\r\n\v\f")
+	return line == "Selected model is at capacity. Please try a different model."
+}
+
+func capacityComposerLine(line string) bool {
+	return strings.HasPrefix(line, "›") || strings.HasPrefix(line, "❯") || strings.HasPrefix(line, ">")
+}
+
+func capacityComposerFooterLine(line string) bool {
+	lower := strings.ToLower(line)
+	return strings.HasPrefix(lower, "gpt-") || strings.HasPrefix(lower, "claude code") || strings.HasPrefix(lower, "bypass permissions") || strings.HasPrefix(lower, "tip:")
+}
+
+func capacityRuleLine(line string) bool {
+	if line == "" {
+		return false
+	}
+	for _, character := range line {
+		if !strings.ContainsRune("─━╭╮╰╯│┌┐└┘", character) {
+			return false
+		}
+	}
+	return true
 }
 
 // Empty terminal rows below the composer must not displace current evidence or its identity.

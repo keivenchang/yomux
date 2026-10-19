@@ -1010,6 +1010,7 @@ class _BrowserDriverLease:
     """Stable fixture object whose worker-local Chrome may be replaced after a crash."""
 
     def __init__(self, driver):
+        object.__setattr__(self, "generation", time.time_ns())
         object.__setattr__(self, "_driver", driver)
         object.__setattr__(self, "_retirement_lease", WebDriverLease.from_driver(driver))
 
@@ -1017,7 +1018,7 @@ class _BrowserDriverLease:
         return getattr(self._driver, name)
 
     def __setattr__(self, name, value):
-        if name in {"_driver", "_retirement_lease"}:
+        if name in {"_driver", "_retirement_lease", "generation"}:
             object.__setattr__(self, name, value)
         else:
             setattr(self._driver, name, value)

@@ -316,7 +316,20 @@ def test_git_provenance_fixture_preserves_index_and_frozen_blobs_without_operato
         for path in paths:
             path.chmod(0o555 if path.is_dir() else 0o444)
         copied = bazel_native.capture_git_fixture(workspace, second, revision, contract.repository_git_environment())
-        assert next((copied / "objects/pack").glob("*.pack")).read_bytes() == next((fixture / "objects/pack").glob("*.pack")).read_bytes()
+
+        def packed_object_inventory(repository):
+            index = next((repository / "objects/pack").glob("*.idx"))
+            output = subprocess.check_output(
+                ["git", "--git-dir=" + str(repository), "verify-pack", "-v", str(index)], text=True
+            )
+            return {
+                fields[0]: (fields[1], int(fields[2]))
+                for line in output.splitlines()
+                if len(fields := line.split()) >= 5 and len(fields[0]) == 40
+            }
+
+        # Pack ordering and headers can vary even when every content-addressed object is identical.
+        assert packed_object_inventory(copied) == packed_object_inventory(fixture)
     finally:
         for path in paths:
             path.chmod(0o700 if path.is_dir() else 0o600)

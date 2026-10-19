@@ -663,6 +663,7 @@ let tabberActivityPayload = {activity: {}, agents: []};
 let tabberActivityRefreshMs;
 let tabberLaunchWarmupStarted = false;
 const tabberActivityState = {
+  publishedSignature: '',
   requestGeneration: 0,
   appliedGeneration: 0,
   loaded: false,
@@ -692,6 +693,7 @@ const fileExplorerFinderSessionFilesState = {
   diffBackfillPending: false,
   partialBackfillPainted: false,
   fastListingPainted: false,
+  fastPaintGeneration: 0,
   guard: makeGenerationGuard(),
   abortController: null,
   completionWaiter: null,
@@ -1311,6 +1313,7 @@ const DROP_PREVIEW_CLASSES = Object.freeze([
 function makeGenerationGuard() {
   let generation = 0;
   return Object.freeze({
+    get generation() { return generation; },
     begin() {
       const current = ++generation;
       return () => current === generation;

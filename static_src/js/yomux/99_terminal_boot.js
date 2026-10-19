@@ -5511,6 +5511,7 @@ function loadAutoStatuses(options = {}) {
   if (loadAutoStatuses.request && options.force !== true) return loadAutoStatuses.request;
   if (options.force !== true && options.preferFresh === true && autoApproveSnapshotIsFresh()) return Promise.resolve(loadAutoStatuses.lastResult);
   const guardIsCurrent = loadAutoStatuses.guard.begin();
+  const requestGeneration = loadAutoStatuses.guard.generation;
   const topologyEpoch = tmuxTopologyEpoch;
   const requestIsCurrent = () => guardIsCurrent() && topologyEpoch === tmuxTopologyEpoch;
   const request = (async () => {
@@ -5521,7 +5522,7 @@ function loadAutoStatuses(options = {}) {
       if (!statsOnlyBootEnabled()) {
         const payload = await fetchAutoApproveSnapshot();
         if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
-        routeResult = applyAutoApprovePayload(payload, {...options, topologyEpoch});
+        routeResult = applyAutoApprovePayload(payload, {...options, topologyEpoch, requestGeneration});
       }
       // Go owns agent status through the activity product. Seed the activity cache
       // when the full app starts, and continue using it as the live-status repair
@@ -5539,7 +5540,7 @@ function loadAutoStatuses(options = {}) {
     } else {
       const payload = await fetchAutoApproveSnapshot();
       if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
-      result = applyAutoApprovePayload(payload, {...options, topologyEpoch});
+      result = applyAutoApprovePayload(payload, {...options, topologyEpoch, requestGeneration});
     }
     if (requestIsCurrent()) {
       loadAutoStatuses.lastResult = result;
@@ -5571,6 +5572,7 @@ function loadAutoStatuses(options = {}) {
     }
     result = {applied: false, sessionsChanged: false, previousActive: activeSessions.slice()};
   }
+  if (result) result.requestGeneration = requestGeneration;
   if (options.render !== false && !result?.rendered) renderAutoApproveStatusSurfaces(result);
   return result;
   })();
@@ -5596,6 +5598,11 @@ function autoApproveStateWithSnapshotRevision(state, revision = agentWindowSnaps
 function renderAutoApproveStatusSurfaces(result = {}) {
   if (typeof refreshDebugAgentWindowLiveDetails === 'function') refreshDebugAgentWindowLiveDetails();
   if (Array.isArray(result?.changedSessions) && !result.changedSessions.length && !result.sessionsChanged) {
+    const revisionSessions = [...autoApproveStates.keys()];
+    refreshTabberPanelsForAgentWindowPublication({producer: 'status-response',
+      requestGeneration: result.requestGeneration,
+      revision: revisionSessions.map(session => agentWindowSnapshotRevision(autoApproveStates.get(session))),
+      changedSessions: []});
     result.rendered = true;
     return;
   }
@@ -5608,7 +5615,8 @@ function renderAutoApproveStatusSurfaces(result = {}) {
   // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
   // updated the title but never re-synced the markers).
     renderAutoApproveButtons(changedSessions);
-    refreshAgentWindowActivityDisplays(changedSessions);
+    refreshAgentWindowActivityDisplays(changedSessions, {producer: 'status-response',
+      requestGeneration: result.requestGeneration, revision: changedSessions.map(session => agentWindowSnapshotRevision(autoApproveStates.get(session))), changedSessions});
     trackSessionStateChanges(changedSessions);
     syncTerminalAttentionHighlights(changedSessions);
     if (result && typeof result === 'object') result.rendered = true;
@@ -5777,6 +5785,7 @@ function applyAutoApprovePayload(payload, options = {}) {
   }
   const changedSessions = Array.from(changedSessionSet);
   const result = {applied: true, sessionsChanged, previousActive, changedSessions, workingAgentTransitionNotifications: 0};
+  if (options.requestGeneration !== undefined) result.requestGeneration = options.requestGeneration;
   if (options.render !== false) renderAutoApproveStatusSurfaces(result);
   // Deliver after the status render. Rendering may rebuild a pane and its toast stack; inserting a
   // transition toast before that pass makes it disappear immediately even though classification ran.

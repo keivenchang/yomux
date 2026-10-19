@@ -2043,28 +2043,153 @@ test('status publication repaints Pane Tabs and Tabber through one display owner
   const activity = fs.readFileSync('static_src/js/yomux/35_agent_window_activity.js', 'utf8');
   const painted = [];
   const context = {
-    sessions: ['yo7111'], tabberViewSessions: new Map(), tabberItemId: '__tabber__',
+    autoApproveStates: new Map([['yo7111', {agent_window_snapshot_revision:17}]]),
+    sessions: ['yo7111'], tabberViewSessions: new Map(), tabberItemId: '__tabber__', tabberActivityPayload: {activity: {}},
     clientPerfStart() {}, clientPerfEnd() {}, updateDocumentTitle() {},
     renderAutoApproveButtons() {}, trackSessionStateChanges() {}, syncTerminalAttentionHighlights() {},
     updateTopbarActivityStatus() {}, updateSessionStateClasses() {}, refreshPaneTabSessionPopovers() {},
     syncSessionTabLeadingActivityChrome() {painted.push('pane');},
-    itemInLayout: () => true, refreshTabberPanels() {painted.push('tabber');},
+    itemInLayout: () => true, refreshTabberPanels(options) {
+      painted.push('tabber');
+      assert.equal(options.producer, 'status-response');
+      assert.equal(options.requestGeneration, 3);
+      assert.deepEqual(Array.from(options.revision), [17]);
+    },
     scheduleAgentWindowActivityAnimationSync() {},
   };
-  for (const [text, name] of [[activity, 'refreshAgentWindowActivityDisplays'], [boot, 'renderAutoApproveStatusSurfaces']]) {
+  for (const [text, name] of [[activity, 'agentWindowSnapshotRevision'], [activity, 'tabberActivityRenderSignature'], [activity, 'tabberActivityPublicationSignature'], [activity, 'refreshTabberPanelsForAgentWindowPublication'], [activity, 'refreshAgentWindowActivityDisplays'], [boot, 'renderAutoApproveStatusSurfaces']]) {
     const start = text.indexOf(`function ${name}(`);
     const end = text.indexOf('\nfunction ', start + 1);
     vm.runInNewContext(text.slice(start, name === 'renderAutoApproveStatusSurfaces' ? text.indexOf('\nlet deferredSealedAutoApprovePayload', start) : end), context);
   }
-  context.renderAutoApproveStatusSurfaces({changedSessions: ['yo7111'], sessionsChanged: false});
+  context.renderAutoApproveStatusSurfaces({changedSessions: ['yo7111'], sessionsChanged: false, requestGeneration:3});
   assert.deepEqual(painted, ['pane', 'tabber'], 'the accepted status snapshot repaints both surfaces before returning');
+});
+
+test('Tabber coalesces identical status revisions but applies changed status content', () => {
+  const activity = fs.readFileSync('static_src/js/yomux/35_agent_window_activity.js', 'utf8');
+  const painted = [];
+  const records = new Map();
+  const context = {
+    agentWindowActivityRecords: records,
+    autoApproveStates: new Map([['yo7111', {agent_window_snapshot_revision:17, enabled:false}]]),
+    tabberActivityPayload: {activity: {}, topology_generation: 3, session_order: ['yo7111'],
+      sessions: {yo7111: {name: 'yo7111'}}, agent_window_snapshot_revision: 17}, tabberItemId: '__tabber__',
+    itemInLayout: () => true,
+    refreshTabberPanels() {painted.push(context.autoApproveStates.get('yo7111').enabled);},
+  };
+  const revisionStart = activity.indexOf('function agentWindowSnapshotRevision(');
+  const revisionEnd = activity.indexOf('\nfunction agentWindowSnapshotIsAuthoritative(', revisionStart);
+  vm.runInNewContext(activity.slice(revisionStart, revisionEnd), context);
+  const signatureStart = activity.indexOf('function tabberActivityRenderSignature(');
+  const signatureEnd = activity.indexOf('\nfunction refreshTabberPanelsForAgentWindowPublication(', signatureStart);
+  const publicationStart = activity.indexOf('function tabberActivityPublicationSignature(', signatureStart);
+  vm.runInNewContext(activity.slice(signatureStart, publicationStart), context);
+  vm.runInNewContext(activity.slice(publicationStart, signatureEnd), context);
+  const start = activity.indexOf('function refreshTabberPanelsForAgentWindowPublication(');
+  const end = activity.indexOf('\nfunction refreshAgentWindowActivityDisplays(', start);
+  vm.runInNewContext(activity.slice(start, end), context);
+  const publish = () => context.refreshTabberPanelsForAgentWindowPublication({
+    producer: 'status-response', revision: [17], changedSessions: ['yo7111'],
+  });
+  assert.equal(publish(), true, 'the first status revision publishes');
+  records.set('yo7111:0:claude', {activity: {updatedAtMs: 100}, transitionPulseRefresh: {untilMs: 200}});
+  assert.equal(publish(), false, 'renderer timestamps cannot republish an identical server revision');
+  context.tabberActivityPayload = {...context.tabberActivityPayload,
+    topology_generation: 4, session_order: ['yo7111', 'yo7112'],
+    sessions: {yo7111: {name: 'yo7111'}, yo7112: {name: 'yo7112'}}};
+  assert.equal(publish(), true, 'same-revision topology and roster updates still publish');
+  context.autoApproveStates.set('yo7111', {agent_window_snapshot_revision:17, enabled:true});
+  assert.equal(publish(), true, 'changed status content still publishes at the same revision');
+  assert.deepEqual(painted, [false, false, true]);
+});
+
+test('Tabber republishes local acknowledgement and transition timer changes', () => {
+  const activity = fs.readFileSync('static_src/js/yomux/35_agent_window_activity.js', 'utf8');
+  const painted = [];
+  const agentWindowActivityRecords = new Map([['one:1:claude', {
+    activity: {visualTone: 'attention', transitionStartedAt: 1}, acknowledgedStoppedAt: 0,
+    stoppedRefresh: null, transitionPulseRefresh: null,
+    acknowledgementVisual: {startedAtMs: 10, untilMs: 20, durationMs: 10,
+      acknowledgementKey: 'ack-one', agent: {session: 'one', state: 'idle'}},
+  }]]);
+  const context = {
+    agentWindowActivityRecords, tabberActivityPayload: {activity: {}}, tabberItemId: '__tabber__',
+    itemInLayout: () => true, refreshTabberPanels() {painted.push('tabber');},
+  };
+  for (const name of ['tabberActivityRenderSignature',
+    'refreshTabberPanelsForAgentWindowPublication']) {
+    const start = activity.indexOf(`function ${name}(`);
+    const end = activity.indexOf('\nfunction ', start + 1);
+    vm.runInNewContext(activity.slice(start, end), context);
+  }
+  const publish = () => context.refreshTabberPanelsForAgentWindowPublication({revision: []});
+  assert.equal(publish(), true, 'initial local state renders');
+  assert.equal(publish(), true, 'local refreshes always apply even without a record change');
+  agentWindowActivityRecords.get('one:1:claude').acknowledgementVisual = null;
+  assert.equal(publish(), true, 'acknowledgement expiry removes the local marker');
+  agentWindowActivityRecords.get('one:1:claude').transitionPulseRefresh = {untilMs: 30};
+  assert.equal(publish(), true, 'transition timer arming changes rendered pulse state');
+  agentWindowActivityRecords.get('one:1:claude').transitionPulseRefresh = null;
+  assert.equal(publish(), true, 'transition timer expiry refreshes the settled state');
+  agentWindowActivityRecords.get('one:1:claude').stoppedRefresh = {untilMs: 40};
+  assert.equal(publish(), true, 'stopped-state timer arming changes rendered pulse state');
+  agentWindowActivityRecords.get('one:1:claude').stoppedRefresh = null;
+  assert.equal(publish(), true, 'stopped-state timer expiry refreshes the settled state');
+  agentWindowActivityRecords.get('one:1:claude').acknowledgedStoppedAt = 7;
+  assert.equal(publish(), true, 'local stopped acknowledgement changes rendered status');
+  assert.equal(painted.length, 8);
+});
+
+test('Tabber retries a failed status refresh on the next unchanged poll', () => {
+  const boot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+  const activity = fs.readFileSync('static_src/js/yomux/35_agent_window_activity.js', 'utf8');
+  const autoApproveStates = new Map([
+    ['one', {agent_window_snapshot_revision:17}],
+    ['two', {agent_window_snapshot_revision:18}],
+  ]);
+  let refreshAttempts = 0;
+  const context = {
+    autoApproveStates,
+    sessions: ['one', 'two'],
+    tabberViewSessions: new Map(),
+    tabberItemId: '__tabber__',
+    tabberActivityPayload: {activity: {}, session_order: ['one', 'two']},
+    clientPerfStart() {}, clientPerfEnd() {}, updateDocumentTitle() {},
+    refreshDebugAgentWindowLiveDetails() {},
+    renderAutoApproveButtons() {}, trackSessionStateChanges() {}, syncTerminalAttentionHighlights() {},
+    updateTopbarActivityStatus() {}, updateSessionStateClasses() {}, refreshPaneTabSessionPopovers() {},
+    syncSessionTabLeadingActivityChrome() {}, scheduleAgentWindowActivityAnimationSync() {},
+    itemInLayout: () => true,
+    refreshTabberPanels() {
+      refreshAttempts += 1;
+      if (refreshAttempts === 1) throw new Error('transient Tabber render failure');
+    },
+  };
+  for (const name of ['agentWindowSnapshotRevision', 'tabberActivityRenderSignature',
+    'tabberActivityPublicationSignature', 'refreshTabberPanelsForAgentWindowPublication',
+    'refreshAgentWindowActivityDisplays']) {
+    const start = activity.indexOf(`function ${name}(`);
+    const end = activity.indexOf('\nfunction ', start + 1);
+    vm.runInNewContext(activity.slice(start, end), context);
+  }
+  const renderStart = boot.indexOf('function renderAutoApproveStatusSurfaces(');
+  vm.runInNewContext(boot.slice(renderStart, boot.indexOf('\nlet deferredSealedAutoApprovePayload', renderStart)), context);
+
+  assert.throws(() => context.renderAutoApproveStatusSurfaces({
+    changedSessions: ['one', 'two'], sessionsChanged: false, requestGeneration:3,
+  }), /transient Tabber render failure/);
+  context.renderAutoApproveStatusSurfaces({changedSessions: [], sessionsChanged: false, requestGeneration:4});
+  context.renderAutoApproveStatusSurfaces({changedSessions: [], sessionsChanged: false, requestGeneration:5});
+  assert.equal(refreshAttempts, 2, 'the unchanged poll retries once and the successful publication is coalesced');
 });
 
 test('revision-only status publication refreshes mounted debug details', () => {
   const boot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
   const start = boot.indexOf('function renderAutoApproveStatusSurfaces(');
   let refreshed = 0;
-  const context = {refreshDebugAgentWindowLiveDetails() {refreshed++;}};
+  const context = {autoApproveStates: new Map(), refreshTabberPanelsForAgentWindowPublication() {},
+    refreshDebugAgentWindowLiveDetails() {refreshed++;}};
   vm.runInNewContext(boot.slice(start, boot.indexOf('\nlet deferredSealedAutoApprovePayload', start)), context);
   const result = {changedSessions: [], sessionsChanged: false};
   context.renderAutoApproveStatusSurfaces(result);

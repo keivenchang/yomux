@@ -20,6 +20,12 @@ go_library(
         "//internal/cache:cache_lib",
         "//internal/productenv:productenv_lib",
         "//internal/work:work_lib",
+        "@com_github_go_git_gcfg//:go_default_library",
+        "@com_github_go_git_go_billy_v5//:go_default_library",
+        "@com_github_go_git_go_git_v5//:go_default_library",
+        "@com_github_go_git_go_git_v5//plumbing",
+        "@com_github_go_git_go_git_v5//plumbing/cache",
+        "@com_github_go_git_go_git_v5//storage/filesystem",
         "@com_github_mattn_go_sqlite3//:go_default_library",
         "@org_golang_x_sys//unix",
         "@org_golang_x_text//cases",
@@ -38,7 +44,10 @@ go_test_pair(
     embed = [":finder_lib"],
     race_shard_count = 2,
     shard_count = 2,
-    deps = ["//internal/testsupport:testsupport_lib"],
+    deps = [
+        "//internal/testsupport:testsupport_lib",
+        "@com_github_go_git_go_billy_v5//:go_default_library",
+    ],
 )
 
 filegroup(

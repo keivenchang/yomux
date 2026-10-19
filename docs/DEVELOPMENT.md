@@ -54,9 +54,23 @@ Then build and restart the active development server using the commands below. R
 
 Mac qualification on base `e8e1e824590962ee5e333ed782877762c2007bc0`: 26 Darwin tests passed with the race detector, and an isolated negative control that removed concurrent-build coalescing failed with two clone builders. The restarted yo8880 server returned 50 history commits with HTTP 200 in 0.838, 0.664, and 0.664 seconds on three warm requests; working-tree status took 0.607 seconds. Real Chromium rendered 31 history rows and 38 enriched commit counts without history/stats errors, and the served JavaScript hash matched the rebuilt bundle. The first cold browser load still took 6.136 seconds; this cache is service-owned and does not survive restart. The broader native Finder target reported 230 passing and 33 failing top-level tests; all 33 search-index/discovery failures also reproduced on unchanged prior base `4d33cbc967ef13772f1339f58189816a70952c9e`. These focused Mac results do not establish a green full gate or release readiness.
 
+### Descriptor history prototype
+
+The opt-in `--diagnose-history-prototype` command authorizes `--repo` through Finder under the required `--root`. It compares the snapshot reader with go-git v5.19.3 in a separate helper process. Normal Repo Diff HTTP requests continue using the snapshot reader and its shared cache.
+
+```bash
+bazel-bin/cmd/yomux-go/yomux-go_/yomux-go --diagnose-history-prototype --root ~/dev/yomux --repo ~/dev/yomux/yo8881 --limit 50
+```
+
+The JSON report contains one initial request and three repeats for each reader, elapsed milliseconds including helper startup, HEAD, refs, commit metadata, pagination, errors, and qualification differences. OS cache state is uncontrolled. `--offset` selects the next page; `--head` can reject a changed HEAD. Each read has a 30-second deadline. Cancellation kills and reaps the helper, with no automatic retries.
+
+The prototype reads whole-repository metadata only. It does not calculate diffs, statistics, worktree status, or signatures. Directory descriptors pin the Git directory, common directory, and object directory; every component opens relative to those handles and rejects symlinks. Configuration includes and executable settings are ignored. The shared repository-extension allowlist still applies; SHA-256, reftable, shallow boundaries, grafts, replacement refs, alternates, and decoration exclusions return explicit prototype errors.
+
+Qualification fails when go-git's committer-time ordering differs from native Git's `--topo-order`, or when HEAD, refs, pagination, or metadata differ. The equal-timestamp merge fixture exposes an ordering difference. A Mac checkout measurement also exposed an extra `refs/.DS_Store` entry from go-git. These failures prevent this prototype from qualifying as a replacement. Removing snapshot copies or activating the reader for Repo Diff requires a subsequent implementation based on qualification evidence.
+
 ### Qualified native gate
 
-Use `--execution qualified-native` to run the parallel functional gate without Docker. Prepare the platform bundle before starting the gate; execution refuses missing dependencies and never downloads them. Use secondary scratch storage when available and `/tmp` otherwise. The bundle must be outside operator HOME on macOS.
+Use `--execution qualified-native` to run the parallel functional gate without Docker. Prepare the platform bundle before starting the gate; execution refuses missing dependencies and never downloads them. Secondary scratch storage is optional: use it for large jobs when available, or use `/tmp` when it is not. Its absence does not block the gate. The bundle must be outside operator HOME on macOS.
 
 The acquisition command copies platform tools and prepares the locked Python packages, agent clients, Go modules, Bazel registry, and repository cache. macOS acquisition requires arm64 and matching installed Python, Node, Go, Bazel, JDK, Command Line Tools, and cached Chrome/ChromeDriver. Linux acquisition exports an existing immutable comparison image; Docker is used during that preparation only. A host without Docker can receive the prepared platform bundle or freeze an already prepared runtime layout with `tools/native_bundle_prepare.py --layout <layout> --output <bundle-directory>`.
 

@@ -36,7 +36,6 @@ const (
 	goYoloCaptureTimeout     = 2 * time.Second
 )
 
-var goCapacityNotice = regexp.MustCompile(`(?m)^\s*■\s*Selected model is at capacity\. Please try a different model\.\s*$`)
 var goNewerPromptEvidence = regexp.MustCompile(`(?im)(?:would you like to|do you want to|press enter to confirm|allow once|allow always|permission required|needs your approval|\bapprove\b|\breject\b)`)
 var goComposerPromptLine = regexp.MustCompile(`^\s*[❯›>](.*)$`)
 var goComposerPlaceholder = regexp.MustCompile(`(?i)^(?:ask (?:codex|claude)(?: to do anything)?|ask anything|type your message)$`)
@@ -84,27 +83,7 @@ func goCapacityRecoveryAllowed(agentState, visible string) bool {
 }
 
 func goCapacityNoticeCurrent(visible string) bool {
-	lines := strings.Split(strings.ReplaceAll(visible, "\r\n", "\n"), "\n")
-	composer := -1
-	for index := len(lines) - 1; index >= max(0, len(lines)-12); index-- {
-		if goComposerPromptLine.MatchString(strings.TrimSpace(lines[index])) {
-			composer = index
-			break
-		}
-	}
-	if composer < 0 {
-		return false
-	}
-	// A capacity notice is actionable only when it is the latest visible turn
-	// content. A retained notice above subsequent successful output is stale.
-	for index := composer - 1; index >= 0; index-- {
-		line := strings.TrimSpace(lines[index])
-		if line == "" || goComposerFooterLine.MatchString(line) || goComposerRuleLine.MatchString(line) {
-			continue
-		}
-		return goCapacityNotice.MatchString(line)
-	}
-	return false
+	return stats.CapacityNoticeCurrent(visible)
 }
 
 func goCapacityRetryDue(now, lastSent time.Time) bool {

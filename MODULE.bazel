@@ -52,7 +52,7 @@ go_deps.gazelle_override(
     ],
     path = "github.com/mattn/go-sqlite3",
 )
-use_repo(go_deps, "com_github_mattn_go_sqlite3", "in_gopkg_yaml_v3", "org_golang_x_sys", "org_golang_x_text")
+use_repo(go_deps, "com_github_go_git_gcfg", "com_github_go_git_go_billy_v5", "com_github_go_git_go_git_v5", "com_github_mattn_go_sqlite3", "in_gopkg_yaml_v3", "org_golang_x_sys", "org_golang_x_text")
 
 runtime = use_extension("//:tools/bazel_runtime_toolchain.bzl", "runtime")
 use_repo(runtime, "yomux_runtime")

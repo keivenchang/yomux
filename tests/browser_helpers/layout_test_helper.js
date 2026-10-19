@@ -3338,6 +3338,7 @@ globalThis.__layoutTestApi = {
   fileTreeRelativeCopyModeForTest: fileTreeRelativeCopyMode,
   setTabberActivityForTest(payload) {
     tabberActivityPayload = payload;
+    tabberActivityState.publishedSignature = '';
     tabberActivityState.requestGeneration = 0;
     tabberActivityState.appliedGeneration = 0;
     tabberActivityState.loaded = true;

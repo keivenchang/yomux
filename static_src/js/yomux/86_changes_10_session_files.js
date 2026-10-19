@@ -330,13 +330,17 @@ function finderSessionFilesDiffIsDeferred() {
 }
 
 function beginFinderSessionFilesDiffBackfill() {
+  fileExplorerFinderSessionFilesState.fastPaintGeneration += 1;
   fileExplorerFinderSessionFilesState.diffBackfillPending = true;
   fileExplorerFinderSessionFilesState.partialBackfillPainted = false;
   fileExplorerFinderSessionFilesState.fastListingPainted = false;
+  return fileExplorerFinderSessionFilesState.fastPaintGeneration;
 }
 
-function markFinderFastListingPainted() {
+function markFinderFastListingPainted(generation = fileExplorerFinderSessionFilesState.fastPaintGeneration) {
+  if (generation !== fileExplorerFinderSessionFilesState.fastPaintGeneration) return false;
   fileExplorerFinderSessionFilesState.fastListingPainted = true;
+  return true;
 }
 
 function releaseFinderSessionFilesDiffBackfillIfReady() {
@@ -350,19 +354,18 @@ function releaseFinderSessionFilesDiffBackfillIfReady() {
   return true;
 }
 
-function finishFinderFastPaint() {
-  markFinderFastListingPainted();
+function finishFinderFastPaint(generation = fileExplorerFinderSessionFilesState.fastPaintGeneration) {
+  if (!markFinderFastListingPainted(generation)) return false;
   ensureSessionFilesSurfaceLoaded('finder', {fetchEvenWhenPush: true});
   releaseFinderSessionFilesDiffBackfillIfReady();
   scheduleFileTreeMetadataRefresh();
 }
 
-function scheduleFinderSessionFilesBackfillAfterFastPaint(session) {
+function scheduleFinderSessionFilesBackfillAfterFastPaint(session, generation) {
   const expectedSession = String(session || '');
   if (!expectedSession) return;
   scheduleAfterFileExplorerFirstPaint(() => {
-    if (fileExplorerFinderTargetSession() !== expectedSession) return;
-    markFinderFastListingPainted();
+    if (fileExplorerFinderTargetSession() !== expectedSession || !markFinderFastListingPainted(generation)) return;
     if (!sessionFilesRequestIsActiveForDestination('finder')) {
       void fetchSessionFiles({destination: 'finder', session: expectedSession, silent: true, force: true});
     }

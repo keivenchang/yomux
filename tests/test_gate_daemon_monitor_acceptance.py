@@ -68,22 +68,38 @@ def test_a4_teardown_writes_nothing_more_and_a_second_port_touches_no_first_port
 
 def test_a5_clean_go_restart_continues_port_scoped_lifecycle_history(
     isolated_dev_server_factory: Callable[..., IsolatedDevServer],
+    record_property,
 ) -> None:
     """A clean Go restart increments process/restart counts exactly once on the same port."""
 
     server = isolated_dev_server_factory("a5", env_overrides={"YOMUX_GO_START_REASON": "demand"})
+    evidence: dict[str, object] = {"output": server.output}
+    record_property("restart_lifecycle", evidence)
     try:
         server.assert_serving()
         original_port = server.port
         before = _read_health(_health_path(server))
+        evidence["before"] = before
         assert before["process_start_count"] == 1, before
         assert before["restart_count"] == 0, before
         before_pid = server.process.pid
 
-        server.restart()
+        def record_shutdown() -> None:
+            stopped = _read_health(_health_path(server))
+            evidence["stopped"] = stopped
+            evidence["exit_status"] = server.process.returncode
+            assert server.process.returncode == 0, evidence
+            assert stopped["last_clean_shutdown"] is True, evidence
+            shutdown = stopped["events"][-1]
+            assert shutdown["kind"] == "shutdown" and shutdown["pid"] == before_pid, evidence
+            assert shutdown["termination_signal"] in {"interrupt", "terminated"}, evidence
+            assert shutdown["exit_status"] == 0 and shutdown["clean"] is True, evidence
+
+        server.restart(after_stop=record_shutdown)
         server.assert_serving()
         assert server.port == original_port
         after = _read_health(_health_path(server))
+        evidence["after"] = after
         assert after["process_start_count"] == 2, after
         assert after["restart_count"] == 1, after
         assert after["demand_start_count"] == 1, after

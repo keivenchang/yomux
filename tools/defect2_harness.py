@@ -626,7 +626,9 @@ def worker_assignment(evidence_dir: Path) -> list[dict[str, Any]]:
             if not line.strip():
                 continue
             try:
-                rows.append(json.loads(line))
+                row = json.loads(line)
+                if "event" not in row:
+                    rows.append(row)
             except ValueError:
                 continue
     rows.sort(key=lambda row: (str(row.get("worker", "")), float(row.get("start", 0.0))))

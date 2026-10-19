@@ -22,7 +22,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const darwinGitSnapshotMaxEntries = 250_000
+const darwinGitSnapshotMaxEntries = gitMetadataMaxEntries
 const darwinGitSnapshotMaxBytes = 2 << 30
 const darwinGitConfigDataMaxBytes = 16 << 20
 const darwinGitSnapshotCloneWorkers = 8
@@ -850,29 +850,9 @@ func writeDarwinSnapshotConfig(ctx context.Context, commonDirectory *os.File, sn
 		}
 		name = strings.TrimPrefix(name, "extensions.")
 		value = strings.ToLower(value)
-		switch name {
-		case "objectformat":
-			if value != "sha1" && value != "sha256" {
-				return errors.New("Git object format is unsupported")
-			}
-		case "refstorage":
-			if value != "files" && value != "reftable" {
-				return errors.New("Git ref storage format is unsupported")
-			}
-		case "preciousobjects":
-			normalized, valid := normalizeDarwinGitBoolean(value, hasValue)
-			if !valid {
-				return errors.New("Git repository format configuration is invalid")
-			}
-			value = normalized
-		case "worktreeconfig":
-			normalized, valid := normalizeDarwinGitBoolean(value, hasValue)
-			if !valid {
-				return errors.New("Git repository format configuration is invalid")
-			}
-			value = normalized
-		default:
-			return errors.New("Git repository extension is unsupported: " + name)
+		value, err = normalizeGitRepositoryExtension(name, value, hasValue)
+		if err != nil {
+			return err
 		}
 		if previous, exists := extensions[name]; exists && previous != value {
 			return errors.New("Git repository format configuration is ambiguous")
@@ -1329,26 +1309,6 @@ func cloneDarwinTree(ctx context.Context, source, destination *os.File, budget *
 	cloneErrorMu.Lock()
 	defer cloneErrorMu.Unlock()
 	return cloneError
-}
-
-func normalizeDarwinGitBoolean(value string, hasValue bool) (string, bool) {
-	if !hasValue {
-		return "true", true
-	}
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "true", "yes", "on":
-		return "true", true
-	case "", "false", "no", "off":
-		return "false", true
-	}
-	number, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
-	if err != nil {
-		return "", false
-	}
-	if number != 0 {
-		return "true", true
-	}
-	return "false", true
 }
 
 func cloneDarwinFile(ctx context.Context, sourceDirectory, destinationDirectory *os.File, name string, before os.FileInfo, budget *darwinSnapshotBudget) error {

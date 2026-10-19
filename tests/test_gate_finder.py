@@ -449,7 +449,8 @@ def test_finder_fast_paint_wins_when_session_files_completes_first(browser, tmp_
           releaseFastList();
           await waitFor(() => tree.querySelector('.file-tree-row[data-path="/home/test/project"]'), {timeoutMs: 2000, description: 'Finder fast first paint'});
           const firstPaintDiff = tree.querySelector('.file-tree-row[data-path="/home/test/project"]')?.querySelector(':scope > .file-tree-diff')?.textContent.trim() || '';
-          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          await waitFor(() => fileExplorerFinderSessionFilesState.fastListingPainted === true,
+            {timeoutMs: 2000, description: 'owned Finder first-paint completion'});
           const released = releaseFinderSessionFilesDiffBackfillIfReady();
           updateFileTreeGitStatusRows();
           const backfilledDiff = tree.querySelector('.file-tree-row[data-path="/home/test/project"]')?.querySelector(':scope > .file-tree-diff')?.textContent.trim() || '';

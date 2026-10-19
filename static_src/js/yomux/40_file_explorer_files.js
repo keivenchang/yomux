@@ -53,6 +53,7 @@ async function openFileExplorerAt(path, options = {}) {
   if (options.manualSelection === true) {
     cancelPendingFileExplorerActiveSync();
   }
+  const syncGeneration = fileExplorerSyncState.generation;
   const openGeneration = fileWorkspaceState.beginOpen();
   const openStillCurrent = () => fileWorkspaceState.openIsCurrent(openGeneration);
   const requestedRoot = normalizeDirectoryPath(expandUserPath(path));
@@ -84,13 +85,20 @@ async function openFileExplorerAt(path, options = {}) {
       enrichRoot: true,
     });
   if (!openStillCurrent()) return false;
+  if (options.manualSelection !== true && !showPendingRoot
+      && syncGeneration !== fileExplorerSyncState.generation) return false;
   if (!entries) {
     const error = currentFileExplorerListError(root);
     if (error) setFileExplorerPathDisplay(root, {error});
     if (showPendingRoot) renderFileExplorerTreeStatus(error || t('preview.openFailed', {path: root}), {root, error: true});
     return false;
   }
-  beginFinderSessionFilesDiffBackfill();
+  // Passive startup listings join the current target instead of replacing its render owner.
+  if (options.manualSelection !== true && !showPendingRoot && root === currentFileExplorerRoot()) {
+    const publication = activeFileExplorerSyncPublication(root);
+    if (publication) return publication.publish(new Map([[root, entries]]));
+  }
+  const fastPaintGeneration = beginFinderSessionFilesDiffBackfill();
   const previousExpanded = options.preserveExpanded ? Array.from(fileExplorerExpanded) : [];
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
   const rootChanged = root !== currentFileExplorerRoot();
@@ -114,7 +122,7 @@ async function openFileExplorerAt(path, options = {}) {
     if (!openStillCurrent()) return false;
     scheduleAfterFileExplorerFirstPaint(() => {
       if (!openStillCurrent()) return;
-      finishFinderFastPaint();
+      finishFinderFastPaint(fastPaintGeneration);
     });
   }
   if (previousExpanded.length) {
@@ -1114,7 +1122,7 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
     const finderHasLoadedMetadata = finderBackfillSession
       && sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, finderBackfillSession)
       && (options.fromWatchDiff !== true || watchDiffChangedVisibleTree);
-    if (finderHasLoadedMetadata) beginFinderSessionFilesDiffBackfill();
+    const fastPaintGeneration = finderHasLoadedMetadata ? beginFinderSessionFilesDiffBackfill() : null;
     fileExplorerPushRefreshDepth += 1;
     try {
       const root = normalizeDirectoryPath(currentFileExplorerRoot());
@@ -1140,7 +1148,7 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
     } finally {
       fileExplorerPushRefreshDepth = Math.max(0, fileExplorerPushRefreshDepth - 1);
     }
-    if (finderHasLoadedMetadata) scheduleFinderSessionFilesBackfillAfterFastPaint(finderBackfillSession);
+    if (finderHasLoadedMetadata) scheduleFinderSessionFilesBackfillAfterFastPaint(finderBackfillSession, fastPaintGeneration);
   } finally {
     clientPerfEnd(perf, {nodes: changedRoots, rows: renderedRows, skipped});
   }
@@ -2793,7 +2801,8 @@ function* renderCachedFileExplorerSyncPlanSteps(plan, renderPaths, entriesByDir,
   const finderTrees = containers.filter(tree => tree === fileExplorerTree || tree.closest?.('.file-explorer-panel'));
   const firstPaint = rootChanged || !finderTrees.some(tree => tree.querySelector?.('.file-tree-row[data-path]'));
   if (firstPaint && typeof beginFinderSessionFilesDiffBackfill === 'function') {
-    beginFinderSessionFilesDiffBackfill();
+    const fastPaintGeneration = beginFinderSessionFilesDiffBackfill();
+    if (options.renderTransaction) options.renderTransaction.fastPaintGeneration = fastPaintGeneration;
   }
   const preserveState = options.preserveState === true && !rootChanged;
   const previousExpanded = preserveState ? Array.from(fileExplorerExpanded) : [];
@@ -2953,6 +2962,7 @@ async function fetchAuthoritativeFileExplorerDirectoryListing(directory, options
 
 function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature, options = {}) {
   const generation = fileExplorerSyncState.generation;
+  const fastPaintGeneration = options.renderTransaction.fastPaintGeneration;
   const scrollOwner = createInputOwnedDeferredElementScrollOwner(...fileExplorerTreeContainers());
   const selectionOwner = options.selectionOwner || createFileExplorerSyncSelectionOwner();
   const isCurrent = () => fileExplorerSyncState.generation === generation
@@ -2961,7 +2971,7 @@ function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature, opti
     && fileExplorerSyncPlanTargetStillCurrent(plan);
   requestAnimationFrame(() => {
     if (!isCurrent()) return;
-    if (typeof finishFinderFastPaint === 'function') finishFinderFastPaint();
+    if (typeof finishFinderFastPaint === 'function') finishFinderFastPaint(fastPaintGeneration);
     const directories = fileExplorerSyncListingDirectories(plan, renderPaths);
     const previousSignatures = new Map(directories.map(path => [path, fileExplorerDirectoryRecord(path)?.signature]));
     const previousUserExpansion = new Map(directories.map(path => [path, fileExplorerSyncUserExpansionState.get(path)]));
@@ -3013,7 +3023,8 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     scheduleFileTreeMetadataRefresh({highlightsOnly: true});
     return false;
   }
-  const renderTransaction = {epoch: ++fileTreeRenderEpoch, completed: true};
+  const renderTransaction = {epoch: ++fileTreeRenderEpoch, completed: true,
+    fastPaintGeneration: fileExplorerFinderSessionFilesState.fastPaintGeneration};
   const generation = beginFileExplorerSync(signature, renderTransaction);
   const isCurrent = () => fileExplorerSyncState.generation === generation
     && fileExplorerSyncTransactionStillCurrent(plan, signature, options);
@@ -3063,11 +3074,16 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
       if (entriesByDir !== fetchedListings) {
         for (const [directory, entries] of entriesByDir) fetchedListings.set(directory, entries);
       }
+      const cachedAtAdmission = new Map([...fetchedListings.keys()].map(directory => [directory, cachedFileExplorerFsResourceValue('list', directory)]));
       const previous = publicationQueue;
       publicationQueue = (async () => {
         try {
           if (previous) await previous;
           if (!publicationIsCurrent()) { publicationCompleted = false; return false; }
+          for (const directory of fetchedListings.keys()) {
+            const cached = cachedFileExplorerFsResourceValue('list', directory);
+            if (Array.isArray(cached) && cached !== cachedAtAdmission.get(directory)) fetchedListings.set(directory, cached);
+          }
           const context = refreshContext();
           const completed = await renderCachedFileExplorerSyncPlan(plan, renderPaths, new Map(fetchedListings), {
             ...renderOptions, payloadContext: context, qualificationContext,
@@ -3117,8 +3133,10 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
         .some(tree => tree.querySelector?.('.file-tree-row[data-path]'));
     changed = await renderListings(fetchedListings, {preserveState: !targetChanged}) || changed;
     if (firstPaint) {
+      const fastPaintGeneration = renderTransaction.fastPaintGeneration;
       scheduleAfterFileExplorerFirstPaint(() => {
-        if (typeof finishFinderFastPaint === 'function') finishFinderFastPaint();
+        if (!isCurrent()) return;
+        if (typeof finishFinderFastPaint === 'function') finishFinderFastPaint(fastPaintGeneration);
       });
     }
     if (!isCurrent()) return changed;
@@ -3546,6 +3564,24 @@ async function expandFileExplorerTreesToPath(path, root = currentFileExplorerRoo
 }
 
 async function restoreFileExplorerExpandedPaths(paths, root = currentFileExplorerRoot(), options = {}) {
+  const publication = activeFileExplorerSyncPublication(root);
+  if (publication) {
+    const isCurrent = () => publication.isCurrent() && (!options.isCurrent || options.isCurrent())
+      && (options.generation === undefined || options.generation === fileExplorerSyncState.generation);
+    if (!isCurrent()) return false;
+    const directories = new Set([normalizeDirectoryPath(root)]);
+    for (const path of paths) {
+      if (!pathIsInsideDirectory(path, root) || fileExplorerSyncPathSuppressed(path)) continue;
+      directories.add(path);
+      for (const ancestor of ancestorPathsUnderRoot(root, path)) directories.add(ancestor);
+    }
+    const listings = await fetchFileExplorerSyncListings([...directories], {isCurrent});
+    if (!isCurrent()) return false;
+    for (const path of paths) {
+      if (path !== root && pathIsInsideDirectory(path, root) && !fileExplorerSyncPathSuppressed(path)) fileExplorerExpanded.add(path);
+    }
+    return publication.publish(listings);
+  }
   const expandedPaths = fileExplorerPathsSortedByDepth(root, Array.from(new Set(paths))
     .filter(path => pathIsInsideDirectory(path, root) && path !== root)
     .filter(path => fileExplorerRootMode !== 'sync' || !fileExplorerSyncPathSuppressed(path)), false);
@@ -4627,26 +4663,45 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
 const fileTreeInputSliceMs = 1;
 const fileTreeRenderOwners = new WeakMap();
 let fileTreeRenderEpoch = 0;
+let fileTreeRenderStepCount = 0;
+const fileTreeRenderHistory = [];
+function recordFileTreeRender(event, container, parentPath, transaction, options) {
+  if (typeof fileTreeRenderHistory === 'undefined') return;
+  fileTreeRenderHistory.push({event, producer: options.producer || new Error().stack,
+    target: container?.id || container?.dataset?.parent || parentPath,
+    parentPath, generation: fileExplorerSyncState.generation, epoch: transaction.epoch,
+    connected: container?.isConnected, at: performance.now()});
+  if (fileTreeRenderHistory.length > 160) fileTreeRenderHistory.splice(0, fileTreeRenderHistory.length - 160);
+}
 
 function drainFileTreeRenderSteps(steps) {
   let next = steps.next();
-  while (!next.done) next = steps.next();
+  if (typeof fileTreeRenderStepCount !== 'undefined') fileTreeRenderStepCount += 1;
+  while (!next.done) { next = steps.next(); if (typeof fileTreeRenderStepCount !== 'undefined') fileTreeRenderStepCount += 1; }
   return next.value;
 }
 
 async function drainFileTreeRenderStepsWithInput(steps, options = {}) {
   let waitForPaint = true;
+  const paintedContainers = new WeakSet();
   while (!options.isCurrent || options.isCurrent()) {
     const started = performance.now();
     let next;
     do {
       if (options.isCurrent && !options.isCurrent()) return false;
       next = steps.next();
+      if (typeof fileTreeRenderStepCount !== 'undefined') fileTreeRenderStepCount += 1;
       if (next.done) return next.value;
-      waitForPaint ||= next.value === true;
+      // Section chrome needs its own paint; repeated rows share their container's first-paint boundary.
+      if (next.value === true) waitForPaint = true;
+      else if (next.value && !paintedContainers.has(next.value)) {
+        waitForPaint = true;
+        paintedContainers.add(next.value);
+      }
     } while (performance.now() - started < fileTreeInputSliceMs);
     options.afterSlice?.();
-    // Paint connected publications before they accumulate; preparation only needs a background task.
+    // Paint the first visible rows, then let background task priority yield to input and rendering.
+    // A frame per tiny work slice makes large listings take thousands of frames under load.
     await new Promise(resolve => scheduleAfterFileExplorerFirstPaint(resolve, {waitForPaint}));
     waitForPaint = false;
   }
@@ -4668,8 +4723,9 @@ function* renderTreeChildrenSteps(container, parentPath, entries, depth, options
   if (!container) return;
   const transaction = options.renderTransaction || {epoch: ++fileTreeRenderEpoch, completed: true};
   const epoch = transaction.epoch;
-  const superseded = () => { transaction.completed = false; return false; };
+  const superseded = () => { recordFileTreeRender('superseded', container, parentPath, transaction, options); transaction.completed = false; return false; };
   if ((fileTreeRenderOwners.get(container)?.epoch || 0) > epoch) return superseded();
+  recordFileTreeRender('start', container, parentPath, transaction, options);
   const owner = {epoch, renderOwner: options.renderOwner};
   fileTreeRenderOwners.set(container, owner);
   const parent = container.parentElement;
@@ -4753,7 +4809,7 @@ function* renderTreeChildrenSteps(container, parentPath, entries, depth, options
       row.remove();
       changed = true;
     } else existingRows.set(path, row);
-    yield changed && clientElementIsVisible(container);
+    yield changed && clientElementIsVisible(container) ? container : false;
     existingNode = fileTreeNodeAfterYield(container, next);
   }
   const retainedRows = new Set();
@@ -4797,7 +4853,7 @@ function* renderTreeChildrenSteps(container, parentPath, entries, depth, options
     retainedRows.add(row);
     previousRow = row;
     if (childContainer && row.nextElementSibling !== childContainer) container.insertBefore(childContainer, row.nextElementSibling || null);
-    yield clientElementIsVisible(container);
+    yield clientElementIsVisible(container) ? container : false;
     if (!isCurrent()) return superseded();
     const stillExpanded = entry.kind === 'dir' && fileTreeDirectoryExpanded(fullPath, renderOptions);
     if (childContainer && childContainer.parentElement === container && stillExpanded && Array.isArray(childEntries) && (
@@ -4824,13 +4880,14 @@ function* renderTreeChildrenSteps(container, parentPath, entries, depth, options
       const failed = directory && fileExplorerDirectoryListingFailed(fullPath);
       if (!((expanded || failed) && childContainerForRow(retainedParent, fullPath) === node)) {
         node.remove();
-        yield clientElementIsVisible(container);
+        yield clientElementIsVisible(container) ? container : false;
       }
       retainedParent = null;
     }
     yield;
     node = fileTreeNodeAfterYield(container, nextNode);
   }
+  recordFileTreeRender('complete', container, parentPath, transaction, options);
   return transaction.completed;
 }
 
@@ -6938,6 +6995,7 @@ async function fetchTabberActivity(options = {}) {
   const requestGeneration = ++tabberActivityState.requestGeneration;
   const request = (async () => {
     let adoptedStatus = 0;
+    let accepted = false;
     try {
       const params = new URLSearchParams();
       params.set('hours', String(requestHours));
@@ -6948,6 +7006,7 @@ async function fetchTabberActivity(options = {}) {
       params.set('scope', 'all');
       const payload = await apiFetchJson(`/api/activity?${params.toString()}`, {cache: 'no-store'});
       const applied = rangeIsCurrent() && applyTabberActivityPayload(payload, requestGeneration);
+      accepted = applied;
       // Go owns live agent status in the activity product.  Keep the shared
       // auto-status model in step with every accepted activity refresh, not
       // only the initial stats-only boot and explicit status repair path; the
@@ -6965,14 +7024,14 @@ async function fetchTabberActivity(options = {}) {
       // when activity collection is temporarily unavailable.
       try {
         const metadata = await apiFetchJson('/api/session-metadata', {cache: 'no-store'});
-        if (rangeIsCurrent()) applyTabberActivityPayload({...metadata, activity: {}}, requestGeneration);
+        if (rangeIsCurrent()) accepted = applyTabberActivityPayload({...metadata, activity: {}}, requestGeneration);
       } catch (_) {
         // Older Go/compatibility servers may expose the lighter roster through /api/tmux even
         // when their full metadata build is unavailable.  It carries the same authoritative
         // session_order, so preserve one Tabber row per live session instead of clearing the tree.
         try {
           const roster = await apiFetchJson('/api/tmux', {cache: 'no-store'});
-          if (rangeIsCurrent()) applyTabberActivityPayload({...roster, activity: {}}, requestGeneration);
+          if (rangeIsCurrent()) accepted = applyTabberActivityPayload({...roster, activity: {}}, requestGeneration);
         } catch (_) {
           // Keep the last snapshot; the interval retries without a render-triggered request loop.
         }
@@ -6984,8 +7043,17 @@ async function fetchTabberActivity(options = {}) {
       }
     }
     if (!rangeIsCurrent()) return fetchTabberActivity(options);
-    if (adoptedStatus > 0) refreshAgentWindowActivityDisplays();
-    else if (itemInLayout(tabberItemId)) refreshTabberPanels();
+    if (accepted) {
+      // Compare the accepted product, including activity and roster changes independent of status.
+      const payload = tabberActivityPayload;
+      const signature = tabberActivityPublicationSignature(payload);
+      const publish = signature !== tabberActivityState.publishedSignature;
+      const refreshOptions = {producer: 'activity-response', requestGeneration,
+        revision: payload.agent_window_snapshot_revision, refreshTabber: publish};
+      if (adoptedStatus > 0) refreshAgentWindowActivityDisplays(sessions, refreshOptions);
+      else if (publish) refreshTabberPanelsForAgentWindowPublication(refreshOptions);
+      tabberActivityState.publishedSignature = signature;
+    }
     return true;
   })();
   tabberActivityState.request = request;

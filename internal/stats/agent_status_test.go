@@ -94,6 +94,36 @@ func TestClassifyAgentStatusRealShapedClaudeCodexOpenCodePanes(t *testing.T) {
 	}
 }
 
+func TestCodexCapacityNoticeIsBlockedAndClearsWithNewerOutput(t *testing.T) {
+	notice := "■ Selected model is at capacity. Please try a different model."
+	current := notice + "\n\n›\n\n  gpt-5.5 xhigh · ~/repo"
+	stale := notice + "\nCompleted successfully\n\n›\n\n  gpt-5.5 xhigh · ~/repo"
+	classify := func(visible string) AgentStatusResult {
+		return ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "codex", PaneTarget: "%1"}, AgentStatusSources{
+			CapturePane: func(context.Context, string) (AgentStatusPane, error) {
+				return AgentStatusPane{Status: "idle", VisibleText: visible}, nil
+			},
+		})
+	}
+
+	blocked := classify(current)
+	if blocked.Status != AgentStatusError || blocked.AttentionKind != "unknown" || blocked.AttentionSignature == "" {
+		t.Fatalf("current capacity notice = %+v, want blocked attention with a signature", blocked)
+	}
+	if cleared := classify(stale); cleared.Status != AgentStatusIdle {
+		t.Fatalf("capacity notice followed by newer output = %+v, want idle", cleared)
+	}
+	for _, variant := range []string{
+		"■  Selected model is at capacity. Please try a different model.",
+		"■Selected model is at capacity. Please try a different model.",
+		"\t■\tSelected model is at capacity. Please try a different model.\t",
+	} {
+		if !CapacityNoticeCurrent(variant + "\n›") {
+			t.Errorf("capacity notice variant %q was not recognized", variant)
+		}
+	}
+}
+
 func TestClassifyVisibleAgentTextPreservesWorkingWithQueuedCodexFollowupQuestion(t *testing.T) {
 	tests := []struct {
 		name                  string

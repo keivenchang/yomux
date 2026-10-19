@@ -405,7 +405,7 @@ class IsolatedDevServer:
         run_fixture_cleanup_phases(f"{self.label} isolated dev server", (("stop-server", stop_server),))
         self.stopped = True
 
-    def restart(self, *, sessions: tuple[str, ...] = ()) -> None:
+    def restart(self, *, sessions: tuple[str, ...] = (), after_stop: Callable[[], None] | None = None) -> None:
         """Stop this process and start a fresh one on the SAME port, root, and tmux runtime.
 
         This is the web restart the restart-sequence acceptance work drives: a new OS process
@@ -418,6 +418,9 @@ class IsolatedDevServer:
         old_descendants = process_descendants(self.process.pid) if Path("/proc").is_dir() else []
         self.stop()
         try:
+            # Keep shutdown observations inside the owner that retains child identities on failure.
+            if after_stop is not None:
+                after_stop()
             if self.port_lease is None:
                 self.port_lease = HttpPortLease.reserve(ports=(self.port,))
             else:

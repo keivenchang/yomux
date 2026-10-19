@@ -1653,7 +1653,8 @@ def test_dockview_tab_directional_actions_use_rendered_geometry_and_reject_ambig
     assert ambiguous["targets"]["right"] is None
 
 
-def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_budget(browser, tmp_path):
+@pytest.mark.parametrize("response_order", ["status-first", "activity-first", "overlap"])
+def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_budget(browser, tmp_path, response_order):
     sessions = [str(index) for index in range(1, 13)]
     transcript_sessions = {
         session: {
@@ -1712,13 +1713,23 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
             (async () => {
               await Promise.all([loadAutoStatuses.request, tabberActivityState.request]);
               const originalFetch = window.fetch;
-              const state = window.__tabSwitchActivity = {heldCalls: 0, heldStatusCalls: 0, pollBefore: runtimeIntervalDiagnostics('auto-approve')[0].lastStartedAtMs};
+              const state = window.__tabSwitchActivity = {heldCalls: 0, heldStatusCalls: 0, pollBefore: runtimeIntervalDiagnostics('auto-approve')[0].lastStartedAtMs, nextStatusRevision: 41, responseRevisions: [], activityPayload: JSON.parse(JSON.stringify(tabberActivityPayload))};
               state.barrier = new Promise(resolve => { state.release = resolve; });
               state.statusBarrier = new Promise(resolve => { state.releaseStatus = resolve; });
+              const originalRefreshAutoStatuses = refreshAutoStatuses;
+              refreshAutoStatuses = (...args) => {
+                const callback = originalRefreshAutoStatuses(...args);
+                if (!state.statusTimerCallback && runtimeIntervalDiagnostics('auto-approve')[0].lastStartedAtMs > state.pollBefore) {
+                  state.statusTimerCallback = Promise.resolve(callback);
+                  state.statusTimerCalls = (state.statusTimerCalls || 0) + 1;
+                }
+                return callback;
+              };
               state.restore = async () => {
                 window.fetch = originalFetch;
                 state.release();
                 state.releaseStatus();
+                refreshAutoStatuses = originalRefreshAutoStatuses;
                 try { await Promise.all([state.promise, loadAutoStatuses.request]); }
                 finally { delete window.__tabSwitchActivity; }
               };
@@ -1735,7 +1746,24 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
                   state.heldStatusCalls += 1;
                   await state.statusBarrier;
                 }
-                return originalFetch.apply(window, args);
+                const response = await originalFetch.apply(window, args);
+                if (url.pathname === '/api/activity' || url.pathname === '/api/auto-approve') {
+                  let payload = await response.json();
+                  if (url.pathname === '/api/activity') {
+                    payload = JSON.parse(JSON.stringify(state.activityPayload));
+                    payload.agent_window_snapshot_revision = 41;
+                    state.responseRevisions.push({producer: 'activity-response', revision: payload.agent_window_snapshot_revision});
+                  } else {
+                    delete payload.status;
+                    payload.topology_generation = tmuxTopologyGeneration;
+                    payload.agent_window_snapshot_revision = state.nextStatusRevision;
+                    payload.sessions['1'].enabled = state.nextStatusRevision === 41;
+                    payload.sessions['1'].agent_window_snapshot_revision = state.nextStatusRevision;
+                    state.responseRevisions.push({producer: 'status-response', revision: payload.agent_window_snapshot_revision});
+                  }
+                  return new Response(JSON.stringify(payload), {status:response.status, headers:{'Content-Type':'application/json'}});
+                }
+                return response;
               };
               state.promise = fetchTabberActivity({visible: true, allowHidden: true});
               state.request = tabberActivityState.request;
@@ -1749,13 +1777,6 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
             " && runtimeIntervalDiagnostics('auto-approve')[0].lastStartedAtMs > state.pollBefore"
             " && tabberActivityState.request === state.request;"
         ))
-        status_published = browser.execute_async_script("""
-            const done = arguments[arguments.length - 1];
-            const request = loadAutoStatuses.request;
-            window.__tabSwitchActivity.releaseStatus();
-            Promise.resolve(request).then(() => done(true), error => done({error: String(error)}));
-        """)
-        assert status_published is True, status_published
         setup = browser.execute_script(
             """
             clearClientPerfCounters();
@@ -1770,7 +1791,7 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
             let tabRefreshCalls = 0;
             let reservationCalls = 0;
             let fullRefreshCalls = 0;
-            const fullRefreshStacks = [];
+            const fullRefreshStacks = window.__tabSwitchRefreshHistory = [];
             const firstPanel = panelNodes.get('1');
             const secondPanel = panelNodes.get('2');
             firstPanel.__tabSwitchSentinel = 'first';
@@ -1813,12 +1834,12 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
             dockviewCommitPanelActivation = (item, options) => {
               const started = activationStartedAt.get(String(item || ''));
               const commitStarted = performance.now();
-              const chromeBefore = [tabRefreshCalls, reservationCalls];
+              const chromeBefore = [tabRefreshCalls, reservationCalls, fullRefreshCalls];
               const result = originalCommit(item, options);
               if (started !== undefined) {
                 perf.commitSamples.push(performance.now() - started);
                 perf.commitWorkSamples.push(performance.now() - commitStarted);
-                perf.commitChromeCalls.push([tabRefreshCalls - chromeBefore[0], reservationCalls - chromeBefore[1]]);
+                perf.commitChromeCalls.push([tabRefreshCalls - chromeBefore[0], reservationCalls - chromeBefore[1], fullRefreshCalls - chromeBefore[2]]);
                 activationStartedAt.delete(String(item || ''));
               }
               return result;
@@ -1829,7 +1850,7 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
             };
             refreshTabberPanels = (...args) => {
               fullRefreshCalls += 1;
-              fullRefreshStacks.push(new Error().stack);
+              fullRefreshStacks.push({producer:args[0]?.producer || 'unattributed', requestGeneration:args[0]?.requestGeneration, revision:args[0]?.revision, stack:new Error().stack});
               return originalRefresh(...args);
             };
             dockviewSyncHeaderActionReservations = (...args) => {
@@ -1849,6 +1870,22 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
         )
         assert setup["rows"] >= 31 and setup["windowRows"] >= 24, setup
         assert setup["virtualRows"] >= 1 and setup["fileRow"] is True, setup
+
+        status_published = browser.execute_async_script("""
+            const done = arguments[arguments.length - 1], state = window.__tabSwitchActivity;
+            if (arguments[0] !== 'status-first') { done(true); return; }
+            state.releaseStatus();
+            Promise.resolve(state.statusTimerCallback).then(
+              () => done({completed: true, timerCalls: state.statusTimerCalls, responseRevisions: state.responseRevisions,
+                statusRevision: agentWindowSnapshotRevision(autoApproveStates.get('1'))}),
+              error => done({error: String(error)}),
+            );
+        """, response_order)
+        if response_order == "status-first":
+            assert status_published["completed"] and status_published["timerCalls"] == 1, status_published
+            assert status_published["statusRevision"] == 41, status_published
+        browser.execute_script("window.__tabSwitchPerf.activationRefreshBaseline = window.__tabSwitchPerf.fullRefreshCalls();")
+        browser.execute_script("window.__tabSwitchPerf.layoutSyncBaseline = clientPerfSummary().find(counter => counter.name === 'tabberLayoutSync')?.count || 0;")
 
         target = "2" if setup["initial"] == "1" else "1"
         for index in range(30):
@@ -1926,8 +1963,9 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
               immediate: window.__tabSwitchPerf.immediate.every(Boolean),
               fromJsonCalls: window.__tabSwitchPerf.fromJsonCalls(),
               fullRefreshCalls: window.__tabSwitchPerf.fullRefreshCalls(),
+              activationFullRefreshCalls: window.__tabSwitchPerf.fullRefreshCalls() - window.__tabSwitchPerf.activationRefreshBaseline,
               fullRefreshStacks: window.__tabSwitchPerf.fullRefreshStacks,
-              layoutSyncs: counters.tabberLayoutSync?.count || 0,
+              layoutSyncs: (counters.tabberLayoutSync?.count || 0) - window.__tabSwitchPerf.layoutSyncBaseline,
               activationPaints: counters.tabActivationPaint?.count || 0,
               activationPaintMax: counters.tabActivationPaint?.maxMs || 0,
               firstPanelPreserved: panelNodes.get('1') === window.__tabSwitchPerf.firstPanel && panelNodes.get('1').__tabSwitchSentinel === 'first',
@@ -1937,8 +1975,8 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
         )
         assert result["fromJsonCalls"] == 0, result
         print('Tabber full refresh producers:', result["fullRefreshStacks"])
-        assert result["fullRefreshCalls"] == 0, result
-        assert all(calls == [0, 0] for calls in result["commitChromeCalls"]), result
+        assert result["activationFullRefreshCalls"] == 0, result
+        assert all(calls == [0, 0, 0] for calls in result["commitChromeCalls"]), result
         assert result["layoutSyncs"] <= 30, result
         # This fixture has no xterm render events; the real-xterm native journey owns paint completion.
         assert result["activationPaints"] == 0, result
@@ -1975,15 +2013,45 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
         released = browser.execute_async_script(
             """
             const done = arguments[arguments.length - 1], state = window.__tabSwitchActivity;
-            state.release();
-            Promise.all([state.promise, loadAutoStatuses.request]).then(() => done({
-              heldCalls: state.heldCalls,
-              fullRefreshCalls: window.__tabSwitchPerf.fullRefreshCalls(),
-              timerActive: runtimeIntervalActive('auto-approve'),
-            }), error => done({error: String(error)}));
-            """
+            (async () => {
+              if (arguments[0] === 'overlap') state.releaseStatus();
+              state.release();
+              await state.promise;
+              state.releaseStatus();
+              await state.statusTimerCallback;
+              const beforeDuplicate = window.__tabSwitchPerf.fullRefreshCalls();
+              await fetchTabberActivity({visible:true, allowHidden:true});
+              const afterDuplicate = window.__tabSwitchPerf.fullRefreshCalls();
+              state.nextStatusRevision = 42;
+              await refreshAutoStatuses({force:true});
+              return {beforeDuplicate, afterDuplicate, fullRefreshCalls:window.__tabSwitchPerf.fullRefreshCalls(),
+                producers:window.__tabSwitchPerf.fullRefreshStacks,
+                timerActive:runtimeIntervalActive('auto-approve'),
+                timerCalls:state.statusTimerCalls,
+                statusRevision:agentWindowSnapshotRevision(autoApproveStates.get('1')),
+                statusEnabled:autoApproveStates.get('1')?.enabled,
+                activityRevision:agentWindowSnapshotRevision(tabberActivityPayload),
+                changedSessions:loadAutoStatuses.lastResult?.changedSessions || [],
+                responseRevisions:state.responseRevisions};
+            })().then(done, error => done({error:String(error)}));
+            """, response_order,
         )
-        assert released == {"heldCalls": 1, "fullRefreshCalls": 1, "timerActive": True}, released
+        print('Tabber release refresh producers:', released)
+        assert released['timerActive'], released
+        assert released['beforeDuplicate'] == released['afterDuplicate'], released
+        assert released['fullRefreshCalls'] == released['afterDuplicate'] + 1, released
+        expected_shared_revision_refreshes = 2 if response_order == 'activity-first' else 1
+        assert len(released['producers']) == expected_shared_revision_refreshes + 1, released
+        assert released['beforeDuplicate'] == expected_shared_revision_refreshes, released
+        assert sum(row['producer'] == 'activity-response' and row['revision'] == 41 for row in released['producers']) + sum(row['producer'] == 'status-response' and isinstance(row['revision'], list) and 41 in row['revision'] for row in released['producers']) == expected_shared_revision_refreshes, released
+        assert released['statusRevision'] == 42 and released['statusEnabled'] is False, released
+        assert released['activityRevision'] == 41, released
+        assert released['changedSessions'] == ['1'], released
+        assert released['timerCalls'] == 1 and released['timerActive'], released
+        assert {row['revision'] for row in released['responseRevisions']} == {41, 42}, released
+        assert all(isinstance(row['requestGeneration'], int) and row['requestGeneration'] > 0 for row in released['producers']), released
+        assert any(row['producer'] == 'status-response' and isinstance(row['revision'], list) and 42 in row['revision'] for row in released['producers']), released
+        assert all(row['producer'] in ('activity-response', 'status-response') for row in released['producers']), released
     finally:
         try:
             restored = browser.execute_async_script(

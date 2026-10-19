@@ -4655,3 +4655,11 @@ def test_native_main_requires_scope_evidence_for_selected_lane(monkeypatch, tmp_
     assert result == (0 if matching else check.EXIT_NOT_CERTIFIABLE)
     text = capsys.readouterr().out
     assert ("CHECK PASSED" in text) is matching
+
+
+def test_functional_evidence_is_owned_by_the_gate_and_partitioned_per_step(tmp_path):
+    check = load_check_module()
+    lane = check.Lane("browser", "browser", (check.Step("boot", ["boot"]), check.Step("suite", ["suite"])))
+    observed = check.instrument_lane_for_evidence(lane, tmp_path)
+    paths = [dict(step.env)[product_env_name("E2E_EVIDENCE_DIR")] for step in observed.steps]
+    assert paths == [str(tmp_path / "browser" / "0"), str(tmp_path / "browser" / "1")]

@@ -44,7 +44,7 @@ const {runSuite} = require('./layout_url.test.js');
 function installTreePublicationHelpers(context) {
   for (const [path, names] of [
     ['10_core_utils.js', ['setAttributeIfChanged', 'setStylePropertyIfChanged', 'setInnerHtmlIfChanged', 'clientElementIsVisible']],
-    ['40_file_explorer_files.js', ['setRowDataset', 'setHiddenIfChanged', 'beginFileExplorerSync', 'finishFileExplorerSync']],
+    ['40_file_explorer_files.js', ['setRowDataset', 'setHiddenIfChanged', 'beginFileExplorerSync', 'finishFileExplorerSync', 'recordFileTreeRender']],
   ]) {
     const source = fs.readFileSync(`static_src/js/yomux/${path}`, 'utf8');
     if (names.includes('setInnerHtmlIfChanged')) vm.runInContext('const elementHtmlState = new WeakMap();', context);
@@ -1262,6 +1262,55 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.summaryStreamForTest('source'), null, 'completed one-shot summary never regenerates on layout sync');
   });
 
+await testAsync('stale Finder paint callbacks cannot release a newer listing boundary', async () => {
+  const finder = fs.readFileSync('static_src/js/yomux/86_changes_40_finder.js', 'utf8');
+  const sessionFiles = fs.readFileSync('static_src/js/yomux/86_changes_10_session_files.js', 'utf8');
+  for (const failed of [false, true]) {
+    const callbacks = [];
+    let calls = 0;
+    const state = {fastPaintGeneration: 0, payload: {loaded: true, session: '1'}};
+    const context = vm.createContext({
+      fileExplorerFinderSessionFilesState: state,
+      refreshFileExplorerPanelTree() {
+        if (++calls > 1) return new Promise(() => {});
+        return failed ? Promise.reject(new Error('old listing failed')) : Promise.resolve();
+      },
+      scheduleAfterFileExplorerFirstPaint: callback => callbacks.push(callback),
+      ensureSessionFilesSurfaceLoaded() {}, scheduleFileTreeMetadataRefresh() {},
+      sessionFilesRequestIsActiveForDestination: () => false,
+      sessionFilesPayloadIsLoadedForSession: () => true, fileExplorerFinderTargetSession: () => '1',
+      currentFileExplorerRoot: () => '/root', fileExplorerExpandedPathsForRoot: () => [],
+      console: {warn() {}},
+    });
+    for (const [source, name] of [[sessionFiles, 'beginFinderSessionFilesDiffBackfill'],
+      [sessionFiles, 'markFinderFastListingPainted'], [sessionFiles, 'releaseFinderSessionFilesDiffBackfillIfReady'],
+      [sessionFiles, 'finishFinderFastPaint'], [sessionFiles, 'scheduleFinderSessionFilesBackfillAfterFastPaint'],
+      [finder, 'startFinderPanelListing']]) {
+      const start = source.indexOf(`function ${name}(`);
+      assert.ok(start >= 0, name);
+      const ends = ['\nfunction ', '\nasync function '].map(marker => source.indexOf(marker, start + 1)).filter(end => end >= 0);
+      vm.runInContext(source.slice(start, Math.min(...ends)), context);
+    }
+    const panel = {querySelector: () => null};
+    context.startFinderPanelListing(panel);
+    await Promise.resolve();
+    await Promise.resolve();
+    context.startFinderPanelListing(panel);
+    assert.equal(callbacks.length, 1);
+    callbacks.shift()();
+    assert.equal(state.diffBackfillPending, true, 'old success and failure callbacks preserve the newer gate');
+    assert.equal(state.fastListingPainted, false);
+    context.finishFinderFastPaint(state.fastPaintGeneration);
+    assert.equal(state.diffBackfillPending, false, 'only the current owner releases the gate');
+    const pushGeneration = context.beginFinderSessionFilesDiffBackfill();
+    context.beginFinderSessionFilesDiffBackfill();
+    context.scheduleFinderSessionFilesBackfillAfterFastPaint('1', pushGeneration);
+    callbacks.shift()();
+    assert.equal(state.diffBackfillPending, true, 'a delayed push cannot adopt a newer listing generation');
+    assert.equal(state.fastListingPainted, false);
+  }
+});
+
 await testAsync('yielding tree preparation hands off first paint once and retires superseded continuation work', async () => {
   const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
   const frames = [], tasks = [], priorities = [];
@@ -1304,13 +1353,14 @@ await testAsync('connected tree publication hands off paint before another row s
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('function scheduleAfterFileExplorerFirstPaint('), source.indexOf('function scrollFileTreeRowIntoView('))
     + source.slice(source.indexOf('function drainFileTreeRenderSteps('), source.indexOf('function renderTreeChildren(')), context);
+  const publication = {};
   const iterator = (function* () {
     yield;
     yield;
     published += 1;
-    yield true;
+    yield publication;
     published += 1;
-    yield true;
+    yield publication;
     return true;
   })();
   const completion = context.drainFileTreeRenderStepsWithInput(iterator, {isCurrent: () => current});
@@ -1323,11 +1373,16 @@ await testAsync('connected tree publication hands off paint before another row s
   assert.equal(published, 1);
   assert.equal(frames.length, 1, 'a connected row publication must paint before another publication slice');
   assert.equal(tasks.length, 0, 'held paint cannot accumulate another connected row');
-  current = false;
   frames.shift()();
   tasks.shift()();
+  await Promise.resolve();
+  assert.equal(published, 2);
+  assert.equal(frames.length, 0, 'later visible slices yield to input without waiting for another frame');
+  assert.equal(tasks.length, 1, 'later publications remain background tasks');
+  current = false;
+  tasks.shift()();
   assert.equal(await completion, false);
-  assert.equal(published, 1, 'input supersedes the second publication while paint is held');
+  assert.equal(published, 2, 'input supersedes continuation before another iterator step');
 });
 
 await testAsync('Differ empty collapsed and missing repository chrome paints between publication slices', async () => {
@@ -9335,6 +9390,20 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     const tree = api.fileExplorerTreeForTest();
     assert.ok(tree.querySelector('.file-tree-row[data-path="/repo/current.txt"]'));
     assert.equal(tree.querySelector('.file-tree-row[data-path="/repo/obsolete.txt"]'), null);
+  });
+
+  await testAsync('a passive startup completion cannot replace a newer sync root', async () => {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {requestAnimationFrame() { return 1; }});
+    api.setFileExplorerRootMode('sync', {sync: false});
+    const held = deferredFetch();
+    api.setFetchForTest(() => held.promise);
+    const initial = api.openFileExplorerAtForTest('/older', {syncSelection:true, refreshPanels:false});
+    await flushAsyncWork();
+    api.setFileExplorerDirListingForTest('/newer', [{name:'current.txt',kind:'file'}]);
+    assert.equal(await api.syncFileExplorerRootToPlanForTest({session:'1',root:'/newer',expandPaths:[],affectedDirs:['/newer']}, '1'), true);
+    held.resolve(jsonResponse({path:'/older',entries:[{name:'obsolete.txt',kind:'file'}]}));
+    assert.equal(await initial, false);
+    assert.equal(api.fileExplorerRootForTest(), '/newer');
   });
 
   await testAsync('A failed retained Finder publication permits ordinary same-plan recovery', async () => {
