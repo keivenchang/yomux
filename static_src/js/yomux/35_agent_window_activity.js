@@ -242,13 +242,13 @@ function mergedAgentWindowMetadataRows(activityRows, infoRows, info = null) {
     kind: item.row.kind,
     window: item.row.window,
     window_index: item.row.window_index,
-    state: '',
+    state: agentWindowBootstrapMetadataState(item.row) || STATE_KEY.idle,
     ...agentWindowMetadataPayload(item.row),
   })).concat(looseRows.map(row => ({
     kind: row.kind,
     window: row.window,
     window_index: row.window_index,
-    state: '',
+    state: agentWindowBootstrapMetadataState(row) || STATE_KEY.idle,
     ...agentWindowMetadataPayload(row),
   })));
 }
@@ -351,6 +351,73 @@ function agentWindowSnapshotRevisionsMismatch(hasStateRows, stateRevision, activ
   return hasStateRows && stateRevision > 0 && activityRevision > 0 && stateRevision !== activityRevision;
 }
 
+function agentErrorIsBlocking(error) {
+  const text = String(error || '').toLowerCase();
+  if (!text) return false;
+  return !(/transcript not found/.test(text) || /^missing /.test(text));
+}
+
+function agentWindowBootstrapMetadataState(agent) {
+  const state = agentWindowStateKey(agent?.state);
+  if ([STATE_KEY.working, STATE_KEY.idle, STATE_KEY.blocked, STATE_KEY.approval, STATE_KEY.needsInput, STATE_KEY.needsApproval, 'unavailable', 'done'].includes(state)) return state;
+  const status = String(agent?.status || '').trim().toLowerCase();
+  if (!status && !agent?.error) return null;
+  if (agentErrorIsBlocking(agent?.error) || /blocked|denied|rejected|error|failed|failure|stuck/.test(status)) return STATE_KEY.blocked;
+  if (/permission|approval|approve|confirm/.test(status)) return STATE_KEY.approval;
+  if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(status)) return STATE_KEY.needsInput;
+  if (/done|completed|complete|finished|success/.test(status)) return 'done';
+  if (/^(working|running|run)$/.test(status)) return STATE_KEY.working;
+  return STATE_KEY.idle;
+}
+
+// Legacy screen/tmux inputs enter once as window rows before any surface classifies them.
+function sessionAgentWindowBootstrapRows(session, info, payload) {
+  const rows = [];
+  const knownKinds = [...new Set(agentWindowPayloadRows(info?.agents).map(agent => agentWindowKind(agent.kind)).filter(Boolean))];
+  const fallbackKind = agentWindowKind(payload.agent_kind || payload.screen?.agent_kind) || (knownKinds.length === 1 ? knownKinds[0] : 'codex');
+  const promptCleared = promptAttentionIsCleared(session, promptAttentionPayloadSignature(payload), payload);
+  for (const windowRecord of tmuxSignalWindowsForSession(session)) {
+    const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+    const pane = panes.find(tmuxSignalPaneCommandIsAgent)
+      || panes.find(tmuxSignalPaneActionRequired);
+    if (!pane) continue;
+    const kind = agentWindowKind(tmuxSignalPaneCommand(pane)) || fallbackKind;
+    const attention = !promptCleared && (windowRecord.bell_flag === true || panes.some(tmuxSignalPaneActionRequired));
+    const quiet = windowRecord.silence_flag === true && !tmuxSignalWindowIsRecentlyActive(windowRecord);
+    const state = attention ? STATE_KEY.needsInput : pane.dead === true || quiet ? 'done'
+      : tmuxSignalWindowIsRecentlyActive(windowRecord) ? STATE_KEY.working : STATE_KEY.idle;
+    rows.push(normalizedAgentWindowPayload({kind, state, window_index: windowRecord.window_index,
+      pane_target: tmuxSignalPaneTarget(pane), current: windowRecord.active === true,
+      bootstrapReason: attention ? stateReason(panes.some(tmuxSignalPaneActionRequired) ? 'tmuxActionRequired' : 'tmuxBellAlert')
+        : pane.dead === true ? tmuxSignalDeadText(pane) : stateReason('tmuxSilenceAlert'),
+      attention_key: promptAttentionClearKey(session, promptAttentionPayloadSignature(payload), payload),
+      attention_acknowledged: promptCleared}));
+  }
+  const screenState = payload.screen?.key === 'error' ? STATE_KEY.blocked : String(payload.screen?.key || '');
+  const promptState = payload.prompt?.visible === true
+    ? payload.prompt.yes_selected === true ? STATE_KEY.approval : STATE_KEY.needsInput : screenState;
+  const screenText = String(payload.prompt?.visible === true ? payload.prompt.question_text || payload.prompt.text || '' : payload.screen?.question_text || payload.screen?.text || '');
+  const supportedState = [STATE_KEY.working, STATE_KEY.blocked, STATE_KEY.approval, STATE_KEY.needsInput, STATE_KEY.needsApproval].includes(promptState);
+  if (supportedState && !rows.some(row => row.state === promptState)) {
+    const existing = rows.find(row => row.current) || rows[0];
+    if (existing) {
+      if (existing.state !== STATE_KEY.needsInput || promptState === STATE_KEY.blocked) {
+        existing.state = promptState;
+        existing.screen_text = screenText;
+        if (screenText) existing.bootstrapReason = screenText;
+      }
+    } else {
+      rows.push(normalizedAgentWindowPayload({kind: fallbackKind,
+        state: promptState || STATE_KEY.idle, screen_text: screenText, bootstrapReason: screenText, attention_key: promptAttentionClearKey(session, promptAttentionPayloadSignature(payload), payload),
+        attention_acknowledged: promptCleared}));
+    }
+  }
+  if (!rows.length && payload.enabled === true && !agentWindowPayloadRows(info?.agents).length && !agentWindowPayloadRows(info?.agent_windows).length) {
+    rows.push(normalizedAgentWindowPayload({kind: fallbackKind, state: STATE_KEY.idle}));
+  }
+  return rows;
+}
+
 function sessionAgentWindowStatusModel(session, info = null, autoPayload = null) {
   const view = tabberViewDescriptorForSession(session);
   if (view) {
@@ -387,16 +454,19 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
     [...infoRows, ...liveAgentRows],
     info,
   );
-  const source = stateRows.length ? stateRows : metadataRows;
+  const hasCanonicalInventory = agentWindowActivitySnapshotFresh(statePayload)
+    && Object.prototype.hasOwnProperty.call(statePayload, 'agent_windows');
+  const authoritativeEmpty = hasCanonicalInventory && stateRows.length === 0;
+  const source = stateRows.length ? stateRows : authoritativeEmpty ? [] : metadataRows;
   const knownPhysicalKeys = new Set(stateRows.map(agent => agentWindowPhysicalKey(agent, info)).filter(Boolean));
-  const missingOpenCodeRows = stateRows.length
+  const missingOpenCodeRows = (stateRows.length || authoritativeEmpty)
     ? metadataRows.filter(agent => (
       agentWindowKind(agent?.kind) === 'opencode'
       && !knownPhysicalKeys.has(agentWindowPhysicalKey(agent, info))
     ))
     : [];
   const fallbackSource = [...source, ...missingOpenCodeRows];
-  const fallback = fallbackSource.length ? fallbackSource : (Array.isArray(info?.agents) ? info.agents : [])
+  const fallback = fallbackSource.length ? fallbackSource : (authoritativeEmpty ? [] : Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
       state: '',
@@ -409,7 +479,7 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
       idle_since: null,
     }));
   const activeIndex = activeTmuxWindowIndexFromInfo(info);
-  const agents = fallback
+  let agents = fallback
     .map(agent => mergeAgentWindowPayload(agent, [liveAgentRows, trustedActivityRows, metadataRows]))
     .map(agent => agentWindowWithInfoActiveWindow(agent, activeIndex))
     .filter(agent => agent.kind);
@@ -426,6 +496,21 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
       agent.idle_since = null;
     }
   }
+  if (!hasCanonicalInventory) {
+    const bootstrapRows = sessionAgentWindowBootstrapRows(session, info, statePayload);
+    const used = new Set();
+    agents = agents.map(agent => {
+      if (agent.state === 'unavailable') return agent;
+      const physicalKey = agentWindowPhysicalKey(agent, info);
+      const metadata = liveAgentRows.find(row => agentWindowPhysicalKey(row, info) === physicalKey)
+        || (liveAgentRows.length === 1 && liveAgentRows[0].kind === agent.kind ? liveAgentRows[0] : null);
+      const bootstrapRow = bootstrapRows.find(row => agentWindowPhysicalKey(row, info) === physicalKey)
+        || (agents.length === 1 && bootstrapRows.length === 1 ? bootstrapRows[0] : null);
+      if (bootstrapRow) used.add(bootstrapRow);
+      return bootstrapRow ? {...agent, ...bootstrapRow} : {...agent, state: agentWindowBootstrapMetadataState(metadata) || agent.state || STATE_KEY.idle};
+    });
+    agents.push(...bootstrapRows.filter(row => !used.has(row)));
+  }
   for (const visualAgent of agentWindowAcknowledgementVisualAgents(session)) {
     if (agents.some(agent => agentWindowPhysicalKey(agent, info) === agentWindowPhysicalKey(visualAgent, info))) continue;
     agents.push(agentWindowWithInfoActiveWindow(visualAgent, activeIndex));
@@ -437,22 +522,8 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
       if (!stateRows.some(row => agentWindowSameInstance(row, agent))) agent.queued_followup_question = false;
     }
   }
-  const screenWorking = !authoritativeStatus && sessionAgentWindowScreenIsWorking(statePayload);
-  const hasWorkingWindow = agents.some(agent => agentWindowIsWorkingState(agent.state));
-  // The screen capture is authoritative for a current working turn even before the per-window
-  // activity poll catches up. Promote one non-attention window here, at the shared model boundary,
-  // so the window bar, parent tab, Tabber, and session working count all see the same row.
-  const screenProxyIndex = screenWorking && !hasWorkingWindow
-    ? agents.findIndex(agent => agentWindowPayloadCurrent(agent) === true && !agentWindowIsAttentionState(agent.state) && !agentWindowIsUnavailableState(agent.state))
-    : -1;
-  const fallbackProxyIndex = screenWorking && !hasWorkingWindow && screenProxyIndex < 0
-    ? agents.findIndex(agent => !agentWindowIsAttentionState(agent.state) && !agentWindowIsUnavailableState(agent.state))
-    : -1;
-  const proxyIndex = screenProxyIndex >= 0 ? screenProxyIndex : fallbackProxyIndex;
-  const effectiveAgents = proxyIndex >= 0
-    ? agents.map((agent, index) => (index === proxyIndex ? {...agent, state: STATE_KEY.working, screen_working_proxy: true} : agent))
-    : agents;
-  return {agents: effectiveAgents, hasAttributedWindows, screenWorking, screenProxyIndex: proxyIndex, stale: revisionMismatch, stateRevision, activityRevision};
+  const screenWorking = !hasCanonicalInventory && !authoritativeStatus && sessionAgentWindowScreenIsWorking(statePayload);
+  return {agents, hasAttributedWindows, hasCanonicalInventory, authoritativeEmpty, screenWorking, screenProxyIndex: -1, stale: revisionMismatch, stateRevision, activityRevision};
 }
 
 function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = null) {
@@ -479,15 +550,16 @@ function sessionPromptAttentionEvent(session, payload = autoApproveStates.get(se
   return agentWindowAttentionEvent(agent, session, {transitionKey: `prompt:${session}`, scheduleRefresh: false});
 }
 
-function sessionAttentionEvent(session, info = null, payload = null) {
-  const model = sessionAgentWindowStatusModel(session, info, payload);
+function sessionAttentionEvent(session, info = null, payload = null, options = {}) {
+  const model = options.model || sessionAgentWindowStatusModel(session, info, payload);
   const events = model.agents.map(agent => agentWindowAttentionEvent(agent, session));
-  if (!model.hasAttributedWindows) {
+  if (!model.hasAttributedWindows && !model.hasCanonicalInventory) {
     const prompt = sessionPromptAttentionEvent(session, payload || autoApproveStates.get(session) || {});
     if (prompt) events.push(prompt);
   }
   const visible = events.filter(event => ['attention', 'blocked'].includes(event.item?.state) && event.item?.acknowledged !== true);
-  const summary = sessionAgentWindowStatusSummary(session, info, payload);
+  const summary = options.model ? agentWindowStatusSummary(model.agents, session, model)
+    : sessionAgentWindowStatusSummary(session, info, payload);
   const indicated = summary?.acknowledgement;
   return visible.sort((a, b) => {
     const rank = event => event.item.acknowledging === true ? -2
@@ -517,8 +589,23 @@ function sessionAgentWindowHasWorkingSignal(session, info = null, autoPayload = 
 
 function sessionAgentWindowStatusSummary(session, info = null, autoPayload = null) {
   const model = sessionAgentWindowStatusModel(session, info, autoPayload);
-  const {agents, hasAttributedWindows} = model;
-  if (!agents.length) return {agents, hasAttributedWindows, agent: null, item: null, acknowledgement: null};
+  return agentWindowStatusSummary(model.agents, session, model);
+}
+
+// Session groups and genuine subsets reduce the same classified physical windows.
+function agentWindowStatusSummary(rows, session, options = {}) {
+  const hasAttributedWindows = options.hasAttributedWindows === true;
+  const hasCanonicalInventory = options.hasCanonicalInventory === true;
+  const info = options.info || null;
+  const seen = new Set();
+  const agents = rows.filter(agent => {
+    const key = agentWindowPhysicalKey(agent, info);
+    if (!key) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (!agents.length) return {agents, hasAttributedWindows, hasCanonicalInventory, agent: null, item: null, acknowledgement: null};
   let selected = null;
   let acknowledging = null;
   let acknowledgement = null;
@@ -540,7 +627,7 @@ function sessionAgentWindowStatusSummary(session, info = null, autoPayload = nul
       if (!acknowledgement || rank < acknowledgementRank || (rank === acknowledgementRank && current && !acknowledgementCurrent)) acknowledgement = {agent, item};
     }
   }
-  if (!selected) return {agents, hasAttributedWindows, agent: null, item: null, acknowledgement: null};
+  if (!selected) return {agents, hasAttributedWindows, hasCanonicalInventory, agent: null, item: null, acknowledgement: null};
   // A parent tab briefly mirrors the gray acknowledgement of the child the user just acted on.
   // This feedback must not be hidden by a sibling that remains green and working.
   if (acknowledging) selected = acknowledging;
@@ -556,6 +643,7 @@ function sessionAgentWindowStatusSummary(session, info = null, autoPayload = nul
   return {
     agents,
     hasAttributedWindows,
+    hasCanonicalInventory,
     ...selected,
     acknowledgement,
     item,
@@ -766,22 +854,13 @@ function collectAgentWindowPulseAnimations(nodes) {
 function syncAgentWindowActivityAnimationDelays(root = document) {
   const nodes = collectAgentWindowPulseNodes(root);
   if (!nodes.length) return;
-  const broadPulseEnabled = typeof statusPulseAnimationEnabled !== 'function' || statusPulseAnimationEnabled();
   if (typeof attentionAnimationClockDelay === 'function') attentionAnimationClockDelay();
   const activeNodes = [];
   for (const node of nodes) {
     if (!node?.style) continue;
     if (!node.classList?.contains?.('agent-window-status-dot') && !node.classList?.contains?.('status-indicator') && !node.classList?.contains?.('js-debug-live-pulse') && !node.querySelector?.('.agent-window-status-dot')) continue;
-    // Ordinary balls retain the fresh per-render delay stamped by their renderer while the broad
-    // pulse is disabled. Replacing it with the old root delay would shift the wall-clock phase;
-    // RUN glyphs and the Preferences comparison sample are deliberate exceptions because they
-    // continue to demonstrate one shared global phase in that mode.
-    const subwindowGlyph = node.classList?.contains?.('agent-window-activity--subwindow')
-      || node.closest?.('.agent-window-activity--subwindow')
-      || node.querySelector?.('.agent-window-activity--subwindow');
-    const preferencesPreview = node.closest?.('.preferences-status-pulse-example')
-      || node.querySelector?.('.preferences-status-pulse-example');
-    if (!broadPulseEnabled && !subwindowGlyph && !preferencesPreview) continue;
+    // The animation classifier excludes one-shot acknowledgment feedback. All remaining
+    // pulses share a clock, including replacement RUN markers when broad pulsing is disabled.
     const localDelay = node.style.getPropertyValue('--attention-animation-delay').trim();
     if (localDelay) node.style.removeProperty('--attention-animation-delay');
     activeNodes.push(node);
@@ -1438,7 +1517,7 @@ function agentWindowStatusDotHtml(item, options = {}) {
   );
   const label = String(options.label || '').trim();
   const accessibility = label ? ` role="img" aria-label="${esc(label)}"` : ' aria-hidden="true"';
-  return `<span class="${esc(classes)}"${accessibility}>${esc(item.icon)}</span>`;
+  return `<span class="agent-window-status-glyph"><span class="${esc(classes)}"${accessibility}>${esc(item.icon)}</span></span>`;
 }
 
 function agentWindowActivityStyleAttribute(tone, item = {}, options = {}) {

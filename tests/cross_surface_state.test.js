@@ -1197,8 +1197,8 @@ async function runCrossSurfaceStateSuite() {
     assert.deepStrictEqual(canonical(hoverApi.fileExplorerSyncPlanForTest()), {
       session: '5',
       root: '/home/test',
-      affectedDirs: ['/home/test/yolomux.dev', '/home/test/yolomux.dev/src'],
-      expandPaths: ['/home/test/yolomux.dev', '/home/test/yolomux.dev/src'],
+      affectedDirs: ['/home/test/yolomux.dev'],
+      expandPaths: ['/home/test/yolomux.dev'],
     }, 'hover/autofocus keeps Finder Sync planned from the explicit session');
     hoverApi.setFocusedTerminal('6');
     assert.equal(hoverApi.activeTmuxDirectoryPath(), '/home/test/yolomux.dev/src', 'passive xterm focus does not become the Finder tmux-directory source');
@@ -2222,8 +2222,6 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.platformWindowControlClass('minimize'), 'pc-window-control pc-minimize');
     assert.equal(api.platformWindowControlClass('close'), 'pc-window-control pc-close');
     assert.equal(api.platformWindowControlClass('zoom'), 'pc-window-control pc-zoom');
-    assert.equal(api.fileExplorerPanelCloseClass(), 'file-explorer-panel-close pc-window-control pc-close');
-    assert.equal(api.fileEditorPanelCloseClass(), 'file-editor-panel-close pc-window-control pc-close');
     const pcSingleSlots = api.emptyLayoutSlots();
     pcSingleSlots[api.layoutTreeKey] = api.leafNode('left');
     pcSingleSlots.left = api.paneStateWithTabs(['1'], '1');
@@ -2260,8 +2258,6 @@ async function runCrossSurfaceStateSuite() {
   assert.equal(macApi.platformWindowControlClass('minimize'), 'pc-window-control pc-minimize');
   assert.equal(macApi.platformWindowControlClass('close'), 'pc-window-control pc-close');
   assert.equal(macApi.platformWindowControlClass('zoom'), 'pc-window-control pc-zoom');
-  assert.equal(macApi.fileExplorerPanelCloseClass(), 'file-explorer-panel-close pc-window-control pc-close');
-  assert.equal(macApi.fileEditorPanelCloseClass(), 'file-editor-panel-close pc-window-control pc-close');
   const macPaneControls = macApi.panelControlsHtml('1');
   assert.ok(macPaneControls.includes('data-pane-minimize="1"'));
   assert.ok(macPaneControls.includes('data-detail-toggle="1"'));
@@ -2284,14 +2280,10 @@ async function runCrossSurfaceStateSuite() {
   assert.equal(forcedPcApi.fileExplorerLabel(), 'File Explorer');
   assert.ok(forcedPcApi.tabSearchFields(forcedPcApi.fileExplorerItemId).includes('Finder'), 'File Explorer tab also indexes the Finder alias');
   assert.equal(forcedPcApi.platformWindowControlClass('close'), 'pc-window-control pc-close');
-  assert.equal(forcedPcApi.fileExplorerPanelCloseClass(), 'file-explorer-panel-close pc-window-control pc-close');
-  assert.equal(forcedPcApi.fileEditorPanelCloseClass(), 'file-editor-panel-close pc-window-control pc-close');
 
   const forcedMacApi = loadYomux('?platform=mac', ['1'], 'http:', 'Linux x86_64');
   assert.equal(forcedMacApi.fileExplorerLabel(), 'Finder');
   assert.equal(forcedMacApi.platformWindowControlClass('close'), 'pc-window-control pc-close');
-  assert.equal(forcedMacApi.fileExplorerPanelCloseClass(), 'file-explorer-panel-close pc-window-control pc-close');
-  assert.equal(forcedMacApi.fileEditorPanelCloseClass(), 'file-editor-panel-close pc-window-control pc-close');
 
   const watchApi = loadYomux('', ['1']);
   const visiblePath = '/repo/README.md';
@@ -3708,8 +3700,8 @@ async function runCrossSurfaceStateSuite() {
       assert.ok(/function tabMenuItems\(openItems[\s\S]*menuGroups\(\s*tmuxItems[\s\S]*yoloItems/.test(newSessionSrc) && /id: 'file',[\s\S]*items: menuGroups\(\s*newTmuxSessionItems\(\)/.test(newSessionSrc), 'File owns creation commands while Tabs remains the stable tab navigator');
       assert.ok(menuCss.includes('.app-menu-ui-icon-shell') && menuCss.includes('--icon-shell'), 'shell menu icon CSS is generated');
       assert.ok(/function newTmuxSessionFullAccessFlags\(agent\)[\s\S]*`\+ \$\{flags\}`/.test(newSessionSrc), 'the dangerous-auto-approve action retains the exact command flags for its tooltip and accessible name');
-      assert.ok(menuCss.includes('.app-menu-command-pair') && /\.app-menu-command-pair\s*\{[\s\S]*display:\s*flex[\s\S]*flex-wrap:\s*nowrap/.test(menuCss) && menuCss.includes('.app-menu-command-separator') && /function createAppMenuCommandPair\(item\)[\s\S]*separator: true/.test(newSessionSrc), 'paired launch actions stay compact on one line with a visible separator instead of wasting half the menu width');
-      assert.ok(menuCss.includes('.app-menu-command-row') && /\.app-menu-command-row\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss), 'Shell command rows stay on one line and scroll only as a final narrow-screen fallback');
+      assert.ok(menuCss.includes('.app-menu-command-pair') && /\.app-menu-command-group\s*\{[\s\S]*display:\s*flex[\s\S]*flex-wrap:\s*nowrap/.test(menuCss) && menuCss.includes('.app-menu-command-separator') && /function createAppMenuCommandPair\(item\)[\s\S]*separator: true/.test(newSessionSrc), 'paired launch actions stay compact on one line with a visible separator instead of wasting half the menu width');
+      assert.ok(menuCss.includes('.app-menu-command-row') && /\.app-menu-command-group\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss), 'Shell command rows stay on one line and scroll only as a final narrow-screen fallback');
       assert.ok(/app-phone-single-pane\.app-topbar-touch-compact \.app-menu > \.app-menu-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*overflow:\s*auto/.test(menuCss) && /app-topbar-touch-compact \.app-menu-command-pair\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss) && /app-menu-command-row--shells \.(?:app-menu-command-row-label|app-menu-command)[\s\S]*border-color:\s*transparent[\s\S]*background:\s*transparent/.test(menuCss), 'phone menus use a viewport-bounded sheet while tablet touch menus retain compact paired actions and separator-free shell text controls');
       const infoTreeCss = fs.readFileSync('static/yomux.css', 'utf8');
       assert.ok(infoTreeCss.includes('--info-pane-bg:') && infoTreeCss.includes('--info-tree-border:') && infoTreeCss.includes('--info-tree-line:') && infoTreeCss.includes('--info-tree-record-border:'), 'YO!info tree owns dedicated pane, border, record-outline, and connector tokens');
@@ -3856,7 +3848,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/const syncItem = fileSyncPath \? preferredItem : \(isTmuxSession\(preferredItem\) \? preferredItem : explicitSession\);[\s\S]*if \(!syncItem \|\| \(!fileSyncPath && syncItem !== explicitSession\)\) return/.test(finderSyncBody), 'Finder Sync accepts clicked editor files without requiring a tmux target');
     assert.ok(finderSyncBody.includes('fileExplorerSyncPlanForFile(fileSyncPath)'), 'Finder Sync can plan from an explicit editor file');
     assert.ok(finderSyncBody.includes('syncFileExplorerRootToActiveFile(fileSyncPath, {force: explicit})'), 'Finder Sync can move the root to a clicked editor file and explicit sync forces a re-apply');
-    assert.ok(/const rootEntries = await fetchDirectory\(normalizedRoot, \{force: true, user: options\.force === true\}\)[\s\S]*fetchFileExplorerSyncListings\([\s\S]*listingDirectories,[\s\S]*\{force: true, user: options\.force === true, isCurrent\}[\s\S]*fetchedListings/.test(source), 'cold sync-driven Finder paints one fast root before bounded current-transaction descendants without entering the destructive root-open owner');
+    assert.ok(/const rootEntries = await fetchDirectory\(normalizedRoot, \{force: true, user: options\.force === true\}\)[\s\S]*fetchFileExplorerSyncListings\([\s\S]*listingDirectories,[\s\S]*\{force: true, user: options\.force === true, isCurrent,[\s\S]*onIncomplete:[\s\S]*fetchedListings/.test(source), 'cold sync-driven Finder paints one fast root before bounded current-transaction descendants and fences incomplete ownership without entering the destructive root-open owner');
     assert.ok(finderSyncBody.includes('(explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))'), '#automatic Finder Sync skips a repeated already-applied plan');
     const openFileExplorerAtStart = source.indexOf('async function openFileExplorerAt(');
     const openFileExplorerAtEnd = source.indexOf('function resetFileExplorerAppliedSyncPlan(', openFileExplorerAtStart);
@@ -3907,7 +3899,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(source.includes('fileExplorerSyncManualCollapsedPaths'), 'Finder Sync tracks manually collapsed auto-expanded paths');
     assert.ok(/function fileExplorerSyncExpansionPaths\(plan\)[\s\S]*filter\(path => !fileExplorerSyncPathSuppressed\(path\)\)/.test(source), 'Finder Sync filters manually collapsed paths out of future auto-expansion');
     assert.ok(source.includes('function fileExplorerSyncExpansionTargets(root, affectedDirs = [], repoRoots = [])'), 'Finder Sync expansion targets are centralized');
-    assert.ok(source.includes('function ancestorPathsUnderRoot(root, path)') && source.includes('const candidates = [...repoTargets, ...affectedTargets];'), 'Finder Sync expands full ancestor chains for repo roots and affected paths');
+    assert.ok(source.includes('function ancestorPathsUnderRoot(root, path)') && source.includes('const candidates = ancestorPathsUnderRoot(normalizedRoot, commonRoot);'), 'Finder Sync expands only the ancestor chain to one common root');
     assert.ok(source.includes('const expansionPaths = fileExplorerSyncExpansionPaths(plan);'), 'explicit Finder Sync expansion shares manual-collapse suppression with automatic sync');
     assert.ok(source.includes('function commonAncestorPath(paths)') && source.includes('function focusedRepoRootForSync(focusedDir, repoRoots = sessionFilesRepoRoots())'), 'Finder Sync root selection is centralized through common-ancestor and focused-repo helpers');
     const viewMenu = menus.find(menu => menu.id === 'view');
@@ -5347,11 +5339,9 @@ async function runCrossSurfaceStateSuite() {
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
       root: '/home/test',
-      affectedDirs: ['/home/test/yolomux.dev', '/home/test/yolomux.dev/static_src/js'],
+      affectedDirs: ['/home/test/yolomux.dev'],
       expandPaths: [
         '/home/test/yolomux.dev',
-        '/home/test/yolomux.dev/static_src',
-        '/home/test/yolomux.dev/static_src/js',
       ],
     });
     assert.equal(api.finderDirectoryForItem('1'), '');
@@ -5382,30 +5372,23 @@ async function runCrossSurfaceStateSuite() {
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
       root: '/home/test',
-      affectedDirs: ['/home/test/dynamo/repo-a', '/home/test/dynamo/repo-b', '/home/test/dynamo/repo-a/src', '/home/test/dynamo/repo-b/lib'],
+      affectedDirs: ['/home/test/dynamo'],
       expandPaths: [
         '/home/test/dynamo',
-        '/home/test/dynamo/repo-a',
-        '/home/test/dynamo/repo-b',
-        '/home/test/dynamo/repo-a/src',
-        '/home/test/dynamo/repo-b/lib',
       ],
     });
     const highlightSets = api.fileExplorerSessionHighlightSetsForTest('1');
     assert.deepStrictEqual(canonical(highlightSets.repoRoots), []);
     assert.deepStrictEqual(canonical(highlightSets.touchedDirs), []);
-    assert.deepStrictEqual(canonical(highlightSets.expandedDirs), ['/home/test/dynamo/repo-a', '/home/test/dynamo/repo-b']);
+    assert.deepStrictEqual(canonical(highlightSets.expandedDirs), []);
     assert.deepStrictEqual(canonical(highlightSets.syncTargetDirs), [
-      '/home/test/dynamo/repo-a',
-      '/home/test/dynamo/repo-b',
-      '/home/test/dynamo/repo-a/src',
-      '/home/test/dynamo/repo-b/lib',
-    ], 'every touched repo/working/file directory is starred, including touched ancestors; home-chain pass-through directories are not');
+      '/home/test/dynamo',
+    ], 'the single common boundary is starred instead of every touched directory');
     assert.deepStrictEqual(canonical(api.fileExplorerSyncTargetDirsForTest({
       root: '/tmp/outside',
       affectedDirs: ['/tmp/outside', '/tmp/outside/src'],
     })), ['/tmp/outside', '/tmp/outside/src'], 'the working directory remains a star target even when it is the Finder root');
-    assert.equal(api.fileExplorerSessionHighlightClassForTest('/home/test/dynamo/repo-a', 'dir', '1'), 'file-tree-row--sync-expanded');
+    assert.equal(api.fileExplorerSessionHighlightClassForTest('/home/test/dynamo/repo-a', 'dir', '1'), '');
     assert.equal(api.fileExplorerSessionHighlightClassForTest('/home/test/dynamo/repo-a/src', 'dir', '1'), '');
     assert.equal(api.fileExplorerSessionHighlightClassForTest('/home/test/dynamo/repo-a/src/a.js', 'file', '1'), '');
     api.setFileExplorerRootMode('fixed', {sync: false});
@@ -5419,8 +5402,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.fileExplorerSessionHighlightClassForTest('/home/test/dynamo/repo-a', 'dir', '1'), '');
     assert.deepStrictEqual(canonical(api.fileExplorerSessionHighlightSetsForTest('2').syncTargetDirs), [
       '/home/test/dynamo/repo-a',
-      '/home/test/dynamo/repo-a/src',
-    ], 'changing selected sessions removes the previous star set and derives the new session set');
+    ], 'changing selected sessions derives its own common boundary from the matching payload');
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/dynamo1/src'}});
     api.setFinderSessionFilesPayloadForTest({
       session: '1',
@@ -5433,8 +5415,8 @@ async function runCrossSurfaceStateSuite() {
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
       root: '/home/test',
-      affectedDirs: ['/home/test/dynamo1', '/tmp/x', '/home/test/dynamo1/src'],
-      expandPaths: ['/home/test/dynamo1', '/home/test/dynamo1/src'],
+      affectedDirs: ['/'],
+      expandPaths: [],
     });
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/ai-config/claude/skills'}});
     api.setFinderSessionFilesPayloadForTest({
@@ -5448,20 +5430,8 @@ async function runCrossSurfaceStateSuite() {
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
       root: '/home/test',
-      affectedDirs: [
-        '/home/test/ai-config',
-        '/home/test/ai-config/claude',
-        '/home/test/ai-config/claude/skills',
-        '/home/test/ai-config/claude/skills/a',
-        '/home/test/ai-config/hooks',
-      ],
-      expandPaths: [
-        '/home/test/ai-config',
-        '/home/test/ai-config/claude',
-        '/home/test/ai-config/hooks',
-        '/home/test/ai-config/claude/skills',
-        '/home/test/ai-config/claude/skills/a',
-      ],
+      affectedDirs: ['/home/test/ai-config'],
+      expandPaths: ['/home/test/ai-config'],
     });
     api.setFinderSessionFilesPayloadForTest({
       session: '1',
@@ -5474,13 +5444,9 @@ async function runCrossSurfaceStateSuite() {
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
       root: '/home/test',
-      affectedDirs: ['/home/test/ai-config/claude/skills/a', '/home/test/ai-config/hooks', '/home/test/ai-config/claude/skills'],
+      affectedDirs: ['/home/test/ai-config'],
       expandPaths: [
         '/home/test/ai-config',
-        '/home/test/ai-config/claude',
-        '/home/test/ai-config/hooks',
-        '/home/test/ai-config/claude/skills',
-        '/home/test/ai-config/claude/skills/a',
       ],
     });
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: ''}});

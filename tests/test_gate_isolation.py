@@ -4206,8 +4206,8 @@ def test_browser_boot_route_registry_has_one_handler_and_matches_gate_contract()
         browser_layout.BROWSER_BOOT_PRESETS["default"]
     )
 
-    assert len(browser_layout.BROWSER_BOOT_ROUTES) == 34
-    assert len({route.path for route in browser_layout.BROWSER_BOOT_ROUTES}) == 34
+    assert len(browser_layout.BROWSER_BOOT_ROUTES) == 35
+    assert len({route.path for route in browser_layout.BROWSER_BOOT_ROUTES}) == 35
     for route in browser_layout.BROWSER_BOOT_ROUTES:
         assert fixture.count(f"url.pathname === '{route.path}'") == 1
         assert json.dumps(route.path) in fixture

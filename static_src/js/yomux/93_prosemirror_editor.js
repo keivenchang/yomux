@@ -1064,15 +1064,13 @@ function insertProseMirrorSoftBreak(api, schema) {
 
 function insertProseMirrorEnter(api, schema) {
   return (state, dispatch) => {
-    const {$from} = state.selection;
-    if ($from.parentOffset >= $from.parent.content.size) {
-      if (dispatch) {
-        const transaction = state.tr.split($from.pos).scrollIntoView();
-        dispatch(transaction);
-      }
-      return true;
+    if (dispatch) {
+      // A single Markdown source newline renders as a space, so Enter must create a paragraph
+      // boundary to move the caret onto a visibly separate line.
+      const transaction = state.tr.deleteSelection();
+      dispatch(transaction.split(transaction.selection.from).scrollIntoView());
     }
-    return insertProseMirrorSoftBreak(api, schema)(state, dispatch);
+    return true;
   };
 }
 

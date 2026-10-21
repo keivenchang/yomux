@@ -2071,6 +2071,10 @@ function paneInfoBarMetaHtml(session, info) {
 const repoSelectorControlSelector = '[data-repo-cycle], [data-repo-chip]';
 
 function refreshSessionRepoDisplay(session) {
+  if (fileExplorerRootMode === 'sync' && fileExplorerExplicitSyncSessionTarget() === session) {
+    cancelPendingFileExplorerActiveSync({invalidateOpen: false});
+    scheduleFileExplorerActiveTabSync(session, {explicit: true});
+  }
   updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
   renderSessionButtons();
   renderPaneTabStrips();

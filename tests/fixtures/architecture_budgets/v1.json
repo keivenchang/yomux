@@ -352,12 +352,6 @@
       "writer": "static_src/js/yomux/20_layout_state.js"
     },
     {
-      "count": 1,
-      "name": "fileExplorerFinderSelectedSession",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/20_layout_state.js"
-    },
-    {
       "count": 3,
       "name": "fileExplorerMode",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
@@ -466,7 +460,7 @@
       "writer": "static_src/js/yomux/20_layout_state.js"
     },
     {
-      "count": 3,
+      "count": 2,
       "name": "sessions",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/20_layout_state.js"
@@ -682,7 +676,7 @@
       "writer": "static_src/js/yomux/40_file_explorer_files.js"
     },
     {
-      "count": 1,
+      "count": 2,
       "name": "fileExplorerSyncManualCollapseTargetKey",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/40_file_explorer_files.js"
@@ -694,13 +688,13 @@
       "writer": "static_src/js/yomux/40_file_explorer_files.js"
     },
     {
-      "count": 1,
+      "count": 2,
       "name": "fileExplorerVisibleSyncRoot",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/40_file_explorer_files.js"
     },
     {
-      "count": 1,
+      "count": 2,
       "name": "fileExplorerVisibleSyncSession",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/40_file_explorer_files.js"
@@ -1409,12 +1403,6 @@
     },
     {
       "count": 1,
-      "name": "fileExplorerFinderSelectedSession",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/86_changes_10_session_files.js"
-    },
-    {
-      "count": 1,
       "name": "repoRoot",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/86_changes_10_session_files.js"
@@ -1523,12 +1511,6 @@
     },
     {
       "count": 1,
-      "name": "sessions",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/99_terminal_boot.js"
-    },
-    {
-      "count": 1,
       "name": "watchedPrsData",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/99_terminal_boot.js"
@@ -1562,6 +1544,24 @@
       "name": "pendingGlobalShortcutChordTimer",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/99_terminal_shortcuts_boot.js"
+    },
+    {
+      "count": 3,
+      "name": "fileExplorerSyncLegacyExpansionEntries",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 2,
+      "name": "fileExplorerSyncUserExpansionState",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
+    },
+    {
+      "count": 2,
+      "name": "fileExplorerVisibleSyncTargetKey",
+      "owner": "static_src/js/yomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yomux/40_file_explorer_files.js"
     }
   ],
   "source_text_assertions": {

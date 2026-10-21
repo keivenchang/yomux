@@ -13,6 +13,7 @@ import multiprocessing
 import os
 import platform
 import re
+import select
 import shlex
 import signal
 import shutil
@@ -1495,7 +1496,7 @@ def test_run_lane_terminates_a_timed_out_launcher_and_its_pipe_holding_child(mon
         "import signal\n"
         "import subprocess\n"
         "import sys\n"
-        "child = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print(\"child-ready\", flush=True); time.sleep(60)'])\n"
         "with open(sys.argv[1], 'w', encoding='utf-8') as handle:\n"
         "    handle.write(str(child.pid))\n"
         "    handle.flush()\n"
@@ -1503,8 +1504,43 @@ def test_run_lane_terminates_a_timed_out_launcher_and_its_pipe_holding_child(mon
         "os._exit(0)\n",
         encoding="utf-8",
     )
-    started = time.monotonic()
+    original_popen = subprocess.Popen
+    started = None
     child_pid = 0
+
+    def start_ready_launcher(args, **kwargs):
+        nonlocal started, child_pid
+        process = original_popen(args, **kwargs)
+        if str(probe) not in args:
+            return process
+        assert process.stdout is not None
+        # The timeout must measure pipe retirement, after the child owns stdout and has
+        # installed its TERM handler. Interpreter scheduling is a separate startup boundary.
+        deadline = time.monotonic() + 5.0
+        markers = set()
+        buffered = b""
+        try:
+            while markers != {b"launcher-exited", b"child-ready"}:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, f"launcher startup markers missing: {markers!r}"
+                readable, _, _ = select.select([process.stdout], [], [], remaining)
+                assert readable, f"launcher startup markers missing: {markers!r}"
+                chunk = os.read(process.stdout.fileno(), 4096)
+                assert chunk, f"launcher stdout closed before startup markers: {markers!r}"
+                buffered += chunk
+                while b"\n" in buffered:
+                    marker, buffered = buffered.split(b"\n", 1)
+                    markers.add(marker)
+            assert process.wait(timeout=max(0.0, deadline - time.monotonic())) == 0
+            child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        except (AssertionError, OSError, subprocess.TimeoutExpired):
+            check._terminate_lane_process_group(process)
+            process.communicate(timeout=1.0)
+            raise
+        started = time.monotonic()
+        return process
+
+    monkeypatch.setattr(check.subprocess, "Popen", start_ready_launcher)
     try:
         result = check.run_lane(
             check.Lane(
@@ -1525,6 +1561,7 @@ def test_run_lane_terminates_a_timed_out_launcher_and_its_pipe_holding_child(mon
             child_pid = int(child_pid_path.read_text(encoding="utf-8"))
         if child_pid > 1 and check.pid_is_alive(child_pid):
             os.kill(child_pid, signal.SIGKILL)
+    assert started is not None
     assert time.monotonic() - started < 3.0
     assert result.ok is False
     assert result.steps[-1].returncode != 0

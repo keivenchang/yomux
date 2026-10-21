@@ -400,25 +400,6 @@ function previewPopoutBodyClassName() {
 
 function previewPopoutVariableStyle() {
   const root = getComputedStyle(document.documentElement);
-  const names = [
-    '--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text',
-    '--active-control-bg', '--active-control-border', '--active-control-text',
-    '--editor-preview-font-size', '--editor-line-height',
-    '--lt-editor-bg', '--lt-editor-preview-bg', '--lt-text', '--lt-muted', '--lt-line',
-    '--lt-panel', '--lt-panel2', '--lt-markdown-heading', '--lt-markdown-heading-bg',
-    '--lt-markdown-link', '--lt-markdown-strong', '--lt-markdown-emphasis',
-    '--lt-code-inline', '--lt-code-inline-bg', '--lt-code-inline-border',
-    '--markdown-preview-bg', '--markdown-code-block-bg',
-    '--markdown-alert-caution-light-bg', '--markdown-alert-caution-dark-bg',
-    '--markdown-html-dark-bg', '--markdown-html-dark-border', '--markdown-html-dark-text',
-    '--markdown-html-dark-link', '--markdown-html-dark-code',
-    '--markdown-html-dark-code-bg', '--markdown-html-dark-code-border',
-    '--markdown-heading', '--markdown-heading-bg', '--markdown-link', '--markdown-strong',
-    '--markdown-emphasis', '--code-inline', '--code-inline-bg', '--code-inline-border',
-    '--code-keyword', '--code-control', '--code-atom', '--code-string', '--code-number', '--code-variable',
-    '--code-function', '--code-type', '--code-property', '--code-tag', '--code-comment',
-    '--code-invalid',
-  ];
   const aliases = [
     ['--editor-scheme-bg', '--popout-editor-scheme-bg'],
     ['--editor-scheme-fg', '--popout-editor-scheme-fg'],
@@ -428,17 +409,20 @@ function previewPopoutVariableStyle() {
     ['--editor-scheme-panel2', '--popout-editor-scheme-panel2'],
     ['--editor-scheme-preview-bg', '--popout-editor-scheme-preview-bg'],
   ];
-  const copied = names
-    .map(name => {
-      const value = root.getPropertyValue(name).trim();
-      return value ? `${name}: ${value}` : '';
-    });
+  const copied = [panePopoutVariableStyle()];
   const aliased = aliases.map(([source, target]) => {
     const value = root.getPropertyValue(source).trim();
-    return value ? `${target}: ${value}` : '';
+    return value ? `${target}: ${value}; ${source}: var(${target})` : '';
   });
+  // The host transfers app tokens inline; preview shell aliases must follow them.
+  aliased.push(
+    '--bg: var(--editor-scheme-bg)', '--panel: var(--editor-scheme-panel)',
+    '--panel2: var(--editor-scheme-panel2)', '--text: var(--editor-scheme-fg)',
+    '--muted: var(--editor-scheme-muted)', '--line: var(--editor-scheme-line)',
+    '--editor-preview-bg: var(--editor-scheme-preview-bg)',
+  );
   if (fileEditorPreviewDisplayMode === 'vanilla') {
-    copied.push('--editor-preview-bg: var(--paint-white)', '--editor-scheme-fg: var(--markdown-html-light-text)');
+    aliased.push('--editor-preview-bg: var(--paint-white)', '--editor-scheme-fg: var(--markdown-html-light-text)');
   }
   return [...copied, ...aliased].filter(Boolean)
     .join('; ');
@@ -660,291 +644,12 @@ function filePreviewPopoutDocumentStyle() {
 	      overflow: auto;
 	      overscroll-behavior: contain;
 	    }
-    .file-preview-popout-window {
-      --editor-scheme-bg: var(--popout-editor-scheme-bg);
-      --editor-scheme-fg: var(--popout-editor-scheme-fg);
-      --editor-scheme-muted: var(--popout-editor-scheme-muted);
-      --editor-scheme-line: var(--popout-editor-scheme-line);
-      --editor-scheme-panel: var(--popout-editor-scheme-panel);
-      --editor-scheme-panel2: var(--popout-editor-scheme-panel2);
-      --editor-scheme-preview-bg: var(--popout-editor-scheme-preview-bg);
-      --bg: var(--editor-scheme-bg, #0f131a);
-      --panel: var(--editor-scheme-panel, #151b24);
-      --panel2: var(--editor-scheme-panel2, #1b2432);
-      --text: var(--editor-scheme-fg, #e4e8ee);
-      --muted: var(--editor-scheme-muted, #8b95a5);
-      --line: var(--editor-scheme-line, #2a3444);
-      --editor-preview-bg: var(--editor-scheme-preview-bg, var(--bg));
-    }
-    .file-preview-popout-window .markdown-body {
-      color: var(--text, #111827);
-      background: transparent;
+    .file-preview-popout-window:not(.editor-theme-light):not(.editor-preview-vanilla),
+    .file-preview-popout-window:not(.editor-theme-light):not(.editor-preview-vanilla) .file-preview-popout-title {
+      background: var(--markdown-preview-bg);
     }
     .file-preview-popout-window .markdown-source-anchor {
       display: none;
-      width: 0;
-      height: 0;
-      overflow: hidden;
-    }
-    .file-preview-popout-window:not(.editor-theme-light) {
-      background: var(--markdown-preview-bg, #000000);
-    }
-    .file-preview-popout-window:not(.editor-theme-light) .file-preview-popout-title {
-      background: var(--markdown-preview-bg, #000000);
-      box-shadow: 0 1px 0 var(--markdown-preview-bg, #000000);
-    }
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body {
-      background: var(--markdown-preview-bg, #000000);
-    }
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body pre {
-      background: var(--markdown-code-block-bg);
-    }
-    .file-preview-popout-window .markdown-body blockquote.markdown-alert {
-      --markdown-heading: var(--markdown-html-light-text);
-      --markdown-strong: var(--markdown-html-light-text);
-      --markdown-emphasis: var(--markdown-html-light-text);
-      --markdown-link: var(--markdown-html-light-link);
-      --code-inline: var(--markdown-html-light-code);
-      --code-inline-bg: var(--markdown-html-light-code-bg);
-      --code-inline-border: var(--markdown-html-light-code-border);
-      margin: 6px 0;
-      padding: 8px 10px;
-      color: var(--markdown-html-light-text);
-      background: #fff8cc;
-      border: 0;
-      border-radius: var(--radius-control);
-    }
-    .file-preview-popout-window .markdown-body blockquote.markdown-alert > :first-child { margin-top: 0; }
-    .file-preview-popout-window .markdown-body blockquote.markdown-alert > :last-child { margin-bottom: 0; }
-    .file-preview-popout-window .markdown-body blockquote.markdown-alert :is(p, ul, ol, pre) {
-      margin-block: 2px;
-    }
-    .file-preview-popout-window .markdown-body blockquote.markdown-alert :is(strong, em) {
-      color: var(--markdown-html-light-text);
-    }
-    .file-preview-popout-window .markdown-body blockquote.markdown-alert code {
-      color: var(--markdown-html-light-code);
-      background: var(--markdown-html-light-code-bg);
-      border-color: var(--markdown-html-light-code-border);
-    }
-    .file-preview-popout-window .markdown-body blockquote.markdown-alert-caution {
-      background: var(--markdown-alert-caution-light-bg);
-    }
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) {
-      --markdown-heading: var(--markdown-html-dark-text);
-      --markdown-strong: var(--markdown-html-dark-text);
-      --markdown-emphasis: var(--markdown-html-dark-text);
-      --markdown-link: var(--markdown-html-dark-link);
-      --code-inline: var(--markdown-html-dark-code);
-      --code-inline-bg: var(--markdown-html-dark-code-bg);
-      --code-inline-border: var(--markdown-html-dark-code-border);
-      color: var(--markdown-html-dark-text);
-    }
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote.markdown-alert-warning {
-      background: var(--markdown-html-dark-bg);
-    }
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote.markdown-alert-caution {
-      background: var(--markdown-alert-caution-dark-bg);
-    }
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) :is(strong, em) {
-      color: var(--markdown-html-dark-text);
-    }
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) code {
-      color: var(--markdown-html-dark-code);
-      background: var(--markdown-html-dark-code-bg);
-      border-color: var(--markdown-html-dark-code-border);
-    }
-    .file-preview-popout-window .markdown-body .markdown-html-light-bg,
-    .file-preview-popout-window .markdown-body table.markdown-html-light-bg :is(th, td),
-    .file-preview-popout-window .markdown-body table[bgcolor],
-    .file-preview-popout-window .markdown-body table[bgcolor] :is(th, td),
-    .file-preview-popout-window .markdown-body :is(th, td)[bgcolor] {
-      --markdown-heading: var(--markdown-html-light-text);
-      --markdown-strong: var(--markdown-html-light-text);
-      --markdown-emphasis: var(--markdown-html-light-text);
-      --markdown-link: var(--markdown-html-light-link);
-      --code-inline: var(--markdown-html-light-code);
-      --code-inline-bg: var(--markdown-html-light-code-bg);
-      --code-inline-border: var(--markdown-html-light-code-border);
-      color: var(--markdown-html-light-text) !important;
-      border-color: transparent;
-    }
-    .file-preview-popout-window .markdown-body :is(th, td).markdown-html-light-bg,
-    .file-preview-popout-window .markdown-body table.markdown-html-light-bg :is(th, td),
-    .file-preview-popout-window .markdown-body table[bgcolor] :is(th, td),
-    .file-preview-popout-window .markdown-body :is(th, td)[bgcolor] {
-      padding: 10px;
-    }
-    .file-preview-popout-window .markdown-body .markdown-html-light-bg :is(strong, em),
-    .file-preview-popout-window .markdown-body table.markdown-html-light-bg :is(strong, em),
-    .file-preview-popout-window .markdown-body table[bgcolor] :is(strong, em),
-    .file-preview-popout-window .markdown-body :is(th, td)[bgcolor] :is(strong, em) {
-      color: var(--markdown-html-light-text);
-    }
-    .file-preview-popout-window .markdown-body .markdown-html-light-bg code,
-    .file-preview-popout-window .markdown-body table.markdown-html-light-bg code,
-    .file-preview-popout-window .markdown-body table[bgcolor] code,
-    .file-preview-popout-window .markdown-body :is(th, td)[bgcolor] code {
-      color: var(--markdown-html-light-code);
-      background: var(--markdown-html-light-code-bg);
-      border-color: var(--markdown-html-light-code-border);
-    }
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body .markdown-html-light-bg,
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body table.markdown-html-light-bg :is(th, td),
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body table[bgcolor],
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body table[bgcolor] :is(th, td),
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body :is(th, td)[bgcolor] {
-      --markdown-heading: var(--markdown-html-dark-text);
-      --markdown-strong: var(--markdown-html-dark-text);
-      --markdown-emphasis: var(--markdown-html-dark-text);
-      --markdown-link: var(--markdown-html-dark-link);
-      --code-inline: var(--markdown-html-dark-code);
-      --code-inline-bg: var(--markdown-html-dark-code-bg);
-      --code-inline-border: var(--markdown-html-dark-code-border);
-      color: var(--markdown-html-dark-text) !important;
-      background: var(--markdown-html-dark-bg) !important;
-      border-color: var(--markdown-html-dark-border);
-    }
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body .markdown-html-light-bg :is(strong, em),
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body table.markdown-html-light-bg :is(strong, em),
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body table[bgcolor] :is(strong, em),
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body :is(th, td)[bgcolor] :is(strong, em) {
-      color: var(--markdown-html-dark-text);
-    }
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body .markdown-html-light-bg code,
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body table.markdown-html-light-bg code,
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body table[bgcolor] code,
-    .file-preview-popout-window:not(.editor-theme-light) .markdown-body :is(th, td)[bgcolor] code {
-      color: var(--markdown-html-dark-code);
-      background: var(--markdown-html-dark-code-bg);
-      border-color: var(--markdown-html-dark-code-border);
-    }
-    .file-preview-popout-window .markdown-body pre code.hljs {
-      color: var(--editor-scheme-fg, inherit) !important;
-      background: transparent !important;
-      border: 0;
-      display: inline;
-      overflow: visible;
-      padding: 0;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-comment,
-    .file-preview-popout-window .markdown-body pre code .hljs-quote {
-      color: var(--code-comment) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-keyword,
-    .file-preview-popout-window .markdown-body pre code .hljs-selector-tag,
-    .file-preview-popout-window .markdown-body pre code .hljs-literal,
-    .file-preview-popout-window .markdown-body pre code .hljs-section,
-    .file-preview-popout-window .markdown-body pre code .hljs-doctag {
-      color: var(--code-keyword) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-string,
-    .file-preview-popout-window .markdown-body pre code .hljs-regexp,
-    .file-preview-popout-window .markdown-body pre code .hljs-addition,
-    .file-preview-popout-window .markdown-body pre code .hljs-template-variable {
-      color: var(--code-string) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-number,
-    .file-preview-popout-window .markdown-body pre code .hljs-symbol,
-    .file-preview-popout-window .markdown-body pre code .hljs-bullet,
-    .file-preview-popout-window .markdown-body pre code .hljs-attr {
-      color: var(--code-number) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-title,
-    .file-preview-popout-window .markdown-body pre code .hljs-title.function_,
-    .file-preview-popout-window .markdown-body pre code .hljs-function .hljs-title {
-      color: var(--code-function) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-built_in,
-    .file-preview-popout-window .markdown-body pre code .hljs-type,
-    .file-preview-popout-window .markdown-body pre code .hljs-class .hljs-title {
-      color: var(--code-type) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-variable,
-    .file-preview-popout-window .markdown-body pre code .hljs-params,
-    .file-preview-popout-window .markdown-body pre code .hljs-name {
-      color: var(--code-variable) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-property,
-    .file-preview-popout-window .markdown-body pre code .hljs-attribute {
-      color: var(--code-property) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-tag {
-      color: var(--code-tag) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-deletion {
-      color: var(--code-invalid) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-meta {
-      color: var(--code-atom) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-keyword {
-      color: var(--code-keyword) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-control {
-      color: var(--code-control) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-string {
-      color: var(--code-string) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-comment {
-      color: var(--code-comment) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-number {
-      color: var(--code-number) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-constant {
-      color: var(--code-atom) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-builtin,
-    .file-preview-popout-window .markdown-body pre code .code-function {
-      color: var(--code-function) !important;
-      font-weight: 700;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-type,
-    .file-preview-popout-window .markdown-body pre code .code-attr {
-      color: var(--code-type) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-variable {
-      color: var(--code-variable) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-property {
-      color: var(--code-property) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-tag {
-      color: var(--code-tag) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-invalid {
-      color: var(--code-invalid) !important;
-    }
-    .file-preview-popout-window.editor-theme-light {
-      --editor-scheme-bg: var(--lt-editor-bg);
-      --editor-scheme-fg: var(--lt-text);
-      --editor-scheme-muted: var(--lt-muted);
-      --editor-scheme-line: var(--lt-line);
-      --editor-scheme-panel: var(--lt-panel);
-      --editor-scheme-panel2: var(--lt-panel2);
-      --editor-scheme-preview-bg: var(--lt-editor-preview-bg);
-    }
-    .file-preview-popout-window.editor-theme-light .markdown-body {
-      --markdown-heading: var(--lt-markdown-heading);
-      --markdown-heading-bg: var(--lt-markdown-heading-bg);
-      --markdown-link: var(--lt-markdown-link);
-      --markdown-strong: var(--lt-markdown-strong);
-      --markdown-emphasis: var(--lt-markdown-emphasis);
-      --code-inline: var(--lt-code-inline);
-      --code-inline-bg: var(--lt-code-inline-bg);
-      --code-inline-border: var(--lt-code-inline-border);
-    }
-    .file-preview-popout-window.editor-theme-light .markdown-body pre {
-      color: var(--lt-text);
-      background: var(--lt-panel);
-      border-color: var(--lt-line);
-    }
-    .file-preview-popout-window.editor-theme-light .markdown-body pre code {
-      color: inherit;
-      background: transparent;
-      border: 0;
     }
     @media (max-width: 640px) {
       .file-preview-popout-shell { padding: 64px 14px 28px; }

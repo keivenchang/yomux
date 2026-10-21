@@ -606,7 +606,6 @@
   --lt-code-block-bg: #f3f4f6;
   --lt-code-block-border: #e4e7ec;
   --lt-code-block-text: #1f2328;
-  --editor-search-border-light: #8c959f;
   --lt-muted-strong: #475569;
   --lt-code-invalid: #82071e;
   --lt-code-control: var(--lt-code-keyword);
@@ -631,11 +630,8 @@
   --pc-zoom-border: var(--active-control-border);
   --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, var(--paint-white) 16%);
   --pc-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, var(--paint-white) 22%);
-  --panel-close-size: 18px;
-  --panel-close-radius: 4px;
   --panel-close-glyph-width: 8px;
   --panel-close-glyph-height: 1.4px;
-  --panel-close-hover-bg: rgba(255, 255, 255, 0.08);
   --icon-notify: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.3 21a2 2 0 0 0 3.4 0'/%3E%3Cpath d='M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9'/%3E%3C/svg%3E");
   --icon-refresh: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 12a9 9 0 0 1-9 9 9.5 9.5 0 0 1-6.7-2.7'/%3E%3Cpath d='M3 12a9 9 0 0 1 9-9 9.5 9.5 0 0 1 6.7 2.7'/%3E%3Cpath d='M3 3v6h6'/%3E%3Cpath d='M21 21v-6h-6'/%3E%3C/svg%3E");
   --icon-tab-meta: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 9h16'/%3E%3Cpath d='M4 15h16'/%3E%3Cpath d='M10 3 8 21'/%3E%3Cpath d='M16 3l-2 18'/%3E%3C/svg%3E");
@@ -697,13 +693,9 @@
   --20-sessions-popovers-session-popover-border-inline-start-29: var(--line);
   --20-sessions-popovers-session-popover-border-top-30: var(--line);
   --20-sessions-popovers-popover-row-border-top-31: var(--line);
-  --20-sessions-popovers-popover-subtitle-fg-32: var(--text);
-  --20-sessions-popovers-popover-label-fg-33: var(--text);
-  --20-sessions-popovers-state-legend-item-fg-35: var(--text);
-  --20-sessions-popovers-session-popover-fg-36: var(--text);
+  --popover-muted-text: var(--text);
   --20-sessions-popovers-session-popover-fg-37: var(--text);
-  --20-sessions-popovers-session-popover-fg-39: var(--text);
-  --20-sessions-popovers-branch-link-fg-40: var(--text);
+  --popover-link-text: var(--text);
   --30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1: #596273;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2: var(--bad);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3: var(--good);
@@ -1191,7 +1183,6 @@ body.theme-light {
   --pc-zoom-border: var(--active-control-border);
   --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, var(--paint-white) 12%);
   --pc-zoom-hover-border: var(--active-control-border);
-  --panel-close-hover-bg: rgba(15, 23, 42, 0.08);
 
 
   --20-sessions-popovers-session-state-badge-fg-1: var(--neutral-text-strong);
@@ -1225,13 +1216,9 @@ body.theme-light {
   --20-sessions-popovers-session-popover-border-inline-start-29: var(--active-control-soft-border);
   --20-sessions-popovers-session-popover-border-top-30: var(--active-control-soft-border);
   --20-sessions-popovers-popover-row-border-top-31: var(--paint-overlay-slate-10);
-  --20-sessions-popovers-popover-subtitle-fg-32: var(--lt-muted);
-  --20-sessions-popovers-popover-label-fg-33: var(--lt-muted);
-  --20-sessions-popovers-state-legend-item-fg-35: var(--lt-muted);
-  --20-sessions-popovers-session-popover-fg-36: var(--lt-muted);
+  --popover-muted-text: var(--lt-muted);
   --20-sessions-popovers-session-popover-fg-37: #9aa3b2;
-  --20-sessions-popovers-session-popover-fg-39: var(--accent);
-  --20-sessions-popovers-branch-link-fg-40: var(--accent);
+  --popover-link-text: var(--accent);
   --30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1: var(--editor-line-number);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2: #cf1625;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3: #17813a;

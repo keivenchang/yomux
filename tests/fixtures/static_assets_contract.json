@@ -1,10 +1,11 @@
 {
   "baseline": {
-    "builder_blob": "086876818a40863150b206c390c032d2a38e7880",
+    "builder_blob": "72e3977d543e8b70ded08d0a5fc8fd0a52d5cf0b",
     "builder_path": "tools/static_build.py",
-    "source_commit": "1810cb5bd68e315fccd0b9a8eaffa800f38a55a3",
-    "source_state": "working tree with yo7111 Tabber publication coalescing changes"
+    "source_commit": "ba0566162e7f726a95690c60004fba937b7342d1",
+    "source_state": "working tree based on the Markdown Enter release candidate with event-post delivery recovery; independent Python/native byte comparison"
   },
+  "reviewed_text_changes": {},
   "sha256": {
     "emoji-data.js": "ddbb8e55806e4ac11638564da232c9120c95bdd199be1199ccdb58a31e304084",
     "locales/ar.json": "841a16db7863147fea58da30f0ad5bb4c0103b5bf5aba884c14b27c56768f183",
@@ -27,19 +28,7 @@
     "locales/vi.json": "ce0da9151e44281c939ac6ff7cfe23fb78db2f1ce4b838167b947db1df7d96df",
     "locales/zh-Hans.json": "9945b404dd156252dd1f50b9a79d6bcbc295c6cc05deae1bb84eb09cf04a9b45",
     "locales/zh-Hant.json": "140c11f22782a748faefcda13d7d80becf52a8ceda2a9dedfaa9a80753403d6a",
-    "yomux.css": "39daa278f7ce5a792677649a3c5ef2bea35233774f545f36f547d4a76ae0f617",
-    "yomux.js": "096012d3a60591051fc7d8a5cae3a8cf89a0e3a30c0f0649de6f097c885fdcac"
-  },
-  "reviewed_text_changes": {
-    "yomux.js": [
-      {
-        "baseline": "const selfSigned = `python3 yomux.py --port ${port} --self-signed`;",
-        "current": "const selfSigned = `./boot.sh --force ${port}`;"
-      },
-      {
-        "baseline": "const cert = `python3 yomux.py --port ${port} --cert /path/fullchain.pem --key /path/privkey.pem`;",
-        "current": "const cert = `./boot.sh --force ${port} --cert /path/fullchain.pem --key /path/privkey.pem`;"
-      }
-    ]
+    "yomux.css": "c6c19074d53039b6fc447231d50cdb93627678864baf3ca1d3b8fd0f5a37113f",
+    "yomux.js": "45acc9713323e69dcae770481851ae38c9c71832a3c5315b0768414a1e1a099c"
   }
 }

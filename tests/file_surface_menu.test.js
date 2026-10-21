@@ -98,7 +98,7 @@ test('Vertical Side Pane tab menus omit More desc and reuse the shared direction
 test('Finder and Differ render shared selectors with independent selected-session owners', () => {
   const finderBuilder = panel.slice(panel.indexOf('function createFileExplorerPanel('), panel.indexOf('function refreshFileExplorerPanelTree('));
   assert.match(finderBuilder, /file-explorer-path-row[\s\S]*file-explorer-primary-row[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerFinderTargetSession\(\), 'finder'\)[\s\S]*view === 'differ'[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\), 'differ'\)/);
-  assert.match(panel, /function switchFileExplorerFinderSession\(session\)[\s\S]*fileExplorerFinderSelectedSession = session[\s\S]*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\)/);
+  assert.match(panel, /function switchFileExplorerFinderSession\(session\)[\s\S]*setFileExplorerFinderSessionSelection\(session\)[\s\S]*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\)/);
   assert.match(panel, /function switchFileExplorerChangesSession\(session\)[\s\S]*fileExplorerChangesSelectedSession = session/);
 });
 

@@ -38,6 +38,26 @@ func TestFinderIndexSettingsDefaultRefreshCadenceIsOneMinute(t *testing.T) {
 	}
 }
 
+func TestFinderIndexSettingsDeduplicateSymlinkAliases(t *testing.T) {
+	root := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "shared-root")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	settings := &server{}
+	payload := map[string]any{"settings": map[string]any{"file_explorer": map[string]any{"indexed_dirs": []any{root, alias}}}}
+	if _, _, err := settings.updateFinderIndexSettings(payload); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := finder.CanonicalIndexRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings.indexSettings.roots) != 1 || settings.indexSettings.roots[0] != canonical {
+		t.Fatalf("canonical indexed roots = %#v, want [%s]", settings.indexSettings.roots, canonical)
+	}
+}
+
 func TestFinderIndexSettingsPendingFenceRetainsRemovedRootsForRetry(t *testing.T) {
 	removedRoot := filepath.Join(t.TempDir(), "removed")
 	currentRoot := filepath.Join(t.TempDir(), "current")

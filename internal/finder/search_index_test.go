@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,6 +62,69 @@ func TestGoSearchIndexColdStartupAndRestartPreserveOwnedDatabase(t *testing.T) {
 	}
 	if data, err := os.ReadFile(unrelated); err != nil || string(data) != "unrelated state" {
 		t.Fatalf("unrelated file changed: %q %v", data, err)
+	}
+}
+
+func TestGoSearchIndexSymlinkAliasesShareOneRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "shared.go"), []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	aliasOne := filepath.Join(t.TempDir(), "alias-one")
+	aliasTwo := filepath.Join(t.TempDir(), "alias-two")
+	if err := os.Symlink(root, aliasOne); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(root, aliasTwo); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	info, err := os.Stat(aliasOne)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := openSearchIndexStore(filepath.Join(t.TempDir(), "search-index.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.db.Close() }()
+	engine := newSearchIndexEngine(store)
+	if _, err := engine.handle(indexRequest{Action: "ensure", Root: aliasOne, Identity: fileID(info), MaxFiles: 10, MaxBytes: DefaultIndexBytes}); err != nil {
+		t.Fatal(err)
+	}
+	canonicalRoot, err := CanonicalIndexRoot(aliasOne)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.mu.Lock()
+	buildDone := engine.buildDone[canonicalRoot]
+	engine.mu.Unlock()
+	if buildDone == nil {
+		t.Fatal("symlink ensure did not schedule a root build")
+	}
+	select {
+	case <-buildDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("symlink root build did not finish")
+	}
+	status, err := engine.handle(indexRequest{Action: "status", Root: aliasTwo, Identity: fileID(info)})
+	if err != nil || status["indexed"] != true {
+		t.Fatalf("alias status = %#v, err = %v", status, err)
+	}
+	result, err := engine.handle(indexRequest{Action: "search", Root: aliasTwo, Identity: fileID(info), Query: "shared", Limit: 10})
+	if err != nil || result["count"] != 1 {
+		t.Fatalf("alias search = %#v, err = %v", result, err)
+	}
+	files, ok := result["files"].([]map[string]any)
+	canonicalRoot, err = CanonicalIndexRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || len(files) != 1 || files[0]["path"] != filepath.Join(canonicalRoot, "shared.go") {
+		t.Fatalf("alias search paths = %#v", result["files"])
+	}
+	var rootCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM roots`).Scan(&rootCount); err != nil || rootCount != 1 {
+		t.Fatalf("stored root count = %d, err = %v", rootCount, err)
 	}
 }
 
@@ -551,6 +616,91 @@ func TestIndexedOnlySearchForUnconfiguredRootReportsNotIndexed(t *testing.T) {
 		}
 		if payload["indexed"] != false || payload["index_state"] != "not_indexed" {
 			t.Fatalf("unconfigured indexed-only status for cursor %q = %#v", cursor, payload)
+		}
+	}
+}
+
+func TestIndexedSearchThroughSymlinkReturnsRequestedPaths(t *testing.T) {
+	t.Setenv("YOMUX_TEST_INDEX_WORKER", "1")
+	previousRunner := execCommand
+	execCommand = func(_ string, args ...string) *exec.Cmd {
+		return exec.Command(os.Args[0], append([]string{"-test.run=^TestSearchIndexV2WorkerHelperProcess$", "--"}, args...)...)
+	}
+	defer func() { execCommand = previousRunner }()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "shared.go"), []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "needle-secret.go"), []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "shared-alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	service, _ := newTestService(t, nil)
+	client := NewSearchIndexWorkerClient(t.TempDir())
+	defer client.Close()
+	service.searchIndex = client
+	options := SearchOptions{Indexed: true, MaxFiles: 1000, MaxBytes: DefaultIndexBytes, RefreshSec: 3600, SettingsRevision: 41}
+	if _, err := client.ApplySettings(context.Background(), []string{alias}, options.SettingsRevision, 1, true, options.MaxBytes, true, options); err != nil {
+		t.Fatal(err)
+	}
+	if _, finderErr := service.EnsureIndex(context.Background(), alias, options); finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	info, err := os.Stat(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		status, statusErr := client.Request(context.Background(), indexRequest{Action: "status", Root: alias, Identity: fileID(info)})
+		if statusErr != nil {
+			t.Fatal(statusErr)
+		}
+		if status["indexed"] == true {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("symlink index did not finish: %#v", status)
+		}
+		runtime.Gosched()
+	}
+	result, finderErr := service.SearchWithOptions(context.Background(), alias, "shared", 10, true, false, false, options)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	files, ok := result["files"].([]map[string]any)
+	if !ok || len(files) != 1 {
+		t.Fatalf("symlink search paths = %#v", result["files"])
+	}
+	for _, file := range files {
+		path, _ := file["path"].(string)
+		if !strings.HasPrefix(path, alias+string(filepath.Separator)) {
+			t.Fatalf("symlink search returned non-alias path %q", path)
+		}
+	}
+	retained, finderErr := service.SearchWithOptions(context.Background(), alias, "secret", 10, true, false, false, options)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	retainedFiles, ok := retained["files"].([]map[string]any)
+	if !ok || len(retainedFiles) != 1 || retainedFiles[0]["path"] != filepath.Join(alias, "needle-secret.go") {
+		t.Fatalf("indexed fixture before exclusion = %#v", retained["files"])
+	}
+
+	options.ExcludePaths = []string{filepath.Join(alias, "needle-secret.go")}
+	for _, indexed := range []bool{true, false} {
+		options.Indexed = indexed
+		result, finderErr = service.SearchWithOptions(context.Background(), alias, "secret", 10, true, false, false, options)
+		if finderErr != nil {
+			t.Fatalf("indexed=%v: %v", indexed, finderErr)
+		}
+		files, ok = result["files"].([]map[string]any)
+		if !ok || len(files) != 0 {
+			t.Fatalf("indexed=%v symlink search with absolute exclusion = %#v", indexed, result["files"])
 		}
 	}
 }

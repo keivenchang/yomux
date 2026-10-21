@@ -896,7 +896,7 @@ func (s *Service) search(ctx context.Context, root, query string, limit int, rec
 	for _, name := range options.ExcludeDirs {
 		names[name] = struct{}{}
 	}
-	policy, policyErr := compileSearchPolicy(requested, names, options.ExcludePaths)
+	policy, policyErr := compileSearchPolicyResolved(requested, resolved, names, options.ExcludePaths)
 	if policyErr != nil {
 		return nil, filesystemError(requested, policyErr)
 	}
@@ -919,8 +919,8 @@ func (s *Service) search(ctx context.Context, root, query string, limit int, rec
 					continue
 				}
 				path, _ := row["path"].(string)
-				relative, relErr := filepath.Rel(requested, path)
-				if relErr != nil || !indexRootWithin(requested, path) {
+				relative, relErr := filepath.Rel(resolved, path)
+				if relErr != nil || !indexRootWithin(resolved, path) {
 					continue
 				}
 				file, openErr := openIndexedSearchFile(directory, relative, policy, bareCache)
@@ -936,12 +936,14 @@ func (s *Service) search(ctx context.Context, root, query string, limit int, rec
 				}
 				row["file_id"], row["file_identity"] = fileID(info), "id:"+fileID(info)
 				row["size"], row["mtime"], row["mtime_ns"] = info.Size(), info.ModTime().Unix(), info.ModTime().UnixNano()
+				row["path"] = filepath.Join(requested, relative)
 				if minimal {
-					row = map[string]any{"path": row["path"], "name": row["name"], "relative_path": row["relative_path"], "kind": row["kind"]}
+					row = map[string]any{"path": filepath.Join(requested, relative), "name": row["name"], "relative_path": row["relative_path"], "kind": row["kind"]}
 				}
 				verified = append(verified, row)
 			}
 			indexed["files"], indexed["count"] = verified, len(verified)
+			indexed["root"] = requested
 			if len(verified) < len(files) {
 				indexed["complete"] = false
 				indexed["coverage_reason"] = "retained snapshot filtered under current filesystem and exclusion policy"
@@ -1180,6 +1182,7 @@ func (s *Service) IndexStatus(ctx context.Context, root string) (map[string]any,
 		info, statErr := directory.Stat()
 		if statErr == nil {
 			if payload, workerErr := s.searchIndex.Request(ctx, indexRequest{Action: "status", Root: requested, Identity: fileID(info)}); workerErr == nil && payload != nil {
+				payload["root"] = requested
 				return payload, nil
 			}
 		}
@@ -1209,6 +1212,9 @@ func (s *Service) EnsureIndex(ctx context.Context, root string, options SearchOp
 	})
 	if err != nil {
 		return nil, filesystemError(requested, err)
+	}
+	if payload != nil {
+		payload["root"] = requested
 	}
 	return payload, nil
 }

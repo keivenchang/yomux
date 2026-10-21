@@ -163,7 +163,7 @@ function switchFileExplorerChangesSession(session) {
 function switchFileExplorerFinderSession(session) {
   if (!isTmuxSession(session) || !sessions.includes(session)) return false;
   if (fileExplorerFinderSelectedSession === session) return false;
-  fileExplorerFinderSelectedSession = session;
+  setFileExplorerFinderSessionSelection(session);
   rememberFileExplorerExplicitSyncSession(session);
   scheduleFileExplorerActiveTabSync(session, {explicit: true});
   const cached = fileExplorerFinderSessionFilesCache.get(sessionFilesCacheKey(session, 'finder'));

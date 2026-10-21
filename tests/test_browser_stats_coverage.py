@@ -58,6 +58,57 @@ def test_live_runtime_boot_fixture_exposes_exact_stats_capabilities_before_logs_
     assert observed["logsRendered"] is True, observed
 
 
+def test_js_debug_client_work_counter_columns_align_in_visible_report(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugClientPerfHtml === 'function' && typeof clientPerfSummary === 'function';"
+        )
+    )
+    result = browser.execute_script(
+        """
+        const originalSummary = clientPerfSummary;
+        clientPerfSummary = () => [
+          {name:'focusSet',count:14,avgMs:1.9,maxMs:9.8},
+          {name:'tabActivationPaint',count:3,avgMs:61.7,maxMs:122.7},
+          {name:'tabberFullRefresh',count:419,avgMs:0.1,maxMs:0.5},
+          {name:'tabberLayoutSync',count:1,avgMs:0.1,maxMs:0.1,rows:8},
+          {name:'statsNoDataSweep',count:3054,avgMs:0,maxMs:0.8,rows:488028},
+          {name:'sessionFilesRefresh',count:9,rows:42573,nodes:130,skipped:3},
+        ];
+        const host = document.createElement('div');
+        host.style.width = '1000px';
+        host.innerHTML = debugClientPerfHtml();
+        document.body.append(host);
+        const grid = host.querySelector('.js-debug-client-perf-grid');
+        grid.style.gridTemplateColumns = '1fr';
+        const rows = [...host.querySelectorAll('.js-debug-client-perf-row')];
+        const offsets = marker => rows.map(row => {
+          const text = row.firstChild;
+          const start = text.textContent.indexOf(marker);
+          const range = document.createRange();
+          range.setStart(text, start);
+          range.setEnd(text, start + marker.length);
+          return range.getBoundingClientRect().left;
+        });
+        const result = {
+          rows: rows.length,
+          font: getComputedStyle(rows[0]).fontFamily,
+          count: offsets('n='),
+          average: offsets('avg='),
+          maximum: offsets('max='),
+        };
+        host.remove();
+        clientPerfSummary = originalSummary;
+        return result;
+        """
+    )
+    assert result["rows"] == 6, result
+    assert "mono" in result["font"].lower(), result
+    for column in ("count", "average", "maximum"):
+        assert max(result[column]) - min(result[column]) < 0.1, {column: result[column]}
+
+
 def test_stats_only_boot_keeps_stats_ready_without_unrelated_route_traffic(browser, tmp_path):
     """Stats-only boot must not probe routes outside stats plus the live agent-activity surface."""
 

@@ -8,7 +8,8 @@
   direction: ltr;
   text-align: start;
 }
-.file-editor-panel {
+.file-editor-panel,
+.file-preview-popout-shell {
   --editor-toolbar-control-fg: var(--editor-scheme-muted);
   --editor-toolbar-control-bg: color-mix(in srgb, var(--editor-scheme-panel2) 82%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
   --editor-toolbar-control-border: color-mix(in srgb, var(--editor-scheme-line) 74%, var(--pane-ctl-border, var(--pane-tab-control-border)));
@@ -825,12 +826,12 @@ body.editor-theme-light .file-editor-image {
   inset: 0;
 }
 .file-editor-preview-pane[hidden] { display: none; }
-body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane.markdown-body,
-body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane-panel.markdown-body {
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .file-editor-preview-pane.markdown-body,
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .file-editor-preview-pane-panel.markdown-body {
   background: var(--markdown-preview-bg);
 }
-body.editor-theme-light .file-editor-content .file-editor-preview-pane.markdown-body,
-body.editor-theme-light .file-editor-content .file-editor-preview-pane-panel.markdown-body {
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .file-editor-preview-pane.markdown-body,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .file-editor-preview-pane-panel.markdown-body {
   background: var(--light-readable-bg);
 }
 .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 {
@@ -1069,7 +1070,7 @@ body.editor-theme-light .file-editor-content .file-editor-preview-pane-panel.mar
 .markdown-body blockquote.markdown-alert-caution {
   background: var(--markdown-alert-caution-light-bg);
 }
-body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) {
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) {
   --markdown-heading: var(--markdown-html-dark-text);
   --markdown-strong: var(--markdown-html-dark-text);
   --markdown-emphasis: var(--markdown-html-dark-text);
@@ -1079,13 +1080,13 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(
   --code-inline-border: var(--markdown-html-dark-code-border);
   color: var(--markdown-html-dark-text);
 }
-body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote.markdown-alert-warning {
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .markdown-body blockquote.markdown-alert-warning {
   background: var(--markdown-html-dark-bg);
 }
-body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote.markdown-alert-caution {
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .markdown-body blockquote.markdown-alert-caution {
   background: var(--markdown-alert-caution-dark-bg);
 }
-body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) :is(strong, em) { color: var(--markdown-html-dark-text); }
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) :is(strong, em) { color: var(--markdown-html-dark-text); }
 .markdown-body table { width: max-content; max-width: 100%; border-collapse: collapse; margin: var(--space-8) 0; }
 .markdown-body th, .markdown-body td { min-width: 5ch; border: 1px solid var(--line); padding: var(--space-6) var(--space-8); vertical-align: top; }
 .markdown-body th { background: var(--panel2); font-weight: 700; }
@@ -1116,11 +1117,11 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(
 .markdown-body :is(th, td)[bgcolor] :is(strong, em) {
   color: var(--markdown-html-light-text);
 }
-body:not(.editor-theme-light) .file-editor-content .markdown-body .markdown-html-light-bg,
-body:not(.editor-theme-light) .file-editor-content .markdown-body table.markdown-html-light-bg :is(th, td),
-body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor],
-body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor] :is(th, td),
-body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bgcolor] {
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .markdown-body .markdown-html-light-bg,
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .markdown-body table.markdown-html-light-bg :is(th, td),
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .markdown-body table[bgcolor],
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .markdown-body table[bgcolor] :is(th, td),
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .markdown-body :is(th, td)[bgcolor] {
   --markdown-heading: var(--markdown-html-dark-text);
   --markdown-strong: var(--markdown-html-dark-text);
   --markdown-emphasis: var(--markdown-html-dark-text);
@@ -1132,10 +1133,10 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
   background: var(--markdown-html-dark-bg) !important;
   border-color: var(--markdown-html-dark-border);
 }
-body:not(.editor-theme-light) .file-editor-content .markdown-body .markdown-html-light-bg :is(strong, em),
-body:not(.editor-theme-light) .file-editor-content .markdown-body table.markdown-html-light-bg :is(strong, em),
-body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor] :is(strong, em),
-body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bgcolor] :is(strong, em) {
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .markdown-body .markdown-html-light-bg :is(strong, em),
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .markdown-body table.markdown-html-light-bg :is(strong, em),
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .markdown-body table[bgcolor] :is(strong, em),
+body:not(.editor-theme-light) :is(.file-editor-content, .file-preview-popout-shell) .markdown-body :is(th, td)[bgcolor] :is(strong, em) {
   color: var(--markdown-html-dark-text);
 }
 .markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: var(--space-12) 0; }
@@ -1167,7 +1168,7 @@ body.editor-preview-vanilla .prosemirror-editor :is(h1, h2, h3, h4, h5, h6) {
 .prosemirror-editor.vanilla-preview-body :is(strong, em) { color: inherit; }
 .file-editor-preview-pane.vanilla-preview-body :is(code, pre),
 .file-editor-preview-pane-panel.vanilla-preview-body :is(code, pre),
-.file-editor-content .markdown-body.vanilla-preview-body :is(code, pre),
+:is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body :is(code, pre),
 .prosemirror-editor.vanilla-preview-body :is(code, pre) {
   color: var(--markdown-html-light-text);
   background: var(--lt-panel);
@@ -1175,10 +1176,10 @@ body.editor-preview-vanilla .prosemirror-editor :is(h1, h2, h3, h4, h5, h6) {
 }
 .file-editor-preview-pane.vanilla-preview-body pre code,
 .file-editor-preview-pane-panel.vanilla-preview-body pre code,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body pre code,
 .file-editor-preview-pane.vanilla-preview-body pre code *,
 .file-editor-preview-pane-panel.vanilla-preview-body pre code *,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code *,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body pre code *,
 .prosemirror-editor.vanilla-preview-body pre code,
 .prosemirror-editor.vanilla-preview-body pre code * {
   color: inherit !important;
@@ -1197,26 +1198,26 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
 .file-editor-preview-pane-panel.vanilla-preview-body h4,
 .file-editor-preview-pane-panel.vanilla-preview-body h5,
 .file-editor-preview-pane-panel.vanilla-preview-body h6,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h1,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h2,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h3,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h4,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h5,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h6 {
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body h1,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body h2,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body h3,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body h4,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body h5,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body h6 {
   color: var(--markdown-html-light-text);
   background: transparent;
 }
 .file-editor-preview-pane.vanilla-preview-body a,
 .file-editor-preview-pane-panel.vanilla-preview-body a,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body a {
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body a {
   color: var(--vanilla-preview-link);
 }
 .file-editor-preview-pane.vanilla-preview-body strong,
 .file-editor-preview-pane.vanilla-preview-body em,
 .file-editor-preview-pane-panel.vanilla-preview-body strong,
 .file-editor-preview-pane-panel.vanilla-preview-body em,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body strong,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body em {
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body strong,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body em {
   color: inherit;
 }
 /* Firefox has supported the standard ::selection pseudo-element since version 62. Keeping the legacy
@@ -2251,7 +2252,8 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-popout-preview-panel:hover,
 .file-editor-theme-panel:hover,
 .file-editor-reload-panel:hover,
-.file-editor-preview-find-panel button:not(:disabled):hover {
+.file-editor-preview-find-panel button:not(:disabled):is(:hover, :focus-visible),
+:is(.file-editor-codemirror, .file-editor-codemirror-panel) .cm-search :is(.cm-button, label, .cm-dialog-close):where(:not(:disabled):not(:has(input:checked, input:disabled))):is(:hover, :focus-visible) {
   color: var(--editor-toolbar-control-hover-fg);
   border-color: var(--editor-toolbar-control-hover-border);
   background: var(--editor-toolbar-control-hover-bg);
@@ -2321,6 +2323,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   --editor-text-padding-inline: 10px;
 }
 .file-editor-content,
+.file-preview-popout-shell,
 .file-editor-panel-body,
 .file-editor-code-preview {
   --bg: var(--editor-scheme-bg);
@@ -2334,6 +2337,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   --editor-preview-bg: var(--editor-scheme-preview-bg);
 }
 body.editor-theme-light .file-editor-content,
+body.editor-theme-light .file-preview-popout-shell,
 body.editor-theme-light .file-editor-panel-body,
 body.editor-theme-light .file-editor-code-preview {
   --editor-scheme-bg: var(--lt-editor-bg);
@@ -2365,16 +2369,16 @@ body.editor-theme-light .file-editor-code-preview {
   --markdown-strong: var(--lt-markdown-strong);
   --markdown-emphasis: var(--lt-markdown-emphasis);
 }
-body.editor-theme-light .file-editor-content .markdown-body h1,
-body.editor-theme-light .file-editor-content .markdown-body h2 {
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body h1,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body h2 {
   background: transparent;
 }
-body.editor-theme-light .file-editor-content:not(:has(.file-editor-preview-pane-panel)) .markdown-body :is(h1, h2, h3, h4, h5, h6) {
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell):not(:has(.file-editor-preview-pane-panel)) .markdown-body :is(h1, h2, h3, h4, h5, h6) {
   color: var(--markdown-html-light-text) !important;
 }
-body.theme-light .file-editor-content .markdown-body.vanilla-preview-body,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body,
-body.editor-scheme-yomux-light .file-editor-content .markdown-body.vanilla-preview-body {
+body.theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body,
+body.editor-scheme-yomux-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body {
   --text: var(--light-readable-text);
   --muted: #374151;
   --line: var(--light-readable-line);
@@ -2384,65 +2388,65 @@ body.editor-scheme-yomux-light .file-editor-content .markdown-body.vanilla-previ
   --markdown-emphasis: #1f2937;
   color: var(--light-readable-text) !important;
 }
-body.theme-light .file-editor-content .markdown-body.vanilla-preview-body :is(h1,h2,h3,h4,h5,h6,p,li,blockquote,summary,strong,em,th,td),
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body :is(h1,h2,h3,h4,h5,h6,p,li,blockquote,summary,strong,em,th,td),
-body.editor-scheme-yomux-light .file-editor-content .markdown-body.vanilla-preview-body :is(h1,h2,h3,h4,h5,h6,p,li,blockquote,summary,strong,em,th,td) {
+body.theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body :is(h1,h2,h3,h4,h5,h6,p,li,blockquote,summary,strong,em,th,td),
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body :is(h1,h2,h3,h4,h5,h6,p,li,blockquote,summary,strong,em,th,td),
+body.editor-scheme-yomux-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body :is(h1,h2,h3,h4,h5,h6,p,li,blockquote,summary,strong,em,th,td) {
   color: var(--light-readable-text) !important;
 }
-body.theme-light .file-editor-content .markdown-body.vanilla-preview-body a,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body a,
-body.editor-scheme-yomux-light .file-editor-content .markdown-body.vanilla-preview-body a {
+body.theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body a,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body a,
+body.editor-scheme-yomux-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body a {
   color: var(--vanilla-preview-link) !important;
 }
-body.theme-light .file-editor-content .markdown-body.vanilla-preview-body th,
-body.theme-light .file-editor-content .markdown-body.vanilla-preview-body td,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body th,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body td {
+body.theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body th,
+body.theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body td,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body th,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body td {
   border-color: var(--light-readable-line);
   background: var(--light-readable-bg);
 }
-body.editor-scheme-yomux-light .file-editor-content .markdown-body.vanilla-preview-body th,
-body.editor-scheme-yomux-light .file-editor-content .markdown-body.vanilla-preview-body td {
+body.editor-scheme-yomux-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body th,
+body.editor-scheme-yomux-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body td {
   border-color: var(--light-readable-line);
   background: var(--light-readable-bg);
 }
-body.editor-scheme-yomux-light .file-editor-content .markdown-body.vanilla-preview-body th {
+body.editor-scheme-yomux-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body th {
   background: var(--light-readable-heading-bg);
 }
-body.theme-light .file-editor-content .markdown-body.vanilla-preview-body th,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body th {
+body.theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body th,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body th {
   background: var(--light-readable-heading-bg);
 }
-body.theme-light .file-editor-content .markdown-body.vanilla-preview-body :not(pre) > code,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body :not(pre) > code,
-body.editor-scheme-yomux-light .file-editor-content .markdown-body.vanilla-preview-body :not(pre) > code {
+body.theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body :not(pre) > code,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body :not(pre) > code,
+body.editor-scheme-yomux-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body :not(pre) > code {
   color: var(--code-inline) !important;
   background: var(--code-inline-bg);
   border-color: var(--light-readable-line);
 }
-body.theme-light .file-editor-content .markdown-body.vanilla-preview-body pre,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre,
-body.editor-scheme-yomux-light .file-editor-content .markdown-body.vanilla-preview-body pre,
-body.theme-light .file-editor-content .markdown-body.vanilla-preview-body code:not(pre code),
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body code:not(pre code),
-body.editor-scheme-yomux-light .file-editor-content .markdown-body.vanilla-preview-body code:not(pre code) {
+body.theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body pre,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body pre,
+body.editor-scheme-yomux-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body pre,
+body.theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body code:not(pre code),
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body code:not(pre code),
+body.editor-scheme-yomux-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body code:not(pre code) {
   color: var(--markdown-html-light-text) !important;
   background: var(--lt-panel) !important;
   border-color: var(--lt-line) !important;
 }
-body.theme-light .file-editor-content .markdown-body.vanilla-preview-body > code,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body > code,
-body.editor-scheme-yomux-light .file-editor-content .markdown-body.vanilla-preview-body > code {
+body.theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body > code,
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body > code,
+body.editor-scheme-yomux-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body > code {
   color: var(--markdown-html-light-text) !important;
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
-body.editor-theme-light .file-editor-content .markdown-body pre {
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body pre {
   color: var(--lt-text);
   background: var(--lt-panel) !important;
   border-color: var(--lt-line);
 }
-body.editor-theme-light .file-editor-content .markdown-body pre code {
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body pre code {
   color: inherit;
   background: transparent;
 }
@@ -2458,7 +2462,7 @@ body.editor-scheme-yomux-light .file-editor-raw-panel .md-italic,
 body.editor-scheme-yomux-light .file-editor-code-preview .md-italic {
   color: var(--light-readable-text) !important;
 }
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body {
+body.editor-theme-light :is(.file-editor-content, .file-preview-popout-shell) .markdown-body.vanilla-preview-body {
   background: var(--paint-white);
   color: var(--markdown-html-light-text);
 }
@@ -2600,34 +2604,17 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   height: 3px;
   background: var(--active-accent);
 }
+/* Preview overlays and CodeMirror panels share control paint; each retains its own layout. */
 .file-editor-preview-find-panel input {
   width: clamp(12ch, 22vw, 28ch);
   min-width: 0;
-  border: 1px solid var(--editor-toolbar-control-border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-2) var(--space-5);
-  color: var(--text);
-  background: var(--panel);
-  font: var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
 .file-editor-preview-find-count {
-  min-width: 4ch;
-  color: var(--muted);
-  font: var(--ui-font-size-xs)/1 var(--mono-font);
   text-align: end;
 }
 .file-editor-preview-find-panel button {
-  width: 20px;
-  height: 20px;
+  width: 22px;
   padding: 0;
-  border: 1px solid var(--editor-toolbar-control-border);
-  border-radius: var(--radius-sm);
-  color: var(--editor-toolbar-control-fg);
-  background: var(--editor-toolbar-control-bg);
-  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
-}
-.file-editor-preview-find-panel button:disabled {
-  opacity: 0.42;
 }
 /* The desktop font-size group is pinned to the pane center. A narrow iPad pane keeps the same compact
    button geometry but puts that group in flex flow so it cannot cover the mode buttons. */
@@ -2686,7 +2673,7 @@ body.app-topbar-coarse-pointer .file-editor-toolbar-center {
    the pane renders full-width but offset to `left:50%`, pushing its right half (and the diagram)
    off-screen and chopping it. `width:auto`/`height:auto` lets the inset define the box: full pane
    when inset is 0, exactly the right half when inset is `0 0 0 50%`. */
-.file-editor-content .file-editor-preview-pane-panel.file-editor-preview-zoom-full,
+:is(.file-editor-content, .file-preview-popout-shell) .file-editor-preview-pane-panel.file-editor-preview-zoom-full,
 .file-editor-content .file-editor-image-panel.file-editor-preview-zoom-full {
   width: auto;
   height: auto;
@@ -2832,32 +2819,16 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror-panel .cm-search .cm-textfield {
   grid-column: 1;
   grid-row: 1;
-  box-sizing: border-box;
   width: 100%;
   min-width: 18ch;
-  height: 24px;
   margin: 0;
-  padding: var(--space-3) var(--space-6);
-  color: var(--text);
-  background: var(--bg);
-  border: 1px solid #91a68a;
-  border-radius: var(--radius-control);
   font: 600 var(--ui-font-size-sm)/1.2 var(--ui-font);
-  box-shadow: inset 0 0 0 1px rgba(201, 255, 122, 0.08);
 }
 .file-editor-codemirror .cm-search input[name="replace"].cm-textfield,
 .file-editor-codemirror-panel .cm-search input[name="replace"].cm-textfield {
   grid-column: 1;
   grid-row: 2;
   margin-inline-start: 0;
-  border-color: var(--neutral-border-strong);
-  box-shadow: none;
-}
-.file-editor-codemirror .cm-search .cm-textfield:focus,
-.file-editor-codemirror-panel .cm-search .cm-textfield:focus {
-  border-color: var(--accent-sky-strong);
-  outline: 0;
-  box-shadow: 0 0 0 2px rgba(159, 216, 255, 0.22);
 }
 .file-editor-codemirror .cm-search .cm-button,
 .file-editor-codemirror-panel .cm-search .cm-button {
@@ -2866,20 +2837,15 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   box-sizing: border-box;
   min-width: 22px;
   width: 22px;
-  height: 24px;
   margin: 0;
   padding: 0;
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.055);
-  background-image: none;
-  border: 1px solid var(--neutral-border-strong);
-  border-radius: var(--radius-control);
   font: 700 0/1 var(--ui-font);
   white-space: nowrap;
 }
+.file-editor-preview-find-panel button,
 .file-editor-codemirror .cm-search .cm-button::before,
 .file-editor-codemirror-panel .cm-search .cm-button::before {
-  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
 }
 .file-editor-codemirror .cm-search .cm-button[name="next"]::before,
 .file-editor-codemirror-panel .cm-search .cm-button[name="next"]::before {
@@ -2944,15 +2910,8 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   grid-column: 5;
   grid-row: 1;
   min-width: 4ch;
-  color: #c9ff7a;
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
   white-space: nowrap;
-}
-.file-editor-codemirror .cm-search .cm-button:hover,
-.file-editor-codemirror-panel .cm-search .cm-button:hover {
-  color: var(--paint-white);
-  border-color: var(--accent-sky-strong);
-  background: rgba(159, 216, 255, 0.12);
 }
 .file-editor-codemirror .cm-search label,
 .file-editor-codemirror-panel .cm-search label {
@@ -2960,12 +2919,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   justify-content: center;
   box-sizing: border-box;
   width: 24px;
-  height: 24px;
   margin: 0;
-  color: var(--muted);
-  background: rgba(255, 255, 255, 0.045);
-  border: 1px solid var(--neutral-border-strong);
-  border-radius: var(--radius-control);
   font: 700 0/1 var(--ui-font);
   white-space: nowrap;
   overflow: hidden;
@@ -3035,52 +2989,48 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   width: 22px;
   height: 22px;
   padding: 0;
-  color: var(--text);
-  background: transparent;
-  border: 0;
-  border-radius: var(--radius-control);
   font: 700 var(--ui-font-size-2xl)/1 var(--ui-font);
   transform: translateY(-50%);
 }
-.file-editor-codemirror .cm-search .cm-dialog-close:hover,
-.file-editor-codemirror-panel .cm-search .cm-dialog-close:hover {
-  background: rgba(255, 255, 255, 0.12);
+
+.file-editor-preview-find-panel input,
+:is(.file-editor-codemirror, .file-editor-codemirror-panel) .cm-search .cm-textfield {
+  box-sizing: border-box;
+  height: 24px;
+  padding: var(--space-3) var(--space-6);
+  color: var(--editor-scheme-fg);
+  background: var(--editor-scheme-bg);
+  border: 1px solid var(--editor-toolbar-control-border);
+  border-radius: var(--radius-control);
+  font: 600 var(--ui-font-size-sm)/1.2 var(--ui-font);
+  box-shadow: none;
 }
-body.editor-theme-light .file-editor-codemirror .cm-search .cm-textfield,
-body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-textfield {
-  color: var(--lt-text);
-  background: var(--lt-editor-bg);
-  border-color: var(--editor-search-border-light);
-  box-shadow: inset 0 0 0 1px rgba(9, 105, 218, 0.04);
+.file-editor-preview-find-panel input:focus,
+:is(.file-editor-codemirror, .file-editor-codemirror-panel) .cm-search .cm-textfield:focus {
+  border-color: var(--active-control-border);
+  outline: 2px solid color-mix(in srgb, var(--active-control-border) 25%, transparent);
+  outline-offset: 0;
 }
-body.editor-theme-light .file-editor-codemirror .cm-search .cm-button,
-body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-button,
-:where(body.editor-theme-light) .file-editor-codemirror .cm-search label,
-:where(body.editor-theme-light) .file-editor-codemirror-panel .cm-search label {
-  color: var(--lt-markdown-link);
-  background: var(--lt-panel);
-  border-color: var(--editor-search-border-light);
+.file-editor-preview-find-panel button,
+:is(.file-editor-codemirror, .file-editor-codemirror-panel) .cm-search :is(.cm-button, label, .cm-dialog-close) {
+  height: 24px;
+  color: var(--editor-toolbar-control-fg);
+  background: var(--editor-toolbar-control-bg);
+  background-image: none;
+  border: 1px solid var(--editor-toolbar-control-border);
+  border-radius: var(--radius-control);
 }
-body.editor-theme-light .file-editor-codemirror .cm-search .cm-button:hover,
-body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-button:hover,
-:where(body.editor-theme-light) .file-editor-codemirror .cm-search label:hover,
-:where(body.editor-theme-light) .file-editor-codemirror-panel .cm-search label:hover {
-  color: var(--lt-code-atom);
-  background: var(--lt-code-inline-bg);
-  border-color: var(--lt-markdown-link);
+
+.file-editor-preview-find-panel button:disabled,
+:is(.file-editor-codemirror, .file-editor-codemirror-panel) .cm-search .cm-button:disabled {
+  opacity: 0.42;
 }
-body.editor-theme-light .file-editor-codemirror .cm-search .cm-dialog-close,
-body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-dialog-close {
-  color: var(--lt-text);
-}
-body.editor-theme-light .file-editor-codemirror .cm-search .cm-dialog-close:hover,
-body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-dialog-close:hover {
-  color: var(--lt-text);
-  background: var(--lt-code-inline-bg);
-}
-body.editor-theme-light .file-editor-codemirror .cm-search .cm-search-count,
-body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-count {
-  color: var(--lt-markdown-heading);
+.file-editor-preview-find-count,
+:is(.file-editor-codemirror, .file-editor-codemirror-panel) .cm-search .cm-search-count {
+  min-width: 4ch;
+  color: var(--editor-scheme-muted);
+  font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
+  white-space: nowrap;
 }
 .file-editor-raw-panel {
   z-index: var(--z-file-editor-layer);

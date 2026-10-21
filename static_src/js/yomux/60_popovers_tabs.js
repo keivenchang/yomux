@@ -921,7 +921,7 @@ function sessionShouldOfferYoloMarker(session, info, payload, auto, state = null
 function sessionStatusBallPlaceholderHtml() {
   // Every session Tab reserves the same ball column. Keeping the placeholder inside the canonical
   // activity wrapper makes its geometry follow the real red/yellow/green status ball exactly.
-  return '<span class="session-agent-activity-marker session-agent-activity-marker--placeholder" aria-hidden="true"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span>';
+  return '<span class="session-agent-activity-marker session-agent-activity-marker--placeholder" aria-hidden="true"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-glyph"><span class="agent-window-status-dot"></span></span></span></span>';
 }
 
 function sessionTabLeadingActivityContainerHtml(session, info, auto, options = {}) {
@@ -931,9 +931,14 @@ function sessionTabLeadingActivityContainerHtml(session, info, auto, options = {
 function sessionTabStatusDecorations(session, info, auto, options = {}) {
   const payload = options.payload || autoApproveStates.get(session);
   const state = Object.prototype.hasOwnProperty.call(options, 'state') ? options.state : sessionState(session, info);
-  const attentionEvent = sessionAttentionEvent(session, info, payload);
-  const stateMarker = attentionEvent ? agentWindowAttentionBadgeHtml(attentionEvent)
-    : ['blocked', 'needs-input', 'needs-approval'].includes(state?.key) ? '' : sessionTabStateMarkerHtml(state);
+  const attentionEvent = sessionAttentionEvent(session, info, payload, {model: options.statusSummary});
+  const facts = state?.chromeFacts || (state ? sessionChromeFacts(session, info, payload) : null);
+  const factStates = [facts?.connection, facts?.tests].filter(Boolean);
+  const factKeys = new Set(factStates.map(fact => fact.key));
+  const attentionMarker = attentionEvent ? agentWindowAttentionBadgeHtml(attentionEvent) : '';
+  const fallbackMarker = !attentionEvent && !factKeys.has(state?.key) && !['blocked', 'needs-input', 'needs-approval'].includes(state?.key)
+    ? sessionTabStateMarkerHtml(state) : '';
+  const stateMarker = `${attentionMarker}${factStates.map(sessionTabStateMarkerHtml).join('')}${fallbackMarker}`;
   const offerYolo = sessionShouldOfferYoloMarker(session, info, payload, auto, state);
   const yoloHtml = offerYolo
     ? yoloMarkerHtml(session, auto, {...options, enabledOnly: false, yoloWorking: false, payload})
@@ -943,7 +948,7 @@ function sessionTabStatusDecorations(session, info, auto, options = {}) {
 
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const {payload, state, attentionEvent, stateMarker, offerYolo, yoloHtml} = sessionTabStatusDecorations(session, info, auto, options);
-  const statusSummary = sessionAgentWindowStatusSummary(session, info, payload);
+  const statusSummary = options.statusSummary || sessionAgentWindowStatusSummary(session, info, payload);
   if (statusSummary?.agent) {
     const statusAgent = statusSummary.agent;
     const iconHtml = agentWindowActivityIconHtml(statusAgent.kind, statusAgent.state, agentWindowIdleSeconds(statusAgent), {
@@ -953,14 +958,14 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
       statusOnly: true,
     });
     if (iconHtml) {
-      return `<span class="session-tab-status-and-markers"><span class="session-agent-activity-marker">${iconHtml}</span>${stateMarker}${yoloHtml}</span>`;
+      return `<span class="session-tab-status-and-markers"><span class="session-agent-activity-marker${options.activityMarkerClass ? ` ${esc(options.activityMarkerClass)}` : ''}">${iconHtml}</span>${stateMarker}${yoloHtml}</span>`;
     }
   }
   const fallbackEvent = attentionEvent;
   const fallbackIcon = fallbackEvent ? agentWindowActivityIconHtml(fallbackEvent.agent.kind, fallbackEvent.state, 0, {
     ...fallbackEvent.options, item: fallbackEvent.item, statusOnly: true,
   }) : '';
-  const fallbackBall = fallbackIcon ? `<span class="session-agent-activity-marker">${fallbackIcon}</span>` : sessionStatusBallPlaceholderHtml();
+  const fallbackBall = fallbackIcon ? `<span class="session-agent-activity-marker${options.activityMarkerClass ? ` ${esc(options.activityMarkerClass)}` : ''}">${fallbackIcon}</span>` : sessionStatusBallPlaceholderHtml();
   const fallbackYoloHtml = offerYolo
     ? yoloMarkerHtml(session, auto, {
       ...options,

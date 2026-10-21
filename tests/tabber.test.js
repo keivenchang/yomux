@@ -33,6 +33,135 @@ const {
   finishSuite,
 } = require('./browser_helpers/layout_test_helper');
 
+test('Canonical roster supplies counted windows before the top-level session list converges', () => {
+  const api = loadYomux('', ['old']);
+  api.setTranscriptSessionOrderForTest(['new']);
+  api.setTranscriptInfoForTest('new', {panes: [], agent_windows: [{kind: 'codex', window_index: 0, state: 'working'}]});
+  api.setAutoApproveStateForTest('new', {agent_windows: [{kind: 'codex', window_index: 0, state: 'working'}]});
+  assert.equal(api.globalActivityCounts().running, 1);
+  assert.equal(api.globalActivityCounts().total, 1);
+});
+
+test('Canonical idle windows cannot become working from metadata or stale session hints', () => {
+  const api = loadYomux('', ['1']);
+  const info = {agents: [{kind: 'codex', status: 'waiting for input'}], panes: [{window: '0', active: true}],
+    agent_windows: [{kind: 'codex', window_index: 0, state: 'idle'}]};
+  api.setTranscriptInfoForTest('1', info);
+  api.setAutoApproveStateForTest('1', {last_action: 'blocked', screen: {key: 'error'},
+    agent_windows: [{kind: 'codex', window_index: 0, state: 'idle'}]});
+  assert.equal(api.sessionState('1', info).key, 'idle');
+});
+
+test('Declared canonical inventories fence stale metadata for unindexed idle, empty, partial, and unavailable rows', () => {
+  for (const rows of [[], [{kind: 'codex', state: 'idle'}], [{kind: 'codex', window_index: 0, state: 'idle'}], [{kind: 'codex', window_index: 0, state: 'unavailable'}]]) {
+    const api = loadYomux('', ['1']);
+    const info = {agents: [{kind: 'codex', status: 'working'}], panes: [],
+      agent_windows: [{kind: 'codex', window_index: 9, state: 'working'}]};
+    api.setTranscriptInfoForTest('1', info);
+    api.setAutoApproveStateForTest('1', {screen: {key: 'working'}, prompt: {visible: true, text: 'stale question', signature: 'old'}, agent_windows: rows});
+    assert.equal(api.sessionState('1', info).key, rows[0]?.state === 'unavailable' ? 'unavailable' : 'idle');
+    assert.equal(api.globalActivityCounts().running, 0);
+    assert.equal(api.tmuxPaneTabHtml('1', info, null, false).includes('status-indicator--attention'), false);
+    assert.equal(api.sessionAgentWindowStatusPayloadsForTest('1', info).length, rows.length);
+  }
+  const api = loadYomux('', ['1']);
+  api.setAutoApproveStateForTest('1', {screen: {key: 'working'}});
+  assert.equal(api.globalActivityCounts().running, 1, 'absent inventory admits bootstrap normalization');
+});
+
+test('Enabled bootstrap with no screen state preserves quiet and attention tmux windows', () => {
+  const api = loadYomux('', ['1']);
+  api.setDocumentTitleNowForTest(200000);
+  api.setAutoApproveStateForTest('1', {enabled: true});
+  for (const [bell, expected] of [[false, 'done'], [true, 'needs-input']]) {
+    api.setTmuxSignalStateForTest({windows: [{session: '1', window_index: '0', activity_ts: 10,
+      silence_flag: true, bell_flag: bell, panes: [{session: '1', window_index: '0', current_command: 'codex', dead: false}]}]});
+    assert.equal(api.sessionState('1', {agents: [], panes: []}).key, expected);
+  }
+});
+
+test('Absent canonical inventory normalizes metadata once for session chrome and counters', () => {
+  for (const [status, state, countKey] of [['idle', 'idle', 'idle'], ['waiting for input', 'needs-input', 'ask'], ['working', 'working', 'running'], ['approval required', 'needs-approval', 'ask'], ['blocked', 'blocked', 'blocked']]) {
+    const api = loadYomux('', ['1']);
+    const info = {agents: [{kind: 'codex', status}], panes: []};
+    api.setTranscriptInfoForTest('1', info);
+    api.setAutoApproveStateForTest('1', {enabled: true});
+    assert.equal(api.sessionState('1', info).key, state, status);
+    assert.equal(api.globalActivityCounts()[countKey], 1, status);
+  }
+  const api = loadYomux('', ['1']);
+  const info = {agents: [{kind: 'codex', status: 'idle'}], panes: [{window: '0', command: 'python3 -m pytest', active: true}]};
+  api.setTranscriptInfoForTest('1', info);
+  api.setAutoApproveStateForTest('1', {agent_windows: [{kind: 'codex', window_index: 0, state: 'idle'}]});
+  assert.equal(api.sessionState('1', info).key, 'tests-running');
+  const html = api.tmuxPaneTabHtml('1', info, api.sessionState('1', info), false);
+  assert.equal(html.includes('status-indicator--working'), false, 'active tests do not invent working agent activity');
+  assert.ok(html.includes('session-state-tests-running'), 'test command remains a separate badge fact');
+  assert.equal(api.globalActivityCounts().running, 0);
+});
+
+test('Absent canonical inventory preserves admitted window states and queued questions', () => {
+  const api = loadYomux('', ['1']);
+  const info = {agents: [{kind: 'codex'}], agent_windows: [{kind: 'codex', window_index: 0, state: 'working', queued_followup_question: true}], panes: []};
+  api.setTranscriptInfoForTest('1', info);
+  assert.equal(api.sessionState('1', info).key, 'working');
+  assert.equal(api.globalActivityCounts().running, 1);
+  assert.ok(api.tmuxPaneTabHtml('1', info, null, false).includes('session-tab-queued-question'));
+});
+
+test('Session facts preserve independent test and connection badges beside canonical activity', () => {
+  for (const agentState of ['working', 'blocked', 'needs-input']) {
+    for (const disconnected of [false, true]) {
+      const api = loadYomux('', ['1']);
+      const info = {agents: [{kind: 'codex'}], panes: [{window: '0', command: 'python3 -m pytest', active: true}]};
+      api.setTranscriptInfoForTest('1', info);
+      api.setAutoApproveStateForTest('1', {screen: {key: disconnected ? 'disconnected' : 'idle'},
+        agent_windows: [{kind: 'codex', window_index: 0, state: agentState}]});
+      const state = api.sessionState('1', info);
+      const html = api.tmuxPaneTabHtml('1', info, state, false);
+      assert.equal((html.match(/session-state-tests-running/g) || []).length, 1, html);
+      assert.equal(html.includes('session-state-disconnected'), disconnected, html);
+      assert.equal(state.chromeFacts.tests.key, 'tests-running');
+      const expectedTone = agentState === 'needs-input' ? 'attention' : agentState;
+      assert.ok(html.includes(`status-indicator--${expectedTone}`), html);
+      assert.equal(api.globalActivityCounts().running, agentState === 'working' ? 1 : 0);
+      const infoHtml = api.infoTabGroupLeadingActivityHtmlForTest({dimension: 'tab', records: [{tabSession: '1', aiKind: 'codex', aiWindowIndex: 0}]});
+      assert.ok(infoHtml.includes('session-state-tests-running'), infoHtml);
+      assert.equal(infoHtml.includes('session-state-disconnected'), disconnected, infoHtml);
+    }
+  }
+});
+
+test('Bootstrap panes with real targets do not recurse into canonical admission', () => {
+  for (const command of ['bash', 'opencode']) {
+    const api = loadYomux('', ['1']);
+    api.setTmuxSignalStateForTest({ok: true, windows: [{session: '1', window_index: '0', activity_ts: Date.now() / 1000,
+      panes: [{session: '1', window_index: '0', target: '%11', current_command: command, pid: 123, dead: false}]}]});
+    assert.equal(api.sessionAgentWindowStatusPayloadsForTest('1', {agents: [], panes: []}).length, 0);
+    assert.equal(api.sessionState('1', {agents: [], panes: []}).key, 'idle');
+  }
+});
+
+test('Info aggregates same-kind siblings and deduplicates repository records by physical window', () => {
+  const api = loadYomux('', ['1']);
+  const agents = [
+    {kind: 'codex', window_index: 0, pane_target: '%1', state: 'working'},
+    {kind: 'codex', window_index: 1, pane_target: '%2', state: 'blocked'},
+  ];
+  const info = {agents, agent_windows: agents, panes: []};
+  api.setTranscriptInfoForTest('1', info);
+  api.setAutoApproveStateForTest('1', {enabled: true, agent_windows: agents});
+  const record = index => ({tabSession: '1', aiKind: 'codex', aiWindowIndex: index, tmuxWindowIndex: index, aiPaneTarget: `%${index + 1}`});
+  const html = api.infoTabGroupLeadingActivityHtmlForTest({dimension: 'tab', records: [record(0), record(0), record(1)]});
+  assert.ok(html.includes('agent-window-status-dot--attention-working'), html);
+  assert.ok(html.indexOf('agent-window-status-dot') < html.indexOf('yolo-marker'), html);
+  const summary = api.agentWindowStatusSummaryForTest([agents[0], agents[0], agents[1]], '1', {info});
+  assert.equal(summary.agents.length, 2);
+  const subset = api.infoTabGroupLeadingActivityHtmlForTest({dimension: 'tab', records: [record(0), record(0)]});
+  assert.equal(subset.includes('agent-window-status-dot--attention-working'), false, subset);
+  assert.equal(subset.includes('session-state-blocked'), false, 'selected working windows do not inherit a blocked sibling badge');
+});
+
 test('Flat row identities preserve colliding session names through reconciliation and context actions', () => {
   for (const mode of ['normal', 'advanced']) {
     const api = loadYomux('?sessions=__tabber__,a%20b,a_b', ['a b', 'a_b']);
@@ -4888,12 +5017,12 @@ async function runTabberSuite() {
 
 
 
-    assert.ok(/\.agent-window-activity--subwindow \.agent-window-status-dot\s*\{[\s\S]*--subwindow-status-glyph-fill:\s*currentColor/.test(css), 'Tabber fallback child process rows inherit the renderer-owned sub-window glyph selector');
+    assert.equal(css.includes('--subwindow-status-glyph-fill'), false, 'window surfaces have no independent glyph renderer');
     assert.equal(/\.file-tree-row\.tabber-row\[data-tabber-type="session"\][^{]*\.agent-window-status-dot::before/.test(css), false, 'Tabber parent session aggregate status balls never get sub-window pseudo-glyphs');
     assert.ok(/\.agent-window-activity \.agent-icon\s*\{[\s\S]*width:\s*var\(--agent-window-icon-size\)[\s\S]*height:\s*var\(--agent-window-icon-size\)/.test(css), 'shared agent process icons inherit width and height from the shared activity-size variable');
     assert.ok(/\.info-tree-ai-value \.agent-window-activity\s*\{[\s\S]*--agent-window-icon-size:\s*14px/.test(css), 'YO!info supplies only its compact icon-size parameter to the shared activity renderer');
     assert.equal(/\.info-tree-ai-value \.agent-window-activity \.agent-icon\s*\{[^}]*(?:width|height):/.test(css), false, 'YO!info does not copy the shared variable-driven agent icon geometry');
-	    assert.equal((css.match(/--agent-status-ball-size:/g) || []).length, 3, 'status ball size has only the base owner, topbar status-ball owner, and shared sub-window 100% reference owner');
+	    assert.equal((css.match(/--agent-status-ball-size:/g) || []).length, 3, 'status ball size has the shared context, direct glyph fallback, and topbar reference');
     assert.ok(/\.agent-window-status-dot\s*\{[\s\S]*font-family:\s*var\(--ui-font\)[\s\S]*font-stretch:\s*normal/.test(css), 'Tabber status balls reset inherited condensed tab typography instead of shrinking beside the agent icon');
     assert.ok(/\.agent-window-activity--working \.agent-window-status-dot,[\s\S]*\.agent-window-activity--attention \.agent-window-status-dot,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*font-size:\s*var\(--agent-status-ball-size\)/.test(css), 'Tabber status balls inherit the shared agent status-ball glyph size parent');
     assert.equal(/font-size:\s*calc\(var\(--agent-window-icon-size\)/.test(css), false, 'Tabber status balls do not inherit the surface-specific icon size path');

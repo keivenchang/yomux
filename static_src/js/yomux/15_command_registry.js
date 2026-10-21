@@ -2,8 +2,15 @@ const commandContractClasses = new Set(['background', 'optimistic', 'pending']);
 const commandMutatingMethods = new Set(['DELETE', 'PATCH', 'POST', 'PUT']);
 const commandRequestAuthorization = Symbol('yomux-command-route');
 const commandSourceInFlight = new WeakMap();
+const commandControlPending = new WeakMap();
 const commandDetachedInFlight = new Map();
 let commandStatusSequence = 0;
+const commandGlobalPending = new Set();
+let commandGlobalStatusPrevious = null;
+let commandGlobalStatusNode = null;
+let commandGlobalFailure = null;
+let commandOperationSequence = 0;
+const commandLatestSettlements = new Map();
 
 function commandRoute(specification = {}) {
   const id = String(specification.id || '').trim();
@@ -81,8 +88,15 @@ const COMMAND_ROUTES = Object.freeze({
   'finder-folder-create': commandRoute({id: 'finder-folder-create', method: 'POST', path: '/api/fs/mkdir', contractClass: 'pending'}),
   'finder-delete': commandRoute({id: 'finder-delete', method: 'POST', path: '/api/fs/delete', contractClass: 'optimistic'}),
   'finder-rename': commandRoute({id: 'finder-rename', method: 'POST', path: '/api/fs/rename', contractClass: 'optimistic'}),
-  'watch-roots-sync': commandRoute({id: 'watch-roots-sync', method: 'POST', path: '/api/watch/roots', contractClass: 'background'}),
+  'watch-roots-sync': commandRoute({id: 'watch-roots-sync', method: 'POST', path: '/api/watch/roots', contractClass: 'background', applyResult: acceptedWatchRootsCommandResult}),
 });
+
+function acceptedWatchRootsCommandResult(result, params) {
+  if (params.rawResponse === true || result?.ok === true) return result;
+  const error = new Error(userMessageText(result, 'Server did not accept watch registration'));
+  error.payload = result;
+  throw error;
+}
 
 // Internal ownership coordination is a mutation, but it is not a user command and therefore does
 // not belong in the user-command inventory asserted by K0. It remains declared here so the same
@@ -119,6 +133,10 @@ function commandRouteMatchesRequest(route, url, options = {}) {
 function registeredCommandRouteForRequest(url, options = {}) {
   const authorized = options?.[commandRequestAuthorization];
   if (authorized && commandRouteMatchesRequest(authorized, url, options)) return authorized;
+  if (options.commandRouteId) {
+    const selected = COMMAND_ROUTES[options.commandRouteId] || INTERNAL_COMMAND_ROUTES[options.commandRouteId];
+    return selected && commandRouteMatchesRequest(selected, url, options) ? selected : null;
+  }
   return [...Object.values(COMMAND_ROUTES), ...Object.values(INTERNAL_COMMAND_ROUTES)]
     .find(route => commandRouteMatchesRequest(route, url, options)) || null;
 }
@@ -134,22 +152,36 @@ function unregisteredMutatingCommandError(url, method) {
 }
 
 const commandBoundaryApiFetch = apiFetch;
+const commandBoundaryApiFetchJson = apiFetchJson;
 apiFetch = async function guardedApiFetch(url, options = {}, internalOptions = {}) {
   const method = commandRequestMethod(options);
-  if (commandMutatingMethods.has(method) && !registeredCommandRouteForRequest(url, options)) {
-    throw unregisteredMutatingCommandError(url, method);
+  if (commandMutatingMethods.has(method)) {
+    const route = registeredCommandRouteForRequest(url, options);
+    if (!route) throw unregisteredMutatingCommandError(url, method);
+    if (!options[commandRequestAuthorization]) {
+      return dispatchCommand(route, {url, requestOptions: options, internalOptions, rawResponse: true});
+    }
   }
   const requestOptions = {...options};
   delete requestOptions[commandRequestAuthorization];
+  delete requestOptions.commandRouteId;
   return commandBoundaryApiFetch(url, requestOptions, internalOptions);
 };
+apiFetchJson = async function registeredCommandFetchJson(url, options = {}, internalOptions = {}) {
+  const method = commandRequestMethod(options);
+  if (!commandMutatingMethods.has(method)) return commandBoundaryApiFetchJson(url, options, internalOptions);
+  const route = registeredCommandRouteForRequest(url, options);
+  if (!route) return Promise.reject(unregisteredMutatingCommandError(url, method));
+  return dispatchCommand(route, {url, requestOptions: options, internalOptions});
+};
 
-function commandFetchJson(route, url, options = {}) {
-  return apiFetchJson(url, {
+function commandFetchJson(route, url, options = {}, internalOptions = {}, rawResponse = false) {
+  const fetch = rawResponse ? apiFetch : commandBoundaryApiFetchJson;
+  return fetch(url, {
     ...options,
     method: route.method,
     [commandRequestAuthorization]: route,
-  });
+  }, internalOptions);
 }
 
 function commandStatusHost() {
@@ -184,6 +216,105 @@ function commandPublishGlobalStatus(message, tone = 'advisory') {
   return status.firstChild;
 }
 
+function commandGlobalStatusSnapshot(status) {
+  const attributes = status.attributes || {};
+  return {
+    html: status.innerHTML,
+    className: status.className,
+    attributes: typeof attributes.length === 'number'
+      ? Array.from(attributes).map(attribute => [attribute.name, attribute.value])
+      : Object.entries(attributes),
+  };
+}
+
+function commandOwnsGlobalStatus() {
+  return commandGlobalStatusNode !== null
+    && globalThis.document?.getElementById?.('status')?.firstChild === commandGlobalStatusNode;
+}
+
+function beginCommandGlobalStatus(state) {
+  if (state.route.contractClass === 'background') return;
+  const status = globalThis.document?.getElementById?.('status');
+  if (!status) return;
+  if (!commandGlobalPending.size || !commandOwnsGlobalStatus()) {
+    commandGlobalStatusPrevious = commandGlobalFailure?.key === state.statusKey
+      && status.firstChild === commandGlobalFailure.node
+      ? commandGlobalFailure.previous : commandGlobalStatusSnapshot(status);
+  }
+  commandGlobalPending.add(state);
+  commandGlobalStatusNode = commandPublishGlobalStatus(state.route.pendingLabel);
+}
+
+function publishCommandOverdueStatus(state) {
+  state.overdue = true;
+  if ([...commandGlobalPending].at(-1) !== state || !commandOwnsGlobalStatus()) return;
+  commandGlobalStatusNode = commandPublishGlobalStatus(state.route.overdueLabel);
+}
+
+function settleCommandGlobalStatus(state, error) {
+  commandGlobalPending.delete(state);
+  const latest = commandLatestSettlements.get(state.statusKey) || 0;
+  if (state.sequence < latest) error = null;
+  else {
+    commandLatestSettlements.delete(state.statusKey);
+    commandLatestSettlements.set(state.statusKey, state.sequence);
+  }
+  if (commandLatestSettlements.size > 128) commandLatestSettlements.delete(commandLatestSettlements.keys().next().value);
+  const status = globalThis.document?.getElementById?.('status');
+  if (!error) {
+    for (let owner = commandGlobalFailure; owner?.previousFailure; owner = owner.previousFailure) {
+      const hidden = owner.previousFailure;
+      if (hidden.key === state.statusKey && state.sequence > hidden.sequence) {
+        owner.previous = hidden.previous;
+        owner.previousFailure = hidden.previousFailure;
+      }
+    }
+  }
+  if (error) {
+    if (commandGlobalFailure && state.sequence < commandGlobalFailure.sequence) return;
+    const previous = commandGlobalFailure?.key === state.statusKey
+      ? commandGlobalFailure.previous : commandGlobalStatusPrevious || (status ? commandGlobalStatusSnapshot(status) : null);
+    const previousFailure = commandGlobalFailure?.key === state.statusKey ? commandGlobalFailure.previousFailure : commandGlobalFailure;
+    const node = commandPublishGlobalStatus(commandFailureText(error), 'danger');
+    commandGlobalFailure = {key: state.statusKey, sequence: state.sequence, node, previous, previousFailure};
+    commandGlobalStatusNode = null;
+  } else if (commandGlobalFailure?.key === state.statusKey
+      && state.sequence > commandGlobalFailure.sequence
+      && (status?.firstChild === commandGlobalFailure.node || commandOwnsGlobalStatus())) {
+    const previous = commandGlobalFailure.previous;
+    commandGlobalFailure = commandGlobalFailure.previousFailure || null;
+    if (status && previous) {
+      for (const [name] of commandGlobalStatusSnapshot(status).attributes) status.removeAttribute(name);
+      for (const [name, value] of previous.attributes) status.setAttribute(name, value);
+      status.className = previous.className;
+      status.innerHTML = previous.html;
+      if (commandGlobalFailure) commandGlobalFailure.node = status.firstChild;
+    }
+    const remaining = [...commandGlobalPending].at(-1);
+    if (remaining) {
+      commandGlobalStatusPrevious = previous;
+      commandGlobalStatusNode = commandPublishGlobalStatus(remaining.overdue ? remaining.route.overdueLabel : remaining.route.pendingLabel);
+    }
+  } else if (commandOwnsGlobalStatus()) {
+    const remaining = [...commandGlobalPending].at(-1);
+    if (remaining) {
+      commandGlobalStatusNode = commandPublishGlobalStatus(remaining.overdue
+        ? remaining.route.overdueLabel : remaining.route.pendingLabel);
+    } else if (commandGlobalStatusPrevious) {
+      const status = globalThis.document.getElementById('status');
+      const current = commandGlobalStatusSnapshot(status);
+      for (const [name] of current.attributes) status.removeAttribute(name);
+      for (const [name, value] of commandGlobalStatusPrevious.attributes) status.setAttribute(name, value);
+      status.className = commandGlobalStatusPrevious.className;
+      status.innerHTML = commandGlobalStatusPrevious.html;
+    }
+  }
+  if (!commandGlobalPending.size) {
+    commandGlobalStatusPrevious = null;
+    commandGlobalStatusNode = null;
+  }
+}
+
 function commandDescriptionIds(control) {
   return String(control?.getAttribute?.('aria-describedby') || '').split(/\s+/).filter(Boolean);
 }
@@ -200,14 +331,15 @@ function commandRemoveOwnedDescriptions(control) {
   else control.removeAttribute?.('aria-describedby');
 }
 
-function commandPendingState(route, source) {
+function commandPendingState(route, source, statusKey = route.id) {
   const control = source && typeof source === 'object' ? source : null;
-  commandRemoveOwnedDescriptions(control);
-  const previous = control ? {
+  const active = control ? commandControlPending.get(control) : null;
+  if (!active) commandRemoveOwnedDescriptions(control);
+  const previous = active?.previous || (control ? {
     disabled: control.disabled === true,
     ariaBusy: control.getAttribute?.('aria-busy'),
     ariaDescribedBy: control.getAttribute?.('aria-describedby'),
-  } : null;
+  } : null);
   const status = route.contractClass === 'background'
     ? null
     : globalThis.document?.createElement?.('div') || null;
@@ -229,11 +361,15 @@ function commandPendingState(route, source) {
   if (control) {
     control.disabled = true;
     control.setAttribute?.('aria-busy', 'true');
-    if (status) control.setAttribute?.('aria-describedby', status.id);
+    if (status) control.setAttribute?.('aria-describedby', [...commandDescriptionIds(control), status.id].join(' '));
   }
-  const globalStatusNode = route.contractClass !== 'background'
-    ? commandPublishGlobalStatus(route.pendingLabel) : null;
-  const state = {control, previous, status, route, globalStatusNode, overdueTimer: null, settled: false};
+  const state = {control, previous, status, route, sequence: ++commandOperationSequence, statusKey, overdueTimer: null, overdue: false, settled: false};
+  beginCommandGlobalStatus(state);
+  if (control) {
+    const owner = active || {previous, states: new Set()};
+    owner.states.add(state);
+    commandControlPending.set(control, owner);
+  }
   if (route.contractClass !== 'background' && route.overdueMs > 0) {
     state.overdueTimer = setTimeout(() => {
       if (state.settled) return;
@@ -241,7 +377,7 @@ function commandPendingState(route, source) {
         state.status.dataset.commandStatusPhase = 'overdue';
         state.status.textContent = route.overdueLabel;
       }
-      state.globalStatusNode = commandPublishGlobalStatus(route.overdueLabel);
+      publishCommandOverdueStatus(state);
     }, route.overdueMs);
   }
   return state;
@@ -249,7 +385,9 @@ function commandPendingState(route, source) {
 
 function commandFailureText(error) {
   const payload = error?.payload && typeof error.payload === 'object' ? error.payload : {};
-  const reason = payload.reason || payload.error || payload.message || error?.reason || error?.message;
+  const reason = [payload.reason, payload.error, payload.message, error?.reason, error?.message].find(value => typeof value === 'string' && value);
+  if (error?.operationLabel) return `${error.operationLabel}: ${reason || 'Command failed'}`;
+  if (error?.message?.startsWith('Finder watch registration:')) return error.message;
   if (reason) return String(reason);
   if (typeof userMessageText === 'function') return userMessageText(error, 'Command failed');
   return 'Command failed';
@@ -261,7 +399,11 @@ function settleCommandPendingState(state, error = null) {
     clearTimeout(state.overdueTimer);
     state.overdueTimer = null;
   }
-  if (state.control && state.previous) {
+  const owner = state.control ? commandControlPending.get(state.control) : null;
+  owner?.states.delete(state);
+  const controlSettled = !owner || owner.states.size === 0;
+  if (controlSettled && state.control) commandControlPending.delete(state.control);
+  if (controlSettled && state.control && state.previous) {
     state.control.disabled = state.previous.disabled;
     if (state.previous.ariaBusy === null) state.control.removeAttribute?.('aria-busy');
     else state.control.setAttribute?.('aria-busy', state.previous.ariaBusy);
@@ -275,19 +417,16 @@ function settleCommandPendingState(state, error = null) {
       state.status.setAttribute('aria-live', 'assertive');
       state.status.textContent = reason;
     }
-    commandPublishGlobalStatus(reason, 'danger');
+    settleCommandGlobalStatus(state, error);
     return;
   }
-  if (state.control && state.previous) {
-    if (state.previous.ariaDescribedBy === null) state.control.removeAttribute?.('aria-describedby');
-    else state.control.setAttribute?.('aria-describedby', state.previous.ariaDescribedBy);
+  if (state.control) {
+    const descriptions = commandDescriptionIds(state.control).filter(id => id !== state.status?.id);
+    if (descriptions.length) state.control.setAttribute?.('aria-describedby', descriptions.join(' '));
+    else state.control.removeAttribute?.('aria-describedby');
   }
   state.status?.remove?.();
-  // Text-node identity prevents completion from clearing a newer command or error message.
-  if (state.route.clearStatusOnSuccess && state.globalStatusNode
-      && globalThis.document?.getElementById?.('status')?.firstChild === state.globalStatusNode) {
-    commandPublishGlobalStatus('');
-  }
+  settleCommandGlobalStatus(state, null);
 }
 
 function commandInFlightMap(source) {
@@ -316,25 +455,46 @@ function commandRequestOptions(route, params = {}) {
   return options;
 }
 
+function commandOperationIdentity(route, params, url, options) {
+  // Opaque uploads and independently cancellable requests cannot safely share transport ownership.
+  if (route.contractClass === 'background' || params.rawResponse === true || options.signal
+      || (options.body !== undefined && typeof options.body !== 'string')) return Symbol(route.id);
+  if (typeof route.operationKey === 'function') return JSON.stringify([route.id, route.operationKey(params, url, options)]);
+  return JSON.stringify([route.id, url, options, params.internalOptions || {}, params.rawResponse === true]);
+}
+
 function dispatchCommand(route, params = {}, source = null) {
   const descriptor = commandRoute(route);
+  const url = String(params?.url || descriptor.path);
+  const requestOptions = commandRequestOptions(descriptor, params);
+  const identity = commandOperationIdentity(descriptor, params, url, requestOptions);
   const inFlight = commandInFlightMap(source);
-  const existing = inFlight.get(descriptor.id);
+  const existing = inFlight.get(identity);
   if (existing) return existing;
 
-  const pendingState = commandPendingState(descriptor, source);
+  const pendingState = commandPendingState(descriptor, source, JSON.stringify([descriptor.id, url, descriptor.id === 'watch-roots-sync' ? '' : requestOptions.body || '']));
   const operation = (async () => {
     let undo;
     let failure = null;
     try {
       undo = descriptor.optimistic?.(params);
-      const url = String(params?.url || descriptor.path);
-      const result = await commandFetchJson(descriptor, url, commandRequestOptions(descriptor, params));
+      const result = await commandFetchJson(descriptor, url, requestOptions, params.internalOptions, params.rawResponse === true);
+      // Raw callers still inspect their HTTP response themselves, while command feedback records failure.
+      if (params.rawResponse === true && !result.ok) {
+        try {
+          await apiJsonResponse(result.clone());
+        } catch (error) {
+          failure = error;
+        }
+        if (!failure || typeof result.clone !== 'function') failure = new Error(`HTTP ${result.status}`);
+        failure.operationLabel = descriptor.id === 'watch-roots-sync' ? 'Finder watch registration' : descriptor.id;
+      }
       return typeof descriptor.applyResult === 'function'
-        ? descriptor.applyResult(result, params)
+        ? await descriptor.applyResult(result, params)
         : result;
     } catch (error) {
       failure = error;
+      if (descriptor.id === 'watch-roots-sync') error.message = `Finder watch registration: ${error.message}`;
       if (typeof descriptor.rollback === 'function') descriptor.rollback(undo, params, error);
       throw error;
     } finally {
@@ -343,14 +503,14 @@ function dispatchCommand(route, params = {}, source = null) {
   })();
   const tracked = operation.then(
     value => {
-      if (inFlight.get(descriptor.id) === tracked) inFlight.delete(descriptor.id);
+      if (inFlight.get(identity) === tracked) inFlight.delete(identity);
       return value;
     },
     error => {
-      if (inFlight.get(descriptor.id) === tracked) inFlight.delete(descriptor.id);
+      if (inFlight.get(identity) === tracked) inFlight.delete(identity);
       throw error;
     },
   );
-  inFlight.set(descriptor.id, tracked);
+  inFlight.set(identity, tracked);
   return tracked;
 }

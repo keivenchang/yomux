@@ -1,3 +1,4 @@
+const sessionRepoDisplayRoot = new Map();
 const rootCssLengthState = {absolutePixels: new Map()};
 
 const BROWSER_STORAGE_LEGACY_PREFIX = 'yolomux.';
@@ -710,12 +711,12 @@ const explicitPaneFocusState = {
 let fileExplorerFinderSelectedSession = '';
 let fileExplorerChangesSelectedSession = '';
 const fileExplorerSyncTargetRecords = new Map();
-// The one user-owned disclosure record for Finder Sync. `true` means the user
-// explicitly expanded the path; `false` means they explicitly collapsed it.
-// Automatic sync expansion is deliberately not stored here.
-const fileExplorerSyncUserExpansionState = new Map();
+// Active aliases into the selected target record; automatic expansion is derived separately.
+let fileExplorerSyncUserExpansionState = new Map();
+let fileExplorerSyncLegacyExpansionEntries = null;
 let fileExplorerSyncManualCollapseTargetKey = '';
 let fileExplorerSyncManualCollapsedPaths = new Set();
+let fileExplorerVisibleSyncTargetKey = '';
 let fileExplorerVisibleSyncSession = '';
 let fileExplorerVisibleSyncRoot = '';
 let fileExplorerLastInteractionAt = 0;
@@ -905,6 +906,7 @@ let popoverHideDelayMs = initialSetting('performance.popover_hide_delay_ms');
 const fileEditorScrollSyncSuppressMs = 150;
 const serverWatchRootsState = {
   signature: '',
+  rejectedSignature: '',
   retired: false,
   inFlight: false,
   request: null,
@@ -1769,20 +1771,6 @@ function platformWindowControlClass(kind) {
   return classes[kind] || classes.minimize;
 }
 
-function platformCloseButtonClass(baseClass) {
-  return `${baseClass} ${platformWindowControlClass('close')}`;
-}
-
-// Test/bootstrap compatibility only. File surfaces no longer render this bespoke close class;
-// their pane headers use the shared minimize/expand controls.
-function fileExplorerPanelCloseClass() {
-  return platformCloseButtonClass('file-explorer-panel-close');
-}
-
-function fileEditorPanelCloseClass() {
-  return platformCloseButtonClass('file-editor-panel-close');
-}
-
 function applyPlatformControlClass(element, kind) {
   if (!element) return;
   element.classList.add(...platformWindowControlClass(kind).split(' '));
@@ -2168,7 +2156,6 @@ const watchedPrRecords = new Map();
 const toastRecords = new Map();
 const browserNotificationsByTarget = new Map();
 const browserNotificationLifecycleKeys = new WeakMap();
-const sessionRepoDisplayRoot = new Map();
 
 function setLimitedMapEntry(map, key, value, limit) {
   if (!map || !key) return;
@@ -2199,6 +2186,7 @@ function sessionStatusRecord(session, create = false) {
   if (!record && create) {
     record = {
       state: null,
+      pendingEventStateChanges: [],
       notificationLastSent: new Map(),
       workingAgentNotificationTones: new Map(),
       workingAgentTransitionNotificationPending: new Map(),

@@ -700,7 +700,7 @@ def test_session_popover_agent_row_wraps_text_after_compact_state_and_ai_control
         page.name,
         page_html("""
       <div id="row" class="session-agent-row attention">
-        <span id="controls" class="session-agent-kind"><span class="agent-window-activity"><span class="agent-window-status-dot">■</span><span class="agent-icon">✳</span></span></span>12:claude a deliberately long tmux window name that should wrap in the popover <span id="separator" class="session-agent-sep">—</span> needs input
+        <span id="controls" class="session-agent-kind"><span class="agent-window-activity"><span class="agent-window-status-glyph"><span class="agent-window-status-dot">■</span></span><span class="agent-icon">✳</span></span></span>12:claude a deliberately long tmux window name that should wrap in the popover <span id="separator" class="session-agent-sep">—</span> needs input
       </div>
     """, extra_css="""
       body { margin: 0; padding: 16px; background: var(--bg); }
@@ -751,8 +751,8 @@ def subwindow_gray_cases(*window_indexes):
     """Return the acknowledgement cases for the requested sub-window indexes."""
 
     catalogue = {
-        2: {"tone": "attention", "pulsing": True, "expected_fill": "#dc2626", "window_index": 2},
-        3: {"tone": "attention", "pulsing": False, "expected_fill": "#dc2626", "window_index": 3},
+        2: {"tone": "attention", "pulsing": True, "expected_fill": "#ff6673", "window_index": 2},
+        3: {"tone": "attention", "pulsing": False, "expected_fill": "#ff6673", "window_index": 3},
         4: {"tone": "cooldown", "pulsing": True, "expected_fill": ui_pin("agentStatusCooldown"), "window_index": 4},
         5: {"tone": "cooldown", "pulsing": False, "expected_fill": ui_pin("agentStatusCooldown"), "window_index": 5},
     }
@@ -823,7 +823,7 @@ def install_subwindow_gray_harness(browser, cases):
             const pseudoStyle = dot ? getComputedStyle(dot, name) : null;
             return {content: pseudoStyle?.content || '', width: pseudoStyle?.width || '', height: pseudoStyle?.height || '', background: pseudoStyle?.backgroundColor || ''};
           };
-          return {label, gray: dot?.classList.contains('agent-window-status-dot--acknowledging') || false, pulsing: dot?.classList.contains('agent-window-status-dot--subwindow-pulse') || false, fill: style?.getPropertyValue('--subwindow-status-glyph-fill').trim() || '', opacity: Number(style?.opacity || 0), animationName: style?.animationName || '', animationDuration: style?.animationDuration || '', animationDelay: style?.animationDelay || '', animationIterationCount: style?.animationIterationCount || '', animationTimingFunction: style?.animationTimingFunction || '', acknowledgement: {pending: record?.pending === true, recorded: record?.recordedAt !== null && record?.recordedAt !== undefined, state: stateRow?.attention_acknowledged === true || stateRow?.cooldown_acknowledged === true, fixture: fixtureRow?.attention_acknowledged === true || fixtureRow?.cooldown_acknowledged === true}, before: pseudo('::before'), after: pseudo('::after')};
+          return {label, gray: dot?.classList.contains('agent-window-status-dot--acknowledging') || false, pulsing: dot?.classList.contains('agent-window-status-dot--subwindow-pulse') || false, fill: style?.getPropertyValue('--agent-status-ball-fill').trim() || '', opacity: Number(style?.opacity || 0), animationName: style?.animationName || '', animationDuration: style?.animationDuration || '', animationDelay: style?.animationDelay || '', animationIterationCount: style?.animationIterationCount || '', animationTimingFunction: style?.animationTimingFunction || '', acknowledgement: {pending: record?.pending === true, recorded: record?.recordedAt !== null && record?.recordedAt !== undefined, state: stateRow?.attention_acknowledged === true || stateRow?.cooldown_acknowledged === true, fixture: fixtureRow?.attention_acknowledged === true || fixtureRow?.cooldown_acknowledged === true}, before: pseudo('::before'), after: pseudo('::after')};
         };
         const realDateNow = Date.now.bind(Date);
         const realSetTimeout = window.setTimeout.bind(window);
@@ -960,13 +960,8 @@ def assert_subwindow_gray_acknowledgement_sequence(case, samples, expected_gray)
         assert sample["animationDuration"] == f"{duration_seconds:g}s", detail
         assert -duration_seconds <= float(sample["animationDelay"].removesuffix("s")) <= 0, detail
         assert sample["animationIterationCount"] == "1" and sample["animationTimingFunction"].startswith(f"steps({SUBWINDOW_GRAY_ACKNOWLEDGEMENT_STEP_COUNT}"), detail
-        assert float(sample["before"]["width"].removesuffix("px")) > 0, detail
-        assert float(sample["before"]["height"].removesuffix("px")) > 0, detail
-        assert sample["before"]["background"] == expected_gray, detail
-        if case["tone"] == "cooldown":
-            assert float(sample["after"]["width"].removesuffix("px")) > 0, detail
-            assert float(sample["after"]["height"].removesuffix("px")) > 0, detail
-            assert sample["after"]["background"] == expected_gray, detail
+        assert sample["fill"] == "#9aa5b1", detail
+
     paint = samples[2:-1]
     assert all(earlier["opacity"] > later["opacity"] for earlier, later in zip(paint, paint[1:])), evidence
     assert paint[-1]["opacity"] > 0, evidence
@@ -1058,9 +1053,9 @@ def test_session_tabs_reserve_an_invisible_status_ball_without_number_padding(br
         page.name,
         page_html("""
       <section class="tab-prefix-fixture">
-        <button id="with-ball" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
-        <button id="without-ball" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker session-agent-activity-marker--placeholder"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
-        <button id="long-name" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker session-agent-activity-marker--placeholder"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span><span class="session-button-prefix"><strong class="session-button-name session-button-identifier">[dynamo-utils.production]</strong></span><span class="session-button-text">keivenc</span></span></button>
+        <button id="with-ball" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-glyph"><span class="agent-window-status-dot"></span></span></span></span><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
+        <button id="without-ball" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker session-agent-activity-marker--placeholder"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-glyph"><span class="agent-window-status-dot"></span></span></span></span><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
+        <button id="long-name" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker session-agent-activity-marker--placeholder"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-glyph"><span class="agent-window-status-dot"></span></span></span></span><span class="session-button-prefix"><strong class="session-button-name session-button-identifier">[dynamo-utils.production]</strong></span><span class="session-button-text">keivenc</span></span></button>
       </section>
     """, extra_css="""
       body { margin: 0; padding: 16px; background: #202633; }
@@ -3549,6 +3544,8 @@ def test_working_status_ball_is_filled_green_with_a_border_and_no_glow(browser, 
               background: style.backgroundColor,
               color: style.color,
               border: style.borderTopColor,
+              outline: getComputedStyle(dot.closest('.agent-window-status-glyph')).filter,
+              identityFilter: getComputedStyle(document.getElementById('tabber-glow')).filter,
               opacity: style.opacity,
               reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
         };
@@ -3560,7 +3557,8 @@ def test_working_status_ball_is_filled_green_with_a_border_and_no_glow(browser, 
     assert metrics["filter"] == "none", metrics
     assert metrics["background"] == ui_pin_rgb("statusGood"), metrics
     assert metrics["color"] == "rgba(0, 0, 0, 0)", metrics
-    assert metrics["border"] not in ("rgba(0, 0, 0, 0)", "transparent"), metrics
+    assert "drop-shadow" in metrics["outline"], metrics
+    assert metrics["identityFilter"] == "none", metrics
     assert float(metrics["opacity"]) == 1, metrics
 
 
@@ -3572,8 +3570,8 @@ def test_mixed_parent_status_ball_uses_two_crisp_child_colors(browser, tmp_path)
         page.name,
         page_html("""
       <section class="mixed-status-fixture">
-        <span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--attention"><span id="red-green" class="status-indicator status-indicator--dot status-indicator--attention agent-window-status-dot agent-window-status-dot--segmented agent-window-status-dot--attention-working">●</span></span></span>
-        <span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--attention"><span id="red-yellow" class="status-indicator status-indicator--dot status-indicator--attention agent-window-status-dot agent-window-status-dot--segmented agent-window-status-dot--attention-cooldown">●</span></span></span>
+        <span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--attention"><span class="agent-window-status-glyph"><span id="red-green" class="status-indicator status-indicator--dot status-indicator--attention agent-window-status-dot agent-window-status-dot--segmented agent-window-status-dot--attention-working">●</span></span></span></span>
+        <span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--attention"><span class="agent-window-status-glyph"><span id="red-yellow" class="status-indicator status-indicator--dot status-indicator--attention agent-window-status-dot agent-window-status-dot--segmented agent-window-status-dot--attention-cooldown">●</span></span></span></span>
       </section>
     """, extra_css="""
       body { margin: 0; padding: 64px; background: #111820; }
@@ -3612,13 +3610,13 @@ def test_pane_tab_cooldown_ball_keeps_canonical_vibrant_yellow_at_rest(browser, 
           <span class="pane-tab-core">
             <span class="session-agent-activity-marker">
               <span class="agent-window-activity agent-window-activity--cooldown" style="--attention-animation-delay: 0s">
-                <span id="tab-dot" class="status-indicator status-indicator--dot status-indicator--cooldown heartbeat-pulse attention-pulse agent-window-status-dot">●</span>
+                <span class="agent-window-status-glyph"><span id="tab-dot" class="status-indicator status-indicator--dot status-indicator--cooldown heartbeat-pulse attention-pulse agent-window-status-dot">●</span></span>
               </span>
             </span>
             <span class="session-button-prefix">8001</span>
           </span>
         </button>
-        <span id="reference-dot" class="status-indicator status-indicator--dot status-indicator--cooldown agent-window-status-dot">●</span>
+        <span class="agent-window-status-glyph"><span id="reference-dot" class="status-indicator status-indicator--dot status-indicator--cooldown agent-window-status-dot">●</span></span>
       </section>
     """, extra_css="""
       body { margin: 0; padding: 64px; background: #111820; color: #e8eef8; font: 18px sans-serif; }
@@ -3673,7 +3671,7 @@ def test_attention_status_ball_is_red_and_uses_the_shared_opacity_pulse(browser,
         <span class="pane-tab-core">
           <span class="session-agent-activity-marker">
             <span class="agent-window-activity agent-window-activity--attention" style="--attention-animation-delay:0s">
-              <span id="attention-dot" class="status-indicator status-indicator--dot status-indicator--attention heartbeat-pulse agent-window-status-dot agent-window-status-dot--transition-glow">●</span>
+              <span class="agent-window-status-glyph"><span id="attention-dot" class="status-indicator status-indicator--dot status-indicator--attention heartbeat-pulse agent-window-status-dot agent-window-status-dot--transition-glow">●</span></span>
             </span>
           </span>
           <span class="session-button-prefix">needs input</span>
@@ -3710,222 +3708,39 @@ def test_attention_status_ball_is_red_and_uses_the_shared_opacity_pulse(browser,
     assert float(metrics["bright"]["opacity"]) == 1, metrics
 
 
-def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_override(browser, tmp_path):
-    page = tmp_path / "subwindow-status-solid-shapes.html"
-    load_static_html_fixture(
-        browser,
-        page.parent,
-        page.name,
-        page_html(f"""
-      <section class="subwindow-glyph-fixture">
-        <div class="tmux-window-bar" data-tmux-window-label-mode="names">
-          <span id="bar-button" class="tab tmux-window-button active">
-            <span class="tmux-window-name-label">
-              {_agent_status_glyph_html("codex", "working", "bar-working", subwindow=True)}
-              <span class="tmux-window-name-text">0:codex</span>
-            </span>
-          </span>
-        </div>
-        <div class="tmux-window-bar" data-tmux-window-label-mode="names">
-          <span id="stable-button" class="tab tmux-window-button">
-            <span class="tmux-window-name-label">
-                  <span class="agent-window-activity agent-window-activity--subwindow agent-window-activity--working">
-                <span id="stable-working-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--working status-indicator--working">●</span>
-              </span>
-              <span class="tmux-window-name-text">3:codex</span>
-            </span>
-          </span>
-        </div>
-        <div class="tmux-window-bar" data-tmux-window-label-mode="names">
-          <span id="stale-cooldown-button" class="tab tmux-window-button">
-            <span class="tmux-window-name-label">
-                  <span class="agent-window-activity agent-window-activity--subwindow agent-window-activity--cooldown">
-                <span id="stale-cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--cooldown status-indicator--cooldown">●</span>
-              </span>
-              <span class="tmux-window-name-text">4:codex</span>
-            </span>
-          </span>
-        </div>
-        <div class="tmux-window-bar" data-tmux-window-label-mode="names">
-          <span id="active-stale-cooldown-button" class="tab tmux-window-button active">
-            <span class="tmux-window-name-label">
-                  <span class="agent-window-activity agent-window-activity--subwindow agent-window-activity--cooldown">
-                <span id="active-stale-cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--cooldown status-indicator--cooldown">●</span>
-              </span>
-              <span class="tmux-window-name-text">5:codex</span>
-            </span>
-          </span>
-        </div>
-        <div class="session-agent-window-block">
-          <div id="popover-row" class="session-agent-row current">
-            {_agent_status_glyph_html("claude", "attention", "popover-attention", subwindow=True)}
-          </div>
-        </div>
-        <div class="file-tree-row tabber-row" data-tabber-type="window">
-          <span class="tabber-window-label">
-            {_agent_status_glyph_html("codex", "cooldown", "tabber-cooldown", subwindow=True)}
-            <span class="tabber-window-text">1:codex</span>
-          </span>
-        </div>
-        <div class="file-tree-row tabber-row" data-tabber-type="session">
-          <span class="tabber-window-label">
-            {_agent_status_glyph_html("codex", "working", "session-aggregate")}
-          </span>
-        </div>
-      </section>
-    """, extra_css="""
-      body { margin: 0; padding: 32px; background: var(--bg); color: var(--text); font: 16px sans-serif; }
-      .subwindow-glyph-fixture { display: grid; gap: 18px; justify-items: start; }
-      .tmux-window-button,
-      .session-agent-row,
-      .file-tree-row.tabber-row { padding: 6px 10px; background: var(--panel2); }
-      .tmux-window-button.active { background: var(--active-control-bg); }
-      .agent-window-activity { overflow: visible; }
-    """),
+def test_status_glyph_paint_and_geometry_are_identical_across_surfaces_and_themes(browser, tmp_path):
+    page = tmp_path / "shared-status-glyphs.html"
+    fixtures = "".join(
+        f'<div class="{surface}">{_agent_status_glyph_html("codex", state, f"{index}-{state}", subwindow=index > 0)}</div>'
+        for index, surface in enumerate(("session-agent-activity-marker", "tmux-window-bar", "tabber-window-label", "info-tree-ai-value"))
+        for state in ("working", "attention", "cooldown")
     )
-    metrics = browser.execute_script(
-        """
-        document.documentElement.classList.add('status-pulse-disabled');
-        document.getElementById('bar-working-dot').classList.add('agent-window-status-dot--subwindow-pulse');
-        document.getElementById('popover-attention-dot').classList.add('agent-window-status-dot--subwindow-pulse');
-        document.getElementById('tabber-cooldown-dot').classList.add('agent-window-status-dot--subwindow-pulse');
-        const read = id => {
-          const dot = document.getElementById(id + '-dot');
-          const before = getComputedStyle(dot, '::before');
-              const after = getComputedStyle(dot, '::after');
-              const style = getComputedStyle(dot);
-              const button = dot.closest('.tmux-window-button');
-              const rect = dot.getBoundingClientRect();
-              return {
-                color: style.color,
-                textIndent: style.textIndent,
-                fontSize: style.fontSize,
-                overflow: style.overflow,
-                borderRadius: style.borderTopLeftRadius,
-                className: dot.className,
-                animationName: style.animationName,
-                boxShadow: style.boxShadow,
-                filter: style.filter,
-                width: rect.width,
-                height: rect.height,
-                beforeContent: before.content,
-                beforeBackground: before.backgroundColor,
-                beforeAnimationName: before.animationName,
-                beforeOpacity: before.opacity,
-                beforeBorderStartColor: before.borderInlineStartColor,
-                beforeBorderStartWidth: before.borderInlineStartWidth,
-            beforeBorderTopColor: before.borderTopColor,
-            beforeBorderTopWidth: before.borderTopWidth,
-            beforeFilter: before.filter,
-            beforeInlineSize: before.inlineSize || before.width || '',
-            beforeInsetInlineStart: before.insetInlineStart || '',
-            afterContent: after.content,
-            afterBackground: after.backgroundColor,
-            afterAnimationName: after.animationName,
-            afterOpacity: after.opacity,
-            afterBorderTopColor: after.borderTopColor,
-            afterBorderTopWidth: after.borderTopWidth,
-            afterFilter: after.filter,
-            afterInsetInlineStart: after.insetInlineStart || '',
-            buttonColor: button ? getComputedStyle(button).color : '',
-          };
-        };
-        const {probePaint} = window.__yomuxTestHelpers;
-        const expectedGrayDark = probePaint('background:var(--muted)').background;
-        const expectedAttentionDark = probePaint('background:var(--subwindow-status-glyph-fill)', document.getElementById('popover-attention-dot')).background;
-        const dark = {
-          bar: read('bar-working'),
-          stable: read('stable-working'),
-          staleCooldown: read('stale-cooldown'),
-          activeStaleCooldown: read('active-stale-cooldown'),
-          popover: read('popover-attention'),
-          tabber: read('tabber-cooldown'),
-          session: read('session-aggregate'),
-        };
-        const barActivity = document.getElementById('bar-working').closest('.agent-window-activity');
-        const barIcon = barActivity.querySelector('.agent-icon').getBoundingClientRect();
-        const barDot = barActivity.querySelector('.agent-window-status-dot').getBoundingClientRect();
-        const barLabel = barActivity.closest('.tmux-window-name-label').querySelector('.tmux-window-name-text').getBoundingClientRect();
-        const barInnerGap = Math.max(barIcon.left, barDot.left) - Math.min(barIcon.right, barDot.right);
-        const barLabelGap = barLabel.left - barActivity.getBoundingClientRect().right;
-        document.body.classList.add('theme-light');
-        return {
-          ...dark,
-          barInnerGap,
-          barLabelGap,
-          lightStaleCooldown: read('stale-cooldown'),
-          lightActiveStaleCooldown: read('active-stale-cooldown'),
-          expectedGrayDark,
-          expectedAttentionDark,
-          expectedCooldownLight: probePaint('background:var(--agent-status-ball-fill)', document.getElementById('stale-cooldown-dot')).background,
-        };
-        """
-    )
-    assert metrics["bar"]["textIndent"] == "0px", metrics
-    assert metrics["bar"]["fontSize"] == "14px", metrics
-    assert metrics["bar"]["color"] == "rgba(0, 0, 0, 0)", metrics
-    assert metrics["bar"]["overflow"] == "visible", metrics
-    assert metrics["bar"]["borderRadius"] == "0px", metrics
-    assert "agent-window-status-dot--subwindow-pulse" in metrics["bar"]["className"], metrics
-    assert metrics["bar"]["animationName"] == "agent-status-opacity-pulse", metrics
-    assert metrics["bar"]["boxShadow"] in ("", "none"), metrics
-    assert metrics["bar"]["filter"] == "none", metrics
-    assert 2.9 <= metrics["barInnerGap"] <= 3.1, metrics
-    assert metrics["barLabelGap"] >= 1, metrics
-    assert 8 <= metrics["bar"]["width"] <= 10 and 8 <= metrics["bar"]["height"] <= 10, metrics
-    assert metrics["bar"]["beforeContent"] == '""', metrics
-    assert metrics["bar"]["beforeAnimationName"] == "none", metrics
-    assert 0.14 <= float(metrics["bar"]["beforeOpacity"]) <= 1, metrics
-    assert metrics["bar"]["beforeBackground"] != "rgba(0, 0, 0, 0)", metrics
-    assert metrics["bar"]["afterBackground"] == ui_pin_rgb("statusGood"), metrics
-    assert metrics["bar"]["afterAnimationName"] == "none", metrics
-    assert metrics["bar"]["beforeFilter"] == "none", metrics
-    assert metrics["bar"]["afterFilter"] == "none", metrics
-    stable_width = float(metrics["stable"]["beforeInlineSize"].replace("px", ""))
-    pulsing_width = float(metrics["bar"]["beforeInlineSize"].replace("px", ""))
-    stale_pause_width = float(metrics["staleCooldown"]["beforeInlineSize"].replace("px", ""))
-    pulsing_pause_width = float(metrics["tabber"]["beforeInlineSize"].replace("px", ""))
-    assert 0.95 <= stable_width / pulsing_width <= 1.05, metrics
-    assert 0.95 <= stale_pause_width / pulsing_pause_width <= 1.05, metrics
-    assert metrics["staleCooldown"]["beforeBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
-    assert metrics["staleCooldown"]["afterBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
-    assert metrics["activeStaleCooldown"]["beforeBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
-    assert metrics["activeStaleCooldown"]["afterBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
-    assert metrics["lightStaleCooldown"]["beforeBackground"] == metrics["expectedCooldownLight"], metrics
-    assert metrics["lightStaleCooldown"]["afterBackground"] == metrics["expectedCooldownLight"], metrics
-    assert metrics["lightActiveStaleCooldown"]["beforeBackground"] == metrics["expectedCooldownLight"], metrics
-    assert metrics["lightActiveStaleCooldown"]["afterBackground"] == metrics["expectedCooldownLight"], metrics
-    assert metrics["popover"]["beforeContent"] == '""', metrics
-    assert metrics["popover"]["color"] == "rgba(0, 0, 0, 0)", metrics
-    assert metrics["popover"]["beforeBackground"] == metrics["expectedAttentionDark"], metrics
-    assert metrics["popover"]["animationName"] == "agent-status-opacity-pulse", metrics
-    assert metrics["popover"]["boxShadow"] in ("", "none"), metrics
-    assert metrics["popover"]["beforeAnimationName"] == "none", metrics
-    assert 0.14 <= float(metrics["popover"]["beforeOpacity"]) <= 1, metrics
-    assert metrics["popover"]["beforeBorderTopWidth"] == "0px", metrics
-    assert metrics["popover"]["beforeFilter"] == "none", metrics
-    assert metrics["tabber"]["beforeContent"] == '""', metrics
-    assert metrics["tabber"]["afterContent"] == '""', metrics
-    assert metrics["tabber"]["color"] == "rgba(0, 0, 0, 0)", metrics
-    assert metrics["tabber"]["beforeBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
-    assert metrics["tabber"]["afterBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
-    assert metrics["tabber"]["animationName"] == "agent-status-opacity-pulse", metrics
-    assert metrics["tabber"]["boxShadow"] in ("", "none"), metrics
-    assert metrics["tabber"]["beforeAnimationName"] == "none", metrics
-    assert metrics["tabber"]["afterAnimationName"] == "none", metrics
-    assert 0.14 <= float(metrics["tabber"]["beforeOpacity"]) <= 1, metrics
-    assert 0.14 <= float(metrics["tabber"]["afterOpacity"]) <= 1, metrics
-    assert metrics["tabber"]["beforeBorderTopWidth"] == "0px", metrics
-    assert metrics["tabber"]["afterBorderTopWidth"] == "0px", metrics
-    assert metrics["tabber"]["beforeFilter"] == "none", metrics
-    assert metrics["tabber"]["afterFilter"] == "none", metrics
-    for key in ("tabber", "staleCooldown", "activeStaleCooldown"):
-        before_left = float(metrics[key]["beforeInsetInlineStart"].replace("px", ""))
-        after_left = float(metrics[key]["afterInsetInlineStart"].replace("px", ""))
-        bar_width = float(metrics[key]["beforeInlineSize"].replace("px", ""))
-        assert after_left - before_left - bar_width >= 1.0, (key, metrics)
-    assert metrics["session"]["beforeContent"] in ("", "none"), metrics
-    assert metrics["session"]["beforeBackground"] in ("", "rgba(0, 0, 0, 0)"), metrics
+    load_static_html_fixture(browser, page.parent, page.name, page_html(fixtures))
+    for light in (False, True):
+        metrics = browser.execute_script("""
+          document.body.classList.toggle('theme-light', arguments[0]);
+          document.documentElement.classList.add('status-pulse-disabled');
+          return [...document.querySelectorAll('.agent-window-status-dot')].map(dot => {
+            const style = getComputedStyle(dot), rect = dot.getBoundingClientRect();
+            const before = getComputedStyle(dot, '::before'), after = getComputedStyle(dot, '::after');
+            return {id: dot.id, width: rect.width, height: rect.height,
+              background: style.backgroundColor, clipPath: style.clipPath, border: style.border,
+              filter: getComputedStyle(dot.closest('.agent-window-status-glyph')).filter,
+              identityFilter: getComputedStyle(dot.closest('.agent-window-activity').querySelector('.agent-icon')).filter,
+              before: [before.content, before.width, before.height, before.backgroundColor],
+              after: [after.content, after.width, after.height, after.backgroundColor]};
+          });
+        """, light)
+        for state in ("working", "attention", "cooldown"):
+            rows = [row for row in metrics if row["id"].endswith(f"-{state}-dot")]
+            assert len(rows) == 4, metrics
+            expected = {key: value for key, value in rows[0].items() if key != "id"}
+            assert expected["identityFilter"] == "none", metrics
+            assert "drop-shadow" in expected["filter"], metrics
+            assert expected["width"] == 9 and expected["height"] == 9, metrics
+            for row in rows[1:]:
+                assert {key: value for key, value in row.items() if key != "id"} == expected, metrics
+
 
 
 def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_path):
@@ -4075,17 +3890,17 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
     subwindow_peak_widths = [metrics[name]["dotWidth"] for name in subwindow_names]
     subwindow_peak_heights = [metrics[name]["dotHeight"] for name in subwindow_names]
     transforms = {metrics[name]["dotTransform"] for name in ("dockAttention", "tabberSessionWorking", "tabberWindowCooldown", "infoAttention")}
-    assert aggregate_ball_sizes == {"14px"}, metrics
-    assert aggregate_dot_font_sizes == {"14px"}, metrics
+    assert aggregate_ball_sizes == {"9px"}, metrics
+    assert aggregate_dot_font_sizes == {"9px"}, metrics
     for name in subwindow_names:
-        assert metrics[name]["agentStatusBallSize"] == "14px", (name, metrics)
-        assert metrics[name]["dotFontSize"] == "14px", (name, metrics)
+        assert metrics[name]["agentStatusBallSize"] == "9px", (name, metrics)
+        assert metrics[name]["dotFontSize"] == "9px", (name, metrics)
     assert max(aggregate_peak_widths) - min(aggregate_peak_widths) <= 0.5, metrics
     assert max(aggregate_peak_heights) - min(aggregate_peak_heights) <= 0.5, metrics
     assert max(subwindow_peak_widths) - min(subwindow_peak_widths) <= 0.5, metrics
     assert max(subwindow_peak_heights) - min(subwindow_peak_heights) <= 0.5, metrics
-    assert all(abs(width - (aggregate_peak_widths[0] * 0.66)) <= 0.5 for width in subwindow_peak_widths), metrics
-    assert all(abs(height - (aggregate_peak_heights[0] * 0.66)) <= 0.5 for height in subwindow_peak_heights), metrics
+    assert all(abs(width - aggregate_peak_widths[0]) <= 0.5 for width in subwindow_peak_widths), metrics
+    assert all(abs(height - aggregate_peak_heights[0]) <= 0.5 for height in subwindow_peak_heights), metrics
     assert len(transforms) == 1, metrics
 
 
@@ -4101,7 +3916,7 @@ def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(b
       <span id="working-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--working status-indicator--working heartbeat-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="window-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="popover-dot" class="status-indicator session-agent-dot status-indicator--dot status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
-      <span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
+      <span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse agent-window-status-dot--pause" style="--attention-animation-delay:-0.42s">●</span>
       <span id="cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="attention-label" class="status-indicator tabber-agent-status status-indicator--label agent-status-attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">&lt;15 sec ago</span>
     """, extra_css=f"""
@@ -4283,14 +4098,17 @@ def test_recreated_working_status_ball_keeps_wall_clock_pulse_phase(browser, tmp
             transitionPulseActive: true,
             acknowledged: false,
           };
-          const {frame} = window.__yomuxTestHelpers;
           const samples = [];
           let previousDot = null;
-          const samplePhase = (dot, animation) => {
-            // Animation progress and its expected phase must describe the same rendered frame.
+          const wallClockFrame = () => {
             const timelineMs = document.timeline.currentTime;
             const sampledAt = performance.timeOrigin + timelineMs;
             const expectedProgress = ((sampledAt % duration) + duration) % duration / duration;
+            return {timelineMs, sampledAt, expectedProgress};
+          };
+          const samplePhase = (dot, animation) => {
+            // Animation progress and its expected phase must describe the same rendered frame.
+            const {timelineMs, sampledAt, expectedProgress} = wallClockFrame();
             const progress = animation.effect.getComputedTiming().progress;
             if (!Number.isFinite(progress)) throw new Error(`Pulse animation has no active progress: ${progress}`);
             const difference = Math.abs(progress - expectedProgress);
@@ -4323,15 +4141,19 @@ def test_recreated_working_status_ball_keeps_wall_clock_pulse_phase(browser, tmp
               const animation = dot.getAnimations().find(value => value.animationName === 'agent-status-opacity-pulse');
               if (!animation) throw new Error('Working status ball has no pulse animation');
               await animation.ready;
+              // Minimum time spacing can alias the stepped opacity under load. Observe each
+              // recreated ball in a distinct native wall-clock phase without changing playback.
+              const targetPhase = 0.05 + index / 5;
+              await window.__yomuxTestWaitFor(() => {
+                const phase = wallClockFrame().expectedProgress;
+                return phase >= targetPhase - 0.04 && phase < targetPhase + 0.04;
+              }, {timeoutMs: duration * 4, description: `native pulse phase near ${targetPhase}`});
               samples.push({replaced: previousDot !== null && previousDot !== dot, ...samplePhase(dot, animation)});
               previousDot = dot;
               if (index === 4) {
                 // A real phase error must still fail the same validator after playback starts.
                 animation.startTime -= duration / 4;
                 negativeControl = samplePhase(dot, animation);
-              } else {
-                const nextSampleAt = animation.currentTime + duration / 6;
-                while (animation.currentTime < nextSampleAt) await frame();
               }
             }
             done({samples, negativeControl});
@@ -4346,7 +4168,7 @@ def test_recreated_working_status_ball_keeps_wall_clock_pulse_phase(browser, tmp
         })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
         """
     )
-    record_property("pulse_phase", metrics)
+    record_property("pulse_phase", json.dumps(metrics, sort_keys=True))
     assert "error" not in metrics, metrics
     assert all(not sample["pending"] and sample["playState"] == "running" and sample["startTime"] is not None for sample in metrics["samples"]), metrics
     assert metrics["negativeControl"]["phaseDistance"] >= 0.08, metrics
@@ -4430,7 +4252,7 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
         <span id="base-icon" class="agent-icon claude agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--attention agent-window-agent-icon--attention">
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="5.5" fill="#cf7554"/></svg>
         </span>
-        <span id="base-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse">●</span>
+        <span class="agent-window-status-glyph"><span id="base-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse agent-window-status-dot--stop">●</span></span>
       </div>
       <button id="info-button" class="tab tmux-window-button">
         <span class="tmux-window-name-label">
@@ -4438,7 +4260,7 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
             <span id="info-icon" class="agent-icon claude agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--attention agent-window-agent-icon--attention">
               <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="5.5" fill="#cf7554"/></svg>
             </span>
-            <span id="info-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse">●</span>
+            <span class="agent-window-status-glyph"><span id="info-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse agent-window-status-dot--stop">●</span></span>
           </span>
           <span class="tmux-window-name-text">0:claude</span>
         </span>
@@ -4451,7 +4273,7 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
                 <span id="tabber-icon" class="agent-icon codex agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--cooldown agent-window-agent-icon--cooldown">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#667ef8" d="M3 12a9 9 0 1 0 18 0A9 9 0 0 0 3 12z"/></svg>
                 </span>
-                <span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse">●</span>
+                <span class="agent-window-status-glyph"><span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse agent-window-status-dot--pause">●</span></span>
               </span>
               <span class="tmux-window-name-text">1:codex</span>
             </span>
@@ -4505,12 +4327,9 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
     for name, item in metrics.items():
         assert item["rootDisplay"] == "flex", (name, item)
         assert item["iconAnimation"] == "none", (name, item)
-        if name == "base":
-            assert item["dotAnimation"] == "attention-ring-fade", (name, item)
-        else:
-            assert item["dotAnimation"] == "agent-status-opacity-pulse", (name, item)
-            assert item["beforeAnimation"] == "none", (name, item)
-            assert item["dotBoxShadow"] in ("", "none"), (name, item)
+        assert item["dotAnimation"] == "agent-status-opacity-pulse", (name, item)
+        assert item["beforeAnimation"] == "none", (name, item)
+        assert item["dotBoxShadow"] in ("", "none"), (name, item)
         assert item["dotDelay"] == item["rootDelayVar"], (name, item)
         assert item["leftGap"] >= -0.5, (name, item)
         assert item["centerDy"] <= 1, (name, item)
@@ -5185,9 +5004,11 @@ def test_ellipsis_and_disabled_control_families_share_computed_state(browser, tm
         """
     )
     expected_ellipsis = {"minWidth": "0px", "overflow": "hidden", "textOverflow": "ellipsis", "whiteSpace": "nowrap"}
+    expected_client_perf = {**expected_ellipsis, "whiteSpace": "pre-wrap"}
     expected_disabled = {"opacity": "0.42", "cursor": "default"}
     for control, state in metrics["ellipsis"].items():
-        assert state == expected_ellipsis, {"control": control, "state": state}
+        expected = expected_client_perf if control == "client-perf" else expected_ellipsis
+        assert state == expected, {"control": control, "state": state}
     for control, state in metrics["disabled"].items():
         assert state == expected_disabled, {"control": control, "state": state}
     expected_text_action = {"padding": "0px", "borderWidth": "0px", "borderStyle": "none", "background": "rgba(0, 0, 0, 0)", "textAlign": "left", "fontFamily": metrics["textActions"]["info-group-action"]["fontFamily"], "fontSize": metrics["textActions"]["info-group-action"]["fontSize"], "fontWeight": metrics["textActions"]["info-group-action"]["fontWeight"], "lineHeight": metrics["textActions"]["info-group-action"]["lineHeight"], "cursor": "pointer"}
@@ -5297,7 +5118,7 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
       <article id="yoagent-assistant" class="conversation-message yoagent-message assistant"></article>
       <article id="yoagent-result" class="conversation-message yoagent-message assistant yoagent-agent-result"></article>
       <article id="yoagent-user" class="conversation-message yoagent-message user"></article>
-      <div class="file-editor-codemirror"><div class="cm-search"><button id="cm-close" class="cm-dialog-close">×</button></div></div>
+      <div class="file-editor-panel"><div class="file-editor-codemirror"><div class="cm-search"><button id="cm-close" class="cm-dialog-close">×</button></div></div></div>
       <section class="file-explorer-changes-panel">
         <section id="embedded-comparison" class="changes-comparison-head"></section>
         <button id="embedded-refresh" class="changes-refresh">refresh</button>
@@ -5398,7 +5219,7 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
           userEndBorder: getComputedStyle(document.getElementById('yoagent-user')).borderInlineEndColor,
           expectedUserEndBorder: probePaint('border:1px solid var(--link-soft)').border,
           close: {color: getComputedStyle(document.getElementById('cm-close')).color, background: getComputedStyle(document.getElementById('cm-close')).backgroundColor},
-          expectedClose: {color: probePaint('color:var(--lt-text)').color, background: 'rgba(0, 0, 0, 0)'},
+          expectedClose: (() => { const paint = probePaint('color:var(--editor-toolbar-control-fg);background:var(--editor-toolbar-control-bg)', document.getElementById('cm-close')); return {color: paint.color, background: paint.background}; })(),
         };
         return {
           darkStatuses,
@@ -13028,7 +12849,7 @@ def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers
             opacity: Number(style.opacity),
             background: style.backgroundColor,
             expectedBackground: probePaint('background:var(--agent-status-ball-fill)', dot).background,
-            expectedGlyphBackground: probePaint('background:var(--subwindow-status-glyph-fill)', dot).background,
+            expectedGlyphBackground: probePaint('background:var(--agent-status-ball-fill)', dot).background,
             expectedAcknowledgementBackground: probePaint('background:var(--muted)', dot).background,
             borderRadius: style.borderRadius,
             clipPath: style.clipPath,
@@ -13070,12 +12891,11 @@ def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers
         expected_shape = "polygon" if marker["state"] in {"working", "cooldown"} else "inset"
         assert expected_shape in marker["clipPath"], metrics
     for marker in groups["subwindow"]["markers"]:
-        shape = marker["after"] if marker["state"] == "working" else marker["before"]
-        if not (shape["width"] > 0 and shape["height"] > 0 and shape["background"] == marker["expectedGlyphBackground"]):
-            raise AssertionError(f"subwindow marker failed: {marker}")
+        assert marker["background"] == marker["expectedGlyphBackground"], metrics
+        assert marker["clipPath"] != "none", metrics
     for marker in groups["acknowledgement"]["markers"]:
-        shape = marker["after"] if marker["state"] == "working" else marker["before"]
-        assert shape["width"] > 0 and shape["height"] > 0 and shape["background"] == marker["expectedAcknowledgementBackground"], metrics
+        assert marker["background"] == marker["expectedAcknowledgementBackground"], metrics
+        assert marker["clipPath"] != "none", metrics
 
 
 def test_active_pane_ring_opacity_follows_preference(browser, tmp_path):
@@ -16463,7 +16283,7 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
         const wrapStyle = getComputedStyle(document.querySelector('.file-editor-wrap-panel'));
         const findStyle = getComputedStyle(document.querySelector('.file-editor-find-panel'));
         const previewStyle = getComputedStyle(document.querySelector('[data-editor-mode="preview"]'));
-        const closeStyle = getComputedStyle(document.querySelector('.file-editor-panel-close'));
+        const closeStyle = getComputedStyle(document.querySelector('.file-editor-panel .pane-close'));
         const searchCloseStyle = getComputedStyle(document.querySelector('.cm-dialog-close'));
         const syntaxProbe = Array.from(document.querySelectorAll('#light-syntax-probe span')).map(node => {
           const style = getComputedStyle(node);

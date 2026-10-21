@@ -3580,68 +3580,6 @@ body.app-vw-lte-980 .tabs {
   border-color: var(--bad);
   box-shadow: 0 0 0 2px rgba(255, 102, 115, 0.14);
 }
-.file-explorer-close,
-.file-editor-close,
-.file-explorer-panel-close,
-.file-editor-panel-close {
-  flex: 0 0 var(--panel-close-size);
-  min-width: var(--panel-close-size);
-  max-width: var(--panel-close-size);
-  width: var(--panel-close-size);
-  height: var(--panel-close-size);
-  position: relative;
-  padding: 0;
-  border: 0;
-  border-radius: var(--panel-close-radius);
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-.file-explorer-close,
-.file-editor-close {
-  --panel-close-glyph-width: 10px;
-  --panel-close-glyph-height: 1.4px;
-}
-.file-editor-close,
-.file-editor-panel-close {
-  --panel-close-glyph-width: 7px;
-  --panel-close-glyph-height: 1.3px;
-}
-.file-editor-close.pc-window-control,
-.file-editor-panel-close.pc-window-control {
-  flex-basis: 20px;
-  min-width: 20px;
-  max-width: 20px;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-}
-.file-editor-panel-close {
-  --panel-close-size: 20px;
-}
-.file-explorer-close:hover,
-.file-explorer-close:focus-visible,
-.file-editor-close:hover,
-.file-editor-close:focus-visible,
-.file-explorer-panel-close:hover,
-.file-explorer-panel-close:focus-visible,
-.file-editor-panel-close:hover,
-.file-editor-panel-close:focus-visible {
-  color: var(--paint-white);
-  background: var(--panel-close-hover-bg);
-}
-.file-explorer-close::before,
-.file-editor-close::before,
-.file-explorer-panel-close::before,
-.file-editor-panel-close::before {
-  transform: translate(-50%, -50%) rotate(45deg);
-}
-.file-explorer-close::after,
-.file-editor-close::after,
-.file-explorer-panel-close::after,
-.file-editor-panel-close::after {
-  transform: translate(-50%, -50%) rotate(-45deg);
-}
 .file-explorer-tree {
   flex: 1;
   overflow: auto;

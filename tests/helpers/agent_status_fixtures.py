@@ -25,6 +25,9 @@ def agent_status_glyph_html(kind, state, element_id, *, subwindow=False):
     svg = CLAUDE_WORKING_ICON_SVG if kind == "claude" else CODEX_WORKING_ICON_SVG
     label = f"{'Claude' if kind == 'claude' else 'Codex'} {state}"
     dot_classes = ["status-indicator", "status-indicator--dot", f"status-indicator--{state}", "heartbeat-pulse", "agent-window-activity-icon", "agent-window-status-dot", f"agent-window-activity-icon--{state}"]
+    shape = {"working": "play", "attention": "stop", "cooldown": "pause"}.get(state)
+    if shape:
+        dot_classes.append(f"agent-window-status-dot--{shape}")
     if state in ("attention", "cooldown"):
         dot_classes.append("attention-pulse")
     return f"""
@@ -32,7 +35,7 @@ def agent_status_glyph_html(kind, state, element_id, *, subwindow=False):
         <span id="{element_id}" class="agent-icon {kind} agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--{state} agent-window-agent-icon--{state}" aria-label="{label}" title="{label}">
           {svg}
         </span>
-        <span id="{element_id}-dot" class="{' '.join(dot_classes)}" aria-hidden="true">●</span>
+        <span class="agent-window-status-glyph"><span id="{element_id}-dot" class="{' '.join(dot_classes)}" aria-hidden="true">●</span></span>
       </span>
     """
 

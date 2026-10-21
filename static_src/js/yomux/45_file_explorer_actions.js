@@ -637,6 +637,7 @@ function bindFileExplorerHeaderActions(container = document) {
       else {
         // A user-requested refresh must bypass the Finder directory cache; otherwise the control
         // only repaints cached rows and cannot reveal filesystem changes.
+        syncServerWatchRoots({immediate: true, force: true, user: true});
         refreshFileExplorerTrees({fresh: true});
         fetchSessionFiles({destination: 'finder', session: fileExplorerFinderTargetSession(), silent: true, force: true});
       }
@@ -1077,12 +1078,12 @@ async function refreshFileExplorerPanelTrees(options = {}) {
 }
 
 function fileExplorerQualifiedExpandedPaths(root, entriesByDir) {
-  return qualifyFileExplorerDirectoryPaths(root, Array.from(fileExplorerExpanded), entriesByDir);
+  return qualifyFileExplorerDirectoryPaths(root, fileExplorerEffectiveExpandedPaths(root), entriesByDir);
 }
 
 async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerRoot(), options = {}) {
   const normalizedRoot = normalizeDirectoryPath(root);
-  const expandedPaths = fileExplorerExpandedPathsForRoot(normalizedRoot);
+  const expandedPaths = fileExplorerEffectiveExpandedPaths(normalizedRoot);
   return fetchFileExplorerSyncListings([normalizedRoot, ...expandedPaths], {
     ...options,
     qualificationContext: {preserveActiveSync: true},
@@ -2133,8 +2134,30 @@ function openFileStateHasLoadedEditorPayload(state) {
   return Boolean(state?.kind && state.loading !== true && state.kind !== 'file' && state.kind !== 'error');
 }
 
-function openFileLoadingStateStillCurrent(path, state) {
-  return fileState.get(path) === state && openFilePathHasOwner(path);
+function captureOpenFileLoad(path, state = fileState.get(path), requireOwner = openFilePathHasOwner(path)) {
+  return {state, requireOwner, generation: openFileContentGeneration.get(path) || 0,
+    content: state?.content, original: state?.original, dirty: state?.dirty, mtime: state?.mtime};
+}
+
+function openFileLoadStillCurrent(path, load) {
+  const current = fileState.get(path);
+  return current === load.state
+    && (!load.requireOwner || openFilePathHasOwner(path))
+    && openFileContentGenerationIsCurrent(path, load.generation)
+    && current?.content === load.content && current?.original === load.original
+    && current?.dirty === load.dirty && current?.mtime === load.mtime;
+}
+
+function completeOpenFileLoad(path, load, state, options = {}) {
+  if (!state || !openFileLoadStillCurrent(path, load)) return false;
+  clearFileAutosaveTimer(path);
+  if (options.publish) options.publish(state);
+  else {
+    setFileState(path, state);
+    bumpOpenFileContentGeneration(path);
+  }
+  if (state.kind === 'text' && options.includeGit !== true) void refreshOpenFileGitMetadata(path, state);
+  return true;
 }
 
 function refreshOpenFileDiffDecorations(path) {
@@ -2475,28 +2498,22 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     dirty: false,
     loading: true,
   }, entry);
+  const load = captureOpenFileLoad(fullPath, loadingState, true);
   const openPromise = (async () => {
     const payload = await fetchFileReadPayload(fullPath, options.includeGit === true ? {includeGit: true} : {});
-    if (!openFileLoadingStateStillCurrent(fullPath, loadingState)) return null;
+    if (!openFileLoadStillCurrent(fullPath, load)) return null;
     if (identityDedupe) {
       const existingIdentityPath = openPathForPhysicalFile(fullPath, payload);
       if (existingIdentityPath && existingIdentityPath !== fullPath) {
         return focusExistingPhysicalFileEditor(fullPath, existingIdentityPath, options);
       }
     }
-    const state = applyRequestedWorkingDiffIdentity(applyFileGitMetadata({
-      mtime: filePayloadMtime(payload),
-      size: payload.size,
-      kind: 'text',
-      original: payload.content,
-      content: payload.content,
-      dirty: false,
-    }, payload), options);
-    await openFilesSetAndShow(fullPath, state, openOptions);
-    // Ordinary editors paint from one direct content read, then enrich through metadata only.
-    // Differ is an explicit Git action: it owns one queued Git-complete read so a missing working
-    // file can resolve through the committed side without a browser-visible direct 404.
-    if (options.includeGit !== true) void refreshOpenFileGitMetadata(fullPath, state);
+    const state = applyRequestedWorkingDiffIdentity(textFileStateFromReadPayload(payload), options);
+    let navigation;
+    if (!completeOpenFileLoad(fullPath, load, state, {...options, publish: next => {
+      navigation = openFilesSetAndShow(fullPath, next, openOptions);
+    }})) return null;
+    await navigation;
     return item;
   })();
   // renderLoadingEditor normally starts a loader for a restored tab. This open already owns the
@@ -2507,22 +2524,13 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   try {
     return await openPromise;
   } catch (err) {
-    if (!openFileLoadingStateStillCurrent(fullPath, loadingState)) return null;
-    const status = Number(err?.status) || 0;
-    if (status) {
-      let state = status === 415 ? await sniffedRawPreviewFileState(fullPath, entry) : null;
-      if (!state) {
-        state = status === 413
-          ? oversizeOrErrorFileState(entry?.size ?? null, err)
-          : status === 404
-            ? missingFileState(err)
-            : fileErrorState(err, err?.code === 'deadline_expired' ? '' : 'editor.fileLoadFailed');
-      }
-      await openFilesSetAndShow(fullPath, state, openOptions);
-      return item;
-    }
-    showFileOpenError(fullPath, err);
-    return null;
+    const state = await fileStateFromReadError(fullPath, err, entry);
+    let navigation;
+    if (!completeOpenFileLoad(fullPath, load, state, {publish: next => {
+      navigation = openFilesSetAndShow(fullPath, next, openOptions);
+    }})) return null;
+    await navigation;
+    return item;
   } finally {
     clearFileOpenPromise(fullPath, openPromise);
   }
@@ -2598,15 +2606,39 @@ async function openHistoricalFileInEditor(path, fromRef, toRef, options = {}) {
   return item;
 }
 
-function textFileStateFromReadPayload(payload) {
-  return applyFileGitMetadata({
+async function fileStateFromReadError(path, error, entry = null) {
+  const status = Number(error?.status) || 0;
+  const sniffed = status === 415 ? await sniffedRawPreviewFileState(path, entry) : null;
+  const state = sniffed || (status === 413
+    ? oversizeOrErrorFileState(entry?.size ?? null, error)
+    : status === 404 ? missingFileState(error)
+      : fileErrorState(error, error?.code === 'deadline_expired' ? '' : 'editor.fileLoadFailed'));
+  if (entry) {
+    state.mtime = fileEntryMtime(entry);
+    state.size = entry.size ?? state.size ?? null;
+    applyFileIdentityMetadata(state, entry);
+  }
+  return state;
+}
+
+async function readTextFileState(path, entry = null, options = {}) {
+  try {
+    const payload = await fetchFileReadPayload(path, options);
+    return textFileStateFromReadPayload(payload, options.previous);
+  } catch (error) {
+    return fileStateFromReadError(path, error, entry);
+  }
+}
+
+function textFileStateFromReadPayload(payload, previous = null) {
+  return preserveDeferredFileGitMetadata(applyFileGitMetadata({
     mtime: filePayloadMtime(payload),
     size: payload.size,
     kind: 'text',
     original: payload.content,
     content: payload.content,
     dirty: false,
-  }, payload);
+  }, payload), previous, payload);
 }
 
 function preserveDeferredFileGitMetadata(state, previous, payload) {
@@ -2624,7 +2656,7 @@ function preserveDeferredFileGitMetadata(state, previous, payload) {
   return state;
 }
 
-async function openFileStateFromDisk(path, entry = null) {
+async function openFileStateFromDisk(path, entry = null, options = {}) {
   const fetched = entry ? {entry, missing: false, error: '', network: false} : await fetchFileEntryStatus(path);
   const fileEntry = fetched.entry;
   if (fetched.superseded) return {superseded: true};
@@ -2651,26 +2683,7 @@ async function openFileStateFromDisk(path, entry = null) {
   if (kind === 'media') {
     return {state: rawPreviewFileState(path, fileEntry)};
   }
-  try {
-    const payload = await fetchFileReadPayload(path);
-    return {state: textFileStateFromReadPayload(payload)};
-  } catch (error) {
-    const status = Number(error?.status) || 0;
-    if (status) {
-      let state = status === 415 ? await sniffedRawPreviewFileState(path, fileEntry) : null;
-      if (!state) {
-        state = status === 413
-          ? oversizeOrErrorFileState(fileEntry.size ?? null, error)
-          : status === 404
-            ? missingFileState(error)
-            : fileErrorState(error);
-      }
-      state.mtime = fileEntryMtime(fileEntry);
-      state.size = fileEntry.size ?? null;
-      return {state};
-    }
-    return {state: fileErrorState(error)};
-  }
+  return {state: await readTextFileState(path, fileEntry, options)};
 }
 
 function markOpenFileMissing(path) {
@@ -2724,7 +2737,7 @@ function openFileContentGenerationIsCurrent(path, generation) {
 //   {state}         -- exact read returned bytes: caller may apply it as recovered content
 //   null            -- inconclusive (non-404 error) or superseded by a newer render: keep loaded content
 async function resolveOpenFileMissingVerdict(path) {
-  const seenGeneration = openFileContentGeneration.get(path) || 0;
+  const load = captureOpenFileLoad(path);
   let payload = null;
   try {
     // A 404 here is this confirmation probe's own deletion verdict, not an API failure: keep it quiet so
@@ -2733,12 +2746,12 @@ async function resolveOpenFileMissingVerdict(path) {
   } catch (error) {
     const status = Number(error?.status) || 0;
     if (status !== 404) return null;                                            // not proof of absence
-    if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null; // newer render won
+    if (!openFileLoadStillCurrent(path, load)) return null; // newer render won
     return {missing: true};
   }
-  if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null;   // newer render won
+  if (!openFileLoadStillCurrent(path, load)) return null;   // newer render won
   if (openFileKindForPreviewPath(basenameOf(path)) !== 'text') return null;     // non-text: keep content
-  return {state: textFileStateFromReadPayload(payload)};
+  return {state: textFileStateFromReadPayload(payload, load.state)};
 }
 
 // Media sibling of resolveOpenFileMissingVerdict, sharing the same fence and rule but a media-appropriate
@@ -2752,19 +2765,20 @@ async function resolveOpenFileMissingVerdict(path) {
 //   {error}         -- inconclusive probe (non-404 network/error): caller shows an error, not "missing"
 //   null            -- superseded by a newer render: keep the newer content
 async function resolveOpenMediaMissingVerdict(path) {
-  const seenGeneration = openFileContentGeneration.get(path) || 0;
+  const load = captureOpenFileLoad(path);
   let info = null;
   try {
     // A 404 here is this confirmation probe's own deletion verdict, not an API failure: keep it quiet.
     info = await apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`, {}, {quietStatuses: [404]});
   } catch (error) {
-    if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null; // newer render won
+    if (!openFileLoadStillCurrent(path, load)) return null; // newer render won
     if (Number(error?.status) === 404) return {missing: true};                  // authoritative absence
     return {error};                                                             // inconclusive
   }
-  if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null;    // newer render won
+  if (!openFileLoadStillCurrent(path, load)) return null;    // newer render won
   if (String(info?.kind || '') !== 'file') return {missing: true};              // path is not a file anymore
-  const built = await openFileStateFromDisk(path, info);                        // rebuild media/image/raw
+  const built = await openFileStateFromDisk(path, info);
+  if (!openFileLoadStillCurrent(path, load)) return null;                        // rebuild media/image/raw
   return built.missing ? {missing: true} : built;
 }
 
@@ -2805,48 +2819,49 @@ function markOpenFileExternalError(path, error) {
 const openFileReloadFlights = new Map();
 
 async function replaceOpenFileStateFromDisk(path, entry = null) {
+  const load = captureOpenFileLoad(path);
   const flight = openFileReloadFlights.get(path);
-  if (flight) {
-    const joined = await flight;
-    // Only an entry-bearing caller knows which content it was told to fetch. If the shared reload
-    // did not reach that content, fall through and run exactly one more -- never assume the read
-    // somebody else started was new enough. An entry-less explicit reload has no such reference
-    // point and accepts the shared result, which is the same race any single read already has.
+  if (flight && flight.load.state === load.state) {
+    const joined = await flight.promise;
+    // A joined read may publish one new clean generation. Only that exact completion or the
+    // invocation's unchanged buffer can authorize a follow-up read; waiting never renews a fence.
+    if (!openFileLoadStillCurrent(path, load)
+        && !(joined && flight.completed && openFileLoadStillCurrent(path, flight.completed))) return false;
     if (!entry || !fileEntryChanged(fileState.get(path), entry)) return joined;
   }
-  const started = loadOpenFileStateFromDisk(path, entry);
-  openFileReloadFlights.set(path, started);
+  const nextFlight = {load, promise: null, completed: null};
+  nextFlight.promise = loadOpenFileStateFromDisk(path, entry, completed => { nextFlight.completed = completed; });
+  openFileReloadFlights.set(path, nextFlight);
   try {
-    return await started;
+    return await nextFlight.promise;
   } finally {
-    // Only retire our own flight; a joiner that fell through has already replaced it.
-    if (openFileReloadFlights.get(path) === started) openFileReloadFlights.delete(path);
+    if (openFileReloadFlights.get(path) === nextFlight) openFileReloadFlights.delete(path);
   }
 }
 
-async function loadOpenFileStateFromDisk(path, entry = null) {
+async function loadOpenFileStateFromDisk(path, entry = null, onApplied = null) {
   const previous = fileState.get(path);
+  const load = captureOpenFileLoad(path, previous);
   const viewStates = fileEditorTabItemsForPath(path).map(item => {
     const panel = panelNodes.get(item);
     if (panel) captureFileEditorPanelViewState(item, panel);
     return {item, panel, mode: editorViewModeFor(path, item)};
   });
-  const loaded = await openFileStateFromDisk(path, entry);
-  if (loaded.superseded) return false;
+  const loaded = await openFileStateFromDisk(path, entry, {previous});
+  if (!openFileLoadStillCurrent(path, load) || loaded.superseded) return false;
   if (loaded.missing) {
     // A directory-listing omission is not proof of absence -- confirm through the shared guard, which
     // only reports missing on an authoritative exact-path 404 and fences it against a newer render.
     const verdict = await resolveOpenFileMissingVerdict(path);
-    if (!verdict) return false;                        // inconclusive/superseded: keep editor content
+    if (!verdict || !openFileLoadStillCurrent(path, load)) return false;                        // inconclusive/superseded: keep editor content
     if (verdict.missing) {
       markOpenFileMissing(path);
       return false;
     }
     loaded.state = verdict.state;                      // recovered exact-path bytes: apply as a normal load
   }
-  clearFileAutosaveTimer(path);
-  setFileState(path, clearOpenFileExternalState(preserveDeferredFileGitMetadata(loaded.state, previous, loaded.state)));
-  bumpOpenFileContentGeneration(path);
+  if (!completeOpenFileLoad(path, load, loaded.state)) return false;
+  if (onApplied) onApplied(captureOpenFileLoad(path));
   renderOpenFilePath(path);
   // Disk replacement changes bytes, not the user's selected editor mode. Rendering the fresh state
   // may briefly lack its asynchronous Git refresh, so restore every tab's mode after the replacement
@@ -3000,7 +3015,7 @@ function watchedFileExplorerDirectories() {
   const root = currentFileExplorerRoot();
   if (!fileExplorerTreePaneIsVisible()) return [];
   const entriesByDir = new Map();
-  for (const directory of [root, ...fileExplorerExpandedPathsForRoot(root)]) {
+  for (const directory of [root, ...fileExplorerEffectiveExpandedPaths(root)]) {
     const entries = cachedFileExplorerFsResourceValue('list', directory);
     if (Array.isArray(entries)) entriesByDir.set(directory, entries);
   }
@@ -3047,8 +3062,19 @@ function clientServerWatchRootDescriptor() {
   if (fileExplorerTreePaneIsVisible() || fileExplorerSessionFilesPaneIsVisible()) {
     const repoRoots = [];
     const payloads = [];
-    if (fileExplorerTreePaneIsVisible()) payloads.push(fileExplorerFinderSessionFilesState.payload);
-    if (fileExplorerSessionFilesPaneIsVisible()) payloads.push(fileExplorerSessionFilesState.payload);
+    const finderDirectories = new Set(watchedFileExplorerDirectories());
+    for (const destination of ['finder', 'differ']) {
+      const surface = sessionFilesSurfaceDescriptor(destination);
+      const payload = surface.state.payload;
+      if (!surface.visible || !surface.session || payload?.session !== surface.session) continue;
+      // Finder metadata must not recursively subscribe hidden repositories mentioned in a transcript.
+      // Differ owns its independently selected changed-file tree.
+      payloads.push(destination === 'finder' ? {
+        ...payload,
+        repos: (payload.repos || []).filter(repo => finderDirectories.has(normalizeDirectoryPath(repo?.repo || repo?.root || ''))),
+        files: (payload.files || []).filter(file => finderDirectories.has(dirnameOf(sessionFileAbsolutePath(file)))),
+      } : payload);
+    }
     for (const repo of payloads.flatMap(payload => payload?.repos || [])) {
       const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
       if (!path || path === '/') continue;
@@ -3178,6 +3204,7 @@ function syncServerWatchRootsNow(options = {}) {
     serverWatchRootsState.pendingOptions = mergedServerWatchRootsOptions(options);
     return;
   }
+  if (signature === serverWatchRootsState.rejectedSignature && options.user !== true) return;
   if (signature === serverWatchRootsState.signature && options.force !== true) return;
   if (serverWatchRootsForceRequestCompleted(signature, options)) return;
   const forceIdentity = serverWatchRootsForceIdentity(options);
@@ -3186,11 +3213,12 @@ function syncServerWatchRootsNow(options = {}) {
   serverWatchRootsState.activeKey = requestKey;
   serverWatchRootsState.registrationPending = true;
   serverWatchRootsState.registered = false;
-  const request = apiFetch('/api/watch/roots', {
+  const request = apiFetchJson('/api/watch/roots', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(state),
   }).then(() => {
+    serverWatchRootsState.rejectedSignature = '';
     serverWatchRootsState.registrationPending = false;
     serverWatchRootsState.registered = true;
     serverWatchRootsState.syncedAt = Date.now();
@@ -3198,7 +3226,8 @@ function syncServerWatchRootsNow(options = {}) {
   }).then(result => {
     if (forceIdentity && requestKey) serverWatchRootsState.completedForceKeys.set(forceIdentity.owner, requestKey);
     return result;
-  }).catch(() => {
+  }).catch(error => {
+    if ([400, 413, 422].includes(Number(error.status))) serverWatchRootsState.rejectedSignature = signature;
     serverWatchRootsState.registrationPending = false;
     serverWatchRootsState.signature = '';
     serverWatchRootsState.registered = false;
@@ -3245,7 +3274,8 @@ function syncServerWatchRoots(options = {}) {
   const pendingOptions = mergedServerWatchRootsOptions(options);
   const signature = JSON.stringify(clientServerWatchState());
   const requestKey = serverWatchRootsRequestKey(signature, pendingOptions);
-  if (signature === serverWatchRootsState.signature && pendingOptions.force !== true) {
+  if ((signature === serverWatchRootsState.rejectedSignature && pendingOptions.user !== true)
+    || (signature === serverWatchRootsState.signature && pendingOptions.force !== true)) {
     if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;

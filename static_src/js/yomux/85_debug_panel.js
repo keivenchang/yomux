@@ -1019,18 +1019,36 @@ function debugClientPerfRows() {
     .slice(0, 18);
 }
 
-function debugClientPerfText(row) {
+function debugClientPerfText(row, widths = {}) {
+  const count = String(Math.floor(Number(row.count || 0)));
+  const average = Number.isFinite(Number(row.avgMs)) && Number(row.avgMs) > 0 ? `${Number(row.avgMs).toFixed(1)}ms` : '';
+  const maximum = Number.isFinite(Number(row.maxMs)) && Number(row.maxMs) > 0 ? `${Number(row.maxMs).toFixed(1)}ms` : '';
   const parts = [
-    `${row.name}`,
-    `n=${Math.floor(Number(row.count || 0))}`,
+    String(row.name || '').padEnd(widths.name || 0),
+    `n=${count.padStart(widths.count || count.length)}`,
   ];
-  if (Number.isFinite(Number(row.avgMs)) && Number(row.avgMs) > 0) parts.push(`avg=${Number(row.avgMs).toFixed(1)}ms`);
-  if (Number.isFinite(Number(row.maxMs)) && Number(row.maxMs) > 0) parts.push(`max=${Number(row.maxMs).toFixed(1)}ms`);
+  if (widths.average || average) parts.push(`avg=${average.padStart(widths.average || average.length)}`);
+  if (widths.maximum || maximum) parts.push(`max=${maximum.padStart(widths.maximum || maximum.length)}`);
   if (Number(row.rows || 0) > 0) parts.push(`rows=${Math.floor(Number(row.rows))}`);
   if (Number(row.nodes || 0) > 0) parts.push(`nodes=${Math.floor(Number(row.nodes))}`);
   if (Number(row.bytes || 0) > 0) parts.push(`bytes=${Math.floor(Number(row.bytes))}`);
   if (Number(row.skipped || 0) > 0) parts.push(`skipped=${Math.floor(Number(row.skipped))}`);
-  return parts.join(' ');
+  return parts.join('  ').trimEnd();
+}
+
+function debugClientPerfLines(rows) {
+  const metrics = rows.map(row => ({
+    count: String(Math.floor(Number(row.count || 0))),
+    average: Number.isFinite(Number(row.avgMs)) && Number(row.avgMs) > 0 ? `${Number(row.avgMs).toFixed(1)}ms` : '',
+    maximum: Number.isFinite(Number(row.maxMs)) && Number(row.maxMs) > 0 ? `${Number(row.maxMs).toFixed(1)}ms` : '',
+  }));
+  const widths = {
+    name: Math.max(0, ...rows.map(row => String(row.name || '').length)),
+    count: Math.max(1, ...metrics.map(metric => metric.count.length)),
+    average: Math.max(0, ...metrics.map(metric => metric.average.length)),
+    maximum: Math.max(0, ...metrics.map(metric => metric.maximum.length)),
+  };
+  return rows.map(row => debugClientPerfText(row, widths));
 }
 
 function debugClientPerfHtml() {
@@ -1041,9 +1059,10 @@ function debugClientPerfHtml() {
   if (!rows.length && !longTasks.count && !activeAnimations) return '';
   const timing = longTasks.count ? t('debug.graph.clientWorkTiming', {average: longTasks.averageMs, max: longTasks.maxMs}) : '';
   const header = t('debug.graph.clientWork', {animations: activeAnimations, tasks: longTasks.count, timing});
+  const lines = debugClientPerfLines(rows);
   return `<div class="js-debug-client-perf" data-js-debug-client-perf>
     <div class="js-debug-client-perf-title">${esc(header)}</div>
-    <div class="js-debug-client-perf-grid">${rows.map(row => `<div class="js-debug-client-perf-row">${esc(debugClientPerfText(row))}</div>`).join('')}</div>
+    <div class="js-debug-client-perf-grid">${lines.map(line => `<div class="js-debug-client-perf-row">${esc(line)}</div>`).join('')}</div>
   </div>`;
 }
 
@@ -5272,7 +5291,7 @@ function jsDebugTextForClipboard() {
   const apiSummaryRows = debugApiSummaryRows();
   const sseSummaryRows = debugSseSummaryRows();
   const sseLatencySummaryRows = debugSseLatencySummaryRows();
-  const clientPerfRows = debugClientPerfRows().map(debugClientPerfText);
+  const clientPerfRows = debugClientPerfLines(debugClientPerfRows());
   const rows = jsDebugEvents.map(debugEventLineText);
   return [
     header,

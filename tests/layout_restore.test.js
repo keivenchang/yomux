@@ -1758,7 +1758,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/\.prosemirror-editor\.vanilla-preview-body[\s\S]*background:\s*var\(--paint-white\)[\s\S]*color:\s*var\(--markdown-html-light-text\)/.test(editorCss), 'ViewEdit Vanilla uses the regular white/black surface');
     assert.ok(!/body\.editor-theme-light \.file-editor-panel \.file-editor-title/.test(editorCss), 'editor theme does not recolor app-chrome editor titles');
     assert.ok(/body\.theme-light \.yomux-dockview[\s\S]*\.session-button-name[\s\S]*color:\s*var\(--chrome-text-strong\) !important/.test(editorCss), 'light-mode active tab titles remain dark on white theme surfaces');
-    assert.ok(/body\.theme-light \.file-editor-content \.markdown-body[\s\S]*color:\s*var\(--light-readable-text\) !important/.test(editorCss), 'light-mode Markdown content remains dark on white surfaces');
+    assert.ok(/body\.theme-light :is\(\.file-editor-content, \.file-preview-popout-shell\) \.markdown-body[\s\S]*color:\s*var\(--light-readable-text\) !important/.test(editorCss), 'light-mode Markdown content remains dark on white surfaces');
     assert.ok(/body\.theme-light \.panel \.pane-tab:not\(\.active\)[\s\S]*color:\s*var\(--light-readable-text\) !important/.test(editorCss), 'light-mode inactive tabs remain dark on light surfaces');
     assert.ok(/body\.theme-light \.yomux-dockview \.yomux-dockview-core[\s\S]*--dv-activegroup-visiblepanel-tab-color:\s*var\(--light-readable-text\)/.test(editorCss), 'light-mode Dockview tabs remain dark on light surfaces');
     assert.ok(!/body\.editor-(?:theme|contrast)-light \.yomux-dockview/.test(editorCss), 'editor theme does not recolor Dockview chrome');
@@ -2337,7 +2337,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('!activeChangesControl(panel)'), 'background Changes renders preserve active selects and ref controls');
     assert.ok(source.includes('function sessionFilesRenderOptions'), 'modified-file fetch rendering distinguishes silent polls from explicit user refreshes');
     assert.ok(source.includes('const loadingPromise = (async () => {'), 'editor file loading keeps a promise handle for guarded cleanup');
-    assert.ok(source.includes('if (current?.loadingPromise === loadingPromise) delete current.loadingPromise;'), 'editor file loading clears stale loading promises after failure or success');
+    assert.ok(source.includes('if (state.loadingPromise === loadingPromise) delete state.loadingPromise;'), 'editor file loading retires only the promise owned by its captured state');
     assert.ok(source.includes('const activitySummaryState = {') && source.includes('guard: makeGenerationGuard()'), 'activity summary payload and refresh generation share one record');
     assert.ok(source.includes('if (activitySummaryState.refreshing && options.force !== true) return;'), 'activity summary polling skips overlapping non-forced refreshes');
     assert.ok(source.includes('const transcriptMetadataState = {') && source.includes('guard: makeGenerationGuard()'), 'metadata payload and request generation share one record');
@@ -3415,9 +3415,15 @@ async function runLayoutRestoreSuite() {
       navigation: false,
       terminalInput: false,
       wheelRemainder: false,
-      agentActivityCount: 0,
+      agentActivityCount: 1,
       acknowledgementCount: 0,
     }, 'rename preserves every lifecycle field under the new session');
+    const renderedIdle = api.agentWindowActivityRecordForTest('renamed:0::codex');
+    assert.equal(renderedIdle.activity.state, 'idle', 'rendering creates only a fresh enabled-idle bootstrap record');
+    assert.equal(renderedIdle.activity.seenWorking, false, 'the old working history was retired');
+    assert.equal(renderedIdle.stoppedRefreshUntilMs, 0);
+    assert.equal(renderedIdle.transitionPulseRefreshUntilMs, 0);
+    assert.equal(renderedIdle.acknowledgementVisual, null, 'the old acknowledgment visual was retired');
     assert.equal(api.toastStateForTest(alertId), null, 'rename discards transient toasts whose click handlers captured the old session');
   });
 

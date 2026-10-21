@@ -62,21 +62,7 @@ function domBuilderElementHtml(element) {
 function createToolbarButton(options = {}) {
   const dataset = {...(options.dataset || {})};
   if (options.action) dataset.action = options.action;
-  const button = makeButton({
-    type: options.type || 'button',
-    id: options.id,
-    className: options.className,
-    role: options.role,
-    html: options.html,
-    label: options.label,
-    disabled: options.disabled,
-    title: options.title,
-    ariaLabel: options.ariaLabel,
-    pressed: options.pressed,
-    checked: options.checked,
-    dataset,
-  });
-  return setDomBuilderOptions(button, options);
+  return makeButton({...options, dataset});
 }
 
 function createActionRowItem(item = {}) {

@@ -238,14 +238,14 @@
   vertical-align: middle;
 }
 .session-agent-activity-marker,
-.agent-window-activity {
+.agent-window-activity,
+.agent-window-status-glyph {
   --agent-status-ball-border: var(--paint-black);
 }
 .agent-window-activity {
   --agent-window-icon-size: 18px;
-  /* Canonical Tab status-ball diameter. Sub-window (per-window) balls derive from this so the
-     two sizes stay in a single source — see .tmux-window-button .agent-window-activity. */
-  --agent-status-ball-size-base: 14px;
+  /* Every surface reserves the same compact status slot. */
+  --agent-status-ball-size-base: 9px;
   --agent-status-ball-size: var(--agent-status-ball-size-base);
   --agent-window-activity-inline-size: 24px;
   --agent-window-activity-block-size: var(--agent-window-icon-size);
@@ -272,7 +272,16 @@
   font-family: var(--ui-font);
   font-stretch: normal;
 }
-.session-agent-activity-marker .agent-window-status-dot {
+.agent-window-status-glyph {
+  --agent-status-ball-size: var(--agent-status-ball-size-base, 9px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--agent-status-ball-size);
+  block-size: var(--agent-status-ball-size);
+  flex: 0 0 var(--agent-status-ball-size);
+}
+.agent-window-status-glyph > .agent-window-status-dot {
   box-sizing: border-box;
   inline-size: var(--agent-status-ball-size);
   min-inline-size: var(--agent-status-ball-size);
@@ -295,13 +304,13 @@
 .agent-window-status-dot--stop {
   --agent-status-shape-path: inset(0);
 }
-.session-agent-activity-marker .agent-window-status-dot:is(.agent-window-status-dot--play, .agent-window-status-dot--pause, .agent-window-status-dot--stop) {
+.agent-window-status-glyph > .agent-window-status-dot:is(.agent-window-status-dot--play, .agent-window-status-dot--pause, .agent-window-status-dot--stop) {
   /* Keep the status slot and pulse while changing only its single-color silhouette. */
   clip-path: var(--agent-status-shape-path);
   border: 0;
   border-radius: 0;
 }
-.session-agent-activity-marker:has(.agent-window-status-dot:is(.agent-window-status-dot--play, .agent-window-status-dot--pause, .agent-window-status-dot--stop)) {
+.agent-window-status-glyph:has(> .agent-window-status-dot:is(.agent-window-status-dot--play, .agent-window-status-dot--pause, .agent-window-status-dot--stop)) {
   /* Outline outside the clipped glyph so matching tab colors cannot hide its edges. */
   filter: drop-shadow(1px 0 0 var(--agent-status-ball-border))
     drop-shadow(-1px 0 0 var(--agent-status-ball-border))
@@ -310,21 +319,21 @@
 }
 /* Parent Tabs summarize every visible child state with equal, crisp colors instead of averaging them
    into an unreadable brown. The child glyphs remain single-state symbols. */
-.session-agent-activity-marker .agent-window-status-dot--attention-cooldown {
+.agent-window-status-glyph > .agent-window-status-dot--attention-cooldown {
   --agent-status-ball-fill: conic-gradient(var(--bad) 0 50%, var(--agent-status-cooldown) 50% 100%);
 }
-.session-agent-activity-marker .agent-window-status-dot--attention-working {
+.agent-window-status-glyph > .agent-window-status-dot--attention-working {
   --agent-status-ball-fill: conic-gradient(var(--bad) 0 50%, var(--pr-status-passing) 50% 100%);
 }
-.session-agent-activity-marker .agent-window-status-dot--cooldown-working {
+.agent-window-status-glyph > .agent-window-status-dot--cooldown-working {
   --agent-status-ball-fill: conic-gradient(var(--agent-status-cooldown) 0 50%, var(--pr-status-passing) 50% 100%);
 }
-.session-agent-activity-marker .agent-window-status-dot--attention-cooldown-working {
+.agent-window-status-glyph > .agent-window-status-dot--attention-cooldown-working {
   --agent-status-ball-fill: conic-gradient(var(--bad) 0 33.333%, var(--agent-status-cooldown) 33.333% 66.666%, var(--pr-status-passing) 66.666% 100%);
 }
-.session-agent-activity-marker .agent-window-status-dot.status-indicator--working.heartbeat-pulse,
-.session-agent-activity-marker .agent-window-status-dot.status-indicator--cooldown.heartbeat-pulse,
-.session-agent-activity-marker .agent-window-status-dot.status-indicator--attention.heartbeat-pulse {
+.agent-window-status-glyph > .agent-window-status-dot.status-indicator--working.heartbeat-pulse,
+.agent-window-status-glyph > .agent-window-status-dot.status-indicator--cooldown.heartbeat-pulse,
+.agent-window-status-glyph > .agent-window-status-dot.status-indicator--attention.heartbeat-pulse {
   animation-name: agent-status-opacity-pulse;
 }
 /* Agent status = a static AI symbol followed by a separate filled status ball:
@@ -763,7 +772,7 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   overflow-wrap: anywhere;
 
 
-  color: var(--20-sessions-popovers-popover-subtitle-fg-32);
+  color: var(--popover-muted-text);
 }
 .popover-subtitle-text {
   min-width: 0;
@@ -857,7 +866,7 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   font-weight: 500;
 
 
-  color: var(--20-sessions-popovers-popover-label-fg-33);
+  color: var(--popover-muted-text);
 }
 .popover-value {
   min-width: 0;
@@ -870,7 +879,7 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   overflow-wrap: anywhere;
 }
 .session-popover .meta-muted {
-  color: var(--20-sessions-popovers-session-popover-fg-36);
+  color: var(--popover-muted-text);
 }
 .session-popover .meta-sep {
   color: var(--20-sessions-popovers-session-popover-fg-37);
@@ -1007,7 +1016,7 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   white-space: nowrap;
 
 
-  color: var(--20-sessions-popovers-state-legend-item-fg-35);
+  color: var(--popover-muted-text);
 }
 .popover-value a,
 .branch-link,
@@ -1083,9 +1092,9 @@ body :is(
 }
 .session-popover a {
 
-  color: var(--20-sessions-popovers-session-popover-fg-39);
+  color: var(--popover-link-text);
 }
 .branch-link {
 
-  color: var(--20-sessions-popovers-branch-link-fg-40);
+  color: var(--popover-link-text);
 }
