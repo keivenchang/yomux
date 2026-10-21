@@ -766,6 +766,124 @@ func TestSearchIndexV2CrashedNewerSchemaIsReadWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestSearchIndexExclusionPathFollowsSymlinkRootAlias(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "excluded"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "excluded", "secret.md"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	canonicalRoot, err := CanonicalIndexRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "root-alias")
+	if err := os.Symlink(canonicalRoot, alias); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	paths, _, _, err := discoverIndexPaths(context.Background(), canonicalRoot, nil, []string{filepath.Join(alias, "excluded")}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range paths {
+		if path.name == "secret.md" {
+			t.Fatal("absolute exclusion through a symlink alias was not applied")
+		}
+	}
+}
+
+func TestSearchPolicyCacheTracksSymlinkRootRetargeting(t *testing.T) {
+	firstRoot, secondRoot := t.TempDir(), t.TempDir()
+	alias := filepath.Join(t.TempDir(), "root-alias")
+	if err := os.Symlink(firstRoot, alias); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	rule := filepath.Join(alias, "excluded")
+	first, err := compileSearchPolicy(alias, nil, []string{rule})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secondRoot, alias); err != nil {
+		t.Fatal(err)
+	}
+	second, err := compileSearchPolicy(alias, nil, []string{rule})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalSecond, err := CanonicalIndexRoot(secondRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.canonicalRoot != canonicalSecond || first == second {
+		t.Fatalf("cached policy did not follow retargeted root: first=%q second=%q want=%q", first.canonicalRoot, second.canonicalRoot, canonicalSecond)
+	}
+	if !second.excludedPath(filepath.Join(alias, "excluded", "secret.md")) {
+		t.Fatal("absolute exclusion through the retargeted alias was not applied")
+	}
+}
+
+func TestSearchPolicyCacheTracksSymlinkExclusionRetargeting(t *testing.T) {
+	root := t.TempDir()
+	firstTarget := filepath.Join(root, "first")
+	secondTarget := filepath.Join(root, "second")
+	for _, target := range []string{firstTarget, secondTarget} {
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alias := filepath.Join(root, "exclusion-alias")
+	if err := os.Symlink(firstTarget, alias); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	rule := []string{alias}
+	first, err := compileSearchPolicy(root, nil, rule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secondTarget, alias); err != nil {
+		t.Fatal(err)
+	}
+	second, err := compileSearchPolicy(root, nil, rule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || !second.excludedPath(filepath.Join(secondTarget, "secret.md")) {
+		t.Fatalf("cached policy did not follow retargeted exclusion: first=%q second=%q", first.rules[0].path, second.rules[0].path)
+	}
+}
+
+func TestSearchPolicyUsesPinnedSymlinkRootForExclusions(t *testing.T) {
+	firstRoot, secondRoot := t.TempDir(), t.TempDir()
+	alias := filepath.Join(t.TempDir(), "root-alias")
+	if err := os.Symlink(firstRoot, alias); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	pinnedRoot, err := CanonicalIndexRoot(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secondRoot, alias); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := compileSearchPolicyResolved(alias, pinnedRoot, nil, []string{filepath.Join(alias, "excluded")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.canonicalRoot != pinnedRoot || !policy.excludedPath(filepath.Join(alias, "excluded", "secret.md")) {
+		t.Fatalf("policy did not preserve pinned root and exclusion: root=%q rules=%#v", policy.canonicalRoot, policy.rules)
+	}
+}
+
 func TestSearchIndexV2ExcludedRootStillAllowsFinderListing(t *testing.T) {
 	for _, name := range []string{"node_modules", ".ssh", "build"} {
 		t.Run(name, func(t *testing.T) {

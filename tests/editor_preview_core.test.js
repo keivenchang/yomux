@@ -261,4 +261,38 @@ test('Markdown Preview editing converts plain paragraph and inline emphasis chan
   assert.match(previewSource, /clearInlineFormatting|markdownTextWithInlineFormat/, 'Preview formatting has a source-level toggle path');
 });
 
+test('preview popouts transfer all root tokens through the common host and preserve editor aliases', () => {
+  const hostSource = fs.readFileSync('static_src/js/yomux/90_pane_popout.js', 'utf8');
+  const previewSource = fs.readFileSync('static_src/js/yomux/91_preview_popout.js', 'utf8');
+  const values = new Map([
+    ['--future-preview-token', '#123456'],
+    ['--editor-scheme-bg', '#112233'],
+    ['--editor-scheme-fg', '#eeeeee'],
+    ['color', 'red'],
+  ]);
+  const context = {
+    document: {documentElement: {}},
+    getComputedStyle: () => ({
+      length: values.size,
+      item: index => [...values.keys()][index],
+      getPropertyValue: name => values.get(name) || '',
+    }),
+    fileEditorPreviewDisplayMode: 'dark',
+  };
+  vm.createContext(context);
+  vm.runInContext(sourceBetween(hostSource, 'function panePopoutVariableStyle', 'function writePanePopoutDocument'), context);
+  vm.runInContext(sourceBetween(previewSource, 'function previewPopoutVariableStyle', 'function previewPopoutToolbarHtml'), context);
+  const style = context.previewPopoutVariableStyle();
+  assert.ok(style.includes('--future-preview-token: #123456'));
+  assert.ok(style.includes('--popout-editor-scheme-bg: #112233'));
+  assert.ok(style.includes('--popout-editor-scheme-fg: #eeeeee'));
+  assert.ok(style.includes('--text: var(--editor-scheme-fg)'));
+  assert.ok(style.indexOf('--editor-scheme-bg: var(--popout-editor-scheme-bg)') > style.indexOf('--editor-scheme-bg: #112233'));
+  assert.ok(!style.includes('color: red'));
+  values.set('--future-preview-token', '#654321');
+  assert.ok(context.previewPopoutVariableStyle().includes('--future-preview-token: #654321'));
+  context.fileEditorPreviewDisplayMode = 'vanilla';
+  assert.ok(context.previewPopoutVariableStyle().includes('--editor-preview-bg: var(--paint-white)'));
+});
+
 runSuites([() => runEditorPreviewSuite({shardIndex: 0, shardCount: 3})]);

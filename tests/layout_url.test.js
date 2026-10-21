@@ -13,6 +13,7 @@ const allSuiteFiles = [
   'tests/i18n_locale_registry.test.js',
   'tests/tmux_wall.test.js',
   'tests/layout_restore.test.js',
+  'tests/gui_command_controls.test.js',
   'tests/drop_action_result.test.js',
   'tests/file_surface_menu.test.js',
   'tests/side_panes.test.js',

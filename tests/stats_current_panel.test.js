@@ -181,6 +181,29 @@ function sourceFunction(name, nextName) {
   return `${source.slice(helperStart, helperEnd)}\n${body}`;
 }
 
+test('client work counter columns stay aligned across optional timing and detail values', () => {
+  const context = {result: null};
+  vm.runInNewContext(`
+    ${sourceFunction('debugClientPerfText', 'debugClientPerfLines')}
+    ${sourceFunction('debugClientPerfLines', 'debugClientPerfHtml')}
+    result = debugClientPerfLines([
+      {name: 'focusSet', count: 14, avgMs: 1.9, maxMs: 9.8},
+      {name: 'tabActivationPaint', count: 3, avgMs: 61.7, maxMs: 122.7},
+      {name: 'tabberFullRefresh', count: 419, avgMs: 0.1, maxMs: 0.5},
+      {name: 'tabberLayoutSync', count: 1, avgMs: 0.1, maxMs: 0.1, rows: 8},
+      {name: 'statsNoDataSweep', count: 3054, avgMs: 0, maxMs: 0.8, rows: 488028},
+      {name: 'sessionFilesRefresh', count: 9, rows: 42573, nodes: 130, skipped: 3},
+    ]);
+  `, context);
+  const lines = [...context.result];
+  for (const marker of ['n=', 'avg=', 'max=']) {
+    const offsets = lines.map(line => line.indexOf(marker));
+    assert.equal(new Set(offsets).size, 1, `${marker} values share one column`);
+  }
+  assert.match(lines[4], /avg=\s+max=\s+0\.8ms  rows=488028/);
+  assert.match(lines[5], /sessionFilesRefresh\s+n=\s*9\s+avg=\s+max=\s+rows=42573\s+nodes=130\s+skipped=3/);
+});
+
 test('host CPU and memory graphs label partial data and keep missing processes unknown', () => {
   const context = {
     debugGraphLocalizedLabel: group => group.label,

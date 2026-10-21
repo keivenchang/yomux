@@ -21,15 +21,7 @@
 .tabs .pane-popout::before,
 .tabs .pane-popout::after,
 .tabs .pane-expand::before,
-.tabs .pane-expand::after,
-.file-explorer-close::before,
-.file-explorer-close::after,
-.file-editor-close::before,
-.file-editor-close::after,
-.file-explorer-panel-close::before,
-.file-explorer-panel-close::after,
-.file-editor-panel-close::before,
-.file-editor-panel-close::after {
+.tabs .pane-expand::after {
   content: "";
   position: absolute;
   top: 50%;
@@ -192,7 +184,7 @@
   color: var(--good);
 }
 .js-debug-log-row--warning .js-debug-log-chip {
-  color: var(--attention);
+  color: var(--bad);
 }
 .js-debug-log-row--debug .js-debug-log-chip {
   color: var(--muted);
@@ -1153,6 +1145,9 @@
 }
 .js-debug-client-perf-title {
   color: var(--text);
+}
+.js-debug-client-perf-row {
+  white-space: pre-wrap;
 }
 .js-debug-client-perf-grid {
   display: grid;

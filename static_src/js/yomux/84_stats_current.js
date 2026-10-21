@@ -1070,7 +1070,7 @@
     async function recoverReadFence(error) {
       if (error?.recoverableReadFence !== true) return;
       if (!readFenceRecovery) {
-        readFenceRecovery = fetchJson(fetchImpl, '/api/stats-retry', false, {method: 'POST'})
+        readFenceRecovery = fetchJson(fetchImpl, '/api/stats-retry', false, {method: 'POST', commandRouteId: 'stats-read-fence-retry'})
           .catch(recoveryError => {
             // Preserve the original fence details for the visible state while
             // the controller's single bounded repair timer retries the read.
@@ -1559,7 +1559,7 @@
       async retry() {
         onState('loading');
         cancelSnapshotRequest();
-        await fetchJson(fetchImpl, '/api/stats-retry', false, {method: 'POST'}).catch(error => {
+        await fetchJson(fetchImpl, '/api/stats-retry', false, {method: 'POST', commandRouteId: 'stats-manual-retry'}).catch(error => {
           onState('error', error);
           throw error;
         });
@@ -2640,6 +2640,7 @@
   async function fetchJson(fetchImpl, url, allowNotModified = false, requestOptions = {}) {
     const response = await fetchImpl(url, Object.freeze({
       method: requestOptions.method || 'GET',
+      ...(requestOptions.commandRouteId ? {commandRouteId: requestOptions.commandRouteId} : {}),
       credentials: 'same-origin',
       cache: 'no-store',
       headers: Object.freeze({Accept: 'application/json'}),

@@ -413,9 +413,7 @@ func (s *server) publishGoYoloAuditEvent(session, eventType, message string, det
 		slog.Warn("cannot persist YO event", "session", session, "type", eventType, "error", err)
 		return
 	}
-	if s.events != nil {
-		_, _ = s.events.publish("event_log_changed", map[string]any{"session": session})
-	}
+	s.publishEventLogChanged(map[string]any{"session": session})
 }
 
 func (s *server) goYoloDryRun() (bool, error) {

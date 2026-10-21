@@ -922,7 +922,7 @@ def test_audited_css_families_have_one_grouped_owner():
         {".file-explorer-title", ".file-explorer-panel-title", ".file-editor-title"}
     ) in panel_groups
     assert re.search(r"\.pane-drag-image-frame,\s*\.preferences-panel,\s*\.js-debug-panel,\s*\.command-palette-dialog,\s*\.panel,\s*\.transcript,\s*\.summary\s*\{", preferences_css)
-    assert re.search(r"\.pane-tab-close::before,\s*\.pane-tab-close::after,\s*\.panel-detail-close::before,\s*\.panel-detail-close::after,[\s\S]*?\.file-editor-panel-close::after\s*\{", preferences_css)
+    assert re.search(r"\.pane-tab-close::before,\s*\.pane-tab-close::after,\s*\.panel-detail-close::before,\s*\.panel-detail-close::after,[\s\S]*?\.tabs \.pane-expand::after\s*\{", preferences_css)
     assert re.search(r"\.file-editor-codemirror \.cm-content ::selection,\s*\.file-editor-codemirror-panel \.cm-content ::selection\s*\{", panels_css)
     assert "body.editor-scheme-yomux-light .file-editor-codemirror .cm-content ::selection" in panels_css
     assert ".cm-content ::-moz-selection" not in panels_css

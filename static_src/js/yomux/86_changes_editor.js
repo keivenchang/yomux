@@ -303,7 +303,7 @@ function relocalizeFileEditorPanel(panel, item) {
   renderFileEditorPanel(panel, item, {updateActiveFile: false, captureViewState: false});
   reconfigureCodeMirrorPanelLocale(panel);
   relocalizeVirtualPanelChrome(panel);
-  setFileEditorLocalizedLabel(panel, '.file-editor-panel-close', 'editor.closePane');
+  setFileEditorLocalizedLabel(panel, '[data-pane-close]', 'editor.closePane');
   setFileEditorLocalizedLabel(panel, '.file-editor-toolbar', 'editor.toolbar.aria', {title: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-mode-control-panel', 'editor.mode.aria', {title: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-preview-font-panel', 'common.previewFontSize', {title: false});
@@ -344,7 +344,6 @@ function createFileEditorPanel(item) {
             minimize: true,
             expand: true,
             close: true,
-            closeClass: 'file-editor-panel-close',
             closeTitle: t('editor.closePane'),
             closeLabel: t('editor.closePane'),
           })}

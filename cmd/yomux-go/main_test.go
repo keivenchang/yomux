@@ -8436,6 +8436,210 @@ func TestEventPostUsesPythonValidationAndEventLogShape(t *testing.T) {
 	}
 }
 
+func TestEventPostAndBatchDoNotReportRetryableFailureAfterPersistence(t *testing.T) {
+	dir := t.TempDir()
+	s := &server{eventLogPath: filepath.Join(dir, "event-log.jsonl"), events: newEventBroker()}
+	// A directory cannot be opened as the broker journal, forcing invalidation to use live in-memory delivery.
+	s.events.journalPath = dir
+	events, cancel := s.events.subscribe("events")
+	t.Cleanup(cancel)
+	requests := []struct {
+		path string
+		body string
+	}{
+		{path: "/api/event", body: `{"session":"","type":"note","message":"single"}`},
+		{path: "/api/events", body: `{"events":[{"session":"","type":"note","message":"batch one"},{"session":"","type":"note","message":"batch two"}]}`},
+	}
+	for _, item := range requests {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, item.path, strings.NewReader(item.body))
+		if item.path == "/api/event" {
+			s.eventPost(recorder, request)
+		} else {
+			s.eventsRoute(recorder, request)
+		}
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status = %d %s after durable append", item.path, recorder.Code, recorder.Body.String())
+		}
+		if item.path == "/api/events" {
+			var response map[string]any
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response["event_log_refresh_required"] != false {
+				t.Fatalf("batch invalidation should be delivered in memory: %#v", response)
+			}
+		}
+		select {
+		case event := <-events:
+			if event.Type != "event_log_changed" {
+				t.Fatalf("invalidation event = %#v", event)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s did not deliver an invalidation to the connected client", item.path)
+		}
+	}
+	s.publishGoYoloAuditEvent("yo-session", "action", "audit", map[string]any{"source": "test"})
+	select {
+	case event := <-events:
+		if event.Type != "event_log_changed" {
+			t.Fatalf("YO audit invalidation event = %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("YO audit event did not deliver an invalidation to the connected client")
+	}
+	if got := len(s.eventLogTail("", 10)); got != 4 {
+		t.Fatalf("durable event rows = %d, want 4", got)
+	}
+}
+
+func TestEventBatchPersistsRowsAndPublishesOneInvalidation(t *testing.T) {
+	dir := t.TempDir()
+	s := &server{eventLogPath: filepath.Join(dir, "event-log.jsonl"), events: newEventBroker()}
+	s.events.journalPath = filepath.Join(dir, "client-events.jsonl")
+	body := `{"events":[{"session":"","type":"state_changed","message":"one changed","details":{"from":"idle","to":"working"}},{"session":"","type":"state_changed","message":"two changed","details":{"from":"idle","to":"working"}}]}`
+	recorder := httptest.NewRecorder()
+	s.eventsRoute(recorder, httptest.NewRequest(http.MethodPost, "/api/events", strings.NewReader(body)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("event batch status = %d %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		OK     bool             `json:"ok"`
+		Events []map[string]any `json:"events"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK || len(response.Events) != 2 {
+		t.Fatalf("event batch response = %#v", response)
+	}
+	for index, event := range response.Events {
+		if event["type"] != "state_changed" || event["message"] != []string{"one changed", "two changed"}[index] {
+			t.Fatalf("event %d = %#v", index, event)
+		}
+		if _, ok := event["time"].(string); !ok {
+			t.Fatalf("event %d lacks its own timestamp: %#v", index, event)
+		}
+	}
+	if got := len(s.eventLogTail("", 10)); got != 2 {
+		t.Fatalf("durable event rows = %d, want 2", got)
+	}
+	if len(s.events.events) != 1 || s.events.events[0].Type != "event_log_changed" {
+		t.Fatalf("batch invalidations = %#v, want one event_log_changed", s.events.events)
+	}
+	journal, err := os.ReadFile(s.events.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(strings.Split(strings.TrimSpace(string(journal)), "\n")); got != 1 {
+		t.Fatalf("durable client-event rows = %d, want 1", got)
+	}
+}
+
+func TestEventBatchRejectsInvalidRowsWithoutPartialAppend(t *testing.T) {
+	dir := t.TempDir()
+	eventLog := filepath.Join(dir, "event-log.jsonl")
+	s := &server{eventLogPath: eventLog, events: newEventBroker()}
+	body := `{"events":[{"session":"","type":"note","message":"valid"},{"session":"","type":"","message":"invalid"}]}`
+	recorder := httptest.NewRecorder()
+	s.eventsRoute(recorder, httptest.NewRequest(http.MethodPost, "/api/events", strings.NewReader(body)))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid batch status = %d %s", recorder.Code, recorder.Body.String())
+	}
+	if _, err := os.Stat(eventLog); !os.IsNotExist(err) {
+		t.Fatalf("invalid batch wrote event log, stat error = %v", err)
+	}
+	if len(s.events.events) != 0 {
+		t.Fatalf("invalid batch published events = %#v", s.events.events)
+	}
+}
+
+func TestEventBatchKeepsValidRowsWhenSessionDisappears(t *testing.T) {
+	dir := t.TempDir()
+	s := &server{eventLogPath: filepath.Join(dir, "event-log.jsonl"), events: newEventBroker()}
+	s.tmuxCommandContextFn = func(ctx context.Context, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", `printf '%s\n' "can't find session: missing-session" >&2; exit 1`)
+	}
+	body := `{"events":[{"session":"missing-session","type":"note","message":"stale"},{"session":"","type":"state_changed","message":"still live"}]}`
+	recorder := httptest.NewRecorder()
+	s.eventsRoute(recorder, httptest.NewRequest(http.MethodPost, "/api/events", strings.NewReader(body)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("mixed event batch status = %d %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Events       []map[string]any `json:"events"`
+		RejectedRows []map[string]any `json:"rejected_rows"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Events) != 1 || response.Events[0]["message"] != "still live" {
+		t.Fatalf("accepted events = %#v", response.Events)
+	}
+	if len(response.RejectedRows) != 1 || response.RejectedRows[0]["index"] != float64(0) || response.RejectedRows[0]["session"] != "missing-session" {
+		t.Fatalf("rejected rows = %#v", response.RejectedRows)
+	}
+	if got := len(s.eventLogTail("", 10)); got != 1 {
+		t.Fatalf("persisted event rows = %d, want 1", got)
+	}
+}
+
+func TestEventBatchFailsAtomicallyWhenSessionValidationIsUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	eventLog := filepath.Join(dir, "event-log.jsonl")
+	s := &server{eventLogPath: eventLog, events: newEventBroker()}
+	s.tmuxCommandContextFn = func(ctx context.Context, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "false")
+	}
+	body := `{"events":[{"session":"","type":"state_changed","message":"valid prefix"},{"session":"uncertain-session","type":"note","message":"cannot validate"}]}`
+	recorder := httptest.NewRecorder()
+	s.eventsRoute(recorder, httptest.NewRequest(http.MethodPost, "/api/events", strings.NewReader(body)))
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"retryable":true`) {
+		t.Fatalf("validation outage status = %d %s", recorder.Code, recorder.Body.String())
+	}
+	if _, err := os.Stat(eventLog); !os.IsNotExist(err) {
+		t.Fatalf("validation outage wrote event log, stat error = %v", err)
+	}
+	if len(s.events.events) != 0 {
+		t.Fatalf("validation outage published events = %#v", s.events.events)
+	}
+}
+
+func TestEventBrokerMergesCoalescedEventLogScopes(t *testing.T) {
+	b := newEventBroker()
+	stream, closeStream := b.subscribe()
+	defer closeStream()
+	if _, err := b.publish("event_log_changed", map[string]any{"sessions": []any{"session-a"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.publish("event_log_changed", map[string]any{"sessions": []string{"session-b"}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-stream:
+		sessions, ok := event.Payload["sessions"].([]string)
+		if !ok || len(sessions) != 2 || sessions[0] != "session-a" || sessions[1] != "session-b" {
+			t.Fatalf("coalesced scopes = %#v", event.Payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for coalesced event")
+	}
+	if _, err := b.publish("event_log_changed", map[string]any{"sessions": []string{"session-c"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.publish("event_log_changed", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-stream:
+		if _, scoped := event.Payload["sessions"]; scoped {
+			t.Fatalf("global invalidation remained scoped: %#v", event.Payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for global invalidation")
+	}
+}
+
 func TestAuthCookiesArePortScopedAndHTTPSafe(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "auth.yaml"), []byte("users:\n  - username: admin\n    password: secret\n    role: admin\n"), 0600); err != nil {

@@ -1570,81 +1570,28 @@ function loadFileEditorState(path, panel, item) {
     state.loadingPromise = loadingPromise;
     return;
   }
+  const load = captureOpenFileLoad(path, state);
   const loadingPromise = (async () => {
     const kind = openFileKindForPreviewPath(basenameOf(path));
+    let next;
     if (kind === 'image' || kind === 'media') {
-      const fetched = await fetchFileEntryStatus(path);
-      const entry = fetched.entry;
-      if (!entry) {
-        if (fetched.missing) {
-          // A directory-listing omission is not proof a media file is gone. Confirm through the shared
-          // authoritative /api/fs/info guard (fenced against newer per-path state) before marking missing;
-          // a stale/racing omission must never clobber an open, valid media view.
-          const verdict = await resolveOpenMediaMissingVerdict(path);
-          if (verdict?.missing) {
-            markOpenFileMissing(path);
-          } else if (verdict?.state) {
-            setFileState(path, verdict.state);
-            bumpOpenFileContentGeneration(path);
-            if (panel) renderFileEditorPanel(panel, item);
-          } else if (verdict?.error) {
-            setFileState(path, fileErrorState(verdict.error));
-          }
-          // verdict null (superseded by a newer render): keep the newer content.
-        } else {
-          setFileState(path, fileErrorState(fetched.error));
-        }
-        renderSessionButtons();
-        renderPaneTabStrips();
-        return;
-      }
-      if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
-        const state = tooLargeFileState(Number(entry.size));
-        state.mtime = fileEntryMtime(entry);
-        setFileState(path, state);
-      } else if (kind === 'image') {
-        setFileState(path, {mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
-      } else {
-        setFileState(path, rawPreviewFileState(path, entry));
-      }
-      bumpOpenFileContentGeneration(path);
-      if (panel) renderFileEditorPanel(panel, item);
-      renderSessionButtons();
-      renderPaneTabStrips();
-      return;
-    }
-    try {
-      const payload = await fetchFileReadPayload(path);
-      setFileState(path, applyFileGitMetadata({
-        mtime: filePayloadMtime(payload),
-        size: payload.size,
-        kind: 'text',
-        original: payload.content,
-        content: payload.content,
-        dirty: false,
-      }, payload));
-      bumpOpenFileContentGeneration(path);
-    } catch (err) {
-      const status = Number(err?.status) || 0;
-      if (status) {
-        const sniffed = status === 415 ? await sniffedRawPreviewFileState(path) : null;
-        setFileState(path, sniffed || (status === 413
-          ? oversizeOrErrorFileState(null, err)
-          : status === 404
-            ? missingFileState(err)
-            : fileErrorState(err)));
-      } else {
-        setFileState(path, fileErrorState(err));
-      }
-    }
+      const loaded = await openFileStateFromDisk(path);
+      if (loaded.superseded || !openFileLoadStillCurrent(path, load)) return;
+      if (loaded.missing) {
+        const verdict = await resolveOpenMediaMissingVerdict(path);
+        if (!verdict || !openFileLoadStillCurrent(path, load)) return;
+        next = verdict.state || (verdict.missing ? missingFileState() : fileErrorState(verdict.error));
+      } else next = loaded.state;
+    } else next = await readTextFileState(path, null, {previous: state});
+    if (!completeOpenFileLoad(path, load, next)) return;
     if (panel) renderFileEditorPanel(panel, item);
     renderSessionButtons();
     renderPaneTabStrips();
   })().finally(() => {
-    const current = fileState.get(path);
-    if (current?.loadingPromise === loadingPromise) delete current.loadingPromise;
+    if (state.loadingPromise === loadingPromise) delete state.loadingPromise;
   });
   state.loadingPromise = loadingPromise;
+  return loadingPromise;
 }
 
 function updateFileEditorPanelChrome(panel, path) {

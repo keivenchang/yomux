@@ -521,7 +521,7 @@ function installTerminalMobileAccessoryResizeSync() {
 function installTerminalMobileAccessorySurfaceSync() {
   if (terminalMobileAccessorySurfaceObserver || typeof MutationObserver !== 'function' || !document.body) return;
   terminalMobileAccessorySurfaceObserver = new MutationObserver(records => {
-    const sessions = new Set();
+    const observedSessions = new Set();
     const collect = node => {
       if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
       const surfaces = node.matches?.('[data-terminal-mobile-toggle], [data-terminal-mobile-keybar]')
@@ -530,13 +530,13 @@ function installTerminalMobileAccessorySurfaceSync() {
       surfaces.push(...(node.querySelectorAll?.('[data-terminal-mobile-toggle], [data-terminal-mobile-keybar]') || []));
       for (const surface of surfaces) {
         const session = String(surface.dataset?.terminalMobileToggle || surface.dataset?.terminalMobileKeybar || '');
-        if (session && terminalMobileAccessoryState(session)) sessions.add(session);
+        if (session && terminalMobileAccessoryState(session)) observedSessions.add(session);
       }
     };
     for (const record of records) {
       for (const node of record.addedNodes || []) collect(node);
     }
-    for (const session of sessions) syncTerminalMobileAccessoryState(session);
+    for (const session of observedSessions) syncTerminalMobileAccessoryState(session);
   });
   terminalMobileAccessorySurfaceObserver.observe(document.body, {childList: true, subtree: true});
 }
@@ -2304,27 +2304,17 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
-  const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
   const groupRecords = Array.isArray(group.records) ? group.records : [];
-  const representativeKind = String(record.aiKind || '').trim().toLowerCase();
-  const exactWindowSurface = representativeKind && groupRecords.every(item => String(item?.aiKind || '').trim().toLowerCase() === representativeKind);
-  const exactAgent = exactWindowSurface ? infoRecordCanonicalAgent(record) : null;
-  const exactActivityHtml = exactAgent
-    ? agentWindowActivityIconHtmlForStatus(exactAgent, record.aiKind, session, {statusOnly: true})
-    : '';
-  if (exactActivityHtml) {
-    return `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${exactActivityHtml}</span>`;
-  }
-  const summary = sessionAgentWindowStatusSummary(session, info, payload);
-  const agent = summary?.agent || infoRecordDisplayAgent(record);
-  const activityHtml = summary?.item
-    ? agentWindowActivityIconHtml(agent.kind, agent.state, agentWindowIdleSeconds(agent), {
-      ...agentWindowActivityOptionsForStatus(agent, session),
-      item: summary.item,
-      statusOnly: true,
-    })
-    : agentWindowActivityIconHtmlForStatus(agent, record.aiKind, session, {statusOnly: true});
-  return activityHtml ? `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${activityHtml}</span>` : undefined;
+  const agents = groupRecords.map(infoRecordCanonicalAgent).filter(Boolean);
+  const allAgents = sessionAgentWindowStatusPayloads(session, info, payload);
+  const selectedKeys = new Set(agents.map(agent => agentWindowPhysicalKey(agent, info)));
+  const fullSession = allAgents.every(agent => selectedKeys.has(agentWindowPhysicalKey(agent, info)));
+  const statusSummary = fullSession
+    ? sessionAgentWindowStatusSummary(session, info, payload)
+    : agentWindowStatusSummary(agents, session, {info, hasAttributedWindows: true});
+  return sessionTabLeadingActivityHtml(session, info, auto, {
+    payload, statusSummary, activityMarkerClass: 'info-tree-tab-group-status', enabledOnly: false, toggle: !readOnlyMode,
+  });
 }
 
 function infoAgentAttentionHtml(record) {
@@ -5370,7 +5360,7 @@ function applyAutoApproveCommandResult(session, payload) {
 function autoApproveCommandRoute(session, enabled) {
   return commandRoute({
     ...COMMAND_ROUTES['auto-approve-toggle'],
-    clearStatusOnSuccess: true,
+    operationKey: () => session,
     pendingLabel: t('status.yoloLoading'),
     overdueLabel: 'Still working...',
     overdueMs: 250,
@@ -7193,13 +7183,21 @@ function refreshOpenEventLogs() {
 }
 
 function refreshEventLogsFromPush(payload = {}) {
+  const pushedSessions = Array.isArray(payload.sessions) ? [...new Set(payload.sessions.map(session => String(session || '')).filter(Boolean))] : [];
+  if (pushedSessions.length) {
+    const refreshes = [];
+    for (const session of pushedSessions) {
+      const pane = document.getElementById(`events-pane-${session}`);
+      if (pane?.classList.contains(CLS.active)) refreshes.push(refreshEventLog(session));
+    }
+    return Promise.all(refreshes);
+  }
   const session = String(payload.session || '');
   if (session) {
     const pane = document.getElementById(`events-pane-${session}`);
-    if (pane?.classList.contains(CLS.active)) refreshEventLog(session);
-    return;
+    return pane?.classList.contains(CLS.active) ? refreshEventLog(session) : Promise.resolve([]);
   }
-  refreshOpenEventLogs();
+  return refreshOpenEventLogs();
 }
 
 function postEvent(session, type, message, details = {}) {
@@ -7212,6 +7210,36 @@ function postEvent(session, type, message, details = {}) {
     body: JSON.stringify({session, type, message, details}),
   }).then(() => {
     if (!lifecycleToken || tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) refreshOpenEventLogs();
+    return true;
+  }).catch(() => false);
+}
+
+const eventPostBatchMax = 64;
+
+function postEventBatch(events) {
+  const batch = events.filter(event => {
+    if (!event.session) return true;
+    const lifecycleToken = tmuxSessionLifecycleToken(event.session);
+    return !lifecycleToken || tmuxSessionLifecycleTokenIsCurrent(lifecycleToken);
+  });
+  if (!batch.length) return Promise.resolve(false);
+  const requests = [];
+  for (let index = 0; index < batch.length; index += eventPostBatchMax) {
+    requests.push(apiFetch('/api/events', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({events: batch.slice(index, index + eventPostBatchMax)}),
+    }));
+  }
+  return Promise.all(requests).then(async responses => {
+    if (responses.some(response => !response.ok)) return false;
+    const results = await Promise.all(responses.map(response => response.json()));
+    if (results.some(result => result?.event_log_refresh_required === true)) {
+      const sessionIds = [...new Set(batch.map(event => String(event.session || '')).filter(Boolean))];
+      const refreshTarget = batch.some(event => !String(event.session || '')) ? {} : {sessions: sessionIds};
+      refreshEventLogsFromPush(refreshTarget).catch(error => console.warn('event batch fallback refresh failed', error));
+    }
     return true;
   }).catch(() => false);
 }

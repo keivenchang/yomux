@@ -128,6 +128,157 @@ async function applyNewerValidRender(api, mtime) {
 }
 
 async function runOpenFileMissingGuardSuite() {
+  await testAsync('layout registration preserves an ordinary read already in flight', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/chart.mmd';
+    const read = deferredFetch();
+    api.setFetchForTest(url => String(url).startsWith('/api/fs/read')
+      ? read.promise : Promise.resolve(jsonResponse({ok: true})));
+    const opening = api.openFileInEditorForTest(path, {name: 'chart.mmd', mtime: 20, size: 30}, {viewMode: 'edit'});
+    await flush(2);
+    const loading = api.currentFileStateForTest(path);
+    assert.equal(loading.loading, true);
+    assert.equal(loading.mtime, 20);
+    api.registerFileEditorLayoutItemForTest(path);
+    assert.equal(api.currentFileStateForTest(path).loadingPromise, loading.loadingPromise);
+    assert.equal(loading.mtime, 20);
+    read.resolve(jsonResponse({content: 'graph TD; A-->B', mtime: 20}));
+    await opening;
+    await flush();
+    assert.equal(api.currentFileStateForTest(path).kind, 'text');
+    assert.equal(api.currentFileStateForTest(path).content, 'graph TD; A-->B');
+    assert.notEqual(api.currentFileStateForTest(path).loading, true);
+  });
+
+  for (const outcome of ['success', 'error', 'sniff']) {
+    await testAsync(`restore completion preserves in-place newer dirty content (${outcome})`, async () => {
+      const api = loadYomux('', ['1']);
+      const path = '/repo/restore.md';
+      const item = api.fileEditorItemForTest(path);
+      api.setOpenFileStateForTest(path, {kind: 'file', original: '', content: '', dirty: false});
+      api.registerFileEditorLayoutItemForTest(path, {item});
+      const read = deferredFetch();
+      const sniff = deferredFetch();
+      api.setFetchForTest(url => String(url).startsWith('/api/fs/info') ? sniff.promise : read.promise);
+      api.loadFileEditorStateForTest(path, null, item);
+      if (outcome === 'sniff') {
+        read.resolve(jsonResponse({error: 'binary'}, 415));
+        await flush();
+      }
+      api.patchOpenFileStateForTest(path, {kind: 'text', content: 'new local edit', dirty: true});
+      if (outcome === 'sniff') sniff.resolve(jsonResponse({kind: 'file', preview_mime: 'application/pdf'}));
+      else read.resolve(outcome === 'error' ? jsonResponse({error: 'missing'}, 404) : jsonResponse({content: 'old disk', mtime: 1}));
+      await flush();
+      const state = api.currentFileStateForTest(path);
+      assert.equal(state.content, 'new local edit');
+      assert.equal(state.dirty, true);
+      assert.equal(state.kind, 'text');
+    });
+  }
+
+  for (const path of ['/repo/restored.md', '/repo/restored.png']) {
+    for (const responseStatus of [200, 404]) {
+      await testAsync(`obsolete restored ${path} response ${responseStatus} cannot resurrect or replace a reopened file`, async () => {
+        const api = loadYomux('', ['1']);
+        const item = api.registerFileEditorLayoutItemForTest(path);
+        const delayed = deferredFetch();
+        api.setFetchForTest(() => delayed.promise);
+        api.loadFileEditorStateForTest(path, null, item);
+        await flush(2);
+        assert.equal(await api.closeFileTabForTest(path), true);
+        api.setOpenFileStateForTest(path, {kind: path.endsWith('.png') ? 'image' : 'text', original: 'new', content: 'new', dirty: false});
+        api.registerFileEditorLayoutItemForTest(path);
+        delayed.resolve(jsonResponse({kind: 'file', content: 'old', size: 12, mtime: 1}, responseStatus));
+        await flush(12);
+        assert.equal(api.currentFileStateForTest(path).content, 'new');
+        assert.equal(api.currentFileStateForTest(path).externalMissing, undefined);
+      });
+    }
+  }
+
+  await testAsync('reload preserves edits made while a disk response is held', async () => {
+    const api = loadYomux('', ['1']);
+    await openValid(api);
+    const delayed = deferredFetch();
+    api.setFetchForTest(() => delayed.promise);
+    const reload = api.loadOpenFileStateFromDiskForTest(MD, {name: 'big.md', kind: 'file', size: 100});
+    api.patchOpenFileStateForTest(MD, {content: 'new edit', dirty: true});
+    delayed.resolve(readOkResponse(6));
+    assert.equal(await reload, false);
+    assert.equal(api.currentFileStateForTest(MD).content, 'new edit');
+    assert.equal(api.currentFileStateForTest(MD).dirty, true);
+  });
+
+  await testAsync('joining a reload cannot renew its fence after newer edits', async () => {
+    const api = loadYomux('', ['1']);
+    await openValid(api);
+    const delayed = deferredFetch();
+    let reads = 0;
+    api.setFetchForTest(url => {
+      if (String(url).includes('include_git=1')) return Promise.resolve(jsonResponse({}));
+      reads += 1;
+      return reads === 1 ? delayed.promise : Promise.resolve(readOkResponse(7));
+    });
+    const first = api.replaceOpenFileStateFromDiskForTest(MD, {name: 'big.md', kind: 'file', mtime: 6});
+    const second = api.replaceOpenFileStateFromDiskForTest(MD, {name: 'big.md', kind: 'file', mtime: 7});
+    api.patchOpenFileStateForTest(MD, {content: 'new local edit', dirty: true});
+    delayed.resolve(readOkResponse(6));
+    assert.equal(await first, false);
+    assert.equal(await second, false);
+    assert.equal(reads, 1);
+    assert.equal(api.currentFileStateForTest(MD).content, 'new local edit');
+    assert.equal(api.currentFileStateForTest(MD).dirty, true);
+  });
+
+  for (const status of [404, 413, 503]) {
+    await testAsync(`typed reload error ${status} preserves entry metadata`, async () => {
+      const api = loadYomux('', ['1']);
+      await openValid(api);
+      api.setFetchForTest(() => Promise.resolve(jsonResponse({error: 'read rejected'}, status)));
+      await api.loadOpenFileStateFromDiskForTest(MD, {name: 'big.md', kind: 'file', mtime: 7, size: 42});
+      const state = api.currentFileStateForTest(MD);
+      assert.equal(state.mtime, 7);
+      assert.equal(state.size, 42);
+      assert.equal(state.externalMissing === true, status === 404);
+    });
+  }
+
+  for (const omittedListing of [false, true]) {
+  await testAsync(`reload retains known Git metadata until enrichment completes (omitted listing: ${omittedListing})`, async () => {
+    const api = loadYomux('', ['1']);
+    await openValid(api);
+    api.patchOpenFileStateForTest(MD, {gitRoot: '/repo/app', gitTracked: true, gitHasHistory: true, gitHistory: [{ref: 'HEAD'}, {ref: 'HEAD~1'}]});
+    const metadata = deferredFetch();
+    api.setFetchForTest(url => String(url).includes('include_git=1') ? metadata.promise : String(url).startsWith('/api/fs/info') ? Promise.resolve(jsonResponse({}, 404)) : Promise.resolve(jsonResponse({content: 'new disk', mtime: 6, git_enrichment: {reason: 'deferred'}}))); api.markFileExplorerDeletedPathsForTest([MD]);
+    assert.equal(await api.loadOpenFileStateFromDiskForTest(MD, omittedListing ? null : {name: 'big.md', kind: 'file', size: 100}), true);
+    assert.equal(api.currentFileStateForTest(MD).gitTracked, true);
+    assert.equal(api.currentFileStateForTest(MD).gitHasHistory, true);
+    metadata.resolve(jsonResponse({git_root: '/repo/app', git_tracked: true, git_has_history: true, git_history: [{ref: 'HEAD'}, {ref: 'HEAD~1'}]}));
+    await flush();
+    assert.equal(api.currentFileStateForTest(MD).content, 'new disk');
+  });
+  }
+
+  await testAsync('restored direct text read schedules metadata-only Git enrichment', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/restore.md';
+    const item = api.fileEditorItemForTest(path);
+    api.setOpenFileStateForTest(path, {kind: 'file', content: '', original: '', dirty: false});
+    api.registerFileEditorLayoutItemForTest(path, {item});
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse(String(url).includes('include_git=1')
+        ? {git_root: '/repo', git_tracked: true, git_has_history: true, git_history: [{ref: 'HEAD'}]}
+        : {content: 'restored', mtime: 1, git_enrichment: {reason: 'deferred'}}));
+    });
+    api.loadFileEditorStateForTest(path, null, item);
+    await flush();
+    assert.equal(api.currentFileStateForTest(path).content, 'restored');
+    assert.equal(api.currentFileStateForTest(path).gitTracked, true);
+    assert.equal(requests.filter(url => url.includes('/api/fs/info?') && url.includes('include_git=1')).length, 1);
+  });
+
   await testAsync('poll lane: exact-path status checks progress independently', async () => {
     const api = loadYomux('', ['1']);
     for (const path of [MD, OTHER_MD]) {

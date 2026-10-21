@@ -1057,9 +1057,13 @@ func (b *eventBroker) publish(kind string, payload map[string]any) (clientEvent,
 	b.nextID++
 	e := clientEvent{ID: b.nextID, Type: kind, Time: float64(time.Now().UnixNano()) / 1e9, Payload: payload, Epoch: b.epoch, Resource: resource, Base: base, Revision: base + 1}
 	if err := b.appendDurable(e); err != nil {
-		b.nextID--
-		b.revisions[resource] = base
-		return clientEvent{}, err
+		if kind != "event_log_changed" {
+			b.nextID--
+			b.revisions[resource] = base
+			return clientEvent{}, err
+		}
+		// The event log itself is already durable; keep the invalidation live in memory so open logs refresh.
+		slog.Warn("event log invalidation journal append failed; delivering in memory", "error", err)
 	}
 	b.published++
 	bytes := eventBytes(e)
@@ -1091,6 +1095,10 @@ func (b *eventBroker) publish(kind string, payload map[string]any) (clientEvent,
 		if pending := b.pending[ch]; pending != nil {
 			if _, ok := pending[resource]; ok {
 				prior := pending[resource]
+				if kind == "event_log_changed" {
+					payload = mergeEventLogScopes(prior.Payload, payload)
+					e.Payload = payload
+				}
 				priorPatch, _ := prior.Payload["patch"].(bool)
 				currentPatch, _ := payload["patch"].(bool)
 				if priorPatch || currentPatch {
@@ -1168,6 +1176,45 @@ func (b *eventBroker) publish(kind string, payload map[string]any) (clientEvent,
 	}
 	return e, nil
 }
+
+func mergeEventLogScopes(prior, current map[string]any) map[string]any {
+	priorSessions, priorScoped := eventLogSessions(prior["sessions"])
+	currentSessions, currentScoped := eventLogSessions(current["sessions"])
+	if !priorScoped || !currentScoped || len(priorSessions) == 0 || len(currentSessions) == 0 {
+		return map[string]any{}
+	}
+	seen := make(map[string]bool, len(priorSessions)+len(currentSessions))
+	sessions := make([]string, 0, len(priorSessions)+len(currentSessions))
+	for _, group := range [][]string{priorSessions, currentSessions} {
+		for _, session := range group {
+			if session != "" && !seen[session] {
+				seen[session] = true
+				sessions = append(sessions, session)
+			}
+		}
+	}
+	return map[string]any{"sessions": sessions}
+}
+
+func eventLogSessions(value any) ([]string, bool) {
+	switch sessions := value.(type) {
+	case []string:
+		return sessions, true
+	case []any:
+		result := make([]string, 0, len(sessions))
+		for _, value := range sessions {
+			session, ok := value.(string)
+			if !ok {
+				return nil, false
+			}
+			result = append(result, session)
+		}
+		return result, true
+	default:
+		return nil, false
+	}
+}
+
 func (b *eventBroker) replaceQueuedResource(ch chan clientEvent, resource string, replacement clientEvent) {
 	items := make([]clientEvent, 0, len(ch))
 	for {

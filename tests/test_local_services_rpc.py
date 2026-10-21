@@ -8,6 +8,7 @@ import threading
 import fcntl
 import os
 import time
+import traceback
 
 import pytest
 
@@ -481,25 +482,45 @@ def _start_local_rpc_service(
     concurrent_handlers=0,
 ):
     listener_ready = threading.Event()
-    worker = threading.Thread(
-        target=lambda: runtime.run_local_rpc_service(
-            socket_path=socket_path,
-            lock_path=lock_path,
-            service_name=service_name,
-            stop_event=stop_event,
-            handle=handle,
-            on_idle=lambda: False,
-            on_client=lambda: None,
-            on_start=listener_ready.set,
-            concurrent_handlers=concurrent_handlers,
-        ),
-        daemon=True,
-    )
+    outcome = {"return_code": None, "exception": None}
+
+    def run_service():
+        try:
+            outcome["return_code"] = runtime.run_local_rpc_service(
+                socket_path=socket_path,
+                lock_path=lock_path,
+                service_name=service_name,
+                stop_event=stop_event,
+                handle=handle,
+                on_idle=lambda: False,
+                on_client=lambda: None,
+                on_start=listener_ready.set,
+                concurrent_handlers=concurrent_handlers,
+            )
+        except Exception as error:
+            # Startup failures belong to the waiting fixture; later service failures retain the
+            # ordinary thread exception path so a running fixture cannot discard them.
+            if listener_ready.is_set():
+                raise
+            outcome["exception"] = error
+
+    worker = threading.Thread(target=run_service, daemon=True)
     worker.start()
     if not listener_ready.wait(timeout=2.0):
+        frame = sys._current_frames().get(worker.ident)
+        stack = "".join(traceback.format_stack(frame)) if frame is not None else "<no live Python frame>"
+        boundary = (
+            f"service={service_name} socket={socket_path} lock={lock_path} "
+            f"thread={worker.ident} alive={worker.is_alive()} "
+            f"return_code={outcome['return_code']!r} exception={outcome['exception']!r}\n{stack}"
+        )
         stop_event.set()
         worker.join(timeout=1.0)
-        pytest.fail("local service listener did not reach its post-listen start boundary")
+        if outcome["exception"] is not None:
+            error = outcome["exception"]
+            error.add_note(boundary)
+            raise error.with_traceback(error.__traceback__)
+        pytest.fail("local service listener did not reach its post-listen start boundary: " + boundary)
     if not socket_path.exists() or (socket_path.stat().st_mode & 0o777) != 0o600:
         stop_event.set()
         worker.join(timeout=1.0)

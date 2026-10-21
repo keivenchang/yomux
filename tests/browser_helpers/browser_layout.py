@@ -92,6 +92,7 @@ BROWSER_BOOT_ROUTES = (
     *BROWSER_BOOT_ROUTES,
     BrowserBootRoute("/api/fs/fast/list", ("GET",)),
     BrowserBootRoute("/api/fs/info", ("GET",)),
+    BrowserBootRoute("/api/fs/read", ("GET",)),
 )
 
 pytestmark = [pytest.mark.browser, pytest.mark.socket]
@@ -1294,7 +1295,7 @@ def pc_controls_fixture_html():
           <button id="hash-tab" class="tab panel-detail-toggle">#</button>
           <button id="list-tab" class="tab terminal-tab">1.</button>
           <button id="pane-actions" class="tab pane-actions"><span id="pane-actions-dots" class="pane-actions-dots">...</span></button>
-          <button id="pane-zoom" type="button" class="tab pane-expand pc-window-control pc-zoom" data-action="fixture-zoom"></button>
+          <button id="pane-zoom" type="button" class="btn-base tab pane-expand pc-window-control pc-zoom" data-action="fixture-zoom"></button>
           <button id="hidden-pane-zoom" class="tab pane-expand pc-window-control pc-zoom" hidden></button>
         </div>
         <span id="working-yolo" class="session-yolo-marker active working">YO</span>
@@ -1307,8 +1308,8 @@ def pc_controls_fixture_html():
           <span id="tab-minimize" class="pane-tab-close pc-window-control pc-minimize"></span>
         </button>
         <div class="tabs pane-frame-controls">
-          <button id="finder-close" class="tab pane-close pc-window-control pc-close file-explorer-panel-close"></button>
-          <button id="editor-close" class="tab pane-close pc-window-control pc-close file-editor-panel-close"></button>
+          <button id="finder-close" class="tab pane-close pc-window-control pc-close"></button>
+          <button id="editor-close" class="tab pane-close pc-window-control pc-close"></button>
         </div>
         <section class="preferences-section collapsed">
           <button type="button" class="preferences-section-toggle">Appearance</button>
@@ -1440,7 +1441,7 @@ def codemirror_editor_controls_fixture_html():
               <div class="tabs pane-frame-controls file-editor-frame-controls">
                 <button class="tab pane-minimize pc-window-control pc-minimize"></button>
                 <button class="tab pane-expand pc-window-control pc-zoom"></button>
-                <button type="button" class="tab pane-close pc-window-control pc-close file-editor-panel-close"></button>
+                <button type="button" class="tab pane-close pc-window-control pc-close"></button>
               </div>
             </div>
             <div class="pane-tabs" role="tablist">{tabs}</div>
@@ -2865,6 +2866,23 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         emitFixtureClientEvent('chat_messages_changed', {revision: message.id});
         return message;
       };
+      function fixtureFilesystemRecord(path, create = false) {
+        const entriesByPath = window.__fixtureFsEntries;
+        const parent = path.slice(0, Math.max(1, path.lastIndexOf('/'))) || '/';
+        const name = path.split('/').filter(Boolean).pop() || '/';
+        const entries = entriesByPath[parent] || [];
+        let entry = entries.find(candidate => candidate.name === name);
+        // Restored-layout tests have always read synthetic empty files by default. Record that
+        // successful read in the same inventory used by metadata and directory requests.
+        if (!entry && create) {
+          entry = {name, kind: entriesByPath[path] ? 'dir' : 'file', size: 0, mtime: 0, content: ''};
+          entries.push(entry);
+          entriesByPath[parent] = entries;
+        }
+        if (!entry) return null;
+        return {entry, info: {path, name, kind: entry.kind || (entriesByPath[path] ? 'dir' : 'file'),
+          size: entry.size ?? null, mtime: entry.mtime ?? null, mtime_ns: entry.mtime_ns ?? null, realpath: path}};
+      }
       window.fetch = async (input, options = {}) => {
         const url = new URL(String(input), 'https://localhost');
         const body = options.body ? JSON.parse(options.body || '{}') : null;
@@ -3269,6 +3287,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           return jsonResponse(window.__fixtureStatsAgentStatus);
         }
         if (url.pathname === '/api/ping') return jsonResponse({ok: true});
+        if (url.pathname === '/api/watch/roots') return jsonResponse({ok: true, roots: body?.roots || [], files: body?.files || []});
         if (url.pathname === '/api/event') return jsonResponse({ok: true});
         if (url.pathname === '/api/events') return jsonResponse({events: []});
         if (url.pathname === '/api/logs') return jsonResponse(window.__fixtureServerLogsPayload);
@@ -3278,14 +3297,15 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           const entries = (window.__fixtureFsEntries || {})[path] || [];
           return jsonResponse({path, entries});
         }
+        if (url.pathname === '/api/fs/read') {
+          const path = url.searchParams.get('path') || '/home/test';
+          const record = fixtureFilesystemRecord(path, true);
+          return jsonResponse({...record.info, content: String(record.entry.content || '')});
+        }
         if (url.pathname === '/api/fs/info') {
           const path = url.searchParams.get('path') || '/home/test';
-          const entriesByPath = window.__fixtureFsEntries || {};
-          const parent = path.slice(0, Math.max(1, path.lastIndexOf('/'))) || '/';
-          const name = path.split('/').filter(Boolean).pop() || '/';
-          const entry = (entriesByPath[parent] || []).find(candidate => candidate.name === name);
-          if (!entry) return jsonResponse({path}, 404);
-          return jsonResponse({path, name, kind: entry.kind || (entriesByPath[path] ? 'dir' : 'file'), size: entry.size ?? null, mtime: entry.mtime ?? null, mtime_ns: entry.mtime_ns ?? null, realpath: path});
+          const record = fixtureFilesystemRecord(path);
+          return record ? jsonResponse(record.info) : jsonResponse({path}, 404);
         }
         if (url.pathname === '/api/fs/batch') {
           const entriesByPath = window.__fixtureFsEntries || {};
@@ -3349,7 +3369,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
               <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle active" aria-pressed="true">Sync</button>
               <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/">
               <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy"></button>
-              <button type="button" id="fileExplorerClose" class="file-explorer-close"></button>
+              <button type="button" id="fileExplorerClose" class="tab pane-close pc-window-control pc-close"></button>
             </div>
             <div class="file-explorer-tree" id="fileExplorerTree" role="tree" tabindex="0"></div>
           </div>

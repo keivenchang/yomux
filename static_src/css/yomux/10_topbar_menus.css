@@ -775,7 +775,7 @@ body.app-phone-single-pane.app-topbar-touch-compact .app-menu--nested-root .app-
 .app-menu-submenu-wrap {
   position: relative;
 }
-.app-menu-command-pair {
+.app-menu-command-group {
   display: flex;
   flex-wrap: nowrap;
   align-items: stretch;
@@ -798,14 +798,6 @@ body.app-phone-single-pane.app-topbar-touch-compact .app-menu--nested-root .app-
   color: var(--menu-command-text);
   font: 600 var(--ui-font-size)/1.2 var(--ui-font);
   white-space: nowrap;
-}
-.app-menu-command-row {
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: stretch;
-  gap: var(--space-4);
-  max-width: 100%;
-  overflow-x: auto;
 }
 .app-menu-command {
   width: 100%;
@@ -858,7 +850,7 @@ body.app-phone-single-pane.app-topbar-touch-compact .app-menu--nested-root .app-
 .app-menu-command-row + .app-menu-submenu-wrap {
   margin-top: var(--space-2);
 }
-.app-menu-command-pair .app-menu-command {
+.app-menu-command-group .app-menu-command {
   width: auto;
   flex: 0 0 auto;
   grid-template-columns: minmax(0, 1fr);
@@ -866,28 +858,17 @@ body.app-phone-single-pane.app-topbar-touch-compact .app-menu--nested-root .app-
   min-height: 30px;
   padding-inline: var(--space-6);
 }
-.app-menu-command-pair .app-menu-command + .app-menu-command {
+.app-menu-command-group .app-menu-command + .app-menu-command {
   margin-top: 0;
 }
-.app-menu-command-row .app-menu-command {
-  width: auto;
-  flex: 0 0 auto;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 0;
-  min-height: 30px;
-  padding-inline: var(--space-6);
-}
-.app-menu-command-row .app-menu-command + .app-menu-command {
-  margin-top: 0;
-}
-.app-menu-command-row .app-menu-check,
-.app-menu-command-row .app-menu-detail {
+.app-menu-command-group .app-menu-check,
+.app-menu-command-group .app-menu-detail {
   display: none;
 }
-.app-menu-command-row .app-menu-content {
+.app-menu-command-group .app-menu-content {
   display: block;
 }
-.app-menu-command-row .app-menu-line {
+.app-menu-command-group .app-menu-line {
   min-width: 0;
   display: flex;
   align-items: center;
@@ -896,28 +877,9 @@ body.app-phone-single-pane.app-topbar-touch-compact .app-menu--nested-root .app-
 .app-menu-command-row-label .app-menu-icon {
   min-width: 24px;
 }
-.app-menu-command-row .app-menu-label {
+.app-menu-command-group .app-menu-label {
   min-width: 0;
   white-space: nowrap;
-}
-.app-menu-command-pair .app-menu-check {
-  display: none;
-}
-.app-menu-command-pair .app-menu-content {
-  display: block;
-}
-.app-menu-command-pair .app-menu-line {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-}
-.app-menu-command-pair .app-menu-label {
-  min-width: 0;
-  white-space: nowrap;
-}
-.app-menu-command-pair .app-menu-detail {
-  display: none;
 }
 /* Agent launches remain two separate touch targets. The full-access button uses the localized action
    name; its exact bypass flags stay in the accessible label/title rather than consuming the whole sheet. */

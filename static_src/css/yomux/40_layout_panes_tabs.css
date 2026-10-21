@@ -1598,17 +1598,6 @@ body.theme-light .pane-tab-close {
   opacity: 0.92;
   background: var(--paint-dark-green-16);
 }
-/* Keep this selector list in sync with platformCloseButtonClass() callers in yomux.js. */
-.file-explorer-close.pc-window-control,
-.file-explorer-panel-close.pc-window-control,
-.file-editor-close.pc-window-control,
-.file-editor-panel-close.pc-window-control {
-  border: 1px solid var(--pc-control-border);
-  border-radius: var(--radius-sm);
-  background: var(--pc-control-bg);
-  color: var(--pc-control-fg);
-  opacity: 0.82;
-}
 .pane-tab-close.pc-window-control {
   border: 1px solid transparent;
   border-radius: var(--radius-control);
@@ -1616,18 +1605,10 @@ body.theme-light .pane-tab-close {
   color: currentColor;
   opacity: 0.68;
 }
-.pane-tab-close.pc-minimize::before,
-.file-explorer-close.pc-minimize::before,
-.file-explorer-panel-close.pc-minimize::before,
-.file-editor-close.pc-minimize::before,
-.file-editor-panel-close.pc-minimize::before {
+.pane-tab-close.pc-minimize::before {
   transform: translate(-50%, calc(-50% + 2px)) rotate(0deg);
 }
-.pane-tab-close.pc-minimize::after,
-.file-explorer-close.pc-minimize::after,
-.file-explorer-panel-close.pc-minimize::after,
-.file-editor-close.pc-minimize::after,
-.file-editor-panel-close.pc-minimize::after {
+.pane-tab-close.pc-minimize::after {
   display: none;
 }
 .pane-tab.active .pane-tab-close.pc-window-control {
@@ -1636,11 +1617,7 @@ body.theme-light .pane-tab-close {
   border-color: transparent;
 }
 .pane-tab-close.pc-window-control:hover,
-.pane-tab.active .pane-tab-close.pc-window-control:hover,
-.file-explorer-close.pc-window-control:hover,
-.file-explorer-panel-close.pc-window-control:hover,
-.file-editor-close.pc-window-control:hover,
-.file-editor-panel-close.pc-window-control:hover {
+.pane-tab.active .pane-tab-close.pc-window-control:hover {
   opacity: 1;
   background: var(--pc-control-hover-bg);
   border-color: var(--pc-control-hover-border);
@@ -1885,140 +1862,27 @@ body.theme-light .pane-tab-close {
   overflow: visible;
   text-overflow: clip;
 }
+/* Window surfaces only size identity icons; status glyphs use the shared owner. */
 .agent-window-activity--subwindow {
   --agent-window-icon-size: 14px;
   --agent-window-activity-inline-size: var(--agent-window-icon-size);
   --agent-window-activity-block-size: var(--agent-window-icon-size);
-  --agent-status-ball-size: var(--agent-status-ball-size-base);
-  --subwindow-status-glyph-scale: 0.66;
-  --subwindow-status-slot-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
-  /* RUN/ASK/paused share these exact dimensions everywhere this renderer is embedded. Keeping
-     the shape geometry here prevents a Tabber/popup font context from changing one triangle. */
-  --subwindow-status-glyph-inline-size: calc(var(--subwindow-status-slot-size) * 0.94);
-  --subwindow-status-glyph-block-size: calc(var(--subwindow-status-slot-size) * 0.88);
-  --subwindow-status-glyph-inner-inline-size: calc(var(--subwindow-status-glyph-inline-size) - 2px);
-  --subwindow-status-glyph-inner-block-size: calc(var(--subwindow-status-glyph-block-size) - 2px);
-  margin-inline-start: 0;
-  margin-inline-end: 0;
+  margin-inline: 0;
 }
 .tmux-window-button .agent-window-activity--subwindow {
-  /* Keep the state glyph and stable agent identity visually distinct without wasting label space. */
   gap: var(--space-3);
 }
-.tmux-window-button .agent-window-status-placeholder {
-  inline-size: var(--subwindow-status-slot-size);
-  min-inline-size: var(--subwindow-status-slot-size);
-  block-size: var(--subwindow-status-slot-size);
-  flex: 0 0 var(--subwindow-status-slot-size);
+.agent-window-status-placeholder {
+  inline-size: var(--agent-status-ball-size);
+  min-inline-size: var(--agent-status-ball-size);
+  block-size: var(--agent-status-ball-size);
+  flex: 0 0 var(--agent-status-ball-size);
   opacity: 0;
   pointer-events: none;
 }
 .agent-window-activity--subwindow .agent-icon {
   padding: 0;
   vertical-align: middle;
-}
-.agent-window-activity--subwindow .agent-window-status-dot {
-  --subwindow-status-attention-fill: var(--danger-strong);
-  --subwindow-status-cooldown-fill: var(--agent-status-cooldown);
-  --subwindow-status-glyph-fill: currentColor;
-  --subwindow-status-glyph-border-color: var(--agent-status-ball-border);
-  --subwindow-status-glyph-border-color-active: var(--agent-status-ball-border);
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  inline-size: var(--subwindow-status-slot-size);
-  min-inline-size: var(--subwindow-status-slot-size);
-  block-size: var(--subwindow-status-slot-size);
-  flex: 0 0 var(--subwindow-status-slot-size);
-  border-radius: 0;
-  color: transparent !important;
-  margin-inline: 0;
-}
-.agent-window-activity--subwindow .agent-window-status-dot:is(.heartbeat-pulse, .attention-pulse, .agent-window-status-dot--transition-glow, .agent-window-status-dot--transition-pulse, .agent-window-status-dot--subwindow-pulse) {
-  border-color: transparent !important;
-  background: transparent !important;
-  box-shadow: none !important;
-  animation: none !important;
-  filter: none !important;
-}
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--working {
-  --subwindow-status-glyph-fill: var(--pr-status-passing);
-  color: transparent !important;
-}
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--attention,
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--blocked {
-  --subwindow-status-glyph-fill: var(--subwindow-status-attention-fill);
-  color: transparent !important;
-}
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown {
-  --subwindow-status-glyph-fill: var(--subwindow-status-cooldown-fill);
-  color: transparent !important;
-}
-.agent-window-activity--subwindow .agent-window-status-dot::before,
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::after {
-  content: "";
-  position: absolute;
-  inset-block-start: 50%;
-  inset-inline-start: 50%;
-  display: block;
-  text-indent: 0;
-  transform: translate(-50%, -50%);
-  filter: none;
-}
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--working::before {
-  inline-size: var(--subwindow-status-glyph-inline-size);
-  block-size: var(--subwindow-status-glyph-block-size);
-  background: var(--subwindow-status-glyph-border-color);
-  clip-path: var(--agent-status-play-path);
-}
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--working::after {
-  content: "";
-  position: absolute;
-  inset-block-start: 50%;
-  inset-inline-start: 50%;
-  inline-size: var(--subwindow-status-glyph-inner-inline-size);
-  block-size: var(--subwindow-status-glyph-inner-block-size);
-  background: var(--subwindow-status-glyph-fill);
-  clip-path: var(--agent-status-play-path);
-  transform: translate(-50%, -50%);
-}
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--attention::before,
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--blocked::before {
-  box-sizing: border-box;
-  inline-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
-  block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
-  border-radius: max(1px, calc(var(--agent-status-ball-size) * 0.08));
-  background: var(--subwindow-status-glyph-fill, currentColor);
-}
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--acknowledged::before {
-  background: var(--muted);
-}
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::before,
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::after {
-  --subwindow-status-pause-bar-offset: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale) * 0.31);
-  box-sizing: border-box;
-  inline-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale) * 0.16);
-  block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
-  border-radius: max(1px, calc(var(--agent-status-ball-size) * 0.06));
-  background: var(--subwindow-status-glyph-fill, currentColor);
-  filter: none;
-}
-.agent-window-activity--subwindow .agent-window-status-dot:is(.status-indicator--attention, .status-indicator--blocked, .status-indicator--cooldown)::before,
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::after {
-  box-shadow: 0 0 0 1px var(--agent-status-ball-border);
-}
-.agent-window-activity--subwindow .agent-window-status-dot.agent-window-status-dot--subwindow-pulse {
-  /* The parent circle and child glyph deliberately animate this same element opacity. The child
-     container is transparent, so this does not draw a ball behind the triangle/square/pause bars. */
-  animation: agent-status-opacity-pulse var(--pulse-duration) var(--status-pulse-timing) var(--attention-animation-delay, 0s) infinite normal both !important;
-  will-change: opacity;
-}
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::before {
-  inset-inline-start: calc(50% - var(--subwindow-status-pause-bar-offset));
-}
-.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::after {
-  inset-inline-start: calc(50% + var(--subwindow-status-pause-bar-offset));
 }
 .tmux-window-bar[data-tmux-window-label-mode="names"] .tmux-window-number-label,
 .tmux-window-bar[data-tmux-window-label-mode="numbers"] .tmux-window-name-label {
@@ -2034,27 +1898,6 @@ body.theme-light .pane-tab-close {
    pane-control state block so generic control paint cannot override it. */
 .tmux-window-bar .tmux-window-button.active {
   font-weight: 600;
-}
-.tmux-window-bar .tmux-window-button.active .agent-window-status-dot,
-.session-agent-window-block > .session-agent-row.current .agent-window-status-dot {
-  --subwindow-status-glyph-border-color: var(--subwindow-status-glyph-border-color-active);
-  color: transparent !important;
-}
-.tmux-window-bar .tmux-window-button.active .agent-window-status-dot.status-indicator--attention,
-.session-agent-window-block > .session-agent-row.current .agent-window-status-dot.status-indicator--attention {
-  --subwindow-status-glyph-fill: var(--subwindow-status-attention-fill);
-}
-.tmux-window-bar .tmux-window-button.active .agent-window-status-dot.status-indicator--working,
-.session-agent-window-block > .session-agent-row.current .agent-window-status-dot.status-indicator--working {
-  --subwindow-status-glyph-fill: var(--pr-status-passing);
-}
-.tmux-window-bar .tmux-window-button.active .agent-window-status-dot.status-indicator--cooldown,
-.session-agent-window-block > .session-agent-row.current .agent-window-status-dot.status-indicator--cooldown {
-  --subwindow-status-glyph-fill: var(--subwindow-status-cooldown-fill);
-}
-.agent-window-activity--subwindow .agent-window-status-dot--acknowledging {
-  --subwindow-status-glyph-fill: var(--muted) !important;
-  color: transparent !important;
 }
 .terminal-tab {
   flex: 0 1 auto;

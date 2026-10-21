@@ -29,6 +29,7 @@ type searchPathRule struct {
 type compiledSearchPolicy struct {
 	directoryLimit int
 	root           string
+	canonicalRoot  string
 	names          map[string]struct{}
 	rules          []searchPathRule
 }
@@ -39,15 +40,28 @@ var searchPolicyCache = struct {
 }{values: cache.NewLRU[[32]byte, *compiledSearchPolicy](64)}
 
 func compileSearchPolicy(root string, names map[string]struct{}, rules []string) (*compiledSearchPolicy, error) {
+	canonicalRoot, err := CanonicalIndexRoot(root)
+	if err != nil {
+		canonicalRoot = filepath.Clean(root)
+	}
+	return compileSearchPolicyResolved(root, canonicalRoot, names, rules)
+}
+
+func compileSearchPolicyResolved(root, canonicalRoot string, names map[string]struct{}, rules []string) (*compiledSearchPolicy, error) {
 	normalizedNames := make([]string, 0, len(names))
 	for name := range names {
 		normalizedNames = append(normalizedNames, name)
 	}
 	sort.Strings(normalizedNames)
+	canonicalRules := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		canonicalRules = append(canonicalRules, canonicalSearchPolicyRule(root, canonicalRoot, rule))
+	}
 	encoded, err := json.Marshal(struct {
-		Root         string
-		Names, Rules []string
-	}{filepath.Clean(root), normalizedNames, rules})
+		Root          string
+		CanonicalRoot string
+		Names, Rules  []string
+	}{filepath.Clean(root), canonicalRoot, normalizedNames, canonicalRules})
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +71,7 @@ func compileSearchPolicy(root string, names map[string]struct{}, rules []string)
 	if policy, ok := searchPolicyCache.values.Get(key); ok {
 		return policy, nil
 	}
-	policy, err := buildSearchPolicy(root, names, rules)
+	policy, err := buildSearchPolicy(root, canonicalRoot, names, rules)
 	if err != nil {
 		return nil, err
 	}
@@ -65,8 +79,33 @@ func compileSearchPolicy(root string, names map[string]struct{}, rules []string)
 	return policy, nil
 }
 
-func buildSearchPolicy(root string, names map[string]struct{}, rules []string) (*compiledSearchPolicy, error) {
-	policy := &compiledSearchPolicy{root: filepath.Clean(root), names: make(map[string]struct{}), directoryLimit: MaxDirectoryEntries}
+func canonicalSearchPolicyRule(root, canonicalRoot, raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.HasPrefix(raw, "glob:") || strings.HasPrefix(raw, "regex:") {
+		return raw
+	}
+	home, _ := os.UserHomeDir()
+	if raw == "~" {
+		raw = home
+	} else if strings.HasPrefix(raw, "~/") {
+		raw = filepath.Join(home, raw[2:])
+	}
+	if !filepath.IsAbs(raw) {
+		raw = filepath.Join(root, raw)
+	}
+	raw = filepath.Clean(raw)
+	if relative, err := filepath.Rel(root, raw); err == nil && indexRootWithin(root, raw) {
+		raw = filepath.Join(canonicalRoot, relative)
+	}
+	if canonical, err := CanonicalIndexRoot(raw); err == nil {
+		return "path:" + canonical
+	}
+	return "path:" + raw
+}
+
+func buildSearchPolicy(root, canonicalRoot string, names map[string]struct{}, rules []string) (*compiledSearchPolicy, error) {
+	policyRoot := filepath.Clean(root)
+	policy := &compiledSearchPolicy{root: policyRoot, canonicalRoot: filepath.Clean(canonicalRoot), names: make(map[string]struct{}), directoryLimit: MaxDirectoryEntries}
 	for name := range searchExcludedDirectoryNames {
 		policy.names[name] = struct{}{}
 	}
@@ -100,7 +139,7 @@ func buildSearchPolicy(root string, names map[string]struct{}, rules []string) (
 			if !filepath.IsAbs(raw) {
 				raw = filepath.Join(root, raw)
 			}
-			rule.path = filepath.Clean(raw)
+			rule.path = strings.TrimPrefix(canonicalSearchPolicyRule(root, canonicalRoot, raw), "path:")
 		}
 		policy.rules = append(policy.rules, rule)
 	}
@@ -121,10 +160,11 @@ func (policy *compiledSearchPolicy) excludedPath(path string) bool {
 	if err != nil || !indexRootWithin(policy.root, path) {
 		return true
 	}
+	canonicalPath := filepath.Join(policy.canonicalRoot, relative)
 	relative = filepath.ToSlash(relative)
 	for _, rule := range policy.rules {
 		if rule.matcher == nil {
-			if indexRootWithin(rule.path, path) {
+			if indexRootWithin(rule.path, canonicalPath) {
 				return true
 			}
 			continue

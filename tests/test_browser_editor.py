@@ -1797,13 +1797,14 @@ def test_markdown_prosemirror_click_enter_and_delayed_source_sync(browser, tmp_p
     assert "error" not in metrics, metrics
     assert metrics["clickEditable"] is True, metrics
     assert metrics["middleSelectionAfter"] == metrics["middleSelection"], metrics
-    assert "soft_break" in str(metrics["middleDoc"]), metrics
-    assert "data-markdown-soft-break" in metrics["middleDom"], metrics
-    assert "hello\nworld" in metrics["middleSource"], metrics
+    assert metrics["middleDoc"]["content"][-2:][0]["type"] == "paragraph", metrics
+    assert metrics["middleDoc"]["content"][-2:][1]["type"] == "paragraph", metrics
+    assert "data-markdown-soft-break" not in metrics["middleDom"], metrics
+    assert "hello\n\nworld" in metrics["middleSource"], metrics
     assert "<br>" not in metrics["middleSource"], metrics
-    assert "hello\nXworld" in metrics["modeSwitchSource"], metrics
+    assert "hello\n\nXworld" in metrics["modeSwitchSource"], metrics
     assert metrics["savedBeforeDebounce"].startswith("YThe product"), metrics
-    assert "hello\nXworld" in metrics["savedBeforeDebounce"], metrics
+    assert "hello\n\nXworld" in metrics["savedBeforeDebounce"], metrics
     assert metrics["endSelectionAfter"] == metrics["endSelection"], metrics
     assert metrics["endDoc"]["content"][-2:] == [{"type": "paragraph"}, {"type": "paragraph"}], metrics
     assert metrics["endSerializedNow"].endswith("Xworld\n\n\n"), metrics
@@ -2677,7 +2678,7 @@ def test_markdown_prosemirror_native_enter_keeps_typing_and_codemirror_keeps_vie
         })();
         """
     )
-    assert metrics["afterNative"]["source"].endswith("hello\nZworld"), metrics
+    assert metrics["afterNative"]["source"].endswith("hello\n\nZworld"), metrics
     assert "<br>" not in metrics["afterNative"]["source"], metrics
     assert metrics["afterNative"]["text"].endswith("helloZworld"), metrics
     assert metrics["afterNative"]["active"] is True, metrics
@@ -2871,7 +2872,7 @@ def test_markdown_split_enter_middle_and_end_have_distinct_markdown_results(brow
         })();
         """
     )
-    assert metrics["middleSource"] == "hello\nworld", metrics
+    assert metrics["middleSource"] == "hello\n\nworld", metrics
     assert metrics["endSource"].endswith("\n\n"), metrics
     assert "<br>" not in metrics["endAfterTyping"], metrics
     assert metrics["middleTextEdit"] == metrics["middleSource"], metrics
@@ -6210,7 +6211,7 @@ def test_markdown_viewedit_prosemirror_edits_simple_text_and_inline_formatting(b
     assert metrics["rejections"] == [], metrics
 
 
-def test_markdown_viewedit_prosemirror_enter_preserves_soft_break_contract(browser, tmp_path):
+def test_markdown_viewedit_prosemirror_enter_splits_paragraph_at_caret(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
@@ -6237,10 +6238,11 @@ def test_markdown_viewedit_prosemirror_enter_preserves_soft_break_contract(brows
             const paragraphStart = view.state.doc.content.size - paragraph.nodeSize + 1;
             view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, paragraphStart + 6)));
             view.someProp('handleKeyDown', handler => handler(view, new KeyboardEvent('keydown', {key: 'Enter'})));
-            await waitFor(() => fileEditorPanelState(panel).content === 'Before\\n and after');
+            await waitFor(() => fileEditorPanelState(panel).content === 'Before\\n\\n and after');
             done({
               content: fileState.get(path)?.content || '',
               blocks: Array.from(view.dom.querySelectorAll('p')).map(node => node.textContent),
+              selectionParent: view.state.selection.$from.parent.type.name,
               hasSoftBreak: Boolean(view.dom.querySelector('[data-markdown-soft-break]')),
               hasLiteralBreak: Boolean(view.dom.querySelector('br')),
               serialized: serializeProseMirrorSource(panel),
@@ -6254,11 +6256,12 @@ def test_markdown_viewedit_prosemirror_enter_preserves_soft_break_contract(brows
         """
     )
     assert "error" not in metrics, metrics
-    assert metrics["content"] == "Before\n and after", metrics
-    assert metrics["blocks"] == ["Before  and after"], metrics
-    assert metrics["hasSoftBreak"] is True, metrics
+    assert metrics["content"] == "Before\n\n and after", metrics
+    assert metrics["blocks"] == ["Before", " and after"], metrics
+    assert metrics["selectionParent"] == "paragraph", metrics
+    assert metrics["hasSoftBreak"] is False, metrics
     assert metrics["hasLiteralBreak"] is False, metrics
-    assert metrics["serialized"] == "Before\n and after", metrics
+    assert metrics["serialized"] == "Before\n\n and after", metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
@@ -8297,3 +8300,131 @@ def test_viewedit_raw_image_shapes_survive_native_edit_and_reopen(browser, tmp_p
     assert reopened["nested"] == "nested" and "amended" in reopened["title"], reopened
     assert '<widget>Unsupported neighbor</widget>' in reopened["serialized"], reopened
     assert '</details>\n\n## **Bold** title' in reopened["serialized"], reopened
+
+
+def test_editor_search_and_detached_markdown_share_presentation(browser, tmp_path):
+    markdown = '<h1>Title</h1><blockquote class="markdown-alert markdown-alert-warning"><p><strong>Warning</strong> <code>code</code></p></blockquote><table bgcolor="#fff"><tr><td><em>cell</em> <code>code</code></td></tr></table><pre><code class="hljs"><span class="hljs-keyword">return</span></code></pre>'
+    search = '<div class="file-editor-preview-find-panel"><input value="term"><button>↓</button><span class="file-editor-preview-find-count">1/2</span></div><div class="file-editor-codemirror-panel"><div class="cm-search cm-panel"><input class="cm-textfield" name="search" value="term"><button class="cm-button" name="next">next</button><span class="cm-search-count">1/2</span></div></div>'
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    browser.execute_async_script("""
+      const done = arguments[arguments.length - 1];
+      window.__yomuxTestWaitFor(() => typeof setFileEditorThemeMode === 'function' && document.getElementById('grid')).then(() => done(true), error => done({error: String(error)}));
+    """)
+    browser.execute_script("""
+      const host = document.createElement('div');
+      host.id = 'editor-presentation';
+      host.style.cssText = 'position:fixed;inset:0;z-index:9999;overflow:auto;display:block;';
+      host.innerHTML = arguments[0];
+      host.querySelector('.file-editor-panel').style.cssText = 'position:relative;width:900px;height:150px;';
+      document.body.append(host);
+    """, f"<div class='file-editor-panel'>{search}</div><section class='file-editor-content'><article class='markdown-body'>{markdown}</article></section><main class='file-preview-popout-shell'><article class='markdown-body'>{markdown}</article></main>")
+    metrics = browser.execute_script("""
+      const props = ['color', 'backgroundColor', 'borderTopColor', 'borderTopWidth', 'borderRadius', 'fontFamily', 'fontSize', 'fontWeight', 'lineHeight'];
+      const find = selector => document.querySelector(`#editor-presentation ${selector}`);
+      const paint = (node, pseudo = null) => Object.fromEntries(props.map(key => [key, getComputedStyle(node, pseudo)[key]]));
+      const results = [];
+      const originalTheme = fileEditorThemeMode;
+      const originalPreviewMode = fileEditorPreviewDisplayMode;
+      const originalBodyClass = document.body.className;
+      const originalRootStyle = document.documentElement.getAttribute('style');
+      try {
+      for (const appTheme of ['theme-dark', 'theme-light']) {
+        for (const editorTheme of ['dark', 'yomux-light', 'nord', 'solarized-light']) {
+          document.body.classList.remove('theme-dark', 'theme-light', 'theme-resolved-dark', 'theme-resolved-light');
+          document.body.classList.add(appTheme);
+          setFileEditorThemeMode(editorTheme);
+          const input = find('.file-editor-preview-find-panel input');
+          const cmInput = find('.cm-textfield');
+          const inputPaint = paint(input);
+          const cmInputPaint = paint(cmInput);
+          input.focus(); const inputFocus = paint(input);
+          cmInput.focus(); const cmInputFocus = paint(cmInput);
+          cmInput.blur();
+          const buttons = [find('.file-editor-preview-find-panel button'), find('.cm-button')];
+          const buttonPaint = buttons.map(node => { const value = paint(node); delete value.fontSize; delete value.fontWeight; delete value.lineHeight; return value; });
+          const glyphFonts = buttons.map((node, index) => { const style = getComputedStyle(node, index === 1 ? '::before' : null); return [style.fontFamily, style.fontSize, style.fontWeight, style.lineHeight]; });
+          const selectors = ['h1', 'blockquote', 'blockquote strong', 'blockquote code', 'td', 'td em', 'td code', 'pre', '.hljs-keyword'];
+          const markdown = selectors.map(selector => ({selector, embedded: paint(find(`.file-editor-content ${selector}`)), detached: paint(find(`.file-preview-popout-shell ${selector}`))}));
+          results.push({appTheme, editorTheme, inputPaint, cmInputPaint, inputFocus, cmInputFocus, buttonPaint, glyphFonts, markdown});
+        }
+      }
+      return results;
+      } finally {
+        document.getElementById('editor-presentation').remove();
+        setFileEditorThemeMode(originalTheme);
+        setFileEditorPreviewDisplayMode(originalPreviewMode);
+        document.body.className = originalBodyClass;
+        if (originalRootStyle === null) document.documentElement.removeAttribute('style');
+        else document.documentElement.setAttribute('style', originalRootStyle);
+      }
+    """)
+    for result in metrics:
+        assert result["inputPaint"] == result["cmInputPaint"], result
+        assert result["inputFocus"] == result["cmInputFocus"], result
+        assert result["buttonPaint"][0] == result["buttonPaint"][1], result
+        assert result["glyphFonts"][0] == result["glyphFonts"][1], result
+        for markdown_result in result["markdown"]:
+            assert markdown_result["embedded"] == markdown_result["detached"], {"theme": result["editorTheme"], **markdown_result}
+
+
+def test_editor_search_hover_and_focus_preserve_selected_and_disabled_states(browser, tmp_path):
+    css = app_css()
+    controls = '<input class="cm-textfield" name="search"><label id="search-case"><input type="checkbox" name="case"></label><label id="search-re"><input type="checkbox" name="re"></label><label id="search-word"><input type="checkbox" name="word"></label><button id="search-prev" class="cm-button" name="prev">prev</button><button id="search-next" class="cm-button" name="next">next</button><button id="search-close" class="cm-dialog-close">close</button>'
+    load_static_html_fixture(browser, tmp_path, "editor-search-states.html", f'''<!doctype html><html><head><style>{css}</style><style>
+      body {{ display:block; overflow:auto; }} .file-editor-panel {{ position:relative; display:block; width:1000px; height:500px; }}
+      .file-editor-codemirror-panel {{ position:relative; inset:auto; }} .cm-search {{ margin:80px; }}
+      #search-park {{ position:fixed; left:10px; top:10px; width:30px; height:30px; }}
+      #search-active {{ background:var(--active-control-bg); color:var(--active-control-text); border:1px solid var(--active-control-border); }}
+      #search-hover {{ background:var(--editor-toolbar-control-hover-bg); color:var(--editor-toolbar-control-hover-fg); border:1px solid var(--editor-toolbar-control-hover-border); }}
+    </style></head><body><section class="file-editor-panel"><div class="file-editor-panel-body"><div class="file-editor-codemirror-panel"><div class="cm-search cm-panel">{controls}</div></div></div><span id="search-active"></span><span id="search-hover"></span></section><span id="search-park"></span></body></html>''')
+    original_class = browser.execute_script("return document.body.className")
+
+    def paint(target):
+        return browser.execute_script("const s=getComputedStyle(arguments[0]); return {background:s.backgroundColor,color:s.color,border:s.borderTopColor,opacity:s.opacity};", target)
+
+    def move_pointer(target):
+        ActionChains(browser).move_to_element(target).perform()
+
+    def semantic_paint(value):
+        return {key: value[key] for key in ("background", "color", "border")}
+
+    try:
+        for theme in ("dark", "light"):
+            browser.execute_script("document.body.className=arguments[0]", f"theme-{theme} editor-theme-{theme}")
+            park = browser.find_element(By.ID, "search-park")
+            active = semantic_paint(paint(browser.find_element(By.ID, "search-active")))
+            hover = semantic_paint(paint(browser.find_element(By.ID, "search-hover")))
+            for name in ("case", "re", "word"):
+                target = browser.find_element(By.ID, f"search-{name}")
+                for checked, disabled in ((False, False), (True, False), (False, True), (True, True)):
+                    move_pointer(park)
+                    browser.execute_script("const input=arguments[0].querySelector('input');input.checked=arguments[1];input.disabled=arguments[2];", target, checked, disabled)
+                    normal = paint(target)
+                    if checked:
+                        assert semantic_paint(normal) == active, {"theme": theme, "name": name, "normal": normal}
+                    move_pointer(target)
+                    hovered = paint(target)
+                    expected = semantic_paint(normal) if checked or disabled else hover
+                    assert semantic_paint(hovered) == expected, {"theme": theme, "name": name, "checked": checked, "disabled": disabled, "normal": normal, "hovered": hovered, "expected": expected}
+                    move_pointer(park)
+                    focused = browser.execute_script("const input=arguments[0].querySelector('input');input.focus({focusVisible:true});return document.activeElement===input;", target)
+                    assert focused is (not disabled), {"theme": theme, "name": name, "disabled": disabled}
+                    assert semantic_paint(paint(target)) == semantic_paint(normal), {"theme": theme, "name": name, "checked": checked, "disabled": disabled}
+                    browser.execute_script("document.activeElement?.blur()")
+            for name in ("prev", "next", "close"):
+                target = browser.find_element(By.ID, f"search-{name}")
+                for disabled in (False, True):
+                    move_pointer(park)
+                    browser.execute_script("arguments[0].disabled=arguments[1]", target, disabled)
+                    normal = paint(target)
+                    move_pointer(target)
+                    hovered = paint(target)
+                    expected = semantic_paint(normal) if disabled else hover
+                    assert semantic_paint(hovered) == expected, {"theme": theme, "name": name, "disabled": disabled, "hovered": hovered, "expected": expected}
+                    move_pointer(park)
+                    focused = browser.execute_script("arguments[0].focus({focusVisible:true});return document.activeElement===arguments[0];", target)
+                    assert focused is (not disabled), {"theme": theme, "name": name, "disabled": disabled}
+                    assert semantic_paint(paint(target)) == expected, {"theme": theme, "name": name, "disabled": disabled}
+                    browser.execute_script("document.activeElement?.blur()")
+    finally:
+        browser.execute_script("document.body.className=arguments[0]", original_class)

@@ -23,7 +23,7 @@ assert.match(adapter, /MarkdownParser/);
 assert.match(adapter, /PROSEMIRROR_SERIALIZE_DELAY_MS = 1250/);
 assert.match(adapter, /'Shift-Enter': insertProseMirrorHardBreak\(api, schema\)/);
 assert.match(adapter, /Enter: insertProseMirrorEnter/);
-assert.match(adapter, /state\.tr\.split\(\$from\.pos\)\.scrollIntoView\(\)/);
+assert.match(adapter, /transaction\.split\(transaction\.selection\.from\)\.scrollIntoView\(\)/);
 assert.match(adapter, /function scheduleProseMirrorAutosave/);
 assert.match(adapter, /deferAutosave: true/);
 assert.match(adapter, /disposeMarkdownPreviewEditing\(parts\.previewPane\)/);

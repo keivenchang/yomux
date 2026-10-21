@@ -1259,7 +1259,7 @@ function layoutUrlFinderStateSnapshot() {
     diffRefFrom: cleanDiffRef(diffRefFrom, 'HEAD'),
     diffRefTo: cleanDiffRef(diffRefTo, 'current'),
     expanded: layoutUrlSetSnapshot(fileExplorerExpanded),
-    syncUserExpansionState: typeof fileExplorerSyncUserExpansionEntries === 'function' ? fileExplorerSyncUserExpansionEntries() : [],
+    syncUserExpansionState: typeof fileExplorerSyncTargetExpansionSnapshot === 'function' ? fileExplorerSyncTargetExpansionSnapshot() : [],
     selectedPaths: layoutUrlSetSnapshot(fileExplorerSelectedPaths),
     selectionAnchor: fileExplorerSelectionAnchor || '',
     selectionLead: fileExplorerSelectionLead || '',
@@ -1457,7 +1457,7 @@ function applyLayoutUrlFinderSeed(finder = {}) {
     }
   }
   if ('session' in finder && isTmuxSession(String(finder.session || '').trim())) {
-    fileExplorerFinderSelectedSession = String(finder.session || '').trim();
+    setFileExplorerFinderSessionSelection(String(finder.session || '').trim());
     setExplicitPaneFocusItem(fileExplorerFinderSelectedSession, {allowInactive: true});
   }
   if ('differSession' in finder && isTmuxSession(String(finder.differSession || '').trim())) {
@@ -1471,6 +1471,8 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   if ('expanded' in finder) layoutUrlReplaceSet(fileExplorerExpanded, finder.expanded);
   if ('syncUserExpansionState' in finder && typeof applyFileExplorerSyncUserExpansionState === 'function') {
     applyFileExplorerSyncUserExpansionState(finder.syncUserExpansionState);
+  } else if (fileExplorerRootMode === 'sync' && Array.isArray(finder.expanded)) {
+    applyFileExplorerSyncUserExpansionState([]);
   }
   if ('selectedPaths' in finder) layoutUrlReplaceSet(fileExplorerSelectedPaths, finder.selectedPaths);
   if ('selectionAnchor' in finder) fileExplorerSelectionAnchor = String(finder.selectionAnchor || '');
@@ -2455,7 +2457,7 @@ function registerFileEditorLayoutItem(path, options = {}) {
     syncFileLayoutItems();
     return item;
   }
-  if (fileState.get(path)?.loading !== true && fileState.get(path)?.kind) {
+  if (fileState.get(path)?.kind) {
     syncFileLayoutItems();
     return item;
   }
@@ -2875,73 +2877,36 @@ function terminalDisconnected(session) {
   return item.socket?.readyState === WebSocket.CLOSED || item.socket?.readyState === WebSocket.CLOSING;
 }
 
-function sessionState(session, info = sessionMetadataForLayoutItem(session)) {
-  if (!isTmuxSession(session)) return {key: STATE_KEY.idle, ...stateDef(STATE_KEY.idle), reason: t('state.notTmux')};
-  const view = tabberViewDescriptorForSession(session);
-  const auto = autoApproveStates.get(view?.sourceSession || session) || {};
-  const autoEnabled = autoApproveEnabledForSession(auto);
-  const approvalPrompt = auto.prompt || {};
+function sessionChromeFacts(session, info = sessionMetadataForLayoutItem(session), payload = null) {
+  const auto = payload || autoApproveStates.get(tabberViewDescriptorForSession(session)?.sourceSession || session) || {};
   const screen = auto.screen || {};
-  const lastAction = String(auto.last_action || '').toLowerCase();
-  const approvalPromptVisible = approvalPrompt.visible === true;
-  const approvalYesSelected = approvalPrompt.yes_selected === true;
-  const approvalPromptText = String(approvalPrompt.text || stateReason('approvalPromptVisible'));
-  const screenKey = String(screen.key || '');
-  const screenText = String(screen.text || '');
-  const agentWindowSummary = typeof sessionAgentWindowStatusSummary === 'function'
-    ? sessionAgentWindowStatusSummary(session, info, auto)
-    : null;
-  const hasAttributedAgentWindows = agentWindowSummary?.hasAttributedWindows === true;
-  const agentWindowTone = typeof agentWindowStatusToneForItem === 'function'
-    ? agentWindowStatusToneForItem(agentWindowSummary?.item)
-    : '';
-  const agents = Array.isArray(info?.agents) ? info.agents : [];
-  const panes = Array.isArray(info?.panes) ? info.panes : [];
-  const agentText = agents
-    .map(agent => `${agent.kind || ''} ${agent.status || ''} ${agent.error || ''}`)
-    .join(' ')
-    .toLowerCase();
-  const paneCommandText = panes
-    .map(pane => `${pane.command || ''} ${pane.current_command || ''}`)
-    .join(' ')
-    .toLowerCase();
+  let connection = null;
+  if (terminalDisconnected(session) || (!info && terminals.has(session))) {
+    connection = stateValue('disconnected', stateReason('terminalConnectionClosed'));
+  } else if (screen.key === 'disconnected') {
+    connection = stateValue('disconnected', screen.text && screen.text !== 'failed to capture pane'
+      ? screen.text : stateReason('terminalScreenUnavailable'));
+  }
+  // Only live pane commands establish a test run; terminal titles can be arbitrary task names.
+  const paneCommandText = (Array.isArray(info?.panes) ? info.panes : [])
+    .map(pane => `${pane.command || ''} ${pane.current_command || ''}`).join(' ').toLowerCase();
+  const tests = /pytest|cargo test|npm test|pnpm test|yarn test|vitest|jest|ctest|go test|python3 -m pytest|python -m pytest|ruff|mypy|pre-commit/.test(paneCommandText)
+    ? stateValue('tests-running', stateReason('testsActive')) : null;
   const pr = displayPullRequest(info);
   const prStatus = pullRequestStatusLabel(pr).toLowerCase();
-  const checksState = pullRequestCiState(pr);
+  const repository = pr?.number && !pr.draft && prStatus !== 'closed' && prStatus !== 'merged' && pullRequestCiState(pr) === 'passing'
+    ? stateValue('ready-review', stateReason('prChecksPassing')) : null;
+  return {connection, tests, repository};
+}
 
-  if (terminalDisconnected(session) || (!info && terminals.has(session))) {
-    return stateValue('disconnected', stateReason('terminalConnectionClosed'));
-  }
-  if (screenKey === 'disconnected') {
-    const disconnectedReason = screenText && screenText !== 'failed to capture pane'
-      ? screenText
-      : stateReason('terminalScreenUnavailable');
-    return stateValue('disconnected', disconnectedReason);
-  }
-  if (!hasAttributedAgentWindows && screenKey === STATE_KEY.blocked) {
-    return stateValue(STATE_KEY.blocked, screenText || stateReason('agentErrorBlocker'), promptAttentionExtra(session, auto));
-  }
-  if (/blocked|denied|rejected/.test(lastAction)) {
-    return stateValue(STATE_KEY.blocked, stateReason('yoloBlockedApproval'));
-  }
-  if (!hasAttributedAgentWindows && approvalPromptVisible && approvalYesSelected) {
-    return stateValue(STATE_KEY.needsApproval, approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
-  }
-  if (!hasAttributedAgentWindows && approvalPromptVisible) {
-    return stateValue(STATE_KEY.needsInput, stateReason('approvalYesNotSelected'), promptAttentionExtra(session, auto));
-  }
-  if (!hasAttributedAgentWindows && !autoEnabled && /permission|approval|approve|confirm/.test(agentText)) {
-    return stateValue(STATE_KEY.needsApproval, approvalPromptText || stateReason('approvalPromptVisible'));
-  }
-  if (!hasAttributedAgentWindows && screenKey === STATE_KEY.approval) {
-    return stateValue(STATE_KEY.needsApproval, screenText || approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
-  }
+function sessionAgentWindowStateForSummary(agentWindowSummary) {
+  const agentWindowTone = agentWindowStatusToneForItem(agentWindowSummary?.item);
   if (agentWindowTone === 'attention') {
     const agent = agentWindowSummary.agent;
     const stateKey = AGENT_WINDOW_APPROVAL_STATES.has(String(agent?.state || '')) ? STATE_KEY.needsApproval : STATE_KEY.needsInput;
     const windowLabel = String(agent?.window_label || agent?.window || agent?.kind || '').trim();
     const reasonText = String(agent?.screen_text || '').trim() || (stateKey === STATE_KEY.needsApproval ? stateReason('approvalPromptVisible') : stateReason('agentWaitingInput'));
-    return stateValue(stateKey, windowLabel ? `${windowLabel}: ${reasonText}` : reasonText, {
+    return stateValue(stateKey, agent?.bootstrapReason || (windowLabel ? `${windowLabel}: ${reasonText}` : reasonText), {
       agentWindowState: 'attention',
       attentionAgent: agent,
       attentionAgentItem: agentWindowSummary.item,
@@ -2960,51 +2925,20 @@ function sessionState(session, info = sessionMetadataForLayoutItem(session)) {
   if (agentWindowTone === 'unavailable') {
     return stateValue('unavailable', t('common.notAvailable'), {agentWindowState: 'unavailable'});
   }
-  const tmuxSignalStateForSession = tmuxSignalAgentStateForSession(session);
-  if (tmuxSignalStateForSession) {
-    return tmuxSignalStateForSession;
-  }
-  if (!hasAttributedAgentWindows && screenKey === STATE_KEY.working) {
-    return stateValue(STATE_KEY.working, screenText || stateReason('agentWorking'));
-  }
-  if (!hasAttributedAgentWindows && screenKey === STATE_KEY.needsInput) {
-    return stateValue(STATE_KEY.needsInput, screenText || stateReason('agentWaitingInput'), promptAttentionExtra(session, auto));
-  }
-  if (screenKey === 'error') {
-    return stateValue(STATE_KEY.blocked, screenText || stateReason('agentScreenFailed'));
-  }
-  if (agentWindowTone === 'cooldown') {
-    const agent = agentWindowSummary.agent;
-    const label = String(agent?.window_label || agent?.window || agent?.kind || '').trim();
-    return stateValue('cooldown', label ? `${label}: ${stateReason('agentCooldown')}` : stateReason('agentCooldown'), {agentWindowState: 'cooldown'});
-  }
-  if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(agentText)) {
-    return stateValue(STATE_KEY.needsInput, stateReason('agentWaitingInput'));
-  }
-  if (!hasAttributedAgentWindows && (agents.some(agent => agentErrorIsBlocking(agent.error)) || /blocked|error|failed|failure|stuck/.test(agentText))) {
-    return stateValue(STATE_KEY.blocked, stateReason('agentErrorBlocker'));
-  }
-  // Terminal titles can be arbitrary agent-written task names (for example,
-  // "Make Go tests default"). Only live pane commands can establish a test run.
-  if (/pytest|cargo test|npm test|pnpm test|yarn test|vitest|jest|ctest|go test|python3 -m pytest|python -m pytest|ruff|mypy|pre-commit/.test(paneCommandText)) {
-    return stateValue('tests-running', stateReason('testsActive'));
-  }
-  if (pr?.number && !pr.draft && prStatus !== 'closed' && prStatus !== 'merged' && checksState === 'passing') {
-    return stateValue('ready-review', stateReason('prChecksPassing'));
-  }
-  if (/done|completed|complete|finished|success/.test(agentText)) {
-    return stateValue('done', stateReason('agentComplete'));
-  }
-  if (agents.length || panes.some(pane => pane.active) || terminals.get(session)?.socket?.readyState === WebSocket.OPEN) {
-    return stateValue(STATE_KEY.working, stateReason('agentActivePaneDetected'));
-  }
-  return stateValue(STATE_KEY.idle, stateReason('noActiveAgent'));
+  if (agentWindowTone === STATE_KEY.working) return stateValue(STATE_KEY.working, stateReason('agentWorking'));
+  if (agentWindowTone === 'cooldown') return stateValue('cooldown', stateReason('agentCooldown'), {agentWindowState: 'cooldown'});
+  const completed = agentWindowSummary?.agents.find(agent => agent.state === 'done');
+  if (completed) return stateValue('done', completed.bootstrapReason || stateReason('agentComplete'));
+  return null;
 }
 
-function agentErrorIsBlocking(error) {
-  const text = String(error || '').toLowerCase();
-  if (!text) return false;
-  return !(/transcript not found/.test(text) || /^missing /.test(text));
+function sessionState(session, info = sessionMetadataForLayoutItem(session)) {
+  if (!isTmuxSession(session)) return {key: STATE_KEY.idle, ...stateDef(STATE_KEY.idle), reason: t('state.notTmux')};
+  const chromeFacts = sessionChromeFacts(session, info);
+  const summary = sessionAgentWindowStatusSummary(session, info);
+  const state = chromeFacts.connection || sessionAgentWindowStateForSummary(summary)
+    || chromeFacts.tests || chromeFacts.repository || stateValue(STATE_KEY.idle, stateReason('noActiveAgent'));
+  return {...state, chromeFacts};
 }
 
 function stateValue(key, reason, extra = {}) {
@@ -3141,8 +3075,12 @@ function tmuxSignalPaneCommand(pane) {
   return String(pane?.agent || pane?.current_command || pane?.pane_current_command || '').trim().toLowerCase();
 }
 
+function tmuxSignalPaneCommandIsAgent(pane) {
+  return tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane));
+}
+
 function tmuxSignalPaneIsAgent(pane) {
-  return tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) || Boolean(tmuxSignalAuthoritativeAgentKind(pane));
+  return tmuxSignalPaneCommandIsAgent(pane) || Boolean(tmuxSignalAuthoritativeAgentKind(pane));
 }
 
 function tmuxSignalWindowAgentPanes(windowRecord) {
@@ -3277,40 +3215,6 @@ function tmuxSignalPaneTitle(pane) {
 
 function tmuxSignalPaneActionRequired(pane) {
   return /\[\s*[!.]\s*\]\s*action required/i.test(tmuxSignalPaneTitle(pane));
-}
-
-function tmuxSignalAgentStateForSession(session) {
-  const sessionText = String(session || '').trim();
-  const sessionPanes = tmuxSignalPanes().filter(pane => tmuxSignalPaneSession(pane) === sessionText);
-  const actionRequiredPane = sessionPanes.find(pane => pane?.dead !== true && tmuxSignalPaneActionRequired(pane));
-  if (actionRequiredPane) {
-    return stateValue(STATE_KEY.needsInput, stateReason('tmuxActionRequired'), {tmuxSignal: 'action-required'});
-  }
-  const panes = sessionPanes.filter(tmuxSignalPaneIsAgent);
-  if (!panes.length) return null;
-  const livePanes = panes.filter(pane => pane?.dead !== true);
-  const deadPanes = panes.filter(pane => pane?.dead === true);
-  const windows = panes.map(tmuxSignalWindowForPane).filter(Boolean);
-  const bellWindow = windows.find(windowRecord => windowRecord?.bell_flag === true);
-  if (bellWindow) {
-    return stateValue(STATE_KEY.needsInput, stateReason('tmuxBellAlert'), {tmuxSignal: 'bell'});
-  }
-  const quietWindow = windows.find(windowRecord => windowRecord?.silence_flag === true && !tmuxSignalWindowIsRecentlyActive(windowRecord));
-  if (quietWindow && livePanes.length) {
-    return stateValue('done', stateReason('tmuxSilenceAlert'), {tmuxSignal: 'silence', showBadge: true});
-  }
-  if (!livePanes.length && deadPanes.length) {
-    return stateValue('done', tmuxSignalDeadText(deadPanes[0]), {tmuxSignal: 'agent-exited', showBadge: true});
-  }
-  const runningPane = livePanes.find(pane => (
-    tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) || tmuxSignalAuthoritativeAgentKind(pane)
-  ) && (pane?.alternate_on === true || Number(pane?.pid || 0) > 0));
-  if (runningPane) {
-    const command = tmuxSignalPaneCommand(runningPane) || tmuxSignalAuthoritativeAgentKind(runningPane);
-    const mode = t(runningPane?.alternate_on === true ? 'tmux.mode.alternateScreen' : 'tmux.mode.process');
-    return stateValue(STATE_KEY.working, stateReason('tmuxAgentRunning', {command, mode}), {tmuxSignal: 'agent-running'});
-  }
-  return null;
 }
 
 function browserFaviconRoundedRect(ctx, x, y, width, height, radius) {
@@ -3451,84 +3355,23 @@ function updateDocumentTitle() {
 // Cross-session YOLO screen-state rollup for the always-visible top-bar status line. It intentionally
 // ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 working/attention/blocked.
 function globalActivityCounts() {
-  const agentWindowCounts = globalActivityCountsFromAgentWindows();
-  if (agentWindowCounts) return agentWindowCounts;
-  // The fallback runs before agent-window payloads exist, so it must classify
-  // tmux signals and approval state directly; its overlapping states are pinned
-  // against the primary per-window path in layout_restore.test.js.
-  const signalWindows = tmuxSignalWindows();
-  let running = 0;
-  let ask = 0;
-  let blocked = 0;
-  const countedSignalSessions = new Set();
-  const countedSignalWindows = new Set();
-  const runningSignalSessions = new Set();
-  const bellSignalWindows = new Set();
-  const actionRequiredSignalWindows = new Set();
-  const signalAttentionSessions = new Set();
-  for (const windowRecord of signalWindows) {
-    const signalSession = tmuxSignalWindowSession(windowRecord);
-    const signalKey = tmuxSignalWindowKey(windowRecord);
-    const signalPayload = signalSession ? (autoApproveStates.get(signalSession) || {}) : {};
-    const signalPromptSignature = signalSession ? promptAttentionPayloadSignature(signalPayload) : '';
-    const signalPromptCleared = signalSession ? promptAttentionIsCleared(signalSession, signalPromptSignature, signalPayload) : false;
-    const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
-    const hasAgentPane = tmuxSignalWindowHasAgentPane(windowRecord);
-    const hasActionRequiredPane = panes.some(tmuxSignalPaneActionRequired);
-    if (windowRecord?.bell_flag === true && hasAgentPane && !signalPromptCleared) {
-      if (signalKey) bellSignalWindows.add(signalKey);
-      if (signalSession) signalAttentionSessions.add(signalSession);
-    }
-    if (hasActionRequiredPane && !signalPromptCleared) {
-      if (signalKey) actionRequiredSignalWindows.add(signalKey);
-      if (signalSession) signalAttentionSessions.add(signalSession);
-    }
-    if (signalKey && (hasAgentPane || hasActionRequiredPane)) countedSignalWindows.add(signalKey);
-    if (signalSession && (hasAgentPane || hasActionRequiredPane)) countedSignalSessions.add(signalSession);
-    if (!hasAgentPane) continue;
-    if (!tmuxSignalWindowIsRecentlyActive(windowRecord)) continue;
-    running += 1;
-    if (signalSession) runningSignalSessions.add(signalSession);
-  }
-  ask += new Set([...bellSignalWindows, ...actionRequiredSignalWindows]).size;
-  const countedSessions = new Set([...autoApproveStates.keys()]
-    .map(value => String(value || ''))
-    .filter(session => session && autoApprovePayloadCountsInTopbar(session, autoApproveStates.get(session) || {})));
-  for (const session of countedSessions) {
-    if (!isTmuxSession(session)) continue;
-    const payload = autoApproveStates.get(session) || {};
-    const key = String(payload?.screen?.key || '');
-    const promptVisible = payload?.prompt?.visible === true;
-    const promptAttentionKey = promptVisible
-      ? (payload?.prompt?.yes_selected === true ? STATE_KEY.needsApproval : STATE_KEY.needsInput)
-      : key;
-    const promptSignature = promptAttentionPayloadSignature(payload);
-    const promptCleared = promptAttentionIsCleared(session, promptSignature, payload);
-    if (key === STATE_KEY.working && !runningSignalSessions.has(session)) running += 1;
-    else if (key === STATE_KEY.blocked) blocked += 1;
-    else if (ATTENTION_SCREEN_KEYS.has(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
-  }
-  const fallbackTotal = [...countedSessions].filter(isTmuxSession).length;
-  const total = countedSignalWindows.size
-    ? countedSignalWindows.size + [...countedSessions].filter(session => isTmuxSession(session) && !countedSignalSessions.has(session)).length
-    : fallbackTotal;
-  const attention = ask + blocked;
-  return {running, ask, blocked, attention, idle: Math.max(0, total - running - attention), total};
+  return globalActivityCountsFromAgentWindows();
 }
 
 function globalActivityCountSessions() {
-  if (typeof tabberOrderedSessions === 'function') return tabberOrderedSessions();
-  const order = Array.isArray(transcriptMetadataState.payload.session_order) ? transcriptMetadataState.payload.session_order : [];
-  const all = transcriptMetadataState.payload.sessions && typeof transcriptMetadataState.payload.sessions === 'object' ? Object.keys(transcriptMetadataState.payload.sessions) : [];
+  const ordered = tabberOrderedSessions();
+  const signalSessions = tmuxSignalWindows().map(tmuxSignalWindowSession);
+  const admitted = new Set([...ordered, ...signalSessions]);
   const seen = new Set();
-  const sessions = [];
-  for (const value of [...order, ...all]) {
+  const result = [];
+  for (const value of [...ordered, ...autoApproveStates.keys(), ...signalSessions]) {
     const session = String(value || '').trim();
-    if (!session || seen.has(session) || !isTmuxSession(session)) continue;
+    if (!session || seen.has(session) || (!admitted.has(session) && !isTmuxSession(session))) continue;
+    if (tabberViewDescriptorForSession(session)) continue;
     seen.add(session);
-    sessions.push(session);
+    result.push(session);
   }
-  return sessions;
+  return result;
 }
 
 function globalActivityCountsFromAgentWindows() {
@@ -3547,8 +3390,12 @@ function globalActivityCountsFromAgentWindows() {
     const info = transcriptMetadataState.payload.sessions?.[session] || {};
     const autoPayload = autoApproveStates.get(session) || {};
     const rows = sessionAgentWindowStatusPayloads(session, info, autoPayload);
+    const seen = new Set();
     for (const agent of rows) {
       if (!agentWindowKind(agent?.kind)) continue;
+      const physicalKey = agentWindowPhysicalKey(agent, info);
+      if (physicalKey && seen.has(physicalKey)) continue;
+      if (physicalKey) seen.add(physicalKey);
       const itemOptions = agentWindowActivityOptionsForStatus(agent, session, {scheduleRefresh: false});
       const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session, itemOptions);
       total += 1;
@@ -3561,7 +3408,6 @@ function globalActivityCountsFromAgentWindows() {
       else if (classification.activity === 'unavailable') unavailable += 1;
     }
   }
-  if (!total) return null;
   const attention = ask + blocked;
   return {running, ask, blocked, unavailable, attention, idle: Math.max(0, total - running - attention - unavailable), total};
 }
@@ -6866,21 +6712,47 @@ function stateSignature(state) {
 }
 
 function trackSessionStateChanges(sessionNames = sessions) {
+  const pendingItems = [];
   for (const session of sessionNames.filter(isTmuxSession)) {
     const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
     const record = sessionStatusRecord(session, true);
     const previous = record?.state || null;
     const signature = stateSignature(state);
-    if (record) record.state = {key: state.key, reason: state.reason, signature};
-    if (!stateTrackingReady || previous == null || previous.signature === signature) continue;
-    postEvent(session, 'state_changed', eventMessageForState(session, state), {
-      from: previous.key,
-      from_reason: previous.reason,
-      to: state.key,
-      reason: state.reason,
-    });
+    record.pendingEventStateChanges ||= [];
+    record.state = {key: state.key, reason: state.reason, signature};
+    if (stateTrackingReady && previous != null && previous.signature !== signature) {
+      record.pendingEventStateChanges.push({
+        event: {
+          session,
+          type: 'state_changed',
+          message: eventMessageForState(session, state),
+          details: {
+            from: previous.key,
+            from_reason: previous.reason,
+            to: state.key,
+            reason: state.reason,
+          },
+        },
+        inFlight: false,
+      });
+    }
+    for (const pending of record.pendingEventStateChanges) {
+      if (pending.inFlight) continue;
+      pending.inFlight = true;
+      pendingItems.push({record, pending});
+    }
   }
   stateTrackingReady = true;
+  if (!pendingItems.length) return Promise.resolve(false);
+  return postEventBatch(pendingItems.map(item => item.pending.event)).then(succeeded => {
+    for (const {record, pending} of pendingItems) {
+      const index = record.pendingEventStateChanges.indexOf(pending);
+      if (index < 0) continue;
+      if (succeeded) record.pendingEventStateChanges.splice(index, 1);
+      else pending.inFlight = false;
+    }
+    return succeeded;
+  });
 }
 
 const workingAgentTransitionNotificationDescriptors = Object.freeze({

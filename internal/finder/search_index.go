@@ -527,6 +527,7 @@ func (engine *searchIndexEngine) handleContext(ctx context.Context, request inde
 		return map[string]any{"ok": true, "purged": true}, nil
 	}
 	if request.Action == "settings_fence" {
+		request.FenceRoots = canonicalIndexRoots(request.FenceRoots)
 		if err := engine.settingsApplyMu.LockContext(ctx, nil); err != nil {
 			return nil, err
 		}
@@ -591,11 +592,10 @@ func (engine *searchIndexEngine) handleContext(ctx context.Context, request inde
 		roots := make([]string, 0, len(request.FenceRoots))
 		seen := make(map[string]struct{}, len(request.FenceRoots))
 		for _, candidate := range request.FenceRoots {
-			absolute, err := filepath.Abs(candidate)
-			if err != nil || candidate == "" {
+			absolute, err := CanonicalIndexRoot(candidate)
+			if err != nil {
 				continue
 			}
-			absolute = filepath.Clean(absolute)
 			if _, exists := seen[absolute]; exists {
 				continue
 			}
@@ -659,11 +659,16 @@ func (engine *searchIndexEngine) handleContext(ctx context.Context, request inde
 			return nil, errors.New("invalid worker CPU profile request")
 		}
 	}
-	root, err := filepath.Abs(request.Root)
+	requestedRoot, err := filepath.Abs(request.Root)
 	if err != nil || request.Root == "" {
 		return nil, errors.New("root is required")
 	}
-	root = filepath.Clean(root)
+	requestedRoot = filepath.Clean(requestedRoot)
+	root, err := CanonicalIndexRoot(requestedRoot)
+	if err != nil {
+		return nil, fmt.Errorf("root is unavailable: %w", err)
+	}
+	request.ChangedPaths = canonicalIndexChangedPaths(requestedRoot, root, request.ChangedPaths)
 	switch request.Action {
 	case "status", "search", "ensure", "repair":
 		info, err := os.Stat(root)
@@ -1073,6 +1078,95 @@ func (engine *searchIndexEngine) storedFenceTargets(root string, includeDescenda
 func indexRootWithin(parent, candidate string) bool {
 	relative, err := filepath.Rel(parent, candidate)
 	return err == nil && (relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))))
+}
+
+// CanonicalIndexRoot follows symlinked directory aliases before the descriptor walk, whose
+// component-by-component opens deliberately reject symlinks. Resolving the nearest existing
+// ancestor also gives removed roots a stable key so fences and unindex requests still match.
+func CanonicalIndexRoot(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", errors.New("root is required")
+	}
+	candidate, err := filepath.Abs(raw)
+	if err != nil {
+		return "", err
+	}
+	candidate = filepath.Clean(candidate)
+	suffix := make([]string, 0, 4)
+	for {
+		resolved, resolveErr := filepath.EvalSymlinks(candidate)
+		if resolveErr == nil {
+			resolved, err = filepath.Abs(resolved)
+			if err != nil {
+				return "", err
+			}
+			for index := len(suffix) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, suffix[index])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !errors.Is(resolveErr, os.ErrNotExist) {
+			return "", resolveErr
+		}
+		parent := filepath.Dir(candidate)
+		if parent == candidate {
+			return candidate, nil
+		}
+		suffix = append(suffix, filepath.Base(candidate))
+		candidate = parent
+	}
+}
+
+func canonicalIndexRoots(roots []string) []string {
+	seen := make(map[string]struct{}, len(roots))
+	canonical := make([]string, 0, len(roots))
+	for _, root := range roots {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		resolved, err := CanonicalIndexRoot(root)
+		if err != nil {
+			resolved, err = filepath.Abs(root)
+			if err != nil {
+				continue
+			}
+			resolved = filepath.Clean(resolved)
+		}
+		if _, exists := seen[resolved]; exists {
+			continue
+		}
+		seen[resolved] = struct{}{}
+		canonical = append(canonical, resolved)
+	}
+	return canonical
+}
+
+func canonicalIndexChangedPaths(requestedRoot, canonicalRoot string, paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	canonical := make([]string, 0, len(paths))
+	for _, path := range paths {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return nil
+		}
+		absolute = filepath.Clean(absolute)
+		if indexRootWithin(requestedRoot, absolute) {
+			relative, relErr := filepath.Rel(requestedRoot, absolute)
+			if relErr != nil {
+				return nil
+			}
+			canonical = append(canonical, filepath.Join(canonicalRoot, relative))
+			continue
+		}
+		resolved, resolveErr := CanonicalIndexRoot(absolute)
+		if resolveErr != nil || !indexRootWithin(canonicalRoot, resolved) {
+			return nil
+		}
+		canonical = append(canonical, resolved)
+	}
+	return uniqueWatchPaths(canonical)
 }
 
 func (engine *searchIndexEngine) quiesceBuilds() error {
@@ -1893,6 +1987,14 @@ func NewSearchIndexWorkerClient(stateDir string) *SearchIndexWorkerClient {
 func (client *SearchIndexWorkerClient) QueueRepair(request indexRequest, onScheduled func()) {
 	if request.Root == "" {
 		return
+	}
+	requestedRoot, err := filepath.Abs(request.Root)
+	if err == nil {
+		requestedRoot = filepath.Clean(requestedRoot)
+		if canonicalRoot, canonicalErr := CanonicalIndexRoot(requestedRoot); canonicalErr == nil {
+			request.ChangedPaths = canonicalIndexChangedPaths(requestedRoot, canonicalRoot, request.ChangedPaths)
+			request.Root = canonicalRoot
+		}
 	}
 	if err := client.repairMu.LockContext(context.Background(), client.closing); err != nil {
 		return

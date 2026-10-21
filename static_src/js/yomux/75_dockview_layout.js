@@ -2827,7 +2827,6 @@ function dockviewHeaderActionsHtml(item, slot = slotForItem(item)) {
       minimize: true,
       expand: true,
       close: true,
-      closeClass: 'file-editor-panel-close',
       closeTitle: t('editor.closePane'),
       closeLabel: t('editor.closePane'),
     });

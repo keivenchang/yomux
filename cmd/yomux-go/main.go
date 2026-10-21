@@ -958,7 +958,7 @@ func main() {
 	mux.Handle("/api/watch/roots", s.protected(http.HandlerFunc(s.watchRoots)))
 	s.registerFilesystemRoutes(mux)
 	mux.Handle("/api/event", s.protected(http.HandlerFunc(s.eventPost)))
-	mux.Handle("/api/events", s.protected(http.HandlerFunc(s.eventsList)))
+	mux.Handle("/api/events", s.protected(http.HandlerFunc(s.eventsRoute)))
 	mux.Handle("/api/transcripts", s.protected(http.HandlerFunc(s.sessionMetadata)))
 	mux.Handle("/api/transcript", s.protected(http.HandlerFunc(s.transcript)))
 	mux.Handle("/api/context", s.protected(http.HandlerFunc(s.context)))
@@ -4249,26 +4249,114 @@ func (s *server) eventPost(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid event"})
 		return
 	}
-	if body == nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid event"})
+	record, status, failure := s.prepareEventRecord(body)
+	if status != 0 {
+		jsonResponse(w, status, failure)
 		return
 	}
+	if err := s.appendEventLog(record); err != nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "event persistence failed", "retryable": true})
+		return
+	}
+	s.publishEventLogChanged(map[string]any{"session": record["session"]})
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "event": record})
+}
+
+// A notification failure follows a successful durable write, so it must not invite clients to retry committed records.
+func (s *server) publishEventLogChanged(payload map[string]any) bool {
+	if s.events == nil {
+		return true
+	}
+	if _, err := s.events.publish("event_log_changed", payload); err != nil {
+		slog.Warn("event log invalidation failed after persistence", "error", err)
+		return false
+	}
+	return true
+}
+
+const maxEventBatchSize = 64
+
+func (s *server) eventsRoute(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.eventsList(w, r)
+	case http.MethodPost:
+		s.eventsPost(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *server) eventsPost(w http.ResponseWriter, r *http.Request) {
+	var body map[string]any
+	if err := decodeJSONBody(r.Body, 64*1024, &body); err != nil || body == nil {
+		w.Header().Set("Connection", "close")
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid events"})
+		return
+	}
+	rawEvents, ok := body["events"].([]any)
+	if !ok || len(rawEvents) == 0 || len(rawEvents) > maxEventBatchSize {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid events", "max_events": maxEventBatchSize})
+		return
+	}
+	records := make([]map[string]any, 0, len(rawEvents))
+	rejectedRows := make([]map[string]any, 0)
+	sessions := make([]string, 0, len(rawEvents))
+	seenSessions := make(map[string]bool, len(rawEvents))
+	for index, rawEvent := range rawEvents {
+		event, ok := rawEvent.(map[string]any)
+		if !ok {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid event"})
+			return
+		}
+		record, status, failure := s.prepareEventRecord(event)
+		if status != 0 {
+			if status == http.StatusNotFound && failure["error"] == "unknown session" {
+				failure["index"] = index
+				rejectedRows = append(rejectedRows, failure)
+				continue
+			}
+			jsonResponse(w, status, failure)
+			return
+		}
+		records = append(records, record)
+		if session, _ := record["session"].(string); session != "" && !seenSessions[session] {
+			seenSessions[session] = true
+			sessions = append(sessions, session)
+		}
+	}
+	if len(records) > 0 {
+		if err := s.appendEventLogs(records); err != nil {
+			jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "event persistence failed", "retryable": true})
+			return
+		}
+		refreshRequired := !s.publishEventLogChanged(map[string]any{"sessions": sessions})
+		jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "events": records, "rejected_rows": rejectedRows, "event_log_refresh_required": refreshRequired})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "events": records, "rejected_rows": rejectedRows, "event_log_refresh_required": false})
+}
+
+func (s *server) prepareEventRecord(body map[string]any) (map[string]any, int, map[string]any) {
 	session, _ := body["session"].(string)
 	if rawSession, exists := body["session"]; exists && rawSession != nil {
 		if _, ok := rawSession.(string); !ok {
-			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid event"})
-			return
+			return nil, http.StatusBadRequest, map[string]any{"error": "invalid event"}
 		}
 	}
 	eventType, typeOK := body["type"].(string)
 	message, messageOK := body["message"].(string)
 	if !typeOK || strings.TrimSpace(eventType) == "" || !messageOK || strings.TrimSpace(message) == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid event"})
-		return
+		return nil, http.StatusBadRequest, map[string]any{"error": "invalid event"}
 	}
-	if session != "" && s.tmuxCommand("has-session", "-t", session).Run() != nil {
-		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "unknown session", "session": session})
-		return
+	if session != "" {
+		output, err := s.tmuxCommand("has-session", "-t", session).CombinedOutput()
+		if err != nil {
+			if tmuxReportsMissingSession(output) {
+				return nil, http.StatusNotFound, map[string]any{"error": "unknown session", "session": session}
+			}
+			return nil, http.StatusServiceUnavailable, map[string]any{"error": "session validation unavailable", "retryable": true}
+		}
 	}
 	details, _ := body["details"].(map[string]any)
 	record := map[string]any{
@@ -4278,16 +4366,12 @@ func (s *server) eventPost(w http.ResponseWriter, r *http.Request) {
 		"details": safeEventDetails(details),
 		"message": boundedText(message, 2000),
 	}
-	if err := s.appendEventLog(record); err != nil {
-		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "event persistence failed", "retryable": true})
-		return
-	}
-	_, err := s.events.publish("event_log_changed", map[string]any{"session": session})
-	if err != nil {
-		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "event persistence failed", "retryable": true})
-		return
-	}
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "event": record})
+	return record, 0, nil
+}
+
+func tmuxReportsMissingSession(output []byte) bool {
+	diagnostic := strings.ToLower(string(output))
+	return strings.Contains(diagnostic, "can't find session:") || strings.Contains(diagnostic, "session not found")
 }
 
 func utcEventTime() string { return time.Now().UTC().Format("2006-01-02T15:04:05Z") }
@@ -4346,6 +4430,10 @@ func safeEventDetails(details map[string]any) map[string]any {
 }
 
 func (s *server) appendEventLog(record map[string]any) error {
+	return s.appendEventLogs([]map[string]any{record})
+}
+
+func (s *server) appendEventLogs(records []map[string]any) error {
 	path := s.eventLogPath
 	if path == "" && s.config != "" {
 		path = filepath.Join(s.config, "event-log.jsonl")
@@ -4353,9 +4441,14 @@ func (s *server) appendEventLog(record map[string]any) error {
 	if path == "" {
 		return nil
 	}
-	data, err := json.Marshal(record)
-	if err != nil {
-		return err
+	var data []byte
+	for _, record := range records {
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			return err
+		}
+		data = append(data, encoded...)
+		data = append(data, '\n')
 	}
 	return withFileLock(path, func() error {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -4365,7 +4458,7 @@ func (s *server) appendEventLog(record map[string]any) error {
 		if err != nil {
 			return err
 		}
-		if _, err = file.Write(append(data, '\n')); err == nil {
+		if _, err = file.Write(data); err == nil {
 			err = file.Sync()
 		}
 		closeErr := file.Close()

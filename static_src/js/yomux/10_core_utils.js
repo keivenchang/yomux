@@ -6624,6 +6624,7 @@ function createDismissableOverlayController(options = {}) {
   let overlay = null;
   let trigger = null;
   let removeOnClose = false;
+  let scope = null;
   const close = (closeOptions = {}) => {
     if (!overlay) return false;
     const closed = overlay;
@@ -6633,9 +6634,8 @@ function createDismissableOverlayController(options = {}) {
     overlay = null;
     trigger = null;
     removeOnClose = false;
-    document.removeEventListener('pointerdown', pointerdown, true);
-    document.removeEventListener('keydown', keydown, true);
-    window.removeEventListener('blur', blur);
+    scope?.dispose('overlay-closed');
+    scope = null;
     options.onClose?.(closed);
     if (closeOptions.returnFocus !== false && returnTarget?.isConnected !== false) returnTarget?.focus?.();
     return true;
@@ -6667,10 +6667,11 @@ function createDismissableOverlayController(options = {}) {
       trigger = openOptions.trigger || null;
       removeOnClose = openOptions.removeOnClose === true;
       overlay.hidden = false;
-      overlay.addEventListener('pointerdown', event => event.stopPropagation());
-      document.addEventListener('pointerdown', pointerdown, true);
-      document.addEventListener('keydown', keydown, true);
-      if (openOptions.closeOnBlur !== false) window.addEventListener('blur', blur);
+      scope = createLifecycleScope();
+      scope.ownEvent('inside-pointer', overlay, 'pointerdown', event => event.stopPropagation());
+      scope.ownEvent('outside-pointer', document, 'pointerdown', pointerdown, true);
+      scope.ownEvent('keyboard', document, 'keydown', keydown, true);
+      if (openOptions.closeOnBlur !== false) scope.ownEvent('blur', window, 'blur', blur);
       options.onOpen?.(overlay);
       return overlay;
     },

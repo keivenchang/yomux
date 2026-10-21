@@ -55,8 +55,10 @@ func (s *server) updateFinderIndexSettings(payload map[string]any) ([]string, bo
 			if !ok || strings.TrimSpace(root) == "" {
 				continue
 			}
-			absolute, err := filepath.Abs(root)
+			canonical, err := finder.CanonicalIndexRoot(root)
 			if err == nil {
+				current.roots = append(current.roots, canonical)
+			} else if absolute, absErr := filepath.Abs(root); absErr == nil {
 				current.roots = append(current.roots, filepath.Clean(absolute))
 			}
 		}
@@ -135,6 +137,9 @@ func uniqueFinderIndexRoots(roots []string) []string {
 	seen := make(map[string]struct{}, len(roots))
 	unique := make([]string, 0, len(roots))
 	for _, root := range roots {
+		if canonical, err := finder.CanonicalIndexRoot(root); err == nil {
+			root = canonical
+		}
 		if _, exists := seen[root]; exists {
 			continue
 		}
@@ -290,7 +295,7 @@ func (s *server) finderIndexSettingsStatus() map[string]any {
 
 func (s *server) finderSearchOptions(root, cursor string, indexedOnly bool) finder.SearchOptions {
 	options := finder.SearchOptions{Cursor: cursor, IndexedOnly: indexedOnly}
-	absolute, err := filepath.Abs(root)
+	absolute, err := finder.CanonicalIndexRoot(root)
 	if err != nil {
 		return options
 	}
