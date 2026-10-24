@@ -788,31 +788,6 @@ body.editor-theme-light .file-editor-image {
 }
 .prosemirror-editor .ProseMirror-selectednode { outline: 2px solid var(--active-control-border); }
 .prosemirror-editor p { min-height: 1.4em; }
-.markdown-preview-editor-toolbar {
-  position: sticky;
-  top: 0;
-  z-index: var(--z-file-editor-preview-layer);
-  display: flex;
-  gap: var(--space-2);
-  width: fit-content;
-  margin: calc(var(--space-8) * -1) 0 var(--space-8) auto;
-  padding: var(--space-2);
-  background: var(--editor-preview-bg);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-}
-.markdown-preview-editor-toolbar button {
-  min-width: 28px;
-  min-height: 28px;
-  padding: 0 var(--space-4);
-  color: var(--text);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
-.markdown-preview-editor-toolbar button:hover,
-.markdown-preview-editor-toolbar button:focus-visible { box-shadow: var(--active-control-focus-shadow-compact); }
 .file-editor-preview-pane-panel [data-markdown-preview-editable="true"] {
   outline: 1px dashed transparent;
   outline-offset: 3px;
@@ -3674,3 +3649,32 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   width: auto;
   max-width: none;
 }
+
+.file-editor-toolbars { min-width: 0; }
+.markdown-formatting-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-6);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+}
+.markdown-formatting-toolbar[hidden] { display: none; }
+.markdown-formatting-toolbar button,
+.markdown-formatting-toolbar select {
+  min-height: 26px;
+  max-width: 100%;
+}
+.markdown-formatting-toolbar button { min-width: 28px; }
+.markdown-formatting-toolbar [data-markdown-format="clearInline"] { min-width: 48px; padding-inline: var(--space-6); }
+.markdown-formatting-toolbar [data-markdown-list-indent] { font-size: 17px; font-weight: 600; }
+.markdown-formatting-toolbar button[aria-pressed="true"] { background: var(--accent); color: var(--panel); }
+.markdown-formatting-toolbar button[aria-pressed="mixed"] { border-color: var(--accent); border-style: dashed; }
+.markdown-formatting-toolbar select { flex: 0 1 auto; width: 155px; }
+.markdown-formatting-toolbar [data-markdown-format="bold"] { font-weight: bold; }
+.markdown-formatting-toolbar [data-markdown-format="italic"] { font-style: italic; }
+.markdown-formatting-toolbar [data-markdown-format="underline"] { text-decoration: underline; }
+.markdown-formatting-toolbar [data-markdown-format="strike"] { text-decoration: line-through; }

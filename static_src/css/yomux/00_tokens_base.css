@@ -407,6 +407,7 @@
   --z-drag-ghost: 45;
   --z-pane-modal: 170;
   --z-session-popover: 80;
+  --z-toast: 79;
   --z-tab-popover: var(--z-session-popover);
   --z-transport-warning: 160;
   --z-topbar: 180;
@@ -1526,6 +1527,8 @@ body.editor-theme-light {
 .yoagent-chat,
 .yoagent-jobs-list,
 .info-tree-chip,
+.markdown-formatting-toolbar select,
+.markdown-formatting-toolbar button,
   .file-explorer-path,
   .file-explorer-path-inline,
   .js-debug-hover-tooltip {
@@ -1534,6 +1537,7 @@ body.editor-theme-light {
   color: var(--text);
 }
 :where(button),
+.markdown-formatting-toolbar select,
 .diff-ref-static-value,
 .diff-ref-suggestion-popover,
 .yoagent-message,

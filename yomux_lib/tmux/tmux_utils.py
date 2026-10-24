@@ -378,7 +378,7 @@ def tmux_paste_text(target: str, text: str, submit: bool = False, timeout: float
     if load.returncode != 0:
         return load
     try:
-        paste = tmux_run("paste-buffer", "-p", "-t", exact_target, "-b", buffer_name, check=False, timeout=timeout)
+        paste = tmux_run("paste-buffer", "-r", "-p", "-t", exact_target, "-b", buffer_name, check=False, timeout=timeout)
         if paste.returncode != 0 or not submit:
             return paste
         enter = tmux_run("send-keys", "-t", exact_target, "Enter", check=False, timeout=timeout)

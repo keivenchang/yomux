@@ -3,6 +3,7 @@ import fcntl
 import importlib.util
 import json
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from yomux_lib.local_services.registry import parse_ps_cpu_seconds
 from yomux_lib.local_services.registry import pid_is_serving
 from yomux_lib.stats_current import storage as stats_current_storage
 from tests.gate_harness import FixtureLocalServiceProcess
+from tests.gate_harness import fixture_local_service_startup_diagnostic
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import pin_fixture_batchd_scheduler
 from tests.gate_harness import stop_fixture_local_service_process
@@ -577,134 +579,70 @@ def test_pyproject_package_discovery_retains_developer_support_without_runtime_e
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
 
 
-def test_registry_first_refresh_after_real_leader_exit_adopts_only_inherited_generation(tmp_path):
-    child_pid_file = tmp_path / "retained-child.pid"
-    registry = LocalServiceRegistry(
-        tmp_path,
-        LocalServiceSpec(
-            "generation-fixture",
-            "tests.fixtures.local_service_generation_descendant",
-            "generation.sock",
-            1,
-            extra_args=("--child-pid-file", str(child_pid_file)),
-        ),
-    )
-    process = None
-    ownership = None
-    try:
+@contextlib.contextmanager
+def spawned_generation_fixture(tmp_path, *, spawn_on_term=False):
+    child_pid_file = tmp_path / "generation-child.pid"
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd, "rb", buffering=0) as ready, os.fdopen(write_fd, "wb", buffering=0) as writer:
+        def spawn(*args, **kwargs):
+            return subprocess.Popen(*args, pass_fds=(writer.fileno(),), **kwargs)
+
+        registry = LocalServiceRegistry(
+            tmp_path,
+            LocalServiceSpec(
+                "generation-fixture", "tests.fixtures.local_service_generation_descendant", "generation.sock", 1,
+                extra_args=("--child-pid-file", str(child_pid_file), "--ready-fd", str(writer.fileno()),
+                            *(("--spawn-on-term",) if spawn_on_term else ())),
+            ),
+            popen=spawn,
+        )
         process = registry._spawn()
         assert process is not None
-        initial_ownership = registry.spawn_ownership
-        assert initial_ownership is not None
-        assert initial_ownership.member_identities == ((process.pid, registry_mod.process_start_identity(process.pid)),)
-        assert process.wait(timeout=5) == 0
-        child_pid, grandchild_pid = (
-            int(value)
-            for value in child_pid_file.read_text(encoding="utf-8").split(",")
-        )
+        ownership = registry.spawn_ownership
+        with contextlib.ExitStack() as cleanup:
+            cleanup.callback(stop_fixture_local_service_process,
+                             FixtureLocalServiceProcess(registry, process, ownership),
+                             label="inherited-generation fixture")
+            writer.close()
+            assert ownership is not None
+            assert ownership.member_identities == ((process.pid, registry_mod.process_start_identity(process.pid)),)
+            # Process creation does not acknowledge that the child's TERM handler is installed.
+            readable, _, _ = select.select([ready], [], [], registry.spec.start_timeout_seconds)
+            assert readable and ready.read(1) == b"1", fixture_local_service_startup_diagnostic(registry)
+            yield registry, process, ownership, child_pid_file
+
+
+def test_registry_first_refresh_after_real_leader_exit_adopts_only_inherited_generation(tmp_path):
+    with spawned_generation_fixture(tmp_path) as (registry, process, initial_ownership, child_pid_file):
+        assert process.wait(timeout=registry.spec.start_timeout_seconds) == 0
+        child_pid, grandchild_pid = (int(value) for value in child_pid_file.read_text(encoding="utf-8").split(","))
         assert child_pid != process.pid
         assert grandchild_pid not in {process.pid, child_pid}
-
         ownership = registry.refresh_spawn_ownership()
-
         assert ownership is not None
         member_pids = {pid for pid, _start_identity in ownership.member_identities}
         assert process.pid not in member_pids
         assert child_pid in member_pids
         assert grandchild_pid in member_pids
-        assert all(
-            registry_mod.process_spawn_generation(pid) == ownership.generation_marker
-            for pid in member_pids
-        )
-        stop_fixture_local_service_process(
-            FixtureLocalServiceProcess(registry, process, ownership),
-            label="retained inherited-generation descendant",
-        )
-    finally:
-        if registry.spawn_ownership is not None:
-            ownership = registry.refresh_spawn_ownership() or registry.spawn_ownership
-        if ownership is not None:
-            live_members = [
-                pid
-                for pid, start_identity in ownership.member_identities
-                if registry_mod.process_start_identity(pid) == start_identity
-                and registry_mod.process_spawn_generation(pid) == ownership.generation_marker
-            ]
-            if live_members:
-                os.killpg(ownership.process_group, signal.SIGKILL)
+        assert all(registry_mod.process_spawn_generation(pid) == ownership.generation_marker for pid in member_pids)
 
 
 def test_registry_forced_failure_before_first_refresh_cleans_inherited_generation(tmp_path):
-    child_pid_file = tmp_path / "forced-failure-child.pid"
-    registry = LocalServiceRegistry(
-        tmp_path,
-        LocalServiceSpec(
-            "generation-fixture",
-            "tests.fixtures.local_service_generation_descendant",
-            "generation.sock",
-            1,
-            extra_args=("--child-pid-file", str(child_pid_file)),
-        ),
-    )
-    process = registry._spawn()
-    assert process is not None
-    initial_ownership = registry.spawn_ownership
-    assert initial_ownership is not None
-    marker = initial_ownership.generation_marker
-    process_group = initial_ownership.process_group
-    assert process.wait(timeout=5) == 0
-
     with pytest.raises(RuntimeError, match="forced before refresh"):
-        try:
+        with spawned_generation_fixture(tmp_path) as (registry, process, initial_ownership, child_pid_file):
+            marker = initial_ownership.generation_marker
+            process_group = initial_ownership.process_group
+            assert process.wait(timeout=registry.spec.start_timeout_seconds) == 0
             raise RuntimeError("forced before refresh")
-        finally:
-            cleanup_ownership = registry.refresh_spawn_ownership() or registry.spawn_ownership
-            assert cleanup_ownership is not None
-            stop_fixture_local_service_process(
-                FixtureLocalServiceProcess(registry, process, cleanup_ownership),
-                label="forced pre-refresh inherited-generation cleanup",
-            )
-
-    survivors = [
-        pid
-        for pid, entry in registry_mod.bounded_process_table().items()
-        if entry.pgid == process_group
-        and registry_mod.process_spawn_generation(pid) == marker
-    ]
+    survivors = [pid for pid, entry in registry_mod.bounded_process_table().items()
+                 if entry.pgid == process_group and registry_mod.process_spawn_generation(pid) == marker]
     assert survivors == []
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="post-TERM descendant fixture is POSIX-only")
 def test_fixture_teardown_refreshes_generation_authority_after_term(tmp_path):
-    child_pid_file = tmp_path / "post-term-child.pid"
-    registry = LocalServiceRegistry(
-        tmp_path,
-        LocalServiceSpec(
-            "generation-fixture",
-            "tests.fixtures.local_service_generation_descendant",
-            "generation.sock",
-            1,
-            extra_args=("--child-pid-file", str(child_pid_file), "--spawn-on-term"),
-        ),
-    )
-    process = registry._spawn()
-    assert process is not None
-    ownership = registry.spawn_ownership
-    assert ownership is not None
-    assert ownership.member_identities == ((process.pid, registry_mod.process_start_identity(process.pid)),)
-    deadline = time.monotonic() + 2.0
-    while (
-        not child_pid_file.is_file()
-        or child_pid_file.read_text(encoding="utf-8") != "ready"
-    ) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert child_pid_file.read_text(encoding="utf-8") == "ready"
-
-    stop_fixture_local_service_process(
-        FixtureLocalServiceProcess(registry, process, ownership),
-        label="post-TERM inherited-generation descendant",
-    )
-
+    with spawned_generation_fixture(tmp_path, spawn_on_term=True) as (registry, process, ownership, child_pid_file):
+        assert process.poll() is None
     child_pid = int(child_pid_file.read_text(encoding="utf-8"))
     # A raw ``process_start_identity`` read keeps returning the child's start ticks
     # while it lingers as an unreaped zombie, so under load teardown finishes before

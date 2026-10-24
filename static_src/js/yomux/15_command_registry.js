@@ -40,6 +40,7 @@ const COMMAND_ROUTES = Object.freeze({
   'tmux-window-select': commandRoute({id: 'tmux-window-select', method: 'POST', path: '/api/tmux-window', contractClass: 'optimistic'}),
   'auto-approve-toggle': commandRoute({id: 'auto-approve-toggle', method: 'POST', path: '/api/auto-approve', contractClass: 'optimistic'}),
   'event-log-post': commandRoute({id: 'event-log-post', method: 'POST', path: '/api/event', contractClass: 'background'}),
+  'event-log-batch-post': commandRoute({id: 'event-log-batch-post', method: 'POST', path: '/api/events', contractClass: 'background'}),
   'self-update': commandRoute({id: 'self-update', method: 'POST', path: '/api/self-update', contractClass: 'pending'}),
   'js-debug-observation-flush': commandRoute({id: 'js-debug-observation-flush', method: 'POST', path: '/api/stats-observations', contractClass: 'background'}),
   'pricing-catalog-refresh': commandRoute({id: 'pricing-catalog-refresh', method: 'POST', path: '/api/pricing-catalog/refresh', contractClass: 'pending'}),
@@ -200,6 +201,7 @@ function commandPlaceAssociatedStatus(status, control) {
 }
 
 function commandPublishGlobalStatus(message, tone = 'advisory') {
+  if (typeof terminalAuthenticationActive === 'function' && terminalAuthenticationActive()) return null;
   const status = globalThis.document?.getElementById?.('status') || null;
   if (!status) return;
   status.setAttribute('role', 'status');
@@ -225,6 +227,14 @@ function commandGlobalStatusSnapshot(status) {
       ? Array.from(attributes).map(attribute => [attribute.name, attribute.value])
       : Object.entries(attributes),
   };
+}
+
+function restoreCommandGlobalStatus(status, previous) {
+  if (typeof terminalAuthenticationActive === 'function' && terminalAuthenticationActive()) return;
+  for (const [name] of commandGlobalStatusSnapshot(status).attributes) status.removeAttribute(name);
+  for (const [name, value] of previous.attributes) status.setAttribute(name, value);
+  status.className = previous.className;
+  status.innerHTML = previous.html;
 }
 
 function commandOwnsGlobalStatus() {
@@ -284,10 +294,7 @@ function settleCommandGlobalStatus(state, error) {
     const previous = commandGlobalFailure.previous;
     commandGlobalFailure = commandGlobalFailure.previousFailure || null;
     if (status && previous) {
-      for (const [name] of commandGlobalStatusSnapshot(status).attributes) status.removeAttribute(name);
-      for (const [name, value] of previous.attributes) status.setAttribute(name, value);
-      status.className = previous.className;
-      status.innerHTML = previous.html;
+      restoreCommandGlobalStatus(status, previous);
       if (commandGlobalFailure) commandGlobalFailure.node = status.firstChild;
     }
     const remaining = [...commandGlobalPending].at(-1);
@@ -302,11 +309,7 @@ function settleCommandGlobalStatus(state, error) {
         ? remaining.route.overdueLabel : remaining.route.pendingLabel);
     } else if (commandGlobalStatusPrevious) {
       const status = globalThis.document.getElementById('status');
-      const current = commandGlobalStatusSnapshot(status);
-      for (const [name] of current.attributes) status.removeAttribute(name);
-      for (const [name, value] of commandGlobalStatusPrevious.attributes) status.setAttribute(name, value);
-      status.className = commandGlobalStatusPrevious.className;
-      status.innerHTML = commandGlobalStatusPrevious.html;
+      restoreCommandGlobalStatus(status, commandGlobalStatusPrevious);
     }
   }
   if (!commandGlobalPending.size) {
@@ -393,6 +396,32 @@ function commandFailureText(error) {
   return 'Command failed';
 }
 
+function commandErrorPayload(error) {
+  return error?.payload && typeof error.payload === 'object'
+    ? error.payload
+    : error?.result && typeof error.result === 'object' ? error.result : {};
+}
+
+function commandErrorCodes(error) {
+  const payload = commandErrorPayload(error);
+  const nested = payload.error && typeof payload.error === 'object' ? payload.error : {};
+  return [payload.error_code, payload.reason_code, payload.code, nested.code, error?.code];
+}
+
+function commandFileChangedOnDiskError(error) {
+  const payload = commandErrorPayload(error);
+  const nested = payload.error && typeof payload.error === 'object' ? payload.error : {};
+  return commandErrorCodes(error).includes('changed_on_disk')
+    || [payload.message_key, payload.user_message?.key, nested.message_key, nested.message?.key].includes('fs.error.changedOnDisk');
+}
+
+function commandFileChangedOnDiskText(error) {
+  const payload = commandErrorPayload(error);
+  const nested = payload.error && typeof payload.error === 'object' ? payload.error : {};
+  const path = payload.path || nested.path || error?.path || '';
+  return typeof t === 'function' ? t('fs.error.changedOnDisk', {path}) : commandFailureText(error);
+}
+
 function settleCommandPendingState(state, error = null) {
   state.settled = true;
   if (state.overdueTimer !== null) {
@@ -409,6 +438,25 @@ function settleCommandPendingState(state, error = null) {
     else state.control.setAttribute?.('aria-busy', state.previous.ariaBusy);
   }
   if (error) {
+    const fileChangedOnDisk = commandFileChangedOnDiskError(error);
+    // Deadline failures already reject the caller; a timed notice keeps unrelated controls usable.
+    if (fileChangedOnDisk || commandErrorCodes(error).some(code => code === 'deadline_expired' || code === 'client_deadline_expired')) {
+      if (state.status) state.status.remove?.();
+      if (state.control) {
+        const descriptions = commandDescriptionIds(state.control).filter(id => id !== state.status?.id);
+        if (descriptions.length) state.control.setAttribute?.('aria-describedby', descriptions.join(' '));
+        else state.control.removeAttribute?.('aria-describedby');
+      }
+      settleCommandGlobalStatus(state, null);
+      if (typeof showTimedStatusNotice === 'function') {
+        try {
+          showTimedStatusNotice(fileChangedOnDisk ? commandFileChangedOnDiskText(error) : commandFailureText(error));
+        } catch (toastError) {
+          console.error('Unable to show command notice', toastError);
+        }
+      }
+      return;
+    }
     const reason = commandFailureText(error);
     if (state.status) {
       state.status.className = 'command-error-status';

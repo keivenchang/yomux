@@ -285,7 +285,7 @@ func (s *server) selfUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	jsonResponse(w, http.StatusOK, s.loadUpdateJob())
+	jsonResponse(w, http.StatusOK, map[string]any{"job": s.loadUpdateJob()})
 }
 
 func (s *server) recoverSelfUpdateJob() {
@@ -340,7 +340,7 @@ func (s *server) selfUpdate(w http.ResponseWriter, r *http.Request) {
 	job := s.loadUpdateJob()
 	if job.State == "preparing" || job.State == "activating" || job.State == "restarting" {
 		s.updateJobMu.Unlock()
-		jsonResponse(w, http.StatusAccepted, map[string]any{"ok": true, "restarting": true, "version": job.Target, "target": job.Target, "job": job})
+		jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "restarting": true, "version": job.Target, "target": job.Target, "job": job})
 		return
 	}
 	update := s.updates.Snapshot()
@@ -357,7 +357,7 @@ func (s *server) selfUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.updateJobMu.Unlock()
 	go s.runSelfUpdate(job)
-	jsonResponse(w, http.StatusAccepted, map[string]any{"ok": true, "restarting": true, "version": job.Target, "target": job.Target, "instance_id": s.instanceID, "job": job})
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "restarting": true, "version": job.Target, "target": job.Target, "instance_id": s.instanceID, "job": job})
 }
 
 func (s *server) runSelfUpdate(job selfUpdateJob) {
@@ -407,18 +407,32 @@ func (s *server) runSelfUpdate(job selfUpdateJob) {
 		fail(err)
 		return
 	}
-	if strings.TrimSpace(string(status)) != "" {
-		fail(errors.New("checkout has tracked or untracked changes"))
-		return
-	}
-	ancestor, err := exec.Command("git", "-C", root, "merge-base", "--is-ancestor", head, job.TargetSHA).CombinedOutput()
-	if err != nil {
-		fail(fmt.Errorf("checkout is not behind the pinned update: %s", strings.TrimSpace(string(ancestor))))
-		return
-	}
 	resolved, err := command(root, "rev-parse", job.TargetSHA)
 	if err != nil || strings.TrimSpace(string(resolved)) != job.TargetSHA {
 		fail(errors.New("pinned target commit changed or is unavailable"))
+		return
+	}
+	ancestorErr := exec.Command("git", "-C", root, "merge-base", "--is-ancestor", head, job.TargetSHA).Run()
+	notAncestor := false
+	if ancestorErr != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(ancestorErr, &exitErr) || exitErr.ExitCode() != 1 {
+			fail(fmt.Errorf("could not verify update ancestry: %w", ancestorErr))
+			return
+		}
+		notAncestor = true
+	}
+	hasLocalChanges := strings.TrimSpace(string(status)) != ""
+	if notAncestor {
+		if hasLocalChanges {
+			fail(fmt.Errorf("Auto-update can't use this checkout because it has local work. Save that work, then run this instance from a clean %s checkout.", job.Target))
+		} else {
+			fail(fmt.Errorf("Auto-update can't use this branch because it has a local commit. Run this instance from a clean %s checkout to update.", job.Target))
+		}
+		return
+	}
+	if hasLocalChanges {
+		fail(errors.New("Auto-update needs a clean checkout. Commit or stash the local edits, then retry."))
 		return
 	}
 	stage := filepath.Join(s.config, "self-update", job.TargetSHA, job.ID)

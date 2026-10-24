@@ -364,7 +364,7 @@ function applyAndSaveGlobalTheme(next) {
   renderSessionButtons();  // rebuild the menu bar so the View -> Theme active marker tracks the new mode
   return saveSettingsPatch(settingPatch('appearance.theme', next))
     .then(() => {
-      statusEl.textContent = t('status.themeChanged', {theme: globalThemeLabel(next)});
+      showLayoutStatus(t('status.themeChanged', {theme: globalThemeLabel(next)}));
     })
     .catch(error => {
       statusErr(localizedHtml('status.themeSaveFailed', {error: userMessageText(error, t('common.requestFailed'))}));
@@ -401,7 +401,7 @@ async function openYoloRuleFile() {
     yoloRulesPayload = payload;
     renderPreferencesPanels();
     await openFileInEditor(payload.path || yoloRulePath(), {name: basenameOf(payload.path || yoloRulePath())});
-    statusEl.textContent = t('status.openedYoloRule');
+    showLayoutStatus(t('status.openedYoloRule'));
   } catch (error) {
     statusErr(localizedHtml('status.yoloOpenRuleFailed', {error}));
   }
@@ -414,9 +414,9 @@ async function reloadYoloRules() {
     renderPreferencesPanels();
     const level = payload.error ? 'error' : '';
     const errorText = userMessageText(payload, payload.error || '');
-    statusEl.innerHTML = payload.error
+    setStatusHtml(payload.error
       ? `<span class="err">${localizedHtml('status.yoloReloadFailed', {error: errorText})}</span>`
-      : `<span class="ok">${localizedHtml('status.yoloReloaded')}</span>`;
+      : `<span class="ok">${localizedHtml('status.yoloReloaded')}</span>`);
     emitNotification('yoloRules', {title: t('brand.yoloRules'), lines: errorText || yoloRuleStatusDetail(), className: level ? 'attention-alert toast' : ''});
   } catch (error) {
     statusErr(localizedHtml('status.yoloReloadRequestFailed', {error}));
@@ -1454,6 +1454,7 @@ function appMenuAnchorInlineSize(popover) {
 function measureAppMenuContentWidth(popover) {
   if (!popover?.cloneNode || !document.body) return null;
   const clone = popover.cloneNode(true);
+  clone.removeAttribute('popover');
   clone.style.position = 'fixed';
   clone.style.insetInlineStart = '0';
   clone.style.insetBlockStart = '0';
@@ -1514,6 +1515,19 @@ function fitAppMenuPopover(popover) {
   if (!popover) return;
   popover.style.setProperty('--app-menu-fit-offset', '0px');
   popover.style.removeProperty('--app-menu-fit-width');
+  if (popover.hasAttribute('popover')) {
+    const anchor = popover.parentElement?.querySelector?.(':scope > .app-menu-button, :scope > .app-menu-command');
+    const anchorRect = anchor?.getBoundingClientRect?.();
+    if (anchorRect) {
+      popover.style.inset = 'auto';
+      popover.style.position = 'fixed';
+      popover.style.left = `${Math.ceil(anchorRect.left)}px`;
+      popover.style.top = `${Math.ceil(anchorRect.bottom)}px`;
+      popover.style.right = 'auto';
+      popover.style.bottom = 'auto';
+      popover.style.margin = '0';
+    }
+  }
   const measured = measureAppMenuContentWidth(popover);
   const anchorWidth = appMenuAnchorInlineSize(popover);
   const desiredWidth = Math.max(anchorWidth, measured || 0);
@@ -1696,7 +1710,7 @@ function createAppMenuNumberSetting(item) {
     saveSettingsPatch(settingPatch(item.path, next))
       .then(() => {
         renderPreferencesPanels();
-        statusEl.textContent = t('status.settingSaved', {path: item.path});
+        showLayoutStatus(t('status.settingSaved', {path: item.path}));
       })
       .catch(error => {
         statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))}));
@@ -1817,7 +1831,7 @@ function createAppMenuCommand(item, options = {}) {
       const autoTarget = event.target.closest('[data-auto-session]');
       if (autoTarget && button.contains(autoTarget)) {
         if (readOnlyMode) {
-          statusEl.textContent = t('status.yoloAdminRequired');
+          showLayoutStatus(t('status.yoloAdminRequired'));
           return;
         }
         toggleAutoApprove(autoTarget.dataset.autoSession).then(() => {
@@ -1986,7 +2000,9 @@ function openAppMenu(wrapper, options = {}) {
   closeFileImagePreview();
   closeAppMenus(wrapper);
   refreshAppMenuForOpen(wrapper);
-  fitAppMenuPopover(wrapper.querySelector(':scope > .app-menu-popover'));
+  const popover = wrapper.querySelector(':scope > .app-menu-popover');
+  if (popover?.hasAttribute('popover') && !popover.matches(':popover-open')) popover.showPopover();
+  fitAppMenuPopover(popover);
   wrapper.querySelectorAll(':scope > .app-menu-popover .app-submenu-popover').forEach(fitAppMenuPopover);
   wrapper.classList.add(CLS.open);
   if (!wrapper.classList.contains('app-menu--nested-root')) {
@@ -2019,6 +2035,8 @@ function refreshAppMenuForOpen(wrapper) {
 function closeAppMenus(keepOpen = null) {
   for (const menu of document.querySelectorAll('.app-menu.open')) {
     if (menu === keepOpen) continue;
+    const popover = menu.querySelector(':scope > .app-menu-popover');
+    if (popover?.matches(':popover-open')) popover.hidePopover();
     menu.classList.remove(CLS.open);
     menu.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'false');
   }

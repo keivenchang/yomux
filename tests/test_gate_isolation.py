@@ -2541,7 +2541,15 @@ def test_gate_server_start_rolls_back_thread_creation_failure_and_reacquires_por
     monkeypatch.setattr(gate_harness_module, "FixtureHTTPServer", Server)
     monkeypatch.setattr(gate_harness_module, "track_fixture_http_requests", lambda _server: None)
     monkeypatch.setattr(gate_harness_module, "prepare_fixture_http_app", lambda *_args: None)
-    monkeypatch.setattr(gate_harness_module.threading, "Thread", FailingThread)
+    harness_threading = SimpleNamespace(**vars(threading))
+    harness_threading.Thread = FailingThread
+    monkeypatch.setattr(gate_harness_module, "threading", harness_threading)
+    foreign_finished = threading.Event()
+    foreign_thread = threading.Thread(target=foreign_finished.set)
+    foreign_thread.start()
+    foreign_thread.join(timeout=2.0)
+    assert foreign_finished.is_set() is True
+    assert foreign_thread.is_alive() is False
 
     def make_app(_sessions):
         app = App()
@@ -4213,6 +4221,8 @@ def test_browser_boot_route_registry_has_one_handler_and_matches_gate_contract()
         assert json.dumps(route.path) in fixture
         for method in route.methods:
             assert browser_layout.route_for_request(method, route.path) is not None
+    events = next(route for route in browser_layout.BROWSER_BOOT_ROUTES if route.path == "/api/events")
+    assert events.methods == ("GET", "POST")
     assert "fixture method not allowed" in fixture
 
 
@@ -4239,6 +4249,11 @@ def test_browser_bootstrap_represents_or_names_every_production_key():
 
     assert browser_layout.browser_boot_production_contract_errors(bootstrap) == ()
     assert set(browser_layout.BROWSER_BOOT_PRESETS) == {"default", "readonly"}
+    assert bootstrap["settingsPayload"]["settings"]["general"]["startup_tips"] is False
+    explicit = browser_layout.build_browser_bootstrap(browser_layout.BrowserBootScenario(
+        settings={"general": {"startup_tips": True, "default_tabber_mode": "normal"}},
+    ))
+    assert explicit["settingsPayload"]["settings"]["general"] == {"startup_tips": True, "default_tabber_mode": "normal"}
 
 
 def test_browser_boot_scenario_is_deeply_immutable_at_its_mapping_boundaries():

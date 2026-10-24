@@ -3,7 +3,64 @@
 
 package main
 
-import "strings"
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"os"
+	"os/user"
+	"path/filepath"
+	"strings"
+)
+
+const starterAuthConfigHeader = "# YOmux authentication is disabled until an account entry is uncommented.\n"
+
+func initializeStarterAuthConfig(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	username := "admin"
+	if current, err := user.Current(); err == nil && strings.TrimSpace(current.Username) != "" {
+		username = current.Username
+	} else if value := strings.TrimSpace(os.Getenv("USER")); value != "" {
+		username = value
+	} else if value := strings.TrimSpace(os.Getenv("LOGNAME")); value != "" {
+		username = value
+	}
+	passwordBytes := make([]byte, 18)
+	if _, err := rand.Read(passwordBytes); err != nil {
+		return fmt.Errorf("generate starter admin password: %w", err)
+	}
+	password := base64.RawURLEncoding.EncodeToString(passwordBytes)
+	content := starterAuthConfigHeader + fmt.Sprintf("# Uncomment the admin account below, save the file, then refresh the browser.\n# Keep admin credentials private. Add readonly accounts explicitly only when needed.\n#\nusers:\n#  - username: %q\n#    password: %q\n#    role: \"admin\"\n", username, password)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := file.WriteString(content); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	return errors.Join(directory.Sync(), directory.Close())
+}
 
 // These scalar rules mirror yomux_lib.auth's deliberately small YAML contract.
 func stripYAMLComment(line string) string {

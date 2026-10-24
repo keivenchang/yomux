@@ -83,6 +83,58 @@ type eventJournalEntry struct {
 	NextID            int            `json:"next_id"`
 }
 
+// A subscription has one queue owner: the broker mutex. Readiness never carries
+// payloads, so a subscriber cannot overtake events temporarily moved by coalescing.
+type eventSubscription struct {
+	broker   *eventBroker
+	queue    []clientEvent
+	capacity int
+	ready    chan struct{}
+	closed   bool
+}
+
+func newEventSubscription(broker *eventBroker, capacity int) *eventSubscription {
+	return &eventSubscription{broker: broker, capacity: capacity, ready: make(chan struct{}, 1)}
+}
+
+func (s *eventSubscription) enqueueLocked(event clientEvent) {
+	s.queue = append(s.queue, event)
+	select {
+	case s.ready <- struct{}{}:
+	default:
+	}
+}
+
+func (s *eventSubscription) dequeueLocked() (clientEvent, bool) {
+	if len(s.queue) == 0 {
+		return clientEvent{}, false
+	}
+	event := s.queue[0]
+	copy(s.queue, s.queue[1:])
+	s.queue[len(s.queue)-1] = clientEvent{}
+	s.queue = s.queue[:len(s.queue)-1]
+	if !s.closed {
+		if len(s.queue) == 0 {
+			select {
+			case <-s.ready:
+			default:
+			}
+		} else {
+			select {
+			case s.ready <- struct{}{}:
+			default:
+			}
+		}
+	}
+	return event, true
+}
+
+func (s *eventSubscription) dequeue() (clientEvent, bool) {
+	s.broker.mu.Lock()
+	defer s.broker.mu.Unlock()
+	return s.dequeueLocked()
+}
+
 type eventBroker struct {
 	mu                  sync.Mutex
 	epoch               string
@@ -91,13 +143,13 @@ type eventBroker struct {
 	retained            map[string]clientEvent
 	terminalEvents      map[string]clientEvent
 	events              []clientEvent
-	subscribers         map[chan clientEvent]struct{}
-	channels            map[chan clientEvent]map[string]bool
-	channelFilters      map[chan clientEvent]bool
-	clientIDs           map[chan clientEvent]string
-	clientStats         map[chan clientEvent]*eventSubscriberStats
-	pending             map[chan clientEvent]map[string]clientEvent
-	repair              map[chan clientEvent]map[string]bool
+	subscribers         map[*eventSubscription]struct{}
+	channels            map[*eventSubscription]map[string]bool
+	channelFilters      map[*eventSubscription]bool
+	clientIDs           map[*eventSubscription]string
+	clientStats         map[*eventSubscription]*eventSubscriberStats
+	pending             map[*eventSubscription]map[string]clientEvent
+	repair              map[*eventSubscription]map[string]bool
 	journalPath         string
 	published           int
 	delivered           int
@@ -171,8 +223,8 @@ func newEventBroker() *eventBroker {
 	}
 	return &eventBroker{
 		epoch: fmt.Sprintf("go-%d", time.Now().UnixNano()), revisions: map[string]int{}, retained: map[string]clientEvent{}, terminalEvents: map[string]clientEvent{},
-		subscribers: map[chan clientEvent]struct{}{}, channels: map[chan clientEvent]map[string]bool{}, channelFilters: map[chan clientEvent]bool{}, clientIDs: map[chan clientEvent]string{},
-		clientStats: map[chan clientEvent]*eventSubscriberStats{}, pending: map[chan clientEvent]map[string]clientEvent{}, repair: map[chan clientEvent]map[string]bool{},
+		subscribers: map[*eventSubscription]struct{}{}, channels: map[*eventSubscription]map[string]bool{}, channelFilters: map[*eventSubscription]bool{}, clientIDs: map[*eventSubscription]string{},
+		clientStats: map[*eventSubscription]*eventSubscriberStats{}, pending: map[*eventSubscription]map[string]clientEvent{}, repair: map[*eventSubscription]map[string]bool{},
 		publishedByType: map[string]eventMetric{}, deliveredByType: map[string]eventMetric{}, filteredByType: map[string]eventMetric{},
 		publishedByResource: map[string]eventMetric{}, deliveredByResource: map[string]eventMetric{}, coalescedByResource: map[string]eventMetric{}, droppedByResource: map[string]eventMetric{},
 		queueSize: queueSize,
@@ -405,7 +457,7 @@ func (b *eventBroker) hasResource(resource string) bool {
 	return false
 }
 
-func (b *eventBroker) readySnapshotFor(ch chan clientEvent) map[string]int {
+func (b *eventBroker) readySnapshotFor(ch *eventSubscription) map[string]int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	selected := b.channels[ch]
@@ -1034,6 +1086,23 @@ func (s *server) cancelOperation(id string) error {
 	}
 	return s.saveOperationsLocked()
 }
+func orderedClientEvent(event clientEvent) bool {
+	switch event.Type {
+	case "files_changed", "fs_changed", "attention_acks_changed", "stats_sample", "yoagent_stream_delta":
+		return true
+	case "yoagent_jobs_changed":
+		return event.Payload["notification"] != nil
+	case "tmux_roster_changed":
+		switch renames := event.Payload["renames"].(type) {
+		case []map[string]any:
+			return len(renames) > 0
+		case []any:
+			return len(renames) > 0
+		}
+	}
+	return false
+}
+
 func (b *eventBroker) publish(kind string, payload map[string]any) (clientEvent, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -1056,6 +1125,7 @@ func (b *eventBroker) publish(kind string, payload map[string]any) (clientEvent,
 	b.revisions[resource] = base + 1
 	b.nextID++
 	e := clientEvent{ID: b.nextID, Type: kind, Time: float64(time.Now().UnixNano()) / 1e9, Payload: payload, Epoch: b.epoch, Resource: resource, Base: base, Revision: base + 1}
+	ordered := orderedClientEvent(e)
 	if err := b.appendDurable(e); err != nil {
 		if kind != "event_log_changed" {
 			b.nextID--
@@ -1086,92 +1156,73 @@ func (b *eventBroker) publish(kind string, payload map[string]any) (clientEvent,
 		b.retained[resource] = e
 	}
 	for ch := range b.subscribers {
+		delivery := e
 		if selected := b.channels[ch]; b.channelFilters[ch] && !eventMatchesChannels(kind, mapKeys(selected)) {
 			b.filtered++
 			b.filteredBytes += bytes
 			incrementEventMetric(b.filteredByType, kind, bytes)
 			continue
 		}
-		if pending := b.pending[ch]; pending != nil {
+		// Incremental payloads and one-shot effects must retain each delivery, even
+		// when another event for the same resource has not reached its subscriber.
+		if pending := b.pending[ch]; !ordered && pending != nil {
 			if _, ok := pending[resource]; ok {
 				prior := pending[resource]
 				if kind == "event_log_changed" {
-					payload = mergeEventLogScopes(prior.Payload, payload)
-					e.Payload = payload
+					delivery.Payload = mergeEventLogScopes(prior.Payload, e.Payload)
 				}
-				priorPatch, _ := prior.Payload["patch"].(bool)
-				currentPatch, _ := payload["patch"].(bool)
-				if priorPatch || currentPatch {
-					if b.repair[ch] == nil {
-						b.repair[ch] = map[string]bool{}
+				if b.replaceQueuedResource(ch, resource, delivery) {
+					priorPatch, _ := prior.Payload["patch"].(bool)
+					currentPatch, _ := delivery.Payload["patch"].(bool)
+					if priorPatch || currentPatch {
+						if b.repair[ch] == nil {
+							b.repair[ch] = map[string]bool{}
+						}
+						b.repair[ch][resource] = true
 					}
-					b.repair[ch][resource] = true
+					pending[resource] = delivery
+					b.coalesced++
+					incrementEventMetric(b.coalescedByResource, resource, bytes)
+					if stats := b.clientStats[ch]; stats != nil {
+						stats.coalescedEvents++
+					}
+					continue
 				}
-				pending[resource] = e
-				b.replaceQueuedResource(ch, resource, e)
-				b.coalesced++
-				incrementEventMetric(b.coalescedByResource, resource, bytes)
-				if stats := b.clientStats[ch]; stats != nil {
-					stats.coalescedEvents++
-				}
-				continue
+				delivery = e
 			}
 		}
-		select {
-		case ch <- b.withRepair(ch, e):
-			b.pending[ch][resource] = e
-			b.delivered++
-			b.deliveredBytes += bytes
-			incrementEventMetric(b.deliveredByType, kind, bytes)
-			incrementEventMetric(b.deliveredByResource, resource, bytes)
-			if stats := b.clientStats[ch]; stats != nil {
-				stats.deliveredEvents++
-				stats.deliveredBytes += bytes
-			}
-		default:
-			select {
-			case dropped := <-ch:
+		if len(ch.queue) == ch.capacity {
+			dropped, _ := ch.dequeueLocked()
+			if pending, ok := b.pending[ch][dropped.Resource]; ok && pending.ID == dropped.ID {
 				delete(b.pending[ch], dropped.Resource)
-				if dropped.Resource != "" {
-					if b.repair[ch] == nil {
-						b.repair[ch] = map[string]bool{}
-					}
-					b.repair[ch][dropped.Resource] = true
-				}
-				droppedBytes := eventBytes(dropped)
-				droppedResource := dropped.Resource
-				if droppedResource == "" {
-					droppedResource = "event"
-				}
-				incrementEventMetric(b.droppedByResource, droppedResource, droppedBytes)
-				if stats := b.clientStats[ch]; stats != nil {
-					stats.droppedEvents++
-				}
-				b.dropped++
-			default:
 			}
-			select {
-			case ch <- b.withRepair(ch, e):
-				b.pending[ch][resource] = e
-				b.delivered++
-				b.deliveredBytes += bytes
-				incrementEventMetric(b.deliveredByType, kind, bytes)
-				incrementEventMetric(b.deliveredByResource, resource, bytes)
-				if stats := b.clientStats[ch]; stats != nil {
-					stats.deliveredEvents++
-					stats.deliveredBytes += bytes
+			if dropped.Resource != "" {
+				if b.repair[ch] == nil {
+					b.repair[ch] = map[string]bool{}
 				}
-			default:
-				droppedResource := resource
-				if droppedResource == "" {
-					droppedResource = "event"
-				}
-				incrementEventMetric(b.droppedByResource, droppedResource, bytes)
-				if stats := b.clientStats[ch]; stats != nil {
-					stats.droppedEvents++
-				}
-				b.dropped++
+				b.repair[ch][dropped.Resource] = true
 			}
+			droppedResource := dropped.Resource
+			if droppedResource == "" {
+				droppedResource = "event"
+			}
+			incrementEventMetric(b.droppedByResource, droppedResource, eventBytes(dropped))
+			if stats := b.clientStats[ch]; stats != nil {
+				stats.droppedEvents++
+			}
+			b.dropped++
+		}
+		ch.enqueueLocked(b.withRepair(ch, delivery))
+		if !ordered {
+			b.pending[ch][resource] = delivery
+		}
+		b.delivered++
+		b.deliveredBytes += bytes
+		incrementEventMetric(b.deliveredByType, kind, bytes)
+		incrementEventMetric(b.deliveredByResource, resource, bytes)
+		if stats := b.clientStats[ch]; stats != nil {
+			stats.deliveredEvents++
+			stats.deliveredBytes += bytes
 		}
 	}
 	return e, nil
@@ -1215,32 +1266,25 @@ func eventLogSessions(value any) ([]string, bool) {
 	}
 }
 
-func (b *eventBroker) replaceQueuedResource(ch chan clientEvent, resource string, replacement clientEvent) {
-	items := make([]clientEvent, 0, len(ch))
-	for {
-		select {
-		case item := <-ch:
-			if item.Resource != resource {
-				items = append(items, item)
-			}
-		default:
-			goto drained
+func (b *eventBroker) replaceQueuedResource(ch *eventSubscription, resource string, replacement clientEvent) bool {
+	items := ch.queue[:0]
+	replaced := false
+	for _, item := range ch.queue {
+		if item.Resource != resource || orderedClientEvent(item) {
+			items = append(items, item)
+		} else {
+			replaced = true
 		}
 	}
-drained:
-	for _, item := range items {
-		select {
-		case ch <- item:
-		default:
-			return
-		}
+	clear(ch.queue[len(items):])
+	ch.queue = items
+	if replaced {
+		ch.enqueueLocked(replacement)
 	}
-	select {
-	case ch <- replacement:
-	default:
-	}
+	return replaced
 }
-func (b *eventBroker) withRepair(ch chan clientEvent, event clientEvent) clientEvent {
+
+func (b *eventBroker) withRepair(ch *eventSubscription, event clientEvent) clientEvent {
 	if values := b.repair[ch]; len(values) > 0 {
 		for resource := range values {
 			event.RepairResources = append(event.RepairResources, resource)
@@ -1318,37 +1362,37 @@ func operationDemandIDs(operationID, operations string) []string {
 	return ids
 }
 
-func (b *eventBroker) subscribe(requested ...string) (chan clientEvent, func()) {
+func (b *eventBroker) subscribe(requested ...string) (*eventSubscription, func()) {
 	return b.subscribeClient("", requested...)
 }
 
-func (b *eventBroker) subscribeClient(clientID string, requested ...string) (chan clientEvent, func()) {
+func (b *eventBroker) subscribeClient(clientID string, requested ...string) (*eventSubscription, func()) {
 	queueSize := b.queueSize
 	if queueSize <= 0 {
 		queueSize = eventQueueSize
 	}
-	ch := make(chan clientEvent, queueSize)
+	ch := newEventSubscription(b, queueSize)
 	b.mu.Lock()
 	if b.subscribers == nil {
-		b.subscribers = map[chan clientEvent]struct{}{}
+		b.subscribers = map[*eventSubscription]struct{}{}
 	}
 	if b.channels == nil {
-		b.channels = map[chan clientEvent]map[string]bool{}
+		b.channels = map[*eventSubscription]map[string]bool{}
 	}
 	if b.channelFilters == nil {
-		b.channelFilters = map[chan clientEvent]bool{}
+		b.channelFilters = map[*eventSubscription]bool{}
 	}
 	if b.clientIDs == nil {
-		b.clientIDs = map[chan clientEvent]string{}
+		b.clientIDs = map[*eventSubscription]string{}
 	}
 	if b.clientStats == nil {
-		b.clientStats = map[chan clientEvent]*eventSubscriberStats{}
+		b.clientStats = map[*eventSubscription]*eventSubscriberStats{}
 	}
 	if b.pending == nil {
-		b.pending = map[chan clientEvent]map[string]clientEvent{}
+		b.pending = map[*eventSubscription]map[string]clientEvent{}
 	}
 	if b.repair == nil {
-		b.repair = map[chan clientEvent]map[string]bool{}
+		b.repair = map[*eventSubscription]map[string]bool{}
 	}
 	b.subscribers[ch] = struct{}{}
 	var selected map[string]bool
@@ -1378,11 +1422,13 @@ func (b *eventBroker) subscribeClient(clientID string, requested ...string) (cha
 			continue
 		}
 		e.Replay = true
-		select {
-		case ch <- e:
-			b.pending[ch][e.Resource] = e
+		if len(ch.queue) < ch.capacity {
+			ch.enqueueLocked(e)
+			if !orderedClientEvent(e) {
+				b.pending[ch][e.Resource] = e
+			}
 			b.replayed++
-		default:
+		} else {
 			droppedResource := e.Resource
 			if droppedResource == "" {
 				droppedResource = "event"
@@ -1405,7 +1451,8 @@ func (b *eventBroker) subscribeClient(clientID string, requested ...string) (cha
 		delete(b.clientStats, ch)
 		delete(b.pending, ch)
 		delete(b.repair, ch)
-		close(ch)
+		ch.closed = true
+		close(ch.ready)
 		b.mu.Unlock()
 	}
 }

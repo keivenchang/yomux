@@ -565,17 +565,26 @@ function apiFetchDeadlineError(deadlineMs, subject = 'request') {
 }
 
 function apiFetchResponseWithDeadline(response, deadlineState) {
-  if (!response || response.body === null) {
-    deadlineState.onConsumed?.();
-    deadlineState.cleanup();
-    return response;
-  }
   let consumed = false;
-  const noteConsumed = () => {
+  const noteConsumed = (stream = false) => {
     if (consumed) return;
     consumed = true;
-    deadlineState.onConsumed?.();
+    try {
+      deadlineState.onConsumed?.(stream);
+    } finally {
+      deadlineState.cleanup();
+    }
   };
+  const consumptionError = error => {
+    const timeoutError = deadlineState.timeoutError();
+    if (!timeoutError) return error;
+    deadlineState.noteTimeout();
+    return timeoutError;
+  };
+  if (!response || response.body === null) {
+    noteConsumed();
+    return response;
+  }
   const wrappedMethods = new Map();
   for (const name of ['arrayBuffer', 'blob', 'formData', 'json', 'text']) {
     const consume = response[name];
@@ -584,15 +593,9 @@ function apiFetchResponseWithDeadline(response, deadlineState) {
       try {
         return await consume.apply(response, args);
       } catch (error) {
-        const timeoutError = deadlineState.timeoutError();
-        if (timeoutError) {
-          deadlineState.noteTimeout();
-          throw timeoutError;
-        }
-        throw error;
+        throw consumptionError(error);
       } finally {
         noteConsumed();
-        deadlineState.cleanup();
       }
     });
   }
@@ -611,11 +614,12 @@ function apiFetchResponseWithDeadline(response, deadlineState) {
                 return async (...readArgs) => {
                   try {
                     const result = await readerTarget.read(...readArgs);
-                    if (result.done) noteConsumed();
+                    if (result.done) noteConsumed(true);
+                    else deadlineState.onChunk?.(result.value);
                     return result;
                   } catch (error) {
-                    noteConsumed();
-                    throw error;
+                    noteConsumed(true);
+                    throw consumptionError(error);
                   }
                 };
               }
@@ -623,8 +627,10 @@ function apiFetchResponseWithDeadline(response, deadlineState) {
                 return async (...cancelArgs) => {
                   try {
                     return await readerTarget.cancel(...cancelArgs);
+                  } catch (error) {
+                    throw consumptionError(error);
                   } finally {
-                    noteConsumed();
+                    noteConsumed(true);
                   }
                 };
               }
@@ -644,6 +650,27 @@ function apiFetchResponseWithDeadline(response, deadlineState) {
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
+}
+
+let previousApiFetchTimingWindow = null;
+
+function fetchApiRequestWithTiming(url, options, timingWindow) {
+  timingWindow.start = jsDebugPerformanceNow();
+  timingWindow.end = null;
+  timingWindow.ambiguous = false;
+  // Coarsened browser clocks can give adjacent fetches overlapping start windows.
+  // Withhold their phase attribution instead of assigning one request's entry to its sibling.
+  if (previousApiFetchTimingWindow && (previousApiFetchTimingWindow.end === null
+      || timingWindow.start <= previousApiFetchTimingWindow.end)) {
+    previousApiFetchTimingWindow.ambiguous = true;
+    timingWindow.ambiguous = true;
+  }
+  previousApiFetchTimingWindow = timingWindow;
+  try {
+    return fetch(url, options);
+  } finally {
+    timingWindow.end = jsDebugPerformanceNow();
+  }
 }
 
 async function apiFetch(url, options = {}, internalOptions = {}) {
@@ -733,8 +760,10 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     noteBackendHealthFailure();
   };
   let response;
+  const resourceTimingWindow = {};
   try {
-    const request = startupImmediate ? fetch(url, requestOptions) : runStartupRefreshApiRequest(() => fetch(url, requestOptions), requestOptions.signal);
+    const fetchRequest = () => fetchApiRequestWithTiming(url, requestOptions, resourceTimingWindow);
+    const request = startupImmediate ? fetchRequest() : runStartupRefreshApiRequest(fetchRequest, requestOptions.signal);
     const requestPromise = Promise.resolve(request).catch(error => {
       if (timeoutError) throw timeoutError;
       throw error;
@@ -785,7 +814,7 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
       provenance: diagnosticProvenance,
     });
     recordApiDebugResponseBytes(debugEvent, response);
-    noteApiDebugHeaders(debugEvent, url, startedAt);
+    noteApiDebugHeaders(debugEvent, url, startedAt, resourceTimingWindow);
   }
   if (response.status === 401 && internalOptions.returnUnauthorizedResponse !== true) {
     const terminalError = claimTerminalAuthentication(response);
@@ -798,12 +827,17 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     cleanup();
     throw terminalError;
   }
+  let consumedResponseBytes = 0;
   return apiFetchResponseWithDeadline(response, {
     cleanup,
     noteTimeout,
     timeoutError: () => timeoutError,
-    onConsumed: () => {
-      if (recordDebug) noteApiDebugResponseConsumed(debugEvent, url, startedAt);
+    onChunk: chunk => {
+      consumedResponseBytes += Number(chunk?.byteLength) || 0;
+    },
+    onConsumed: stream => {
+      if (recordDebug) noteApiDebugResponseConsumed(debugEvent, url, startedAt, resourceTimingWindow);
+      if (stream) recordApiDebugResponseBytes(debugEvent, response, consumedResponseBytes);
     },
   });
 }
@@ -1240,7 +1274,7 @@ function apiPendingResponseFromNestedEnvelope(envelope = {}) {
 
 async function apiJsonResponse(response) {
   const payload = await response.json().catch(error => {
-    if (error?.code === 'deadline_expired') throw error;
+    if (error?.name !== 'SyntaxError') throw error;
     return {};
   });
   const pending = apiPendingResponseFromPayload(payload, {status: response?.status});
@@ -1636,35 +1670,38 @@ function jsDebugResourcePhaseTimings(entry, startedAt = null) {
   return Object.fromEntries(Object.entries(phases).filter(([_key, value]) => value !== null));
 }
 
-function jsDebugResourceTimingEntry(url, startedAt) {
+function jsDebugResourceTimingEntry(url, timingWindow) {
+  if (!timingWindow || timingWindow.ambiguous || !Number.isFinite(timingWindow.start)
+      || !Number.isFinite(timingWindow.end) || timingWindow.end < timingWindow.start) return null;
   const timings = globalThis.performance;
   if (typeof timings?.getEntriesByName !== 'function') return null;
   let absolute = String(url || '');
   try {
     absolute = new URL(absolute, window.location.origin).href;
   } catch (_) {}
-  const entries = timings.getEntriesByName(absolute).filter(entry => !entry.initiatorType || entry.initiatorType === 'fetch');
-  if (!entries.length) return null;
-  return entries.reduce((closest, entry) => (
-    Math.abs(Number(entry.startTime) - startedAt) < Math.abs(Number(closest.startTime) - startedAt) ? entry : closest
+  const entries = timings.getEntriesByName(absolute).filter(entry => (
+    (!entry.initiatorType || entry.initiatorType === 'fetch')
+    && Number.isFinite(entry.startTime) && entry.startTime >= timingWindow.start && entry.startTime <= timingWindow.end
+    && Number(entry.responseEnd) > 0
   ));
+  return entries.length === 1 ? entries[0] : null;
 }
 
-function updateApiDebugResourcePhases(event, url, startedAt) {
+function updateApiDebugResourcePhases(event, url, startedAt, timingWindow) {
   if (!event) return;
-  const entry = jsDebugResourceTimingEntry(url, startedAt);
+  const entry = jsDebugResourceTimingEntry(url, timingWindow);
   if (!entry) return;
   event.phaseTimings = {...(event.phaseTimings || {}), ...jsDebugResourcePhaseTimings(entry, startedAt)};
   event.connectionProtocol = String(entry.nextHopProtocol || '').toLowerCase().slice(0, 24);
 }
 
-function noteApiDebugHeaders(event, url, startedAt) {
-  updateApiDebugResourcePhases(event, url, startedAt);
+function noteApiDebugHeaders(event, url, startedAt, timingWindow) {
+  updateApiDebugResourcePhases(event, url, startedAt, timingWindow);
 }
 
-function noteApiDebugResponseConsumed(event, url, startedAt) {
+function noteApiDebugResponseConsumed(event, url, startedAt, timingWindow) {
   if (!event) return;
-  updateApiDebugResourcePhases(event, url, startedAt);
+  updateApiDebugResourcePhases(event, url, startedAt, timingWindow);
   const consumedAt = jsDebugPerformanceNow();
   const afterPaint = () => {
     const applyRenderMs = jsDebugRoundedMs(jsDebugPerformanceNow() - consumedAt);
@@ -1859,15 +1896,17 @@ function recordApiDebugEvent(url, method, startedAt, result = {}) {
   return recordJsDebugEvent('api', payload);
 }
 
-function recordApiDebugResponseBytes(event, response) {
+function recordApiDebugResponseBytes(event, response, consumedBytes = undefined) {
   if (!event || !response) return;
-  const headerBytes = Number(response.headers?.get?.('Content-Length') || NaN);
+  const headerBytes = consumedBytes ?? Number(response.headers?.get?.('Content-Length') || NaN);
   if (Number.isFinite(headerBytes) && headerBytes >= 0) {
     event.responseBytes = headerBytes;
     finalizeJsDebugCurrentObservationBytes(event);
     scheduleJsDebugPanelRefresh();
     return;
   }
+  // A clone tees the body: its telemetry drain would keep an SSE producer alive after reader.cancel().
+  if (String(response.headers?.get?.('Content-Type') || '').split(';', 1)[0].trim().toLowerCase() === 'text/event-stream') return;
   if (typeof response.clone !== 'function') return;
   response.clone().arrayBuffer().then(buffer => {
     event.responseBytes = buffer.byteLength;
@@ -3008,6 +3047,14 @@ function fileStateFor(path) {
   return state ? normalizeFileStateRecord(state) : null;
 }
 
+function fileStateIsCurrent(path, state) {
+  return Boolean(state && fileState.get(path) === state);
+}
+
+function clearFileEditorSelfWriteForState(path, state) {
+  if (fileEditorSelfWriteAcks.get(path)?.state === state) fileEditorSelfWriteAcks.delete(path);
+}
+
 function ensureHistoricalFileState(item, defaults = null) {
   const identity = historicalFileEditorIdentity(item);
   if (!identity) return null;
@@ -3057,6 +3104,7 @@ function setFileState(path, state) {
   if (!path) return null;
   const previous = fileStateFor(path);
   if (previous && previous !== state && state && typeof state === 'object') {
+    clearFileEditorSelfWriteForState(path, previous);
     if (!(state.editorTabItems instanceof Set)) state.editorTabItems = previous.editorTabItems;
     if (!(state.ownerSessions instanceof Set)) state.ownerSessions = previous.ownerSessions;
     if (!(state.viewMode instanceof Map)) state.viewMode = previous.viewMode;
@@ -3065,7 +3113,6 @@ function setFileState(path, state) {
     if (!Object.prototype.hasOwnProperty.call(state, 'diffPinnedToRef')) state.diffPinnedToRef = previous.diffPinnedToRef;
     if (!Object.prototype.hasOwnProperty.call(state, 'imageMode')) state.imageMode = previous.imageMode;
     if (!Object.prototype.hasOwnProperty.call(state, 'blame')) state.blame = previous.blame;
-    if (!Object.prototype.hasOwnProperty.call(state, 'conflictDialogOpen')) state.conflictDialogOpen = previous.conflictDialogOpen;
     if (!Object.prototype.hasOwnProperty.call(state, 'realpath')) state.realpath = previous.realpath;
     if (!Object.prototype.hasOwnProperty.call(state, 'fileId')) state.fileId = previous.fileId;
     if (!Object.prototype.hasOwnProperty.call(state, 'fileIdentity')) state.fileIdentity = previous.fileIdentity;
@@ -3078,6 +3125,7 @@ function setFileState(path, state) {
 
 function deleteFileState(path) {
   if (!path) return false;
+  clearFileEditorSelfWriteForState(path, fileStateFor(path));
   return fileState.delete(path);
 }
 
@@ -3403,10 +3451,13 @@ function cycleSessionRepoDisplay(session, info, direction) {
 // Centralized status-line writers: the err/ok pill markup is defined here, not re-inlined at the ~55
 // call sites that report a result. Both take already-built (and esc'd) inner HTML.
 function resetLayoutStatusSurface() {
-  if (!statusEl) return;
+  if (!statusEl || terminalAuthenticationActive()) return;
   statusEl.classList.remove('layout-status-visible', 'layout-status-danger', 'layout-status-advisory');
   statusEl.removeAttribute('data-layout-status-kind');
   statusEl.removeAttribute('title');
+  statusEl.removeAttribute('role');
+  statusEl.removeAttribute('aria-live');
+  statusEl.removeAttribute('aria-atomic');
   delete statusEl.dataset.layoutStatusKind;
 }
 
@@ -3415,27 +3466,40 @@ function layoutStatusSurfaceOwnsMessage() {
     && Boolean(statusEl.dataset.layoutStatusKind);
 }
 
-function statusErr(html) {
+function setStatusHtml(html) {
+  if (!statusEl || terminalAuthenticationActive()) return;
   resetLayoutStatusSurface();
-  if (!statusEl) return;
-  statusEl.innerHTML = `<span class="err">${html}</span>`;
+  statusEl.innerHTML = html;
+}
+
+function statusErr(html) {
+  setStatusHtml(`<span class="err">${html}</span>`);
 }
 
 function statusOk(html) {
-  resetLayoutStatusSurface();
-  if (!statusEl) return;
-  statusEl.innerHTML = `<span class="ok">${html}</span>`;
+  setStatusHtml(`<span class="ok">${html}</span>`);
 }
 
 function showLayoutStatus(message, kind = '') {
-  if (!statusEl) return;
+  if (!statusEl || terminalAuthenticationActive()) return;
   const tone = kind === 'danger' || kind === 'advisory' ? kind : '';
   statusEl.textContent = String(message || '');
   resetLayoutStatusSurface();
+  statusEl.setAttribute('role', 'status');
+  statusEl.setAttribute('aria-live', tone === 'danger' ? 'assertive' : 'polite');
+  statusEl.setAttribute('aria-atomic', 'true');
   if (tone && statusEl.textContent.trim()) {
     statusEl.classList.add('layout-status-visible', `layout-status-${tone}`);
     statusEl.dataset.layoutStatusKind = tone;
   }
+}
+
+function showTimedStatusNotice(message) {
+  if (terminalAuthenticationActive() || typeof showToast !== 'function') return null;
+  const notice = showToast('', message, {countdownMs: toastDurationMs, className: 'attention-alert toast command-notice'});
+  notice?.setAttribute?.('role', 'status');
+  notice?.setAttribute?.('aria-live', 'polite');
+  return notice;
 }
 
 function localizedHtml(key, params) {
@@ -7585,7 +7649,7 @@ async function copyTerminalSelection(session, term, options = {}, container = nu
   const selected = options.selectionText != null ? options.selectionText : terminalSelectedText(term, container);
   const action = terminalCopyActionForOptions(options);
   if (!selected) {
-    statusEl.textContent = t('status.nothingSelected');
+    showLayoutStatus(t('status.nothingSelected'));
     return;
   }
   const text = action.dedent ? dedentSelectionText(selected) : selected;
@@ -7600,7 +7664,7 @@ function copyTerminalSelectionFromShortcut(session, term, options = {}, containe
   const selected = terminalSelectedText(term, container);
   const action = terminalCopyActionForOptions(options);
   if (!selected) {
-    statusEl.textContent = t('status.nothingSelected');
+    showLayoutStatus(t('status.nothingSelected'));
     return false;
   }
   const text = action.dedent ? dedentSelectionText(selected) : selected;
@@ -7632,7 +7696,7 @@ async function copyTmuxSelectionToClipboard(session, term = null, container = nu
     return true;
   } catch (error) {
     if (error?.noClipboardText) {
-      statusEl.textContent = error.message || t('status.nothingSelected');
+      showLayoutStatus(error.message || t('status.nothingSelected'));
       return false;
     }
     statusErr(esc(userMessageText(error, t('common.copyFailed', {error}))));
@@ -7742,9 +7806,9 @@ function handleTerminalCopyShortcutKeydown(session, term, container, event) {
       event.preventDefault();
       // in a Claude/tmux pane the APP owns the mouse, so a plain drag never creates an xterm
       // selection — tell the user the working gestures instead of dead-ending.
-      statusEl.textContent = isMacPlatform()
+      showLayoutStatus(isMacPlatform()
         ? t('terminal.copyHintMac')
-        : t('terminal.copyHintPc');
+        : t('terminal.copyHintPc'));
       return true;
     }
     return false; // no selection: let Ctrl-C through as SIGINT

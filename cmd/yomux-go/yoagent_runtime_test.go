@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -451,12 +452,14 @@ func TestRunNativeAgentCancellationStopsProviderProcessGroup(t *testing.T) {
 	t.Setenv("PATH", bin)
 	t.Setenv("YOAGENT_CHILD_PID_FILE", pidPath)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	started := make(chan error, 1)
 	go func() {
 		_, _, runErr := runNativeAgent(ctx, home, map[string]any{}, "codex", "", false, "prompt", func(string) error { return nil })
 		started <- runErr
 	}()
-	deadline := time.NewTimer(5 * time.Second)
+	exitDeadline := time.Now().Add(5 * time.Second)
+	deadline := time.NewTimer(time.Until(exitDeadline))
 	defer deadline.Stop()
 	poll := time.NewTicker(10 * time.Millisecond)
 	defer poll.Stop()
@@ -476,16 +479,63 @@ func TestRunNativeAgentCancellationStopsProviderProcessGroup(t *testing.T) {
 			}
 		}
 	}
-	cancel()
-	if err := <-started; !errors.Is(err, context.Canceled) {
-		t.Fatalf("provider cancellation returned %v", err)
-	}
 	pid, err := strconv.Atoi(childPID)
 	if err != nil {
 		t.Fatalf("invalid child PID %q: %v", childPID, err)
 	}
-	if running, err := nativeAgentTestProcessRunning(pid); err != nil || running {
-		t.Fatalf("provider child %d remains after cancellation: running=%v err=%v", pid, running, err)
+	// Observe this exact child generation before cancellation: waiting for the provider
+	// leader does not wait for a signaled descendant to finish kernel exit processing.
+	waitForExit, closeObserver, err := nativeAgentTestObserveProcessExit(pid, exitDeadline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := closeObserver(); err != nil {
+			t.Error(err)
+		}
+	}()
+	cancel()
+	select {
+	case err := <-started:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("provider cancellation returned %v", err)
+		}
+	case <-deadline.C:
+		t.Fatal("provider cancellation did not finish before the fixture deadline")
+	}
+	if err := waitForExit(); err != nil {
+		t.Fatalf("provider child %d remains after cancellation: %v", pid, err)
+	}
+}
+
+func TestNativeAgentProcessExitObserverRejectsLiveChild(t *testing.T) {
+	child := exec.Command("/bin/sleep", "60")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := child.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			t.Error(err)
+		}
+		var exitError *exec.ExitError
+		if err := child.Wait(); !errors.As(err, &exitError) {
+			t.Errorf("negative control child did not report its expected termination: %v", err)
+		}
+	}()
+	waitForExit, closeObserver, err := nativeAgentTestObserveProcessExit(child.Process.Pid, time.Now().Add(50*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := closeObserver(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if err := waitForExit(); err == nil {
+		t.Fatal("a live child satisfied the process-exit barrier")
+	}
+	if running, err := nativeAgentTestProcessRunning(child.Process.Pid); err != nil || !running {
+		t.Fatalf("negative control child is not live: running=%v err=%v", running, err)
 	}
 }
 
@@ -501,7 +551,8 @@ func nativeAgentTestProcessRunning(pid int) (bool, error) {
 		return true, nil
 	}
 	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-	if errors.Is(err, os.ErrNotExist) {
+	// The owned child can disappear after kill(0) succeeds but before procfs reads its status.
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 		return false, nil
 	}
 	if err != nil {

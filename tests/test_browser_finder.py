@@ -1010,6 +1010,15 @@ def _finder_listing_input_workload(browser, tmp_path, *, certify=False):
         assert final['otherTreeRows'] == 4000, final
         assert final['scroll'] == scroll_after_wheel and scroll_after_wheel > 0, final
         assert final['keepIdentity'] and final['selected'] and final['value'] == native_text, final
+    except TimeoutException as error:
+        diagnostic = browser.execute_script("""
+          const state = window.__finderBoundedInput;
+          return {settled:state?.settled, error:state?.error, rows:state?.count(), observed:state?.rowsObserved,
+            steps:fileTreeRenderStepCount, history:fileTreeRenderHistory.slice(-12),
+            sync:{generation:fileExplorerSyncState.generation, signature:fileExplorerSyncState.inFlightSignature},
+            visibility:document.visibilityState, inputCount:state?.inputEvents.length};
+        """)
+        raise AssertionError(f"Finder publication timed out: {json.dumps(diagnostic, default=str)}") from error
     finally:
         browser.execute_script(
             "const state = window.__finderBoundedInput; if (state) {cancelPendingFileExplorerActiveSync(); fetchDirectory=state.originalFetch; state.observer.disconnect(); state.longTaskObserver.disconnect(); state.input.remove(); delete window.__finderBoundedInput;}"

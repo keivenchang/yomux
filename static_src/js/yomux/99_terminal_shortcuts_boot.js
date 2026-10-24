@@ -109,7 +109,7 @@ function startPinTabShortcutChord() {
   clearPendingGlobalShortcutChord();
   pendingGlobalShortcutChord = 'pin-tab';
   pendingGlobalShortcutChordTimer = setTimeout(clearPendingGlobalShortcutChord, globalShortcutChordTimeoutMs);
-  statusEl.textContent = t('shortcuts.pinTabPrompt', {keys: `${appShortcutText('K', {shift: true})} Enter`});
+  showLayoutStatus(t('shortcuts.pinTabPrompt', {keys: `${appShortcutText('K', {shift: true})} Enter`}));
 }
 
 function handlePendingGlobalShortcutChord(event, key) {
@@ -234,6 +234,7 @@ function handleFocusedPanelSearchShortcut(event, {mod = appModifier(event), key 
 }
 
 function handleGlobalShortcutKeydown(event) {
+  if (handleMarkdownFormattingShortcut(event)) return;
   if (handleFocusedTerminalCopyShortcut(event)) return;
   const focusedTerminalItem = focusedTerminal ? terminals.get(focusedTerminal) : null;
   // OpenCode documents Ctrl+Alt+B/F as native message navigation. The exact-pane check prevents

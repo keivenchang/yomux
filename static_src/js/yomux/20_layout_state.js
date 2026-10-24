@@ -1853,7 +1853,7 @@ function pinnedTabIconHtml(item) {
 function setTabPinned(item, pinned) {
   const resolved = resolveLayoutItem(item);
   if (!isPinnableTab(resolved)) {
-    statusEl.textContent = t('tab.pinUnavailable');
+    showLayoutStatus(t('tab.pinUnavailable'));
     return false;
   }
   const nextPinned = pinnedTabItems.filter(tab => tab !== resolved);
@@ -1867,12 +1867,11 @@ function setTabPinned(item, pinned) {
   applyLayoutSlots(next, {focusSession: resolved, prune: false, forceFull: dockviewLayoutActive()});
   const slot = slotForItem(resolved, layoutSlots);
   const pinnedInSlot = slot ? paneTabs(slot, layoutSlots).filter(tabIsPinned) : [];
-  if (pinned && pinnedInSlot.length >= maxTabsPerPane() && typeof showLayoutStatus === 'function') {
-    showLayoutStatus(pinnedPaneAtCapStatus(pinnedInSlot, maxTabsPerPane()), 'advisory');
+  if (pinned && pinnedInSlot.length >= maxTabsPerPane()) {
+    showTimedStatusNotice(pinnedPaneAtCapStatus(pinnedInSlot, maxTabsPerPane()));
     return true;
   }
-  if (typeof resetLayoutStatusSurface === 'function') resetLayoutStatusSurface();
-  statusEl.textContent = pinned ? t('tab.pinnedStatus', {name: itemLabel(resolved)}) : t('tab.unpinnedStatus', {name: itemLabel(resolved)});
+  showLayoutStatus(pinned ? t('tab.pinnedStatus', {name: itemLabel(resolved)}) : t('tab.unpinnedStatus', {name: itemLabel(resolved)}));
   return true;
 }
 
@@ -3880,6 +3879,7 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.undoRedo'), keys: `${appShortcutText('Z')} / ${appShortcutText('Z', {shift: true})}`},
       {label: t('shortcuts.editorNav'), keys: `${appShortcutText('[', {alt: true})} / ${appShortcutText(']', {alt: true})}`},
     ]},
+    {section: 'Markdown formatting', items: markdownFormatCommands.filter(command => command.key).map(command => ({label: command.label, keys: markdownFormatShortcut(command)}))},
     {section: t('common.diff'), items: [
       {label: t('shortcuts.undoChunk'), keys: appShortcutText('Z')},
       {label: t('shortcuts.redoChunk'), keys: appShortcutText('Z', {shift: true})},
@@ -6453,7 +6453,7 @@ function showStartupHelperTip(options = {}) {
       startupHelpersEnabled = false;
       closeStartupHelperToast(node);
       saveSettingsPatch(settingPatch('general.startup_tips', false))
-        .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
+        .then(() => { showLayoutStatus(t('startupHelper.status.disabled')); })
         .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
     },
   });
@@ -6744,14 +6744,14 @@ function trackSessionStateChanges(sessionNames = sessions) {
   }
   stateTrackingReady = true;
   if (!pendingItems.length) return Promise.resolve(false);
-  return postEventBatch(pendingItems.map(item => item.pending.event)).then(succeeded => {
+  return postEventBatch(pendingItems.map(item => item.pending.event)).then(accepted => {
     for (const {record, pending} of pendingItems) {
       const index = record.pendingEventStateChanges.indexOf(pending);
       if (index < 0) continue;
-      if (succeeded) record.pendingEventStateChanges.splice(index, 1);
+      if (accepted.has(pending.event)) record.pendingEventStateChanges.splice(index, 1);
       else pending.inFlight = false;
     }
-    return succeeded;
+    return pendingItems.every(({pending}) => accepted.has(pending.event));
   });
 }
 
@@ -7192,7 +7192,10 @@ function applyLayoutSlots(nextSlots, options = {}) {
     && !jsDebugStatsLayoutItemsVisible(previousActive)
     && jsDebugStatsLayoutItemsVisible(activeSessions);
   if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: statsActivated});
-  if (options.message) showLayoutStatus(options.message, options.messageKind || '');
+  if (options.message) {
+    if (options.messageKind === 'advisory') showTimedStatusNotice(options.message);
+    else showLayoutStatus(options.message, options.messageKind || '');
+  }
   if (options.tabberNormalSelection !== true && autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
     const focusGeneration = tabSwitchHighlightGeneration;
     setTimeout(() => {

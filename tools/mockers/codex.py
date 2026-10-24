@@ -32,6 +32,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from process_identity import ensure_mock_process_identity
+
+ensure_mock_process_identity("codex")
+
 import common as mock_agent_common
 
 if "--dump-fixtures" in sys.argv[1:]:

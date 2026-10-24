@@ -638,25 +638,6 @@ function markdownPreviewSelectionTransform(container, command, context = null) {
   return true;
 }
 
-function markdownEditorSelectionTransform(view, panel, path, command, context) {
-  const selectedText = String(context?.selectedText || '').trim();
-  const sourceLine = Number(context?.sourceLine || 0);
-  if (!view || !panel || !path || !sourceLine || !selectedText) return false;
-  const state = fileEditorPanelState(panel);
-  if (readOnlyMode || !state || state.kind !== 'text' || state.historical === true) return false;
-  const next = ['bold', 'italic', 'strike', 'underline', 'code', 'clearInline'].includes(command)
-    ? markdownTextWithInlineFormat(state.content, sourceLine, selectedText, command)
-    : markdownTextWithBlockFormat(state.content, sourceLine, command);
-  if (next === null || next === state.content) return false;
-  handleFileEditorContentChanged(panel, path, next, {syntax: false});
-  syncCodeMirrorDocument(view, next, {path});
-  const line = view.state.doc.line(sourceLine);
-  const selectedStart = line.text.indexOf(selectedText);
-  if (selectedStart >= 0) {
-    view.dispatch({selection: {anchor: line.from + selectedStart, head: line.from + selectedStart + selectedText.length}});
-  }
-  return true;
-}
 
 const MARKDOWN_TASK_LINE_RE = /^(\s*(?:[-+*]|\d+[.)])\s+\[)([ xX])(\]\s*)/;
 const MARKDOWN_INLINE_NUMBERED_TASK_RE = /^\s*(?:[-+*]|\d+[.)])\s+\[[ xX]\]\s+(\d+)([.)])\s+\S/;
@@ -1332,48 +1313,6 @@ function updateMarkdownInlineFromPreview(container, block) {
   return true;
 }
 
-function updateMarkdownFormatFromPreview(container, block, command) {
-  const path = container?.dataset?.mdPath || '';
-  const sourceLine = Number(block?.dataset?.sourceLine || 0);
-  const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)
-    .find(panel => fileEditorPanelState(panel)?.historical !== true) || null;
-  const state = sourcePanel ? fileEditorPanelState(sourcePanel) : fileState.get(path);
-  const selection = document.getSelection?.();
-  const selectedText = selection && !selection.isCollapsed && block.contains(selection.anchorNode) && block.contains(selection.focusNode)
-    ? selection.toString()
-    : '';
-  if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text' || state.historical === true) return false;
-  if (!markdownPreviewInlineBlockIsEditable(block)) return false;
-  const next = markdownTextWithInlineFormat(state.content, sourceLine, selectedText, command);
-  if (next === null || next === state.content) return false;
-  container._markdownPreviewLastEdit = {before: state.content, after: next};
-  handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false, previewEdit: true, skipPreviewPanel: container});
-  for (const panel of fileEditorPanelsForPath(path)) {
-    if (fileEditorPanelState(panel)?.historical === true) continue;
-    if (panel?._cmView) syncCodeMirrorDocument(panel._cmView, next, {path});
-  }
-  return true;
-}
-
-function markdownPreviewEditorToolbar(container) {
-  const toolbar = document.createElement('div');
-  toolbar.className = 'markdown-preview-editor-toolbar';
-  toolbar.setAttribute('role', 'toolbar');
-  toolbar.setAttribute('aria-label', t('editor.toolbar.aria'));
-  for (const [command, label] of [['bold', 'B'], ['italic', 'I']]) {
-    const button = makeButton({
-      className: 'markdown-preview-editor-format-button',
-      label: command === 'bold' ? 'B' : 'I',
-      title: `${t('editor.toolbar.aria')}: ${label}`,
-      ariaLabel: `${t('editor.toolbar.aria')}: ${label}`,
-    });
-    button.dataset.markdownPreviewCommand = command;
-    toolbar.appendChild(button);
-  }
-  container.prepend(toolbar);
-  return toolbar;
-}
-
 function markdownFormattingContextMenu(event, context, options = {}) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu markdown-preview-context-menu';
@@ -1409,16 +1348,15 @@ function markdownFormattingContextMenu(event, context, options = {}) {
     button.dataset.markdownCommand = command;
     return button;
   };
-  action('Bold', 'bold', !context.selectedText, options.isActive?.('bold', context) === true);
-  action('Italic', 'italic', !context.selectedText, options.isActive?.('italic', context) === true);
-  action('Strikethrough', 'strike', !context.selectedText, options.isActive?.('strike', context) === true);
-  action('Underline', 'underline', !context.selectedText, options.isActive?.('underline', context) === true);
-  action('Clear inline formatting', 'clearInline', !context.selectedText);
-  appendContextMenuSeparator(menu);
-  for (const [label, command] of [['Inline code', 'code'], ['Preformatted block', 'pre'], ['Bullet list', 'bullet'], ['Title / H1', 'h1'], ['Heading 2 / H2', 'h2'], ['Heading 3 / H3', 'h3'], ['Heading 4 / H4', 'h4'], ['Heading 5 / H5', 'h5']]) {
-    action(label, command, false);
+  if (options.canFormat === true) {
+    for (const entry of markdownFormatCommands) {
+      if (entry.surface && entry.surface !== options.surface) continue;
+      const shortcut = markdownFormatShortcut(entry);
+      const state = options.formatState?.(entry.id) || 'false';
+      const button = action(entry.label + (shortcut ? ` (${shortcut})` : ''), entry.id, false, state === 'true');
+      if (state === 'mixed') button.setAttribute('aria-checked', 'mixed');
+    }
   }
-  action('Normal text', 'normal', false, markdownPreviewBlockClass(context.block) === 'normal');
   markdownPreviewContextMenuController.open(menu, event.clientX, event.clientY);
 }
 
@@ -1438,14 +1376,11 @@ function markdownPreviewContextMenu(container, event, context, link = null) {
 function markdownEditorContextMenu(view, panel, path, event, context) {
   markdownFormattingContextMenu(event, context, {
     markdownPath: path,
-    applyCommand: command => markdownEditorSelectionTransform(view, panel, path, command, context),
-    isActive: command => markdownEditorFormatActive(panel, context, command),
+    surface: 'text-editor',
+    canFormat: markdownFormattingWritable(panel, 'text-editor'),
+    formatState: command => markdownFormattingState(panel, markdownFormatCommands.find(entry => entry.id === command), 'text-editor'),
+    applyCommand: command => dispatchMarkdownFormat(panel, command, 'text-editor'),
   });
-}
-
-function markdownEditorFormatActive(panel, context, command) {
-  const state = fileEditorPanelState(panel);
-  return state ? markdownInlineFormatState(state.content, context?.sourceLine, context?.selectedText).has(command) : false;
 }
 
 function bindMarkdownPreviewEditing(container, text, markdownPath) {
@@ -1463,8 +1398,6 @@ function bindMarkdownPreviewEditing(container, text, markdownPath) {
   }
   if (!editableBlocks.length) return;
   container.dataset.markdownPreviewEditor = 'true';
-  const toolbar = markdownPreviewEditorToolbar(container);
-  toolbar.contentEditable = 'false';
   container._markdownPreviewEditingDisposer = bindScopedOnce(container, 'markdown-preview-editing', scope => {
     editableBlocks.forEach((block, index) => {
       scope.ownEvent(`markdown-preview-enter-${index}`, block, 'keydown', event => {
@@ -1493,18 +1426,6 @@ function bindMarkdownPreviewEditing(container, text, markdownPath) {
         const state = fileEditorPanelState(container.closest?.('.file-editor-panel'));
         container._markdownPreviewActiveBlockSource = state?.content || '';
       }
-    });
-    scope.ownEvent('mousedown', container, 'mousedown', event => {
-      const button = event.target?.closest?.('[data-markdown-preview-command]');
-      if (!button) return;
-      event.preventDefault();
-    });
-    scope.ownEvent('click', container, 'click', event => {
-      const button = event.target?.closest?.('[data-markdown-preview-command]');
-      if (!button) return;
-      const selection = document.getSelection?.();
-      const block = selection?.anchorNode?.parentElement?.closest?.('[data-markdown-preview-editable="true"]');
-      if (block) updateMarkdownFormatFromPreview(container, block, button.dataset.markdownPreviewCommand);
     });
     scope.ownEvent('contextmenu', container, 'contextmenu', event => {
       const image = event.target?.closest?.('img');

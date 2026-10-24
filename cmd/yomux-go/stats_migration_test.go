@@ -1697,11 +1697,13 @@ func TestStatsHTTPAndSSEProcessSoakStaysBounded(t *testing.T) {
 	if !service.State().Ready {
 		t.Fatalf("HTTP soak product did not become ready: %+v", service.State())
 	}
+	diagnostics := newStatsSoakDiagnostics(t, path)
 	server := &server{statsPath: path, statsService: service, statsNow: func() time.Time { return now }, statsHeartbeat: 20 * time.Millisecond}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/stats-snapshot", server.statsSnapshot)
-	mux.HandleFunc("/api/stats-stream", server.statsStream)
+	mux.HandleFunc("/api/stats-snapshot", diagnostics.handler(server.statsSnapshot))
+	mux.HandleFunc("/api/stats-stream", diagnostics.handler(server.statsStream))
 	httpServer := httptest.NewServer(mux)
+	diagnostics.listener = httpServer.Listener.Addr().String()
 	defer httpServer.Close()
 
 	const streamClients = 8
@@ -1783,9 +1785,20 @@ func TestStatsHTTPAndSSEProcessSoakStaysBounded(t *testing.T) {
 		go func(clientID string) {
 			defer workers.Done()
 			for requestIndex := 0; requestIndex < snapshotsPerClient; requestIndex++ {
+				id := fmt.Sprintf("%s-%d", clientID, requestIndex)
+				diagnostics.mark(context.Background(), id, "request_start", "")
 				started := time.Now()
-				response, requestErr := httpClient.Get(httpServer.URL + "/api/stats-snapshot?range_seconds=300&resolution=10&client_id=" + clientID)
-				latencies <- time.Since(started)
+				request, finishTask, requestErr := diagnostics.request(httpServer.URL+"/api/stats-snapshot?range_seconds=300&resolution=10&client_id="+clientID, id)
+				if requestErr != nil {
+					latencies <- time.Since(started)
+					snapshotErrors <- requestErr
+					return
+				}
+				response, requestErr := httpClient.Do(request)
+				elapsed := time.Since(started)
+				latencies <- elapsed
+				diagnostics.mark(request.Context(), id, "headers_returned", fmt.Sprintf("duration_ns=%d error=%v", elapsed.Nanoseconds(), requestErr))
+				finishTask()
 				if requestErr != nil {
 					snapshotErrors <- requestErr
 					return

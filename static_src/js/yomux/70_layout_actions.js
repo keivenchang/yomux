@@ -2196,9 +2196,9 @@ async function ensureSession(session) {
     try {
       if (tabberViewSessions.has(key) && !await ensureTabberViewSessionReady(key)) return false;
       const payload = await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
-      statusEl.innerHTML = payload.created
+      setStatusHtml(payload.created
         ? `<span class="ok">${localizedHtml('status.sessionCreatedWithAgent', {session: sessionLabel(session), agent: 'Claude'})}</span>`
-        : `<span class="ok">${localizedHtml('status.sessionReady', {session: sessionLabel(session)})}</span>`;
+        : `<span class="ok">${localizedHtml('status.sessionReady', {session: sessionLabel(session)})}</span>`);
       return true;
     } catch (error) {
       if (error?.status) {
@@ -2358,7 +2358,7 @@ async function createNextSessionWithLease(agent, options = {}) {
     return;
   }
   const agentLabel = agentName(agent) || t('common.agentLabel');
-  statusEl.textContent = t('status.sessionCreating', {agent: agentLabel});
+  showLayoutStatus(t('status.sessionCreating', {agent: agentLabel}));
   try {
     const dangerouslyYolo = options.dangerouslyYolo === true;
     const terminal = agent === 'term' ? String(options.terminal || '').trim() : '';
@@ -2675,7 +2675,7 @@ async function renameTmuxSession(session, proposedName) {
     closeSessionRenameDialog();
     return true;
   }
-  statusEl.textContent = t('status.sessionRenaming', {session: sessionLabel(session)});
+  showLayoutStatus(t('status.sessionRenaming', {session: sessionLabel(session)}));
   try {
     const mutation = await runTmuxSessionMutation(
       'rename',
@@ -2700,7 +2700,7 @@ async function renameTmuxSession(session, proposedName) {
           waitForLayoutMutationCompletion(layoutGeneration),
           promiseWithDeadline(ensureTerminalRunning(renamed), 5000, `terminal startup for ${renamed}`),
         ]);
-        showLayoutStatus(localizedHtml('common.renamed', {oldName: session, newName: renamed}), 'advisory');
+        showTimedStatusNotice(t('common.renamed', {oldName: session, newName: renamed}));
         closeSessionRenameDialog();
       },
     );
@@ -2710,7 +2710,7 @@ async function renameTmuxSession(session, proposedName) {
     renderAutoApproveButtons();
     if (mutation.error) {
       const message = `${t('common.renamed', {oldName: session, newName: renamed})} — ${mutation.error.message || String(mutation.error)}`;
-      showLayoutStatus(message, 'advisory');
+      showTimedStatusNotice(message);
       recordJsDebugEvent('client_failure', {
         failure: 'session_rename_client_convergence',
         message,
@@ -2741,7 +2741,7 @@ async function killTmuxSession(session) {
   }
   if (!isTmuxSession(session)) return false;
   if (!window.confirm(t('dialog.sessionKill', {session: sessionLabel(session)}))) return false;
-  statusEl.textContent = t('status.sessionKilling', {session: sessionLabel(session)});
+  showLayoutStatus(t('status.sessionKilling', {session: sessionLabel(session)}));
   try {
     const mutation = await runTmuxSessionMutation(
       'kill',
@@ -2783,7 +2783,7 @@ async function killTmuxWindow(session, windowRecord) {
   if (!isTmuxSession(session) || !/^@[0-9]+$/.test(windowId) || !windowName) return false;
   const sessionName = sessionLabel(session) || session;
   if (!window.confirm(localizedLabel('status.tmux.windowKill.confirm', "Kill {window} in tmux session '{session}'?", {window: windowName, session: sessionName}))) return false;
-  statusEl.textContent = localizedLabel('status.tmux.windowKill.pending', "Killing {window} in tmux session '{session}'", {window: windowName, session: sessionName});
+  showLayoutStatus(localizedLabel('status.tmux.windowKill.pending', "Killing {window} in tmux session '{session}'", {window: windowName, session: sessionName}));
   let payload;
   try {
     payload = await apiFetchJson(

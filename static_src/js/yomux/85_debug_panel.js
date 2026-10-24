@@ -7221,6 +7221,24 @@ function debugSystemRestoreFocus(view, focusKey) {
   view.querySelector(`[data-js-debug-system-focus-key="${cssEscape(focusKey)}"]`)?.focus?.({preventScroll: true});
 }
 
+function updateDebugSystemSummaryRegion(region, html) {
+  const next = document.createElement('div');
+  next.innerHTML = html;
+  const selectors = ['.js-debug-roster-summary-title', '.js-debug-roster-summary-facts', '[data-js-debug-system-refresh]'];
+  const nodes = selectors.map(selector => [region.querySelector(selector), next.querySelector(selector)]);
+  if (nodes.some(([current, replacement]) => !current || !replacement)) return false;
+  // Replacing the Refresh button between pointerdown and click destroys the browser's
+  // activation target before it can acquire focus; restoring focused nodes afterward is too late.
+  for (const [current, replacement] of nodes) {
+    for (const attribute of replacement.attributes) setAttributeIfChanged(current, attribute.name, attribute.value);
+    for (const attribute of [...current.attributes]) {
+      if (!replacement.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+    }
+    setInnerHtmlIfChanged(current, replacement.innerHTML);
+  }
+  return true;
+}
+
 function refreshDebugSystemViews() {
   for (const view of document.querySelectorAll('[data-js-debug-system]')) {
     const scrollTop = view.scrollTop;
@@ -7246,6 +7264,10 @@ function refreshDebugSystemViews() {
       for (const region of regions) {
         const html = debugSystemRegionHtml(String(region.dataset.jsDebugSystemRegion || ''), payload);
         if (debugSystemRenderedRegions.get(region) === html) continue;
+        if (region.dataset.jsDebugSystemRegion === 'summary' && updateDebugSystemSummaryRegion(region, html)) {
+          debugSystemRenderedRegions.set(region, html);
+          continue;
+        }
         if (region.dataset.jsDebugSystemRegion === 'chart' && debugGraphInteractionBelongsToPanel(panel)) {
           panel.dataset.jsDebugSystemChartRefreshPending = 'true';
           continue;
@@ -8930,7 +8952,7 @@ function bindDebugPanel(panel) {
       event.preventDefault();
       jsDebugLogRecordCleared();
       refreshDebugLogsViews();
-      statusEl.textContent = t('debug.logs.cleared');
+      showLayoutStatus(t('debug.logs.cleared'));
       return;
     }
     const copy = event.target.closest('[data-copy-feedback-key]');
@@ -8946,7 +8968,7 @@ function bindDebugPanel(panel) {
     if (clear && panel.contains(clear)) {
       event.preventDefault();
       clearJsDebugEvents();
-      statusEl.textContent = t('debug.cleared');
+      showLayoutStatus(t('debug.cleared'));
     }
     });
     if (typeof MutationObserver === 'function') {

@@ -46,7 +46,7 @@ var statsRanges = []int{300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400}
 
 var errSnapshotChunkGenerationAdvanced = errors.New("snapshot generation advanced while chunks were loading")
 
-var statsRingCapacities = map[int]int{1: 300, 10: 180, 60: 480, 300: 288}
+var statsRingCapacities = stats.RingCapacities()
 
 var statsRetiredQueryFields = map[string]bool{
 	"history": true, "history_start": true, "history_end": true,

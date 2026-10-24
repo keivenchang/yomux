@@ -14,6 +14,11 @@ const AgentStatusTokenRateWindow = 60 * time.Second
 // status, even if the old row is still present in the retained database.
 const AgentStatusActiveCadence = 10 * time.Second
 
+// A successor scan starts one native cadence after its predecessor and must
+// finish collection and durable append within this budget. Live freshness
+// covers that bounded attempt, rather than expiring as soon as it starts.
+const AgentStatusCollectionBudget = AgentStatusActiveCadence
+
 type AgentStatusQuery struct {
 	Now        time.Time
 	RateWindow time.Duration
@@ -22,6 +27,7 @@ type AgentStatusQuery struct {
 type AgentStatusFreshness struct {
 	ObservedAt float64 `json:"observed_at"`
 	AgeSeconds float64 `json:"age_seconds"`
+	ExpiresAt  float64 `json:"expires_at,omitempty"`
 }
 
 type AgentStatusQueryUnavailable struct {
@@ -56,6 +62,24 @@ type AgentStatusSnapshot struct {
 	TokenRates       AgentTokenRates               `json:"token_rates"`
 	TokenCollection  *AgentTokenCollectionSnapshot `json:"token_collection,omitempty"`
 	Unavailable      *AgentStatusQueryUnavailable  `json:"unavailable,omitempty"`
+}
+
+// withFreshnessAt is also used by cached HTTP projections: a stalled owner
+// must not keep serving working status after the successor attempt expires.
+func (s AgentStatusSnapshot) withFreshnessAt(now time.Time) AgentStatusSnapshot {
+	if s.Freshness == nil {
+		return s
+	}
+	freshness := *s.Freshness
+	nowSeconds := float64(now.UnixNano()) / 1e9
+	freshness.AgeSeconds = max(0, nowSeconds-freshness.ObservedAt)
+	s.Freshness = &freshness
+	if s.Available && freshness.ExpiresAt > 0 && nowSeconds > freshness.ExpiresAt {
+		s.Available = false
+		s.Unavailable = &AgentStatusQueryUnavailable{Reason: "agent-status-stale"}
+		s.Payload, s.Counts, s.Agents = nil, nil, nil
+	}
+	return s
 }
 
 type AgentStatusLifecycleState struct {
@@ -208,19 +232,11 @@ ORDER BY observed_at DESC, event_id DESC LIMIT 1`)
 		return result, nil
 	}
 	result.Available = true
-	result.Freshness = &AgentStatusFreshness{ObservedAt: observedAt, AgeSeconds: now.Sub(time.Unix(int64(observedAt), int64((observedAt-float64(int64(observedAt)))*1e9))).Seconds()}
-	if result.Freshness.AgeSeconds < 0 {
-		result.Freshness.AgeSeconds = 0
-	}
 	freshnessCadence, cadenceErr := d.agentStatusCadence(ctx, rowString(rows[0][1]), rowString(rows[0][2]), observedAt)
 	if cadenceErr != nil {
 		return AgentStatusSnapshot{}, cadenceErr
 	}
-	if result.Freshness.AgeSeconds > freshnessCadence {
-		result.Available = false
-		result.Unavailable = &AgentStatusQueryUnavailable{Reason: "agent-status-stale"}
-		return result, nil
-	}
+	result.Freshness = &AgentStatusFreshness{ObservedAt: observedAt, ExpiresAt: observedAt + freshnessCadence + AgentStatusCollectionBudget.Seconds()}
 	result.Payload = payload
 	if value, ok := payload["counts"].(map[string]any); ok {
 		result.Counts = value
@@ -228,7 +244,7 @@ ORDER BY observed_at DESC, event_id DESC LIMIT 1`)
 	if value, ok := payload["agents"].([]any); ok {
 		result.Agents = value
 	}
-	return result, nil
+	return result.withFreshnessAt(now), nil
 }
 
 func (d *Database) agentStatusCadence(ctx context.Context, sourceID, epochID string, observedAt float64) (float64, error) {

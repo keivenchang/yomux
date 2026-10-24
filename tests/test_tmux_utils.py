@@ -329,7 +329,7 @@ def test_tmux_paste_text_submits_with_enter_key_not_pasted_newline(monkeypatch):
     assert result.returncode == 0
     assert calls == [
         ("subprocess", ("tmux", "-S", private_socket, "load-buffer", "-b", "yolomux-abc123", "-"), "date"),
-        ("tmux_run", ("paste-buffer", "-p", "-t", "%6", "-b", "yolomux-abc123"), None),
+        ("tmux_run", ("paste-buffer", "-r", "-p", "-t", "%6", "-b", "yolomux-abc123"), None),
         ("tmux_run", ("send-keys", "-t", "%6", "Enter"), None),
         ("tmux_run", ("delete-buffer", "-b", "yolomux-abc123"), None),
     ]

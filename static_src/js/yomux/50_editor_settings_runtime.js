@@ -379,7 +379,7 @@ function previewFindSetReadOnly(host = null, readOnly = false) {
   const view = host?._pmView;
   if (!view) return;
   host._pmSearchReadOnly = readOnly === true;
-  view.setProps?.({editable: () => host._pmSearchReadOnly !== true});
+  view.setProps?.({editable: () => prosemirrorPanelEditable(host)});
 }
 
 function previewFindUpdateOverview(host = null) {
@@ -1498,7 +1498,7 @@ async function refreshSettings(options = {}) {
     const payload = await apiFetchJson('/api/settings', {cache: 'no-store'});
     const changed = applySettingsPayload(payload, {force: options.force === true});
     if (changed) refreshYoloRulesStatus({silent: true});
-    if (changed && !options.silent) statusEl.textContent = t('status.settingsReloaded');
+    if (changed && !options.silent) showLayoutStatus(t('status.settingsReloaded'));
   } catch (error) {
     if (!options.silent) {
       statusErr(localizedHtml('status.settingsReloadFailed', {

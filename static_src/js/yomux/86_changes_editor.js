@@ -46,7 +46,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   if (item && panel?.contains?.(document.activeElement)) {
     scheduleFileExplorerActiveTabSync(item, {explicit: true});
   }
-  if (state.externalChanged && !state.externalChangeEditPrompted && !fileEditorSelfWritePending(path)) {
+  if (state.externalChanged && !state.externalChangeEditPrompted && !fileEditorSelfWritePending(path, state)) {
     promptExternalChangeBeforeEditing(path, panel);
   }
   if (state.dirty && options.deferAutosave !== true) scheduleFileAutosave(path);
@@ -86,6 +86,7 @@ async function enterFileEditorDiffMode(path, panel, item) {
 
 function fileEditorToolbarHtml(item) {
   return `
+    <div class="file-editor-toolbars">
       <div class="file-editor-toolbar" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}" hidden>
         ${actionRowHtml({
           className: 'file-editor-toolbar-zone file-editor-toolbar-left',
@@ -280,7 +281,8 @@ function fileEditorToolbarHtml(item) {
             },
           ],
         })}
-      </div>`;
+      </div>
+    </div>`;
 }
 
 function setFileEditorLocalizedLabel(panel, selector, key, options = {}) {

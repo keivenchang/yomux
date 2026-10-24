@@ -1202,7 +1202,7 @@ func TestEventBrokerPublishesAndReplays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := <-ch
+	got := ch.receive()
 	if got.ID != event.ID || got.Type != "files_changed" || got.Revision != 1 || got.Base != 0 {
 		t.Fatalf("event = %+v, want %+v", got, event)
 	}
@@ -2363,7 +2363,8 @@ func TestAttentionAcknowledgementIsAuthenticatedPublishedAndPersistent(t *testin
 		t.Fatalf("ack response = %#v", response)
 	}
 	select {
-	case event := <-events:
+	case <-events.ready:
+		event := events.receive()
 		if event.Type != "attention_acks_changed" {
 			t.Fatalf("ack event type = %q", event.Type)
 		}
@@ -6925,7 +6926,7 @@ func TestPhase3EventChannelAndReplay(t *testing.T) {
 	}
 	ch, closeStream := b.subscribe()
 	defer closeStream()
-	e := <-ch
+	e := ch.receive()
 	if !e.Replay || e.Type != "backend_health_changed" {
 		t.Fatalf("replay = %+v", e)
 	}
@@ -6958,7 +6959,8 @@ func TestEventChannelFilterRejectsExplicitlyInvalidChannels(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case event := <-stream:
+	case <-stream.ready:
+		event := stream.receive()
 		t.Fatalf("invalid channel received event: %+v", event)
 	default:
 	}
@@ -7023,7 +7025,7 @@ func TestDurableEventJournalReloads(t *testing.T) {
 	}
 	ch, closeStream := reloaded.subscribe()
 	defer closeStream()
-	event := <-ch
+	event := ch.receive()
 	if !event.Replay || event.Epoch == "" {
 		t.Fatalf("replayed event = %+v", event)
 	}
@@ -7039,7 +7041,7 @@ func TestRetainedEventReplayUsesStableResourceOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 		stream, unsubscribe := b.subscribe("core")
-		first, second := <-stream, <-stream
+		first, second := stream.receive(), stream.receive()
 		unsubscribe()
 		if first.Resource != "search_progress:scope-a" || second.Resource != "search_progress:scope-b" {
 			t.Fatalf("retained replay order = %q, %q", first.Resource, second.Resource)
@@ -7074,7 +7076,7 @@ func TestOperationTerminalizationIsIdempotentAndCancellationPersists(t *testing.
 func TestEventOverflowTracksRepairResource(t *testing.T) {
 	b := newEventBroker()
 	b.mu.Lock()
-	ch := make(chan clientEvent, 1)
+	ch := newEventSubscription(b, 1)
 	b.subscribers[ch] = struct{}{}
 	b.pending[ch] = map[string]clientEvent{}
 	b.mu.Unlock()
@@ -7084,11 +7086,9 @@ func TestEventOverflowTracksRepairResource(t *testing.T) {
 	if _, err := b.publish("files_changed", map[string]any{"n": 2}); err != nil {
 		t.Fatal(err)
 	}
-	b.mu.Lock()
-	pending := b.pending[ch]["files_changed"]
-	b.mu.Unlock()
-	if pending.Type != "files_changed" {
-		t.Fatalf("pending=%+v", pending)
+	delivery := b.decorateEvent(ch, ch.receive())
+	if delivery.Type != "files_changed" || delivery.Payload["n"] != 2 || !slices.Equal(delivery.RepairResources, []string{"files_changed"}) {
+		t.Fatalf("overflow delivery did not retain the newest invalidation and repair: %+v", delivery)
 	}
 }
 
@@ -7207,7 +7207,7 @@ func TestPhase3EventBrokerMatchesPythonDemandAndResourceContracts(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := <-stream; got.Resource != "fs_changed" || got.Revision != 1 {
+	if got := stream.receive(); got.Resource != "fs_changed" || got.Revision != 1 {
 		t.Fatalf("default-channel event = %+v", got)
 	}
 	if !eventMatchesChannels("attention_acks_changed", []string{"attention"}) {
@@ -7248,7 +7248,8 @@ func TestTmuxRosterWatcherPublishesExternalRemovalAndStops(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	srv.startTmuxRosterWatcherWithInterval(ctx, 5*time.Millisecond)
 	select {
-	case event := <-stream:
+	case <-stream.ready:
+		event := stream.receive()
 		if event.Type != "tmux_roster_changed" {
 			t.Fatalf("event type = %q, want tmux_roster_changed", event.Type)
 		}
@@ -7290,7 +7291,8 @@ func TestTmuxRosterWatcherPublishesExternalRemovalAndStops(t *testing.T) {
 		t.Fatalf("published roster events = %d, want exactly one", rosterEvents)
 	}
 	select {
-	case event := <-stream:
+	case <-stream.ready:
+		event := stream.receive()
 		t.Fatalf("core-only subscriber received unexpected event %q", event.Type)
 	default:
 	}
@@ -7373,7 +7375,8 @@ func TestSessionMetadataPublishesRosterRenameBeforeEnrichment(t *testing.T) {
 		t.Fatal("metadata enrichment did not start")
 	}
 	select {
-	case event := <-stream:
+	case <-stream.ready:
+		event := stream.receive()
 		if event.Type != "tmux_roster_changed" {
 			t.Fatalf("first rename event = %q, want tmux_roster_changed", event.Type)
 		}
@@ -7386,7 +7389,8 @@ func TestSessionMetadataPublishesRosterRenameBeforeEnrichment(t *testing.T) {
 	}
 	close(releaseEnrichment)
 	select {
-	case event := <-stream:
+	case <-stream.ready:
+		event := stream.receive()
 		if event.Type != "transcripts_changed" {
 			t.Fatalf("event after roster rename = %q, want transcripts_changed", event.Type)
 		}
@@ -7439,7 +7443,8 @@ func TestTmuxTopologyFromRosterRejectsAnOlderCachedSnapshot(t *testing.T) {
 		t.Fatalf("topology generation = %d, want %d", result.generation, older.generation+1)
 	}
 	select {
-	case event := <-stream:
+	case <-stream.ready:
+		event := stream.receive()
 		renames, ok := event.Payload["renames"].([]map[string]any)
 		if event.Type != "tmux_roster_changed" || !ok || len(renames) != 1 || renames[0]["old_session"] != oldName || renames[0]["new_session"] != newName {
 			t.Fatalf("newer roster event = %#v", event)
@@ -7557,10 +7562,191 @@ func TestPhase3EventBrokerDeliversLatestRepairForKeyedPatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := <-stream
+	first := stream.receive()
 	first = b.decorateEvent(stream, first)
 	if first.ID != latest.ID || len(first.RepairResources) != 1 || first.RepairResources[0] != "auto_approve_changed" {
 		t.Fatalf("patched coalesced event = %+v", first)
+	}
+}
+
+func TestEventBrokerPendingUpdatesPreserveIncrementalPayloads(t *testing.T) {
+	cases := []struct {
+		name     string
+		kind     string
+		path     []string
+		payloads []map[string]any
+	}{
+		{"native filesystem invalidations", "fs_changed", []string{"paths"}, []map[string]any{
+			{"paths": []string{"first"}, "reason": "filesystem-change", "token": "t1", "revision": 1},
+			{"paths": []string{"second"}, "reason": "filesystem-change", "token": "t2", "revision": 2},
+		}},
+		{"filesystem deletion deltas", "fs_changed", []string{"removed_paths"}, []map[string]any{
+			{"mode": "delta", "removed_paths": []string{"first"}, "token": "t1"},
+			{"mode": "delta", "removed_paths": []string{"second"}, "token": "t2"},
+		}},
+		{"native file invalidations", "files_changed", []string{"paths"}, []map[string]any{
+			{"paths": []string{"first"}, "reason": "filesystem-change", "token": "t1", "revision": 1},
+			{"paths": []string{"second"}, "reason": "filesystem-change", "token": "t2", "revision": 2},
+		}},
+		{"attention acknowledgements", "attention_acks_changed", []string{"acknowledged"}, []map[string]any{
+			{"acknowledged": []string{"first"}, "acknowledged_at": map[string]any{"first": 1}},
+			{"acknowledged": []string{"second"}, "acknowledged_at": map[string]any{"second": 2}},
+		}},
+		{"job notifications", "yoagent_jobs_changed", []string{"notification", "body"}, []map[string]any{
+			{"reason": "yoagent_job_fired", "job": map[string]any{"id": "job-one"}, "notification": map[string]any{"body": "first"}},
+			{"reason": "yoagent_job_fired", "job": map[string]any{"id": "job-two"}, "notification": map[string]any{"body": "second"}},
+		}},
+		{"independent agent streams", "yoagent_stream_delta", []string{"stream_id"}, []map[string]any{
+			{"stream_id": "first", "content": "first answer", "phase": "done", "done": true},
+			{"stream_id": "second", "content": "second answer", "phase": "done", "done": true},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			broker := newEventBroker()
+			stream, unsubscribe := broker.subscribe()
+			defer unsubscribe()
+			for _, payload := range tc.payloads {
+				if _, err := broker.publish(tc.kind, payload); err != nil {
+					t.Fatal(err)
+				}
+			}
+			seen := map[string]bool{}
+			for stream.length() > 0 {
+				event := broker.decorateEvent(stream, stream.receive())
+				var value any = event.Payload
+				for _, field := range tc.path {
+					object, ok := value.(map[string]any)
+					if !ok {
+						t.Fatalf("payload field %q is not an object: %+v", field, event)
+					}
+					value = object[field]
+				}
+				switch values := value.(type) {
+				case string:
+					seen[values] = true
+				case []string:
+					for _, item := range values {
+						seen[item] = true
+					}
+				case []any:
+					for _, item := range values {
+						text, ok := item.(string)
+						if !ok {
+							t.Fatalf("payload identifier is not text: %+v", event)
+						}
+						seen[text] = true
+					}
+				default:
+					t.Fatalf("payload identifiers missing: %+v", event)
+				}
+			}
+			if !seen["first"] || !seen["second"] {
+				t.Fatalf("pending delivery lost an incremental update: got %v, want first and second", seen)
+			}
+		})
+	}
+}
+
+func TestEventBrokerInFlightStateCannotOvertakeOrderedEffects(t *testing.T) {
+	broker := newEventBroker()
+	stream, unsubscribe := broker.subscribe()
+	defer unsubscribe()
+	first, err := broker.publish("yoagent_jobs_changed", map[string]any{"reason": "first snapshot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := broker.publish("yoagent_jobs_changed", map[string]any{"notification": map[string]any{"body": "effect"}}); err != nil {
+		t.Fatal(err)
+	}
+	inFlight := stream.receive()
+	if _, err := broker.publish("yoagent_jobs_changed", map[string]any{"reason": "latest snapshot"}); err != nil {
+		t.Fatal(err)
+	}
+	got := broker.decorateEvent(stream, inFlight)
+	if got.ID != first.ID {
+		t.Fatalf("in-flight delivery overtook an ordered effect: got event %d, want %d", got.ID, first.ID)
+	}
+	lastID := got.ID
+	seenEffect := false
+	for stream.length() > 0 {
+		got = broker.decorateEvent(stream, stream.receive())
+		if got.ID <= lastID {
+			t.Fatalf("subscriber delivery went backwards or duplicated: previous %d, current %+v", lastID, got)
+		}
+		lastID = got.ID
+		if got.Payload["notification"] != nil {
+			seenEffect = true
+		}
+	}
+	if !seenEffect {
+		t.Fatal("state coalescing discarded the ordered effect")
+	}
+	if broker.coalesced != 0 || broker.delivered != 3 {
+		t.Fatalf("in-flight delivery was incorrectly counted as coalescing: %+v", broker.snapshot())
+	}
+}
+
+func TestEventBrokerInFlightReplacementStillUsesBoundedOverflowRepair(t *testing.T) {
+	broker := newEventBroker()
+	broker.queueSize = 1
+	stream, unsubscribe := broker.subscribe()
+	defer unsubscribe()
+	if _, err := broker.publish("yoagent_jobs_changed", map[string]any{"reason": "first snapshot"}); err != nil {
+		t.Fatal(err)
+	}
+	inFlight := stream.receive()
+	if _, err := broker.publish("yoagent_jobs_changed", map[string]any{"notification": map[string]any{"body": "effect"}}); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := broker.publish("yoagent_jobs_changed", map[string]any{"reason": "latest snapshot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stream.length() != 1 {
+		t.Fatalf("subscriber exceeded its queue bound: %d", stream.length())
+	}
+	queued := stream.receive()
+	if queued.ID != latest.ID {
+		t.Fatalf("in-flight replacement silently discarded the newest event: got %+v, want %+v", queued, latest)
+	}
+	if broker.dropped != 1 || !slices.Equal(broker.decorateEvent(stream, inFlight).RepairResources, []string{latest.Resource}) {
+		t.Fatalf("bounded overflow failed to report its dropped effect: %+v", broker.snapshot())
+	}
+	if delivered := broker.decorateEvent(stream, queued); delivered.ID != latest.ID {
+		t.Fatalf("queued replacement changed identity: %+v", delivered)
+	}
+	if len(broker.events) != 3 || broker.events[1].Payload["notification"] == nil {
+		t.Fatal("subscriber overflow changed the complete replay history")
+	}
+}
+
+func TestEventBrokerRosterRenamesAndReplacementStateKeepDeliveryOrder(t *testing.T) {
+	broker := newEventBroker()
+	stream, unsubscribe := broker.subscribe()
+	defer unsubscribe()
+	payloads := []map[string]any{
+		{"sessions": []string{"before"}},
+		{"renames": []map[string]any{{"old_session": "before", "new_session": "middle"}}},
+		{"sessions": []string{"middle"}},
+		{"renames": []any{map[string]any{"old_session": "middle", "new_session": "after"}}},
+		{"sessions": []string{"after"}},
+	}
+	for _, payload := range payloads {
+		if _, err := broker.publish("tmux_roster_changed", payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids := []int{}
+	for stream.length() > 0 {
+		event := broker.decorateEvent(stream, stream.receive())
+		ids = append(ids, event.ID)
+	}
+	if !slices.Equal(ids, []int{2, 4, 5}) {
+		t.Fatalf("state replacement discarded or reordered rename effects: %v", ids)
+	}
+	if broker.coalesced != 2 {
+		t.Fatalf("replacement snapshots stopped coalescing: %d", broker.coalesced)
 	}
 }
 
@@ -7585,7 +7771,7 @@ func TestPhase3DiagnosticsHaveDurableShape(t *testing.T) {
 
 func TestEventBrokerOverflowReportsRepairAndPerResourceMetrics(t *testing.T) {
 	b := newEventBroker()
-	ch := make(chan clientEvent, 1)
+	ch := newEventSubscription(b, 1)
 	b.mu.Lock()
 	b.subscribers[ch] = struct{}{}
 	b.channels[ch] = map[string]bool{}
@@ -7600,7 +7786,7 @@ func TestEventBrokerOverflowReportsRepairAndPerResourceMetrics(t *testing.T) {
 	if _, err := b.publish("roots_changed", map[string]any{"resource": "b"}); err != nil {
 		t.Fatal(err)
 	}
-	got := b.decorateEvent(ch, <-ch)
+	got := b.decorateEvent(ch, ch.receive())
 	if got.Type != "roots_changed" || len(got.RepairResources) != 1 || got.RepairResources[0] != "files_changed" {
 		t.Fatalf("overflow repair = %+v", got)
 	}
@@ -7616,7 +7802,7 @@ func TestEventBrokerOverflowReportsRepairAndPerResourceMetrics(t *testing.T) {
 
 func TestEventBrokerKeepsRepairFenceUntilTheSubscriberDequeues(t *testing.T) {
 	b := newEventBroker()
-	ch := make(chan clientEvent, 1)
+	ch := newEventSubscription(b, 1)
 	b.mu.Lock()
 	b.subscribers[ch] = struct{}{}
 	b.channels[ch] = map[string]bool{}
@@ -7636,7 +7822,7 @@ func TestEventBrokerKeepsRepairFenceUntilTheSubscriberDequeues(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	event := b.decorateEvent(ch, <-ch)
+	event := b.decorateEvent(ch, ch.receive())
 	if event.Type != "files_changed" {
 		t.Fatalf("latest event = %+v", event)
 	}
@@ -7655,7 +7841,7 @@ func TestCancellationPublishesTerminalEvent(t *testing.T) {
 	if err := s.cancelOperation("op-cancel-event"); err != nil {
 		t.Fatal(err)
 	}
-	event := <-ch
+	event := ch.receive()
 	if event.Type != "operation_terminal" || event.Payload["status"] != http.StatusOK {
 		t.Fatalf("cancel event = %+v", event)
 	}
@@ -7784,7 +7970,8 @@ func TestBackgroundOwnerTakeoverPublishesGenerationChange(t *testing.T) {
 	defer deadline.Stop()
 	for {
 		select {
-		case event := <-stream:
+		case <-stream.ready:
+			event := stream.receive()
 			if event.Type == "background_owner_changed" {
 				found = true
 			}
@@ -8290,7 +8477,8 @@ func TestSessionFilesBackgroundCompletionsReplayByCacheViewAcrossRestart(t *test
 	got := map[string]bool{}
 	for range views {
 		select {
-		case event := <-stream:
+		case <-stream.ready:
+			event := stream.receive()
 			viewID, _ := event.Payload["cache_view_id"].(string)
 			if !event.Replay || event.Type != "background_refresh_done" || viewID == "" {
 				t.Fatalf("replayed session-files completion = %+v", event)
@@ -8471,7 +8659,8 @@ func TestEventPostAndBatchDoNotReportRetryableFailureAfterPersistence(t *testing
 			}
 		}
 		select {
-		case event := <-events:
+		case <-events.ready:
+			event := events.receive()
 			if event.Type != "event_log_changed" {
 				t.Fatalf("invalidation event = %#v", event)
 			}
@@ -8481,7 +8670,8 @@ func TestEventPostAndBatchDoNotReportRetryableFailureAfterPersistence(t *testing
 	}
 	s.publishGoYoloAuditEvent("yo-session", "action", "audit", map[string]any{"source": "test"})
 	select {
-	case event := <-events:
+	case <-events.ready:
+		event := events.receive()
 		if event.Type != "event_log_changed" {
 			t.Fatalf("YO audit invalidation event = %#v", event)
 		}
@@ -8533,6 +8723,68 @@ func TestEventBatchPersistsRowsAndPublishesOneInvalidation(t *testing.T) {
 	}
 	if got := len(strings.Split(strings.TrimSpace(string(journal)), "\n")); got != 1 {
 		t.Fatalf("durable client-event rows = %d, want 1", got)
+	}
+}
+
+func TestEventBatchGlobalRowsInvalidateEverySessionLog(t *testing.T) {
+	for _, sessions := range [][]string{{"", "session-a"}, {"session-a", ""}, {"session-a", "session-b"}} {
+		t.Run(strings.Join(sessions, ","), func(t *testing.T) {
+			s := &server{eventLogPath: filepath.Join(t.TempDir(), "events.jsonl"), events: newEventBroker()}
+			s.tmuxCommandContextFn = func(ctx context.Context, args ...string) *exec.Cmd {
+				return exec.CommandContext(ctx, "true")
+			}
+			rows := make([]map[string]any, 0, len(sessions))
+			for _, session := range sessions {
+				rows = append(rows, map[string]any{"session": session, "type": "note", "message": "saved"})
+			}
+			body, err := json.Marshal(map[string]any{"events": rows})
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorder := httptest.NewRecorder()
+			s.eventsRoute(recorder, httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body)))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("batch status = %d: %s", recorder.Code, recorder.Body.String())
+			}
+			payload := s.events.events[0].Payload
+			if slices.Contains(sessions, "") {
+				if len(s.eventLogTail("session-b", 10)) != 1 {
+					t.Fatal("global event must also appear in another session's log")
+				}
+				if len(payload) != 0 {
+					t.Fatalf("global row invalidation is restricted to %#v", payload)
+				}
+			} else if !reflect.DeepEqual(payload["sessions"], sessions) {
+				t.Fatalf("session-only batch scopes = %#v, want %#v", payload, sessions)
+			}
+		})
+	}
+}
+
+func TestEventBrokerKeepsCoalescingLocalToEachSubscriber(t *testing.T) {
+	b := newEventBroker()
+	for _, session := range []string{"session-a", "session-b"} {
+		stream, closeStream := b.subscribe("events")
+		t.Cleanup(closeStream)
+		prior := clientEvent{Resource: "event_log_changed", Payload: map[string]any{"sessions": []string{session}}}
+		b.mu.Lock()
+		stream.enqueueLocked(prior)
+		b.pending[stream][prior.Resource] = prior
+		b.mu.Unlock()
+	}
+	published, err := b.publish("event_log_changed", map[string]any{"sessions": []string{"session-c"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for stream := range b.subscribers {
+		event := stream.receive()
+		sessions, _ := event.Payload["sessions"].([]string)
+		if len(sessions) != 2 || sessions[1] != "session-c" {
+			t.Errorf("subscriber inherited another subscriber's scopes: %#v", event.Payload)
+		}
+	}
+	if !reflect.DeepEqual(published.Payload, b.events[0].Payload) {
+		t.Fatalf("published event differs from replay history: returned %#v, history %#v", published.Payload, b.events[0].Payload)
 	}
 }
 
@@ -8616,7 +8868,8 @@ func TestEventBrokerMergesCoalescedEventLogScopes(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case event := <-stream:
+	case <-stream.ready:
+		event := stream.receive()
 		sessions, ok := event.Payload["sessions"].([]string)
 		if !ok || len(sessions) != 2 || sessions[0] != "session-a" || sessions[1] != "session-b" {
 			t.Fatalf("coalesced scopes = %#v", event.Payload)
@@ -8631,7 +8884,8 @@ func TestEventBrokerMergesCoalescedEventLogScopes(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case event := <-stream:
+	case <-stream.ready:
+		event := stream.receive()
 		if _, scoped := event.Payload["sessions"]; scoped {
 			t.Fatalf("global invalidation remained scoped: %#v", event.Payload)
 		}
@@ -8682,13 +8936,21 @@ func TestLoginShowsSetupPageWhenAuthSetupIsRequired(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		authConfig string
+		starter    bool
+		existing   bool
 	}{
 		{name: "missing auth config"},
+		{name: "generated starter", starter: true},
+		{name: "existing empty config", existing: true},
 		{name: "legacy placeholder", authConfig: "users:\n  - username: user\n    password: password\n    role: admin\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
-			if test.authConfig != "" {
+			if test.starter {
+				if err := initializeStarterAuthConfig(filepath.Join(dir, "auth.yaml")); err != nil {
+					t.Fatal(err)
+				}
+			} else if test.existing || test.authConfig != "" {
 				if err := os.WriteFile(filepath.Join(dir, "auth.yaml"), []byte(test.authConfig), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -8718,11 +8980,79 @@ func TestLoginShowsSetupPageWhenAuthSetupIsRequired(t *testing.T) {
 				if !strings.Contains(body, `id="setupStatus"`) || !strings.Contains(body, "/setup-auth.js") {
 					t.Fatalf("%s /login did not render the first-run setup page: %s", request.Method, body)
 				}
+				if strings.Contains(body, "Uncomment the admin account already in auth.yaml") != test.starter {
+					t.Fatalf("%s /login starter-account instructions do not match the file", request.Method)
+				}
+				if !test.starter && !strings.Contains(body, "Add an admin account to this existing configuration") {
+					t.Fatalf("%s /login omitted instructions for a configuration without a starter account", request.Method)
+				}
 				if strings.Contains(body, `action="/login"`) {
 					t.Fatalf("%s /login rendered the credential form before setup", request.Method)
 				}
 			}
 		})
+	}
+}
+
+func TestStarterAuthConfigIsCommentedAndCreatedOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config", "auth.yaml")
+	if err := initializeStarterAuthConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("auth.yaml mode = %o, want 600", info.Mode().Perm())
+	}
+	text := string(first)
+	for _, want := range []string{"users:\n#  - username: ", "#    password: \"", "#    role: \"admin\""} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("starter auth config is missing %q: %s", want, text)
+		}
+	}
+	if users := parseAuthYAML(text); len(users) != 0 {
+		t.Fatalf("commented starter auth config enabled accounts: %#v", users)
+	}
+	active := strings.Replace(text, "\n#  - username:", "\n  - username:", 1)
+	active = strings.Replace(active, "\n#    password:", "\n    password:", 1)
+	active = strings.Replace(active, "\n#    role:", "\n    role:", 1)
+	users := parseAuthYAML(active)
+	if len(users) != 1 || users[0].username == "" || users[0].password == "" || users[0].role != "admin" {
+		t.Fatalf("uncommented starter account = %#v", users)
+	}
+	if err := initializeStarterAuthConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(second) != text {
+		t.Fatal("reinitialization replaced the existing auth config")
+	}
+	existingPath := filepath.Join(t.TempDir(), "config", "auth.yaml")
+	if err := os.MkdirAll(filepath.Dir(existingPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	existing := "users:\n  - username: existing\n    password: keep-me\n    role: admin\n"
+	if err := os.WriteFile(existingPath, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeStarterAuthConfig(existingPath); err != nil {
+		t.Fatal(err)
+	}
+	preserved, err := os.ReadFile(existingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(preserved) != existing {
+		t.Fatal("first-run initialization replaced an existing auth config")
 	}
 }
 

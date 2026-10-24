@@ -15,6 +15,10 @@ for path in (REPO_ROOT, MOCKER_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
+from process_identity import ensure_mock_process_identity
+
+ensure_mock_process_identity("opencode")
+
 import common as mock_agent_common
 
 

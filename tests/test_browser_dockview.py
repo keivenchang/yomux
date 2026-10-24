@@ -64,14 +64,10 @@ def test_advanced_mode_navigation_and_balanced_transition(browser, tmp_path):
 
 
 def test_startup_tip_navigation_glyphs_are_centered_in_their_buttons(browser, tmp_path):
-    load_live_runtime_boot_fixture(browser, tmp_path)
+    load_live_runtime_boot_fixture(browser, tmp_path, settings={"general": {"startup_tips": True}})
     alignment = browser.execute_script("""
-      const toast = document.createElement('div');
-      toast.className = 'toast';
-      toast.style.cssText = 'position:fixed;left:0;top:0;z-index:99999';
-      const group = startupHelperNavigationGroup(0, 14, () => {});
-      toast.append(group);
-      document.body.append(toast);
+      const toast = showStartupHelperTip();
+      const group = toast.querySelector('.startup-helper-nav');
       try {
         return [...group.querySelectorAll('button')].map(button => {
           const buttonRect = button.getBoundingClientRect();
@@ -82,7 +78,7 @@ def test_startup_tip_navigation_glyphs_are_centered_in_their_buttons(browser, tm
             offset: textRect.left + textRect.width / 2 - (buttonRect.left + buttonRect.width / 2)};
         });
       } finally {
-        toast.remove();
+        closeStartupHelperToast(toast);
       }
     """)
     assert len(alignment) == 2, alignment
@@ -224,6 +220,51 @@ def test_normal_mode_keeps_global_topbar_and_tabber_launchers(browser, tmp_path)
       return tabberIsAdvanced() && !document.body.classList.contains('tabber-mode-normal')
         && document.querySelector('.topbar-search')?.getBoundingClientRect().width > 0;
     """))
+
+
+def test_tabber_new_chat_menu_escapes_its_clipped_panel(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser, tmp_path, "?sessions=one&layout=left&tabs=left:tabber,one", sessions=["one"],
+        grid_width=762, grid_height=900, settings={"general": {"default_tabber_mode": "advanced"}},
+        dangerously_yolo=True,
+    )
+    browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 762, "height": 900, "deviceScaleFactor": 1, "mobile": False})
+    try:
+        wait = WebDriverWait(browser, 10)
+        wait.until(lambda driver: driver.execute_script("return typeof setTabberMode === 'function' && !!dockviewLayoutState.api"))
+        browser.execute_script("setTabberMode('advanced')")
+        prior_agents = browser.execute_script("return {claude: availableAgents.has('claude'), codex: availableAgents.has('codex')}")
+        launcher = wait.until(lambda driver: driver.execute_script(
+            "return panelNodes.get(tabberItemId)?.querySelector('[data-tabber-new-chat]') || null"
+        ))
+        browser.execute_script("availableAgents.add('claude'); availableAgents.add('codex'); arguments[0].click()", launcher)
+        wait.until(lambda driver: driver.execute_script("""
+          const popover = panelNodes.get(tabberItemId)?.querySelector('.tabber-new-chat-popover');
+          return popover?.getClientRects().length && getComputedStyle(popover).visibility === 'visible';
+        """))
+        geometry = browser.execute_script("""
+          const panel = panelNodes.get(tabberItemId);
+          const popover = panel?.querySelector('.tabber-new-chat-popover');
+          const rect = popover?.getBoundingClientRect();
+          return {topLayer: Boolean(popover?.matches(':popover-open')),
+            viewport: {width: innerWidth, height: innerHeight},
+            panel: panel?.getBoundingClientRect().toJSON(), popover: rect?.toJSON()};
+        """)
+        assert geometry["topLayer"], geometry
+        assert geometry["viewport"]["width"] == 762, geometry
+        assert geometry["popover"]["right"] > geometry["panel"]["right"], geometry
+        assert geometry["popover"]["left"] >= 0 and geometry["popover"]["right"] <= geometry["viewport"]["width"], geometry
+        browser.execute_script("closeAppMenus()")
+        wait.until(lambda driver: driver.execute_script("""
+          return !panelNodes.get(tabberItemId)?.querySelector('.tabber-new-chat-popover')?.matches(':popover-open');
+        """))
+    finally:
+        browser.execute_script("""
+          if (typeof closeAppMenus === 'function') closeAppMenus();
+          if (typeof availableAgents !== 'undefined' && !arguments[0].claude) availableAgents.delete('claude');
+          if (typeof availableAgents !== 'undefined' && !arguments[0].codex) availableAgents.delete('codex');
+        """, locals().get("prior_agents", {"claude": False, "codex": False}))
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
 
 
 @pytest.mark.parametrize("window_count", [1, 2])
@@ -5217,7 +5258,7 @@ def test_dockview_renamed_metadata_that_never_arrives_reports_one_owned_diagnost
               done({
                 tabs: Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
                 convergence: statusEl.dataset.metadataConvergence || '',
-                status: statusEl.innerHTML,
+                status: [...document.querySelectorAll('.command-notice')].map(node => node.textContent).join(' '),
                 failures: jsDebugFailureEvents('error')
                   .filter(event => event.failure === 'session_metadata_convergence')
                   .map(event => ({type: event.type, reason: event.reason, epoch: event.epoch, awaitedGeneration: event.awaitedGeneration})),
@@ -5338,7 +5379,7 @@ def test_dockview_successful_rename_closes_dialog_after_generationless_render_me
             mergedGeneration,
             dialogOpen: Boolean(document.querySelector('.session-rename-dialog')),
             dialogError: document.querySelector('.session-rename-error')?.textContent || '',
-            status: document.querySelector('#status')?.textContent || '',
+            status: [...document.querySelectorAll('.command-notice')].map(node => node.textContent).join(' '),
             mutation: runtimeState.layoutMutationSnapshot(),
           });
         })().catch(error => done({error: String(error && error.stack || error)}));
@@ -5782,6 +5823,12 @@ def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
           tabsOverlapActions,
           tabsOverlapToolbar: tabs.filter(rect => rect.bottom > toolbar.top + 1),
           lastRowTabClickable: Boolean(lastRowHit?.closest?.('.dockview-pane-tab')),
+          lastRowHit: lastRowHit ? {tag: lastRowHit.tagName, id: lastRowHit.id, className: lastRowHit.className,
+            html: lastRowHit.outerHTML.slice(0, 1200)} : null,
+          lastRowLastTab,
+          viewport: {width: innerWidth, height: innerHeight, scrollX, scrollY},
+          notices: [...document.querySelectorAll('.toast')].map(node => ({className: node.className,
+            text: node.textContent, rect: rectFor(node.getBoundingClientRect())})),
           activeTab: rectFor(activeRect),
           activeTabClickable: Boolean(hit?.closest?.('.dockview-pane-tab') === activeTab),
         };
@@ -5794,11 +5841,22 @@ def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
     assert metrics["laterRowRight"] > metrics["actionLeft"] + 1, metrics
     assert metrics["tabsOverlapActions"] == [], metrics
     assert metrics["tabsOverlapToolbar"] == [], metrics
-    assert metrics["lastRowTabClickable"] is True, metrics
+    assert metrics["lastRowTabClickable"] is True, json.dumps(metrics)
     assert metrics["header"]["height"] >= (metrics["tabHeight"] * 2) - 2, metrics
     assert metrics["activeTab"]["bottom"] <= metrics["toolbar"]["top"] + 1, metrics
     assert metrics["header"]["bottom"] <= metrics["toolbar"]["top"] + 1, metrics
     assert metrics["activeTabClickable"] is True, metrics
+
+
+def test_dockview_geometry_excludes_unrequested_startup_tip(browser, tmp_path, monkeypatch):
+    original_wait = wait_for_dockview_tab_geometry
+
+    def show_scheduled_tip(*args, **kwargs):
+        original_wait(*args, **kwargs)
+        assert browser.execute_script("return showStartupHelperTip() === null;")
+
+    monkeypatch.setitem(globals(), "wait_for_dockview_tab_geometry", show_scheduled_tip)
+    test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path)
 
 
 def test_dockview_drag_reorders_tabs_in_same_pane(browser, tmp_path):

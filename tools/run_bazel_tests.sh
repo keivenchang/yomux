@@ -165,10 +165,15 @@ if [ "$reuse_test_results" = default ]; then
 fi
 [ "$cache" != off ] || reuse_test_results=no
 printf 'YOMUX_EXECUTION {"test_result_reuse":"%s"}\n' "$reuse_test_results"
-test_result_cache=no
-if [ "$reuse_test_results" = yes ]; then
-  test_result_cache=yes
+if [ "$execution" = native ]; then
+  for native_identity_input in .bazelversion MODULE.bazel MODULE.bazel.lock go.mod go.sum; do
+    if [ ! -r "$REPO_ROOT/$native_identity_input" ]; then
+      echo "required native identity input is missing or unreadable: $REPO_ROOT/$native_identity_input" >&2
+      exit 2
+    fi
+  done
 fi
+test_result_cache="$(python3 "$REPO_ROOT/tools/bazel_execution_contract.py" --test-result-cache "$reuse_test_results")"
 
 case "$cache" in on|off) ;; *) echo "cache must be on or off" >&2; exit 2 ;; esac
 if [ "$execution" != native ]; then

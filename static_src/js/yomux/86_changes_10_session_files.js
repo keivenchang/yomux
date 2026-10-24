@@ -608,7 +608,7 @@ async function fetchSessionFiles(options = {}) {
   if (completionWaiter) state.completionWaiter = completionWaiter;
   state.abortController = requestController;
   if (!backgroundRefresh) setSessionFilesLoadingForDestination(destination, true);
-  if (!options.silent) statusEl.textContent = t('status.changedFilesLoading');
+  if (!options.silent) showLayoutStatus(t('status.changedFilesLoading'));
   if (!options.silent) {
     renderSessionFilesDestination(destination, {force: true});
     renderPaneTabStrips();

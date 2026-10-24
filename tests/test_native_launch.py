@@ -175,8 +175,10 @@ def test_authenticated_replacement_can_change_protocol_with_strict_readiness(nat
                     owned.wait(timeout=20)
 
 
-def test_managed_native_launch_adopts_inherited_listener(native_launch_environment, tmp_path):
+@pytest.mark.parametrize("tls", [False, True])
+def test_managed_native_launch_adopts_inherited_listener(native_launch_environment, tmp_path, tls):
     binary, environment = native_launch_environment
+    http_flags = [] if tls else ["--http"]
     listener = socket.socket()
     process = None
     try:
@@ -184,7 +186,7 @@ def test_managed_native_launch_adopts_inherited_listener(native_launch_environme
         listener.listen()
         port = listener.getsockname()[1]
         descriptor = listener.fileno()
-        planned = run_native(binary, environment, "--operator", "plan", "--root", str(REPO), "--port", str(port))
+        planned = run_native(binary, environment, "--operator", "plan", "--root", str(REPO), "--port", str(port), *http_flags)
         assert planned.returncode == 0, planned.stderr
         plan = json.loads(planned.stdout)
         plan["assign"]["YOMUX_ROOT"] = environment["YOMUX_ROOT"]
@@ -194,16 +196,16 @@ def test_managed_native_launch_adopts_inherited_listener(native_launch_environme
         with (tmp_path / "inherited.log").open("w") as output:
             process = subprocess.Popen([str(binary), "--operator", "exec", "--root", str(REPO), "--plan-json", raw_plan,
                                        "--", str(binary), "--launch", "--launch-plan-json", raw_plan, "--root", str(REPO),
-                                       "--http", "--host", "127.0.0.1", "--port", str(port),
+                                       *http_flags, "--host", "127.0.0.1", "--port", str(port),
                                        "--listen-fd", str(descriptor)], env=environment, cwd=REPO,
                                       pass_fds=(descriptor,), stdout=output, stderr=output)
             listener.close()
             ready = run_native(binary, environment, "--operator", "ready", "--root", str(REPO),
-                               "--http", "--host", "127.0.0.1", "--port", str(port), "--timeout", "20s")
+                               *http_flags, "--host", "127.0.0.1", "--port", str(port), "--timeout", "20s")
             assert ready.returncode == 0, ready.stderr + (tmp_path / "inherited.log").read_text()
             assert process.poll() is None
             verification = run_native(binary, environment, "--operator", "verify-environment", "--root", str(REPO),
-                                      "--port", str(port), "--http", "--pid", str(process.pid), "--plan-file", str(plan_file))
+                                       "--port", str(port), *http_flags, "--pid", str(process.pid), "--plan-file", str(plan_file))
             assert verification.returncode == 0, verification.stderr
     finally:
         listener.close()

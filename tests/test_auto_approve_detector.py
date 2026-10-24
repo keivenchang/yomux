@@ -787,7 +787,7 @@ def test_auto_approve_cli_capacity_once_respects_both_dry_run_inputs(monkeypatch
         return auto_approve_tmux.AgentTuiSendResult(ok=True, sent=True)
     monkeypatch.setattr(auto_approve_tmux, "send_prompt", send)
     auto_approve_tmux.main()
-    assert sent == ([] if configured or cli else [("6", "continue\n\n", {"clear_existing": False})])
+    assert sent == ([] if configured or cli else [("6", "continue", {"clear_existing": False})])
 
 
 def test_auto_approve_cli_capacity_recovers_after_preferences_dry_run_is_disabled(monkeypatch):
@@ -808,7 +808,7 @@ def test_auto_approve_cli_capacity_recovers_after_preferences_dry_run_is_disable
     monkeypatch.setattr(auto_approve_tmux, "send_prompt", send)
     with pytest.raises(RuntimeError, match="test observed recovery"):
         auto_approve_tmux.main()
-    assert sent == [("6", "continue\n\n", {"clear_existing": False})]
+    assert sent == [("6", "continue", {"clear_existing": False})]
 
 
 def test_standalone_bash_decision_fails_closed_without_extracted_command(monkeypatch):

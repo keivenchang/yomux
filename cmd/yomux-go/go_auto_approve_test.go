@@ -40,7 +40,7 @@ func goYoloTestProcessID(pid int, start string) string {
 	return stats.AgentStatusProcessInstanceID(stats.AgentRecord{PID: pid, StartedIdentity: start})
 }
 
-func TestGoCapacityRecoveryRequiresExactIdleCodexNoticeWithoutNewerPrompt(t *testing.T) {
+func TestGoCapacityRecoveryRequiresCurrentCodexNoticeWithoutDraft(t *testing.T) {
 	notice := "■ Selected model is at capacity. Please try a different model."
 	emptyComposer := notice + "\n\n›\n\n  gpt-5.5 xhigh · ~/repo"
 	cases := []struct {
@@ -54,6 +54,9 @@ func TestGoCapacityRecoveryRequiresExactIdleCodexNoticeWithoutNewerPrompt(t *tes
 		{name: "no whitespace after marker", state: "idle", text: "■Selected model is at capacity. Please try a different model.\n›", want: true},
 		{name: "current Codex composer placeholder", state: "idle", text: notice + "\n› Ask Codex to do anything\n\n  gpt-5.5 xhigh · ~/repo", want: true},
 		{name: "current Claude composer placeholder", state: "idle", text: notice + "\n› Ask Claude to do anything\n\n  Claude Code · ~/repo", want: true},
+		{name: "historical approval before current capacity", state: "blocked", text: "Would you like to run this command?\n" + emptyComposer, want: true},
+		{name: "blocked capacity", state: "blocked", text: emptyComposer, want: true},
+		{name: "unrelated blocked", state: "blocked", text: "■ denied\n›"},
 		{name: "working pane", state: "run", text: emptyComposer},
 		{name: "approval prompt", state: "idle", text: emptyComposer + "\nWould you like to run this command?"},
 		{name: "question", state: "ask", text: emptyComposer},
@@ -77,6 +80,82 @@ func TestGoCapacityRecoveryRequiresExactIdleCodexNoticeWithoutNewerPrompt(t *tes
 	}
 	if goCapacityNoticeCurrent(notice + "\nCompleted successfully\n\n›\n\n  gpt-5.5 xhigh · ~/repo") {
 		t.Fatal("capacity retry deadline should reset after newer output replaces the notice")
+	}
+}
+
+func TestGoCapacityPendingKeysProtectComposer(t *testing.T) {
+	const notice = "■ Selected model is at capacity. Please try a different model.\n"
+	for _, tc := range []struct {
+		name    string
+		state   string
+		text    string
+		pending bool
+		want    []string
+	}{
+		{"first blocked retry", "blocked", notice + "›", false, []string{"continue", "Enter"}},
+		{"owned pending", "blocked", notice + "› continue", true, []string{"Enter"}},
+		{"user continue", "blocked", notice + "› continue", false, nil},
+		{"changed draft", "blocked", notice + "› continue please", true, nil},
+		{"wrapped draft", "blocked", notice + "› continue\n more", true, nil},
+		{"resumed", "working", notice + "› continue", true, nil},
+		{"new output", "blocked", notice + "done\n› continue", true, nil},
+		{"approval", "needs-input", notice + "Would you like to run this command?\n› continue", true, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := goCapacityRecoveryKeys(tc.state, tc.text, tc.pending); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("keys=%q want=%q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGoCapacityRecoveryWithCodexStatusChrome(t *testing.T) {
+	const notice = "■ Selected model is at capacity. Please try a different model."
+	const model = "GPT-6.1-Sol medium · ~/dev/yomux/yo7110 · Trace this PR's origin · Main [de… Goal achieved (17m)"
+	for _, count := range []int{1, 2, 12, 100} {
+		terminal := "terminal"
+		if count != 1 {
+			terminal += "s"
+		}
+		background := fmt.Sprintf("%d background %s running · /ps to view · /stop to close", count, terminal)
+		for _, warnings := range []string{"? for shortcuts", "? for shortcuts    ⚠ 1 warning · f2 to view", "? for shortcuts    ⚠ 3 warnings · f2 to view"} {
+			t.Run(fmt.Sprintf("%d/%s", count, warnings), func(t *testing.T) {
+				visible := notice + "\n\n" + background + "\n\n› Ask Codex to do anything\n\n" + model + "\n" + warnings
+				if !goCapacityNoticeCurrent(visible) {
+					t.Fatal("status chrome hid the newest capacity notice")
+				}
+				for _, state := range []string{"idle", "blocked"} {
+					if got := goCapacityRecoveryKeys(state, visible, false); !reflect.DeepEqual(got, []string{"continue", "Enter"}) {
+						t.Fatalf("state %s recovery keys = %q", state, got)
+					}
+				}
+				for _, state := range []string{"working", "needs-input", "unavailable"} {
+					if got := goCapacityRecoveryKeys(state, visible, false); len(got) != 0 {
+						t.Fatalf("state %s admitted recovery keys %q", state, got)
+					}
+				}
+				for _, replacement := range []string{"› keep my draft", "›\n wrapped draft", "›\n" + background, "› ? for shortcuts", "› " + background, "›\n  ? for shortcuts", "›\n  ? for shortcuts    ⚠ 3 warnings · f2 to view", "›\nGPT-6.1-Sol medium · /tmp\n? for shortcuts", "›\n  GPT-6.1-Sol user draft"} {
+					draft := strings.Replace(visible, "› Ask Codex to do anything", replacement, 1)
+					if got := goCapacityRecoveryKeys("blocked", draft, false); len(got) != 0 {
+						t.Fatalf("draft admitted recovery keys %q", got)
+					}
+				}
+				for _, footer := range []string{"unknown footer", "? for shortcuts do not submit", "? for shortcuts    ⚠ 3 warnings · f2 to view keep my draft", "gpt-", "Claude codeword"} {
+					if got := goCapacityRecoveryKeys("blocked", visible+"\n"+footer, false); len(got) != 0 {
+						t.Fatalf("unknown footer %q admitted recovery keys %q", footer, got)
+					}
+				}
+				for _, newer := range []string{"Assistant finished successfully", background + " then sent user text", "? for shortcuts", "◦ Working (48s • esc to interrupt)"} {
+					if goCapacityNoticeCurrent(strings.Replace(visible, background, newer, 1)) {
+						t.Fatalf("newer output %q did not supersede capacity notice", newer)
+					}
+				}
+				busy := strings.Replace(visible, background, "◦ Waiting for background terminal (48s • esc to interrupt)", 1)
+				if goCapacityNoticeCurrent(busy) {
+					t.Fatal("newer activity did not supersede capacity notice")
+				}
+			})
+		}
 	}
 }
 
@@ -501,7 +580,7 @@ func TestGoYoloPaneLockSharesPythonWorkerTargetOwnership(t *testing.T) {
 	}
 }
 
-func TestGoCapacityRetryUsesIndependentThreeSecondCadence(t *testing.T) {
+func TestGoCapacityRetryUsesIndependentTenSecondCadence(t *testing.T) {
 	now := time.Unix(100, 0)
 	cases := []struct {
 		name     string
@@ -509,8 +588,8 @@ func TestGoCapacityRetryUsesIndependentThreeSecondCadence(t *testing.T) {
 		want     bool
 	}{
 		{name: "first send", lastSent: time.Time{}, want: true},
-		{name: "too soon", lastSent: now.Add(-2999 * time.Millisecond), want: false},
-		{name: "interval elapsed", lastSent: now.Add(-3 * time.Second), want: true},
+		{name: "too soon", lastSent: now.Add(-9999 * time.Millisecond), want: false},
+		{name: "interval elapsed", lastSent: now.Add(-10 * time.Second), want: true},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -762,13 +841,20 @@ func TestGoYoloCapacityDryRunIsDurablyRecordedWithoutTerminalInput(t *testing.T)
 	}
 	screen := "■ Selected model is at capacity. Please try a different model.\n\n›\n\n  gpt-5.5 xhigh · ~/repo"
 	s := &server{config: config, yolo: store}
+	s.agentStatusClassifier = func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
+		return stats.ClassifyAgentStatus(ctx, request, stats.AgentStatusSources{
+			CapturePane: func(context.Context, string) (stats.AgentStatusPane, error) {
+				return stats.AgentStatusPane{Status: "idle", VisibleText: screen, ObservedAt: time.Now()}, nil
+			},
+		})
+	}
 	done := make(chan struct{})
 	close(done)
 	store.workers["session"] = &goYoloWorker{cancel: func() {}, done: done, paneLocks: make(map[string]*os.File)}
 	defer s.releaseStaleGoYoloPaneLocks("session", map[string]bool{})
 	s.metadataMu.Lock()
 	s.metadataPayload = map[string]any{"sessions": map[string]any{"session": map[string]any{
-		"agents": []map[string]any{{"kind": "codex", "pane_target": "%1", "process_instance_id": "pid=99:start=1000", "status": "idle", "status_observed_at": float64(time.Now().UnixNano()) / 1e9}},
+		"agents": []map[string]any{{"kind": "codex", "pane_target": "%1", "process_instance_id": "pid=99:start=1000", "pid": 99, "status": "blocked", "status_observed_at": float64(time.Now().UnixNano()) / 1e9}},
 	}}}
 	s.metadataBuiltAt = time.Now()
 	s.metadataMu.Unlock()
@@ -940,12 +1026,29 @@ func TestGoYoloCapacityCycleRetriesOnlyTheVisibleGuardedNotice(t *testing.T) {
 	}
 	screen := "■ Selected model is at capacity. Please try a different model.\n\n›\n\n  gpt-5.5 xhigh · ~/repo"
 	sends := 0
+	pendingSubmission := false
+	liveWorking := false
+	expectedKeys := []string{"Enter"}
+	var screenBeforePaste string
+	paintDelayed := true
+	pastes := 0
 	sessionIdentity := "$1"
 	paneSessionIdentity := "$1"
 	processStart := "proc:1000"
 	s := &server{yolo: store, goYoloPaneOwnsProcessFn: func(context.Context, string, int) (bool, error) { return true, nil }, agentProcessSnapshot: func(context.Context, int) (stats.AgentStatusProcess, error) {
 		return goYoloTestProcess(99, processStart, "codex", "/bin/codex"), nil
 	}}
+	s.agentStatusClassifier = func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
+		return stats.ClassifyAgentStatus(ctx, request, stats.AgentStatusSources{
+			CapturePane: func(context.Context, string) (stats.AgentStatusPane, error) {
+				status := "idle"
+				if liveWorking {
+					status = "working"
+				}
+				return stats.AgentStatusPane{Status: status, VisibleText: screen, ObservedAt: time.Now()}, nil
+			},
+		})
+	}
 	done := make(chan struct{})
 	close(done)
 	store.workers["codex-session"] = &goYoloWorker{cancel: func() {}, done: done, paneLocks: make(map[string]*os.File)}
@@ -954,7 +1057,7 @@ func TestGoYoloCapacityCycleRetriesOnlyTheVisibleGuardedNotice(t *testing.T) {
 	s.metadataPayload = map[string]any{
 		"sessions": map[string]any{
 			"codex-session": map[string]any{
-				"agents": []map[string]any{{"kind": "codex", "pane_target": "%1", "pid": 99, "command": "codex", "executable": "/bin/codex", "process_instance_id": goYoloTestProcessID(99, processStart), "status": "idle", "status_observed_at": float64(time.Now().UnixNano()) / 1e9}},
+				"agents": []map[string]any{{"kind": "codex", "pane_target": "%1", "pid": 99, "command": "codex", "executable": "/bin/codex", "process_instance_id": goYoloTestProcessID(99, processStart), "status": "blocked", "status_observed_at": float64(time.Now().UnixNano()) / 1e9}},
 			},
 		},
 	}
@@ -970,10 +1073,20 @@ func TestGoYoloCapacityCycleRetriesOnlyTheVisibleGuardedNotice(t *testing.T) {
 			return exec.CommandContext(ctx, "printf", identity)
 		case "capture-pane":
 			return exec.CommandContext(ctx, "printf", "%s", screen)
+		case "paste-buffer":
+			pastes++
+			screenBeforePaste = screen
+			if !paintDelayed {
+				screen = "■ Selected model is at capacity. Please try a different model.\n› continue"
+			}
+			return exec.CommandContext(ctx, "true")
 		case "send-keys":
 			sends++
-			if !reflect.DeepEqual(args[3:], []string{"continue", "Enter", "Enter"}) {
+			if !reflect.DeepEqual(args[3:], expectedKeys) {
 				t.Errorf("capacity recovery keys = %#v", args[3:])
+			}
+			if !pendingSubmission {
+				screen = screenBeforePaste
 			}
 			return exec.CommandContext(ctx, "true")
 		default:
@@ -988,6 +1101,17 @@ func TestGoYoloCapacityCycleRetriesOnlyTheVisibleGuardedNotice(t *testing.T) {
 		}
 	}
 	cycle()
+	key := "codex-session\x00%1"
+	if sends != 0 || pastes != 1 || !store.capacityRecovery[key].pending || store.capacityRecovery[key].pastedAt.IsZero() || !store.lastSent[key].IsZero() || store.attempts["codex-session"] != 0 {
+		t.Fatalf("unpainted paste lost ownership or claimed submission: sends=%d pastes=%d recovery=%+v", sends, pastes, store.capacityRecovery[key])
+	}
+	cycle()
+	if sends != 0 || pastes != 1 {
+		t.Fatalf("stale empty capture duplicated paste or sent Return: sends=%d pastes=%d", sends, pastes)
+	}
+	paintDelayed = false
+	screen = "■ Selected model is at capacity. Please try a different model.\n› continue"
+	cycle()
 	if sends != 1 {
 		t.Fatalf("first visible capacity notice sends = %d, want 1; status action=%q error=%q owners=%#v", sends, store.lastAction["codex-session"], store.lastError["codex-session"], store.lockOwners["codex-session"])
 	}
@@ -999,7 +1123,6 @@ func TestGoYoloCapacityCycleRetriesOnlyTheVisibleGuardedNotice(t *testing.T) {
 		t.Fatalf("retry before cadence sends = %d, want 1", sends)
 	}
 
-	key := "codex-session\x00%1"
 	store.mu.Lock()
 	store.lastSent[key] = time.Now().Add(-goYoloCapacityRetryDelay)
 	store.mu.Unlock()
@@ -1015,6 +1138,7 @@ func TestGoYoloCapacityCycleRetriesOnlyTheVisibleGuardedNotice(t *testing.T) {
 	}
 	paneSessionIdentity = "$1"
 
+	store.lastSent[key] = time.Now().Add(-goYoloCapacityRetryDelay)
 	screen = "■ Selected model is at capacity. Please try a different model.\n› do not submit my draft"
 	cycle()
 	screen = "■ Selected model is at capacity. Please try a different model.\n\n›\n\n  gpt-5.5 xhigh · ~/repo"
@@ -1022,24 +1146,74 @@ func TestGoYoloCapacityCycleRetriesOnlyTheVisibleGuardedNotice(t *testing.T) {
 	if sends != 3 {
 		t.Fatalf("retry after guarded draft disappears sends = %d, want 3", sends)
 	}
+	// A completed submission must not claim a later user-written continue.
+	store.lastSent[key] = time.Now().Add(-goYoloCapacityRetryDelay)
+	screen = "■ Selected model is at capacity. Please try a different model.\n› continue"
+	cycle()
+	if sends != 3 {
+		t.Fatalf("submitted a user's continue after an empty post-send composer: %d", sends)
+	}
+	// Hold the first submission in the live composer and retry with Enter only.
+	screen = "■ Selected model is at capacity. Please try a different model.\n›"
+	pendingSubmission = true
+	cycle()
+	if sends != 4 || store.capacityRecovery[key].processIdentity == "" {
+		t.Fatalf("pending submission not owned: sends=%d pending=%+v", sends, store.capacityRecovery[key])
+	}
+	cycle()
+	if sends != 4 {
+		t.Fatal("pending Enter sent before the 10-second deadline")
+	}
+	store.lastSent[key] = time.Now().Add(-goYoloCapacityRetryDelay)
+	expectedKeys = []string{"Enter"}
+	cycle()
+	if sends != 5 {
+		t.Fatalf("pending submission retry sends=%d want=5", sends)
+	}
+	// Resumption can arrive after delivery and before the metadata snapshot catches up.
+	liveWorking = true
+	screen = "◦ Working on the request...\n›"
+	cycle()
+	if sends != 5 || store.attempts["codex-session"] != 5 || store.lastSuccess["codex-session"].IsZero() {
+		t.Fatalf("delayed resumption was not confirmed exactly once: sends=%d attempts=%d success=%v", sends, store.attempts["codex-session"], store.lastSuccess["codex-session"])
+	}
+	confirmedAt := store.lastSuccess["codex-session"]
+	cycle()
+	if store.lastSuccess["codex-session"] != confirmedAt {
+		t.Fatal("resumption was confirmed twice for one delivered attempt")
+	}
+	store.record("codex-session", "suspended: current agent status could not be confirmed", "", false, false)
+	cycle()
+	if action := store.lastAction["codex-session"]; strings.HasPrefix(action, "suspended:") {
+		t.Fatalf("fresh working status retained a previous suspension: %q", action)
+	}
+	if sends != 5 || store.attempts["codex-session"] != 5 || store.lastSuccess["codex-session"] != confirmedAt {
+		t.Fatal("clearing a working suspension changed delivery or success counters")
+	}
+	liveWorking = false
+	// New output invalidates ownership even if a later draft says continue.
+	screen = "Completed successfully\n›"
+	s.metadataPayload["sessions"].(map[string]any)["codex-session"].(map[string]any)["agents"].([]map[string]any)[0]["status"] = "idle"
+	cycle()
+	screen = "■ Selected model is at capacity. Please try a different model.\n› continue"
+	s.metadataPayload["sessions"].(map[string]any)["codex-session"].(map[string]any)["agents"].([]map[string]any)[0]["status"] = "blocked"
+	cycle()
+	if sends != 5 {
+		t.Fatal("new output retained ownership of a later user draft")
+	}
 	store.mu.Lock()
 	store.lastSent[key] = time.Now()
 	store.mu.Unlock()
-	s.metadataMu.Lock()
-	s.metadataPayload["sessions"].(map[string]any)["codex-session"].(map[string]any)["agents"].([]map[string]any)[0]["status"] = "run"
-	s.metadataMu.Unlock()
-	cycle()
-	s.metadataMu.Lock()
+	screen = "Completed successfully\n›"
 	s.metadataPayload["sessions"].(map[string]any)["codex-session"].(map[string]any)["agents"].([]map[string]any)[0]["status"] = "idle"
-	s.metadataMu.Unlock()
 	cycle()
-	if sends != 3 {
-		t.Fatalf("temporary non-idle status reset the three-second retry deadline: sends=%d", sends)
+	if sends != 5 || !store.lastSent[key].IsZero() {
+		t.Fatalf("new output retained capacity recovery: sends=%d deadline=%v", sends, store.lastSent[key])
 	}
 
 	sessionIdentity = "$2"
 	cycle()
-	if sends != 3 || store.isEnabled("codex-session") {
+	if sends != 5 || store.isEnabled("codex-session") {
 		t.Fatalf("replacement session retained YO or received a retry: sends=%d enabled=%t", sends, store.isEnabled("codex-session"))
 	}
 
@@ -1047,7 +1221,7 @@ func TestGoYoloCapacityCycleRetriesOnlyTheVisibleGuardedNotice(t *testing.T) {
 		t.Fatal(err)
 	}
 	cycle()
-	if sends != 3 {
+	if sends != 5 {
 		t.Fatalf("disabled YO mode sent another capacity retry: %d", sends)
 	}
 }
@@ -1070,13 +1244,16 @@ func TestGoYoloCycleDisablesBeforeSendingToReplacementAgent(t *testing.T) {
 	screen := "■ Selected model is at capacity. Please try a different model.\n\n›\n\n  gpt-5.5 xhigh · ~/repo"
 	processStart := "proc:1000"
 	processIdentity := goYoloTestProcessID(99, processStart)
-	now := time.Now()
+	if bound, err := store.bindAgentInstance("codex-session", sessionIdentity, "%1", processIdentity); err != nil || !bound {
+		t.Fatalf("bind initial process: bound=%t err=%v", bound, err)
+	}
 	s := &server{yolo: store, goYoloPaneOwnsProcessFn: func(context.Context, string, int) (bool, error) { return true, nil }, agentStatusClassifier: func(context.Context, stats.AgentStatusRequest) stats.AgentStatusResult {
 		return stats.AgentStatusResult{Status: stats.AgentStatusIdle, ObservedAt: time.Now()}
 	}, agentProcessSnapshot: func(context.Context, int) (stats.AgentStatusProcess, error) {
 		return goYoloTestProcess(99, processStart, "codex", "/bin/codex"), nil
 	}}
 	setAgent := func() {
+		now := time.Now()
 		s.metadataMu.Lock()
 		s.metadataPayload = map[string]any{"sessions": map[string]any{"codex-session": map[string]any{
 			"agents": []map[string]any{{
@@ -1087,6 +1264,10 @@ func TestGoYoloCycleDisablesBeforeSendingToReplacementAgent(t *testing.T) {
 		s.metadataBuiltAt = time.Now()
 		s.metadataMu.Unlock()
 	}
+	// Establish durable ownership before observing the fresh transition evidence.
+	if !s.ensureGoYoloPaneLock("codex-session", "%1") {
+		t.Fatal("could not acquire initial pane ownership")
+	}
 	setAgent()
 	sends := 0
 	s.tmuxCommandContextFn = func(ctx context.Context, args ...string) *exec.Cmd {
@@ -1095,6 +1276,9 @@ func TestGoYoloCycleDisablesBeforeSendingToReplacementAgent(t *testing.T) {
 			return exec.CommandContext(ctx, "printf", sessionIdentity)
 		case "capture-pane":
 			return exec.CommandContext(ctx, "printf", "%s", screen)
+		case "paste-buffer":
+			screen = "■ Selected model is at capacity. Please try a different model.\n› continue"
+			return exec.CommandContext(ctx, "true")
 		case "send-keys":
 			sends++
 			return exec.CommandContext(ctx, "true")
@@ -1106,7 +1290,7 @@ func TestGoYoloCycleDisablesBeforeSendingToReplacementAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sends != 1 {
-		t.Fatalf("initial bound process submissions = %d, want 1", sends)
+		t.Fatalf("initial bound process submissions = %d, want 1; action=%q error=%q", sends, store.lastAction["codex-session"], store.lastError["codex-session"])
 	}
 	processStart = "proc:2000"
 	processIdentity = goYoloTestProcessID(99, processStart)
@@ -1220,6 +1404,9 @@ func TestGoYoloGuardedTransportChecksFreshScreenBeforeEveryWrite(t *testing.T) {
 	currentScreen := capacity
 	var commandLog [][]string
 	ownsPane := true
+	var afterPaste func()
+	pasteFails := false
+	liveIdentity := sessionIdentity
 	s := &server{
 		yolo:                    store,
 		goYoloPaneOwnsProcessFn: func(context.Context, string, int) (bool, error) { return ownsPane, nil },
@@ -1234,9 +1421,18 @@ func TestGoYoloGuardedTransportChecksFreshScreenBeforeEveryWrite(t *testing.T) {
 		commandLog = append(commandLog, append([]string(nil), args...))
 		switch args[0] {
 		case "display-message":
-			return exec.CommandContext(ctx, "printf", sessionIdentity)
+			return exec.CommandContext(ctx, "printf", liveIdentity)
 		case "capture-pane":
 			return exec.CommandContext(ctx, "printf", "%s", currentScreen)
+		case "paste-buffer":
+			if pasteFails {
+				return exec.CommandContext(ctx, "false")
+			}
+			currentScreen = "■ Selected model is at capacity. Please try a different model.\n› continue"
+			if afterPaste != nil {
+				afterPaste()
+			}
+			return exec.CommandContext(ctx, "true")
 		case "send-keys":
 			return exec.CommandContext(ctx, "true")
 		default:
@@ -1251,9 +1447,9 @@ func TestGoYoloGuardedTransportChecksFreshScreenBeforeEveryWrite(t *testing.T) {
 
 	currentScreen = capacity + "\n\n› fix.py"
 	commandLog = nil
-	sent, err := s.goYoloGuardedSendKeys(context.Background(), session, target, sessionIdentity, agent, []string{"continue", "Enter", "Enter"}, []string{"idle"}, guard)
-	if err != nil || sent {
-		t.Fatalf("draft-protected send = sent %t, err %v; want no send", sent, err)
+	sent, err := s.goYoloGuardedSendKeys(context.Background(), session, target, sessionIdentity, agent, []string{"continue", "Enter"}, []string{"idle"}, guard)
+	if err != nil || sent.keysSent {
+		t.Fatalf("draft-protected send = sent %+v, err %v; want no send", sent, err)
 	}
 	for _, command := range commandLog {
 		if command[0] == "send-keys" {
@@ -1263,28 +1459,155 @@ func TestGoYoloGuardedTransportChecksFreshScreenBeforeEveryWrite(t *testing.T) {
 
 	currentScreen = capacity
 	commandLog = nil
-	sent, err = s.goYoloGuardedSendKeys(context.Background(), session, target, sessionIdentity, agent, []string{"continue", "Enter", "Enter"}, []string{"idle"}, guard)
-	if err != nil || !sent {
-		t.Fatalf("current capacity send = sent %t, err %v; want guarded send", sent, err)
+	sent, err = s.goYoloGuardedSendKeys(context.Background(), session, target, sessionIdentity, agent, []string{"continue", "Enter"}, []string{"idle"}, guard)
+	if err != nil || !sent.keysSent {
+		t.Fatalf("current capacity send = sent %+v, err %v; want guarded send", sent, err)
 	}
-	if len(commandLog) < 4 || commandLog[len(commandLog)-2][0] != "capture-pane" || commandLog[len(commandLog)-1][0] != "send-keys" {
-		t.Fatalf("terminal write was not adjacent to its final capture: %#v", commandLog)
+	var pasteIndex int
+	for index, command := range commandLog {
+		if command[0] == "paste-buffer" {
+			pasteIndex = index
+		}
 	}
-	if got := commandLog[len(commandLog)-1]; !reflect.DeepEqual(got, []string{"send-keys", "-t", target, "continue", "Enter", "Enter"}) {
+	if pasteIndex == 0 || commandLog[pasteIndex-1][0] != "capture-pane" || commandLog[pasteIndex][1] != "-p" {
+		t.Fatalf("bracketed paste was not adjacent to its final capture: %#v", commandLog)
+	}
+	if got := commandLog[len(commandLog)-1]; !reflect.DeepEqual(got, []string{"send-keys", "-t", target, "Enter"}) {
 		t.Fatalf("guarded key sequence = %q", got)
 	}
+	for _, tc := range []struct {
+		name   string
+		change func()
+	}{
+		{"YO disabled", func() { store.mu.Lock(); store.enabled[session] = false; store.mu.Unlock() }},
+		{"approval replaced notice", func() { currentScreen = "Would you like to run this command?\n› 1. Yes\n  2. No" }},
+		{"draft edited", func() {
+			currentScreen = "■ Selected model is at capacity. Please try a different model.\n› continue please"
+		}},
+		{"process replaced", func() { ownsPane = false }},
+		{"session replaced", func() { liveIdentity = "$replacement" }},
+		{"compositor not updated", func() { currentScreen = capacity }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store.mu.Lock()
+			store.enabled[session] = true
+			store.mu.Unlock()
+			ownsPane = true
+			liveIdentity = sessionIdentity
+			currentScreen = capacity
+			commandLog = nil
+			afterPaste = tc.change
+			delivery, err := s.goYoloGuardedSendKeys(context.Background(), session, target, sessionIdentity, agent, []string{"continue", "Enter"}, []string{"idle"}, guard)
+			if err != nil || !delivery.pasted || delivery.keysSent {
+				t.Fatalf("post-paste delivery=%+v err=%v", delivery, err)
+			}
+			for _, command := range commandLog {
+				if command[0] == "send-keys" {
+					t.Fatalf("post-paste change submitted input: %q", command)
+				}
+			}
+		})
+	}
+	afterPaste = nil
+	ownsPane = true
+	liveIdentity = sessionIdentity
+	currentScreen = capacity
+	store.mu.Lock()
+	store.enabled[session] = true
+	store.mu.Unlock()
+	pasteFails = true
+	commandLog = nil
+	if delivery, err := s.goYoloGuardedSendKeys(context.Background(), session, target, sessionIdentity, agent, []string{"continue", "Enter"}, []string{"idle"}, guard); err == nil || delivery.pasted || delivery.keysSent {
+		t.Fatalf("failed paste delivery=%+v err=%v", delivery, err)
+	}
+	for _, command := range commandLog {
+		if command[0] == "send-keys" {
+			t.Fatalf("failed paste submitted input: %q", command)
+		}
+	}
+	if commandLog[len(commandLog)-1][0] != "delete-buffer" {
+		t.Fatalf("failed paste leaked buffer: %q", commandLog)
+	}
+	pasteFails = false
 	ownsPane = false
 	commandLog = nil
-	if sent, err := s.goYoloGuardedSendKeys(context.Background(), session, target, sessionIdentity, agent, []string{"continue", "Enter", "Enter"}, []string{"idle"}, guard); err != nil || sent {
-		t.Fatalf("replacement process outside pane = sent %t, err %v; want no send", sent, err)
+	if sent, err := s.goYoloGuardedSendKeys(context.Background(), session, target, sessionIdentity, agent, []string{"continue", "Enter"}, []string{"idle"}, guard); err != nil || sent.keysSent {
+		t.Fatalf("replacement process outside pane = sent %+v, err %v; want no send", sent, err)
 	}
 	for _, command := range commandLog {
 		if command[0] == "send-keys" {
 			t.Fatalf("process outside target pane reached terminal through command %q", command)
 		}
 	}
-	if sent, err := s.goYoloGuardedSendKeys(context.Background(), session, target, sessionIdentity, agent, []string{"clear", "Enter"}, []string{"idle"}, guard); err == nil || sent {
-		t.Fatalf("unsupported key sequence = sent %t, err %v; want rejected", sent, err)
+	if sent, err := s.goYoloGuardedSendKeys(context.Background(), session, target, sessionIdentity, agent, []string{"clear", "Enter"}, []string{"idle"}, guard); err == nil || sent.keysSent {
+		t.Fatalf("unsupported key sequence = sent %+v, err %v; want rejected", sent, err)
+	}
+}
+
+func TestGoTerminalPasteUsesBracketedBytesAndSeparateReturn(t *testing.T) {
+	for _, prompt := range []string{"continue", "first\nsecond"} {
+		t.Run(prompt, func(t *testing.T) {
+			root := testsupport.ShortTempDir(t)
+			socket := filepath.Join(root, "tmux.sock")
+			t.Setenv(productenv.Name("TMUX_SOCKET"), socket)
+			rawPath := filepath.Join(root, "input")
+			script := fmt.Sprintf("stty raw -echo\nprintf '\\033[?2004h'\ntmux -S %q wait-for -S ready\ndd bs=1 count=%d of=%q 2>/dev/null\ntmux -S %q wait-for -S received\ntmux -S %q wait-for stop\n", socket, len(prompt)+13, rawPath, socket, socket)
+			scriptPath := filepath.Join(root, "reader.sh")
+			if err := os.WriteFile(scriptPath, []byte(testsupport.ShellScript(t, script)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "paste", scriptPath).CombinedOutput(); err != nil {
+				t.Fatalf("private tmux: %v: %s", err, output)
+			}
+			t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := exec.CommandContext(ctx, "tmux", "-S", socket, "wait-for", "ready").Run(); err != nil {
+				t.Fatal(err)
+			}
+			s := &server{}
+			for _, outcome := range []string{"declined", "error", "canceled"} {
+				guardContext, guardCancel := context.WithCancel(ctx)
+				sent, guardErr := s.pasteTerminalText(guardContext, "=paste:0.0", "must not arrive", func() (bool, error) {
+					if outcome == "canceled" {
+						guardCancel()
+						return false, guardContext.Err()
+					}
+					if outcome == "error" {
+						return false, fmt.Errorf("guard unavailable")
+					}
+					return false, nil
+				})
+				guardCancel()
+				if sent || (outcome == "declined") != (guardErr == nil) {
+					t.Fatalf("%s: sent=%t err=%v", outcome, sent, guardErr)
+				}
+				buffers, bufferErr := s.tmuxCommandContext(ctx, "list-buffers").Output()
+				if bufferErr != nil || len(buffers) != 0 {
+					t.Fatalf("%s leaked private buffer: %s err=%v", outcome, buffers, bufferErr)
+				}
+			}
+			if sent, err := s.pasteTerminalText(ctx, "=paste:0.0", prompt, nil); err != nil || !sent {
+				t.Fatalf("paste sent=%t err=%v", sent, err)
+			}
+			if err := s.tmuxCommandContext(ctx, "send-keys", "-t", "=paste:0.0", "Enter").Run(); err != nil {
+				t.Fatal(err)
+			}
+			if err := exec.CommandContext(ctx, "tmux", "-S", socket, "wait-for", "received").Run(); err != nil {
+				t.Fatal(err)
+			}
+			input, err := os.ReadFile(rawPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(input) != "\x1b[200~"+prompt+"\x1b[201~\r" {
+				t.Fatalf("terminal bytes=%q", input)
+			}
+			buffers, err := s.tmuxCommandContext(ctx, "list-buffers").Output()
+			if err != nil || len(buffers) != 0 {
+				t.Fatalf("private buffer leaked: %s err=%v", buffers, err)
+			}
+		})
 	}
 }
 
@@ -1294,23 +1617,40 @@ func TestGoYoloCapacityWorkerSubmitsThroughPrivateTmuxAPI(t *testing.T) {
 	t.Setenv(productenv.Name("TMUX_SOCKET"), socket)
 	countPath := filepath.Join(root, "submissions")
 	workingPath := filepath.Join(root, "working")
-	scriptPath := filepath.Join(root, "codex-fixture.sh")
-	script := fmt.Sprintf(`printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n'
-printf '■ Selected model is at capacity. Please try a different model.\n\n›\n\n  gpt-5.5 xhigh · ~/repo\n'
-while IFS= read -r line; do
-  if [ "$line" = continue ]; then
-    count=0
-    if [ -r %q ]; then count=$(cat %q); fi
-    count=$((count + 1))
-    printf '%%s\n' "$count" > %q
-    : > %q
-    printf '\033[2J\033[H'
-    printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n'
-    printf '◦ Working on the request...\n\n›\n\n  gpt-5.5 xhigh · ~/repo\n'
-  fi
-done
-`, countPath, countPath, countPath, workingPath)
-	if err := os.WriteFile(scriptPath, []byte(testsupport.ShellScript(t, script)), 0o700); err != nil {
+	scriptPath := filepath.Join(root, "codex-fixture.py")
+	script := fmt.Sprintf(`#!/usr/bin/env python3
+import os
+import pathlib
+import sys
+import tty
+
+tty.setraw(sys.stdin.fileno())
+sys.stdout.write("\x1b[?2004h")
+notice = "■ Selected model is at capacity. Please try a different model."
+def render(draft):
+    sys.stdout.write("\x1b[2J\x1b[H" + "\r\n" * 14 + notice + "\r\n\r\n› " + draft + "\r\n\r\n  gpt-5.5 xhigh · ~/repo\r\n")
+    sys.stdout.flush()
+render("")
+text = b""
+while True:
+    key = os.read(sys.stdin.fileno(), 1)
+    if not key:
+        break
+    text += key
+    if text.endswith(b"\x1b[201~"):
+        render(text.removeprefix(b"\x1b[200~").removesuffix(b"\x1b[201~").decode())
+    if key == b"\r":
+        value = text.removeprefix(b"\x1b[200~").replace(b"\x1b[201~", b"").strip()
+        if value == b"continue":
+            path = pathlib.Path(%q)
+            count = int(path.read_text()) if path.exists() else 0
+            path.write_text(str(count + 1))
+            pathlib.Path(%q).touch()
+            sys.stdout.write("\x1b[2J\x1b[H" + "\r\n" * 14 + "◦ Working on the request...\r\n\r\n›\r\n\r\n  gpt-5.5 xhigh · ~/repo\r\n")
+            sys.stdout.flush()
+        text = b""
+`, countPath, workingPath)
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "yo-private", scriptPath).CombinedOutput(); err != nil {

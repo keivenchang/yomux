@@ -71,7 +71,7 @@ func compileSearchPolicyResolved(root, canonicalRoot string, names map[string]st
 	if policy, ok := searchPolicyCache.values.Get(key); ok {
 		return policy, nil
 	}
-	policy, err := buildSearchPolicy(root, canonicalRoot, names, rules)
+	policy, err := buildSearchPolicy(root, canonicalRoot, normalizedNames, canonicalRules)
 	if err != nil {
 		return nil, err
 	}
@@ -103,17 +103,16 @@ func canonicalSearchPolicyRule(root, canonicalRoot, raw string) string {
 	return "path:" + raw
 }
 
-func buildSearchPolicy(root, canonicalRoot string, names map[string]struct{}, rules []string) (*compiledSearchPolicy, error) {
+func buildSearchPolicy(root, canonicalRoot string, names, canonicalRules []string) (*compiledSearchPolicy, error) {
 	policyRoot := filepath.Clean(root)
 	policy := &compiledSearchPolicy{root: policyRoot, canonicalRoot: filepath.Clean(canonicalRoot), names: make(map[string]struct{}), directoryLimit: MaxDirectoryEntries}
 	for name := range searchExcludedDirectoryNames {
 		policy.names[name] = struct{}{}
 	}
-	for name := range names {
+	for _, name := range names {
 		policy.names[name] = struct{}{}
 	}
-	home, _ := os.UserHomeDir()
-	for _, raw := range rules {
+	for _, raw := range canonicalRules {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			continue
@@ -131,15 +130,8 @@ func buildSearchPolicy(root, canonicalRoot string, names map[string]struct{}, ru
 			}
 			rule.matcher = matcher
 		} else {
-			if raw == "~" {
-				raw = home
-			} else if strings.HasPrefix(raw, "~/") {
-				raw = filepath.Join(home, raw[2:])
-			}
-			if !filepath.IsAbs(raw) {
-				raw = filepath.Join(root, raw)
-			}
-			rule.path = strings.TrimPrefix(canonicalSearchPolicyRule(root, canonicalRoot, raw), "path:")
+			// Re-resolving here could cache a retargeted symlink under the previous generation's key.
+			rule.path = strings.TrimPrefix(raw, "path:")
 		}
 		policy.rules = append(policy.rules, rule)
 	}

@@ -11665,6 +11665,40 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
     assert terminal_closed["openIds"] == [], terminal_closed
 
 
+def test_pane_toast_stays_below_open_app_menu(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return window.__terminalOpened >= 1 && document.querySelector('.app-menu[data-app-menu=\\\"view\\\"] > .app-menu-button')"
+        )
+    )
+    browser.find_element("css selector", '.app-menu[data-app-menu="view"] > .app-menu-button').click()
+    metrics = browser.execute_script(
+        """
+        const menu = document.querySelector('.app-menu[data-app-menu="view"] > .app-menu-popover');
+        const rect = menu.getBoundingClientRect();
+        const point = {x:rect.left + rect.width / 2, y:rect.top + Math.min(32, rect.height / 2)};
+        const toastLayers = ['panel-toast-stack', 'attention-alerts'].map(className => {
+          const stack = document.createElement('div');
+          stack.className = className;
+          Object.assign(stack.style, {position:'fixed', left:`${rect.left}px`, top:`${rect.top}px`, right:'auto', width:`${rect.width}px`});
+          stack.innerHTML = '<div class="toast attention-alert">File changed on disk: /tmp/example.md</div>';
+          document.body.append(stack);
+          const menuReceivesHit = document.elementFromPoint(point.x, point.y)?.closest('.app-menu-popover') === menu;
+          stack.remove();
+          return {className, menuReceivesHit, z: getComputedStyle(stack).zIndex};
+        });
+        return {
+          open: document.querySelector('.app-menu[data-app-menu="view"]').classList.contains('open'),
+          topbarZ: getComputedStyle(document.querySelector('.topbar')).zIndex,
+          toastLayers,
+          point,
+        };
+        """
+    )
+    assert metrics["open"] and all(layer["menuReceivesHit"] for layer in metrics["toastLayers"]), metrics
+
+
 def test_ipad_app_menu_dropdown_keeps_normal_content_width(browser, tmp_path):
     ipad_user_agent = "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"
     with trusted_touch_emulation(browser, user_agent=ipad_user_agent):

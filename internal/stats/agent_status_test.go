@@ -110,6 +110,10 @@ func TestCodexCapacityNoticeIsBlockedAndClearsWithNewerOutput(t *testing.T) {
 	if blocked.Status != AgentStatusError || blocked.AttentionKind != "unknown" || blocked.AttentionSignature == "" {
 		t.Fatalf("current capacity notice = %+v, want blocked attention with a signature", blocked)
 	}
+	withChrome := notice + "\n\n1 background terminal running · /ps to view · /stop to close\n\n› Ask Codex to do anything\n\nGPT-6.1-Sol medium · ~/repo · Goal achieved (17m)\n? for shortcuts    ⚠ 3 warnings · f2 to view"
+	if got := classify(withChrome); got.Status != blocked.Status || got.AttentionKind != "unknown" || got.AttentionSignature == "" {
+		t.Fatalf("persistent status chrome changed capacity attention: %+v, want %+v", got, blocked)
+	}
 	if cleared := classify(stale); cleared.Status != AgentStatusIdle {
 		t.Fatalf("capacity notice followed by newer output = %+v, want idle", cleared)
 	}

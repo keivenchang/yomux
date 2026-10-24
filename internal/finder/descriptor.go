@@ -75,10 +75,6 @@ func openResolvedDescriptorContext(ctx context.Context, resolved string, directo
 	if !filepath.IsAbs(resolved) {
 		return nil, fmt.Errorf("resolved path is not absolute")
 	}
-	flags := syscall.O_RDONLY | syscall.O_CLOEXEC | syscall.O_NOFOLLOW
-	if directory {
-		flags |= syscall.O_DIRECTORY
-	}
 	rootFD, err := platformOpenRoot()
 	if err != nil {
 		return nil, err
@@ -90,10 +86,6 @@ func openResolvedDescriptorContext(ctx context.Context, resolved string, directo
 		if err := ctx.Err(); err != nil {
 			_ = syscall.Close(currentFD)
 			return nil, err
-		}
-		if !directory {
-			_ = syscall.Close(currentFD)
-			return nil, syscall.EISDIR
 		}
 		return os.NewFile(uintptr(currentFD), resolved), nil
 	}

@@ -674,6 +674,51 @@ def test_roster_refresh_preserves_expansion_focus_and_scroll(browser, tmp_path):
 
 
 @pytest.mark.browser
+@pytest.mark.parametrize("refresh_phase", ["pointerdown", "mousedown"])
+def test_roster_refresh_control_survives_a_poll_during_native_activation(browser, tmp_path, refresh_phase):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    _open_daemons_with_frozen_poll(browser)
+    run_when_browser_ready(
+        browser,
+        _schema_five_payload_script() + "return true;",
+        list(SYSTEM_STATUS_SERVICE_IDS),
+        DEFAULT_ROSTER_STATES,
+        globals_required={"refreshDebugSystemViews": "function"},
+        dom_anchors=("[data-js-debug-system-refresh]",),
+    )
+    browser.execute_script("""
+        window.__rosterActivationEvents = [];
+        window.__rosterRefreshControl = document.querySelector('[data-js-debug-system-refresh]');
+        for (const type of ['pointerdown', 'mousedown', 'focusin', 'focusout', 'mouseup', 'click']) {
+          document.addEventListener(type, event => {
+            window.__rosterActivationEvents.push({type, target: event.target.tagName,
+              key: event.target.dataset?.jsDebugSystemFocusKey || '',
+              active: document.activeElement?.dataset?.jsDebugSystemFocusKey || document.activeElement?.tagName});
+          }, {capture: true});
+        }
+        document.addEventListener(arguments[0], event => {
+          if (!event.target.closest('[data-js-debug-system-refresh]')) return;
+          // A poll can start between the native gesture's press and its default focus action.
+          jsDebugSystemState.inFlight = true;
+          refreshDebugSystemViews();
+          jsDebugSystemState.inFlight = false;
+          refreshDebugSystemViews();
+        }, {capture: true, once: true});
+    """, refresh_phase)
+    fast_pointer_actions(browser).click(
+        browser.find_element(By.CSS_SELECTOR, "[data-js-debug-system-refresh]")
+    ).perform()
+    state = browser.execute_script("""
+        return {key: document.activeElement?.dataset?.jsDebugSystemFocusKey || '',
+          sameControl: window.__rosterRefreshControl === document.querySelector('[data-js-debug-system-refresh]'),
+          events: window.__rosterActivationEvents};
+    """)
+    assert state["sameControl"] is True, state
+    assert any(event["type"] == "click" and event["key"] == "roster-refresh" for event in state["events"]), state
+    assert state["key"] == "roster-refresh", state
+
+
+@pytest.mark.browser
 def test_the_first_poll_after_creation_and_after_a_rerender_replaces_no_region(browser, tmp_path):
     """The region cache must be seeded by EVERY site that builds the five regions.
 

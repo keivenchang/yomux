@@ -359,6 +359,14 @@ class TestElement {
     const tmuxWindowBar = testElementFromTmuxWindowBarHtml(this._innerHTML);
     if (tmuxWindowBar) this.appendChild(tmuxWindowBar);
     for (const node of testElementsFromFileEditorDialogHtml(this._innerHTML)) this.appendChild(node);
+    if (this._innerHTML.includes('class="toast-header"')) {
+      for (const match of this._innerHTML.matchAll(/<(div|button)\b([^>]*)>/g)) {
+        const node = new TestElement('', match[1]);
+        node.className = testHtmlAttributeValue(match[2], 'class');
+        populateTestDatasetFromHtmlAttrs(node, match[2]);
+        this.appendChild(node);
+      }
+    }
   }
 
   addEventListener(type, listener) {
@@ -1228,6 +1236,8 @@ globalThis.__layoutTestApi = {
   fileStateCanRenderDiffView,
   diffModeShouldFallBackToEdit,
   setFileExplorerIndexedDirsForTest(paths) { setFileExplorerIndexedDirs(paths); },
+  setFileExplorerDirectoryIndexedForTest: setFileExplorerDirectoryIndexed,
+  reconcileIndexedDirsFromSettingForTest: reconcileIndexedDirsFromSetting,
   setFileExplorerIndexExcludePathsForTest(paths) {
     fileExplorerIndexExcludePaths = new Set((paths || []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
   },
@@ -1659,6 +1669,9 @@ globalThis.__layoutTestApi = {
   refreshTmuxStatusModeForTest: refreshTmuxStatusMode,
   refreshTmuxStatusModeAfterSocketOpenForTest: refreshTmuxStatusModeAfterSocketOpen,
   jsDebugResourcePhaseTimingsForTest: jsDebugResourcePhaseTimings,
+  jsDebugResourceTimingEntryForTest: jsDebugResourceTimingEntry,
+  fetchApiRequestWithTimingForTest: fetchApiRequestWithTiming,
+  updateApiDebugResourcePhasesForTest: updateApiDebugResourcePhases,
   applyApiRequestIdHeaderForTest: applyApiRequestIdHeader,
   inactiveTabItems,
   infoItemId,
@@ -2634,6 +2647,8 @@ globalThis.__layoutTestApi = {
   commandPaletteValidateFileTabPathsForTest: commandPaletteValidateFileTabPaths,
   fileEditorItemForTest: fileEditorItemFor,
   saveFileEditorForTest: saveFileEditor,
+  fileEditorSelfWritePendingForTest: fileEditorSelfWritePending,
+  fileEditorSelfWriteAcknowledgedForTest: fileEditorSelfWriteAcknowledged,
   refreshOpenFileDiffForTest: refreshOpenFileDiff,
   renderEditorPreviewPane,
   openFileIsMissing,
@@ -3412,6 +3427,13 @@ globalThis.__layoutTestApi = {
   modalTitleForTest() { return document.getElementById('modalTitle').textContent; },
   modalBodyHtmlForTest() { return document.getElementById('modalBody').innerHTML; },
   statusTextForTest() { return statusEl.textContent; },
+  timedStatusNoticesForTest() {
+    return [...toastRecords.values()].filter(record => record.node.classList.contains('command-notice'))
+      .map(record => [...record.node.querySelector('.toast-body').children].map(node => node.textContent).join('\\n'));
+  },
+  showLayoutStatusForTest: showLayoutStatus,
+  setStatusHtmlForTest: setStatusHtml,
+  showTimedStatusNoticeForTest: showTimedStatusNotice,
   statusHtmlForTest() { return statusEl.innerHTML; },
   statusClassForTest() { return statusEl.className; },
   statusKindForTest() { return statusEl.dataset.layoutStatusKind || ''; },

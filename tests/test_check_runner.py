@@ -152,6 +152,8 @@ def test_parent_check_lock_ownership_is_inherited_by_pytest(monkeypatch, tmp_pat
 def test_default_check_lanes_keep_full_pytest_gate():
     check = load_check_module()
     nonbrowser_workers, browser_workers, e2e_workers = check.pytest_worker_counts()
+    nonbrowser_cpu, browser_cpu, e2e_cpu = check.pytest_cpu_limits((nonbrowser_workers, browser_workers, e2e_workers))
+    browser_single_cpu = check.pytest_cpu_limit(1, per_worker=2, minimum=2)
     lanes = check.lanes()
     default_names = [lane.name for lane in lanes if lane.default]
     assert default_names == ["py-compile", "static", "node-syntax", "node-layout", "bazel-go", "pytest", "pytest-browser", "pytest-e2e", "pytest-gate-serial", "whitespace"]
@@ -170,7 +172,7 @@ def test_default_check_lanes_keep_full_pytest_gate():
     # browser tests need Selenium/Chrome. Each slow class has its own default lane so failures name the
     # failing subsystem instead of hiding under "pytest full".
     assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("nonbrowser"), "-n", nonbrowser_workers, "-m", "not node_bridge and not gate_serial and not e2e and not browser", "-q"]
-    assert pytest_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(nonbrowser_workers))))
+    assert pytest_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", nonbrowser_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(nonbrowser_workers))))
     assert check.MOCK_TRANSCRIPT_FILES == ("tests/test_mock_transcripts.py",)
     assert set(check.MOCK_TRANSCRIPT_FILES).issubset(check.pytest_files("nonbrowser"))
     node_lane = next(lane for lane in lanes if lane.name == "node-layout")
@@ -182,15 +184,15 @@ def test_default_check_lanes_keep_full_pytest_gate():
     boot_lane = next(lane for lane in lanes if lane.name == "pytest-boot")
     assert boot_lane.default is False
     assert boot_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot", "-q"]
-    assert boot_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
+    assert boot_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", browser_single_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
     browser_lane = next(lane for lane in lanes if lane.name == "pytest-browser")
     assert browser_lane.default is True
     assert browser_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot", "-q"]
-    assert browser_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
+    assert browser_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", browser_single_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
     assert browser_lane.steps[1].args == ["python3", "-m", "pytest", *check.pytest_files("browser"), "-n", browser_workers, "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden", "-q"]
-    assert browser_lane.steps[1].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(browser_workers))))
+    assert browser_lane.steps[1].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", browser_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(browser_workers))))
     assert browser_lane.steps[2].args == ["python3", "-m", "pytest", *check.pytest_files("golden"), "-m", "visual_golden", "-q"]
-    assert browser_lane.steps[2].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
+    assert browser_lane.steps[2].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", browser_single_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
     gate_serial_lane = next(lane for lane in lanes if lane.name == "pytest-gate-serial")
     assert gate_serial_lane.run_last is True
     assert not check.pytest_files("gate_serial")
@@ -201,7 +203,7 @@ def test_default_check_lanes_keep_full_pytest_gate():
         "python3", "-m", "pytest", *check.pytest_files("e2e"), "-n", e2e_workers, "-m", "e2e",
         *[arg for nodeid in test_plan.BAZEL_GO_BROWSER_TESTS for arg in ("--deselect", nodeid)], "-q",
     ]
-    assert e2e_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(e2e_workers))))
+    assert e2e_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", e2e_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(e2e_workers))))
     assert "pytest-unit" not in {lane.name for lane in lanes}
     assert "pytest-socket" not in {lane.name for lane in lanes}
     bazel_lane = next(lane for lane in lanes if lane.name == "bazel-go")
@@ -225,7 +227,8 @@ def test_every_default_pytest_step_enforces_the_go_only_server_boundary():
             assert "No enabled tests" in step.args[-1]
             continue
         assert ("YOMUX_CHECK_GO_ONLY", "1") in step.env, (step_id, step.env)
-        assert ("YOMUX_TEST_CPU_COUNT", "unlimited") in step.env, (step_id, step.env)
+        cpu_limit = dict(step.env)["YOMUX_TEST_CPU_COUNT"]
+        assert cpu_limit.isdigit() and int(cpu_limit) > 0, (step_id, step.env)
 
 
 def test_heavy_lane_admission_includes_bazel_from_the_shared_lane_name_rule(monkeypatch):
@@ -585,7 +588,7 @@ def test_bazel_job_count_is_explicit_and_serializable(monkeypatch):
     (32, 13, ("6", "4", "2")),
     (4, 1, ("1", "1", "1")),
 ])
-def test_explicit_bazel_jobs_keep_pytest_worker_allocation_with_unlimited_container_cpu(monkeypatch, total_budget, bazel_jobs, expected_workers):
+def test_explicit_bazel_jobs_keep_pytest_worker_allocation_with_owned_container_cpu(monkeypatch, total_budget, bazel_jobs, expected_workers):
     check = load_check_module()
     monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
     monkeypatch.setattr(check, "concurrent_test_cpu_budget", lambda _percent=None: total_budget)
@@ -596,10 +599,10 @@ def test_explicit_bazel_jobs_keep_pytest_worker_allocation_with_unlimited_contai
     catalog = check.step_catalog()
     pool_ids = (check.StepId.PYTEST_NONBROWSER, check.StepId.PYTEST_BROWSER, check.StepId.PYTEST_E2E)
     cpu_limits = tuple(dict(catalog[step_id].env)["YOMUX_TEST_CPU_COUNT"] for step_id in pool_ids)
-    assert cpu_limits == ("unlimited", "unlimited", "unlimited")
     nonbrowser, browser, e2e = map(int, workers)
     planned_cpu_shares = check.pytest_cpu_limits(workers)
     assert tuple(map(int, planned_cpu_shares)) == (nonbrowser, browser * 2, e2e * 2)
+    assert cpu_limits == planned_cpu_shares
     assert sum(map(int, planned_cpu_shares)) <= max(5, total_budget - bazel_jobs)
 
 
@@ -797,10 +800,12 @@ def test_module_bazel_uses_pinned_sdk_and_supported_platform_checksums():
     assert not Path("WORKSPACE").exists()
 
 
-def test_bazel_runner_removes_private_output_root_after_bazel_exits(tmp_path):
+@pytest.mark.parametrize("freshness, expected", [([], "no"), (["--reuse-test-results"], "auto"), (["--rerun-tests"], "no"), (["--cache=off", "--reuse-test-results"], "no")])
+def test_bazel_runner_removes_private_output_root_after_bazel_exits(tmp_path, freshness, expected):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     probe_path = tmp_path / "bazel-root"
+    cache_probe = tmp_path / "bazel-cache-mode"
     fake_bazel = fake_bin / "bazel"
     fake_bazel.write_text(
         fixture_script("#!/bin/sh\n"
@@ -808,6 +813,7 @@ def test_bazel_runner_removes_private_output_root_after_bazel_exits(tmp_path):
         "symlink_prefix=\"\"\n"
         "for argument in \"$@\"; do\n"
         "  case \"$argument\" in\n"
+        '    --cache_test_results=*) printf "%s\\n" "$argument" >> "$BAZEL_FRESHNESS_PROBE" ;;\n'
         "    --symlink_prefix=*) symlink_prefix=\"${argument#--symlink_prefix=}\"; printf '%s\\n' \"$symlink_prefix\" > \"$BAZEL_CLEANUP_PROBE\" ;;\n"
         "  esac\n"
         "done\n"
@@ -823,11 +829,12 @@ def test_bazel_runner_removes_private_output_root_after_bazel_exits(tmp_path):
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "BAZEL_CLEANUP_PROBE": str(probe_path),
+        "BAZEL_FRESHNESS_PROBE": str(cache_probe),
         "YOMUX_TEST_CONTAINER": "0",
         "YOLOMUX_TEST_CONTAINER": "0",
     }
     completed = subprocess.run(
-        ["tools/run_bazel_tests.sh", "--execution", "native", "--jobs", "1", "--target", "//:go_tests"],
+        ["tools/run_bazel_tests.sh", "--execution", "native", "--jobs", "1", "--target", "//:go_tests", *freshness, "--", "--cache_test_results=yes"],
         cwd=REPO_ROOT,
         env=environment,
         text=True,
@@ -839,6 +846,7 @@ def test_bazel_runner_removes_private_output_root_after_bazel_exits(tmp_path):
     assert symlink_prefix.name == "bazel-"
     output_root = symlink_prefix.parent
     assert not output_root.exists(), completed.stdout
+    assert cache_probe.read_text().splitlines()[-1] == "--cache_test_results=" + expected
 
 
 @pytest.mark.parametrize("missing", ["MODULE.bazel", "MODULE.bazel.lock", "go.mod", "go.sum"])
@@ -882,7 +890,7 @@ def test_bazel_runner_uses_a_persistent_action_cache_and_private_output_roots():
     assert 'native_test_filter_args+=(--test_tag_filters=-requires_chrome)' in runner
     assert '"requires_chrome"' in build
     assert '--disk_cache=/var/cache/yomux-bazel' in runner
-    assert 'test_result_cache=no' in runner
+    assert 'test_result_cache="$(python3 "$REPO_ROOT/tools/bazel_execution_contract.py" --test-result-cache "$reuse_test_results")"' in runner
     assert 'reuse_test_results=yes' in runner
     assert '--cache_test_results="$test_result_cache"' in runner
     assert 'product_env_assign "BAZEL_CPU_COUNT=$jobs"' in runner
@@ -4001,7 +4009,7 @@ def test_linux_cpu_budget_is_the_same_number_in_code_help_text_and_docs(monkeypa
 
     documentation = " ".join((REPO_ROOT / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8").split())
     assert f"Linux budgets pytest workers and Bazel jobs against {percent}% of schedulable capacity" in documentation
-    assert "Pytest containers keep their memory limits and worker counts but have no hard CPU quota" in documentation
+    assert "Pytest containers receive hard CPU quotas from the worker allocation" in documentation
     assert f"32 logical but 24 schedulable Linux CPUs produce {counts[0]}/{counts[1]}/{counts[2]} pytest workers and 6 Bazel jobs" in documentation
 
 

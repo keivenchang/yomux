@@ -458,8 +458,24 @@ const clientServerPushEventTypes = Object.freeze([
 const clientLocalPushEventTypes = Object.freeze(['generation_ready']);
 const clientPushEventTypes = Object.freeze([...clientServerPushEventTypes, ...clientLocalPushEventTypes]);
 
-function clientPushEventCoalesceKey(type, payload = {}) {
+const clientPushEventQueueLimit = 256;
+const clientPushOrderedEventTypes = new Set([
+  'files_changed', 'fs_changed', 'attention_acks_changed', 'event_log_changed', 'stats_sample', 'yoagent_stream_delta',
+]);
+
+function clientPushEventRequiresOrder(type, payload = {}) {
+  return payload.patch === true || clientPushOrderedEventTypes.has(type)
+    || (type === 'yoagent_jobs_changed' && Boolean(payload.notification))
+    || (type === 'tmux_roster_changed' && Array.isArray(payload.renames) && payload.renames.length > 0);
+}
+
+function clientPushEventCoalesceKey(type, payload = {}, envelope = {}) {
   const key = String(type || 'event');
+  if (envelope.resource) return `${key}:${String(envelope.resource)}`;
+  if (type === 'search_progress' && payload.scope_id) return `${key}:${String(payload.scope_id)}`;
+  if (type === 'background_refresh_done' && payload.role === 'search-index' && payload.root) {
+    return `${key}:search-index:${String(payload.root)}`;
+  }
   if (type === 'operation_terminal') {
     const operationId = String(payload?.operation?.id || '');
     if (operationId) return `${key}:${operationId}`;
@@ -474,11 +490,24 @@ function clientPushEventCoalesceKey(type, payload = {}) {
 }
 
 function queueClientPushEvent(type, payload = {}, envelope = {}) {
-  const key = clientPushEventCoalesceKey(type, payload);
+  // Deltas and one-shot effects depend on their predecessors; only replacement state may coalesce.
+  const identity = clientPushEventCoalesceKey(type, payload, envelope);
+  const ordered = clientPushEventRequiresOrder(type, payload);
+  let key = Symbol(identity);
+  if (!ordered) {
+    let predecessor = null;
+    for (const [pendingKey, event] of clientEventTransportState.queue) {
+      if (event.coalesceKey === identity) predecessor = {key:pendingKey, ordered:event.ordered};
+    }
+    if (predecessor && !predecessor.ordered) key = predecessor.key;
+  }
+  clientEventTransportState.queue.delete(key);
   clientEventTransportState.queue.set(key, {
     type,
     payload,
     envelope,
+    coalesceKey: identity,
+    ordered,
     epoch: String(envelope?.epoch || ''),
     serverEvent: clientServerPushEventTypes.includes(type),
     epochGeneration: clientEventTransportState.epochGeneration,
@@ -486,10 +515,7 @@ function queueClientPushEvent(type, payload = {}, envelope = {}) {
   // Chrome pauses requestAnimationFrame in background tabs. Status events still have to update
   // notification state there, otherwise a complete green->red/yellow transition can be missed
   // before the user returns to YOmux.
-  if (document.visibilityState === 'hidden') {
-    if (clientEventTransportState.frame) currentClientEventTransportLifecycleScope().release('dispatch-frame', clientEventTransportState.frame);
-    currentClientEventTransportLifecycleScope().release('dispatch-generation');
-    clientEventTransportState.frame = 0;
+  if (document.visibilityState === 'hidden' || clientEventTransportState.queue.size >= clientPushEventQueueLimit) {
     flushQueuedClientPushEvents();
     return;
   }
@@ -511,6 +537,10 @@ function queueClientPushEvent(type, payload = {}, envelope = {}) {
 }
 
 function flushQueuedClientPushEvents() {
+  const scope = currentClientEventTransportLifecycleScope();
+  if (clientEventTransportState.frame) scope.release('dispatch-frame', clientEventTransportState.frame);
+  scope.release('dispatch-generation');
+  clientEventTransportState.frame = 0;
   const events = Array.from(clientEventTransportState.queue.values());
   clientEventTransportState.queue.clear();
   recordClientPerfCounter('sseEvent', 0, {nodes: events.length});

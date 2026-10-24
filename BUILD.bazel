@@ -131,6 +131,7 @@ filegroup(
         "tools/mockers/claude.py",
         "tools/mockers/codex.py",
         "tools/mockers/common.py",
+        "tools/mockers/process_identity.py",
         "tools/mockers/text_client_common.py",
         "tools/product_environment.py",
         "tools/product_namespace.json",
@@ -546,6 +547,7 @@ sh_test(
     data = [
         "tools/bazel_native_probe.py",
         "tools/bazel_test_common.sh",
+        "tools/fixture_storage.py",
         "tools/product_environment.sh",
     ],
 )
@@ -663,6 +665,7 @@ filegroup(
         "tests/browser_helpers/__init__.py",
         "tests/browser_helpers/webdriver_lease.py",
         "tools/bazel_test_entrypoint.sh",
+        "tools/fixture_storage.py",
         "tools/instance_isolation.py",
         "tools/native_process_scope.py",
         "tools/product_environment.py",

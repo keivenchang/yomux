@@ -664,6 +664,24 @@ func (w *Writer) ReadRingWindowMetadata(ctx context.Context, rangeSeconds, resol
 	return w.readRingWindow(ctx, rangeSeconds, resolutionSeconds, windowEnd, false, false)
 }
 
+// Published heads are updated in the same transaction as their slots. They
+// retain the lifecycle's actual horizon even when its floating-point publication
+// timestamp rounds across a boundary. Missing slots and invalidations still pass
+// through the ordinary window reader and cannot become synthetic complete data.
+func (w *Writer) readPublishedRingWindowMetadata(ctx context.Context, rangeSeconds, resolutionSeconds int, windowEnd int64) (RingWindow, error) {
+	var newest sql.NullInt64
+	if err := w.db.QueryRowContext(ctx, "SELECT newest_bucket_start FROM aggregate_rings WHERE resolution_seconds=?", resolutionSeconds).Scan(&newest); err != nil {
+		return RingWindow{}, err
+	}
+	if newest.Valid && newest.Int64 < windowEnd-int64(resolutionSeconds) {
+		publishedEnd := newest.Int64 + int64(resolutionSeconds)
+		if publishedEnd >= int64(rangeSeconds) {
+			windowEnd = publishedEnd
+		}
+	}
+	return w.ReadRingWindowMetadata(ctx, rangeSeconds, resolutionSeconds, windowEnd)
+}
+
 // ReadRingWindowPayloads returns the published slot bytes without decoding the
 // optional YRB1 compression wrapper. StatsService uses the slot generation as
 // its cache key and only needs to decompress payloads whose generation changed;

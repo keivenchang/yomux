@@ -646,24 +646,35 @@ func (actions *nativeYOAgentActions) recordResult(ctx context.Context, wait nati
 }
 
 func (actions *nativeYOAgentActions) paste(ctx context.Context, pane, text string) error {
+	_, err := actions.server.pasteTerminalText(ctx, pane, text, nil)
+	return err
+}
+
+// Bracketed paste keeps a client's burst detector from treating the following
+// Return as pasted text. The admission check runs after preparing the buffer.
+func (s *server) pasteTerminalText(ctx context.Context, pane, text string, beforePaste func() (bool, error)) (sent bool, err error) {
 	buffer, err := nativeYOAgentRandomID()
 	if err != nil {
-		return fmt.Errorf("create private tmux buffer identity: %w", err)
+		return false, fmt.Errorf("create private tmux buffer identity: %w", err)
 	}
-	load := actions.server.tmuxCommandContext(ctx, "load-buffer", "-b", buffer, "-")
+	load := s.tmuxCommandContext(ctx, "load-buffer", "-b", buffer, "-")
 	load.Stdin = strings.NewReader(text)
 	if output, err := load.CombinedOutput(); err != nil {
-		return fmt.Errorf("load prompt into private tmux buffer: %w: %s", err, strings.TrimSpace(string(output)))
+		return false, fmt.Errorf("load prompt into private tmux buffer: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	output, pasteErr := actions.server.tmuxCommandContext(ctx, "paste-buffer", "-b", buffer, "-t", pane).CombinedOutput()
-	cleanupErr := actions.server.tmuxCommandContext(ctx, "delete-buffer", "-b", buffer).Run()
-	if pasteErr != nil || cleanupErr != nil {
-		return errors.Join(
-			wrapNativeYOAgentTmuxError("paste prompt into target composer", pasteErr, output),
-			wrapNativeYOAgentTmuxError("delete private tmux prompt buffer", cleanupErr, nil),
-		)
+	defer func() {
+		cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		cleanupErr := s.tmuxCommandContext(cleanupContext, "delete-buffer", "-b", buffer).Run()
+		err = errors.Join(err, wrapNativeYOAgentTmuxError("delete private tmux prompt buffer", cleanupErr, nil))
+	}()
+	if beforePaste != nil {
+		if allowed, guardErr := beforePaste(); guardErr != nil || !allowed {
+			return false, guardErr
+		}
 	}
-	return nil
+	output, pasteErr := s.tmuxCommandContext(ctx, "paste-buffer", "-p", "-r", "-b", buffer, "-t", pane).CombinedOutput()
+	return pasteErr == nil, wrapNativeYOAgentTmuxError("paste prompt into target composer", pasteErr, output)
 }
 
 func (actions *nativeYOAgentActions) pastePrompt(ctx context.Context, pane, text string) error {

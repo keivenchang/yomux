@@ -2412,8 +2412,8 @@ def split_seam_fixture_html():
 def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
     sessions = list(scenario.sessions)
     settings = dict(scenario.settings)
-    # Existing pane/drag scenarios exercise Advanced; fresh Normal is explicit in its journeys.
-    settings["general"] = {"default_tabber_mode": "advanced", **settings.get("general", {})}
+    # Pane/drag scenarios own their layout; unrelated delayed tips must not occlude hit targets.
+    settings["general"] = {"default_tabber_mode": "advanced", "startup_tips": False, **settings.get("general", {})}
     bootstrap: dict[str, object] = {
         "sessions": sessions,
         "tmuxTopology": {"epoch": "browser-fixture", "generation": 0},
@@ -3289,7 +3289,9 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         if (url.pathname === '/api/ping') return jsonResponse({ok: true});
         if (url.pathname === '/api/watch/roots') return jsonResponse({ok: true, roots: body?.roots || [], files: body?.files || []});
         if (url.pathname === '/api/event') return jsonResponse({ok: true});
-        if (url.pathname === '/api/events') return jsonResponse({events: []});
+        if (url.pathname === '/api/events') return jsonResponse(method === 'POST'
+          ? {ok: true, events: body?.events || [], rejected_rows: [], event_log_refresh_required: false}
+          : {events: []});
         if (url.pathname === '/api/logs') return jsonResponse(window.__fixtureServerLogsPayload);
         if (url.pathname === '/api/tmux-window') return jsonResponse({ok: true, session: url.searchParams.get('session'), window: url.searchParams.get('window')});
         if (url.pathname === '/api/fs/list' || url.pathname === '/api/fs/fast/list') {

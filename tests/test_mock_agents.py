@@ -21,6 +21,7 @@ from tests.helpers.mock_agents import tmux_cmd
 from tests.helpers.mock_agents import wait_for_mockcase_render
 
 from yomux_lib.agent_tui import classify_agent_pane
+from yomux_lib.approval.prompt_detector import model_capacity_notice_visible
 from yomux_lib.tmux_utils import PRODUCT_TMUX_SOCKET_ENV
 
 
@@ -30,10 +31,167 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import common as mock_agent_common  # noqa: E402
+from process_identity import ensure_mock_process_identity  # noqa: E402
 
 PROMPT_CORPUS_DIR = REPO_ROOT / "tests" / "fixtures" / "prompt_corpus"
 VISUAL_TMUX_SESSION_PREFIX = "test-mock-visual"
 UNIX_SOCKET_SAFE_PATH_BYTES = 100
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex", "opencode"])
+def test_mock_startup_imports_renderer_once(tmp_path, agent):
+    environment = {name: os.environ[name] for name in ("PATH", "LANG") if name in os.environ}
+    environment.update(HOME=str(tmp_path), PYTHONDONTWRITEBYTECODE="1")
+    result = subprocess.run(
+        [sys.executable, "-X", "importtime", str(TOOLS_DIR / f"{agent}.py"), "--mock"],
+        input="", capture_output=True, text=True, env=environment, cwd=REPO_ROOT, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    renderer_imports = [line for line in result.stderr.splitlines() if line.endswith("| common")]
+    assert len(renderer_imports) == 1, renderer_imports
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex", "opencode"])
+def test_mock_identity_reexec_is_bounded_and_preserves_interpreter_flags(monkeypatch, agent):
+    entrypoint = str(TOOLS_DIR / f"{agent}.py")
+    monkeypatch.setattr(sys, "argv", [entrypoint, "--mock"])
+    monkeypatch.setattr(sys, "orig_argv", [sys.executable, "-u", entrypoint, "--mock"])
+    calls = []
+    monkeypatch.setattr(os, "execv", lambda executable, argv: calls.append((executable, argv)))
+    ensure_mock_process_identity(agent)
+    assert calls == [(sys.executable, [agent, "-u", entrypoint, "--mock"])]
+    monkeypatch.setattr(sys, "orig_argv", [agent, "-u", entrypoint, "--mock"])
+    ensure_mock_process_identity(agent)
+    assert len(calls) == 1
+    monkeypatch.setattr(sys, "orig_argv", [sys.executable, entrypoint])
+    monkeypatch.setattr(sys, "argv", [entrypoint])
+    ensure_mock_process_identity(agent)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("scenario,retries", [("", 4), ("pending", 4), ("2", 2)])
+def test_codex_capacity_retries_reuse_working_simulation(monkeypatch, capsys, scenario, retries):
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
+    working = []
+    monkeypatch.setattr(mock_agent_common, "cmd_codex_sleep", lambda seconds: working.append(seconds) or "queued draft")
+    state = {}
+    mock_agent_common.handle_command(f"mock capacity {scenario}", state)
+    for _ in range(retries):
+        mock_agent_common.handle_command("continue", state)
+    assert capsys.readouterr().out.count("■ Selected model is at capacity. Please try a different model.") == retries + 1
+    assert working == []
+    if scenario == "2":
+        mock_agent_common.handle_command("continue", state)
+        assert working == ["1"]
+        assert "codex_capacity" not in state
+        assert state["composer_prefill"] == "queued draft"
+
+
+@pytest.mark.parametrize("style", ["claude", "opencode"])
+def test_capacity_scenarios_are_codex_only(monkeypatch, style):
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", style)
+    fixtures = []
+    monkeypatch.setattr(mock_agent_common, "cmd_mock_fixture", lambda *args, **kwargs: fixtures.append(args))
+    state = {}
+    mock_agent_common.handle_command("mock capacity pending", state)
+    assert "codex_capacity" not in state
+    assert fixtures == [(state, "capacity pending")]
+
+
+@pytest.mark.parametrize("style", ["codex", "claude", "opencode"])
+@pytest.mark.parametrize("command", ["/mock", "mock list", "mock list all", "mocklist", "mocks", "/help", "mock list idle"])
+def test_capacity_scenarios_are_discoverable_in_codex_mock_help(monkeypatch, capsys, style, command):
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", style)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", style)
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [])
+    mock_agent_common.handle_command(command, {})
+    output = capsys.readouterr().out
+    if style == "codex" and command != "mock list idle":
+        assert "mock capacity N" in output
+        assert "mock capacity 2" in output
+        assert "mock capacity pending" in output
+    else:
+        assert "mock capacity" not in output
+
+
+@pytest.mark.parametrize("scenario", ["", "pending", "2"])
+def test_codex_capacity_live_composer_in_private_tmux(monkeypatch, tmp_path, scenario):
+    tmux_binary = shutil.which("tmux")
+    if not tmux_binary:
+        pytest.skip("tmux is not installed")
+    socket_path = short_tmux_socket_path("yocapacity")
+    session = f"yt-{os.getpid()}-{uuid.uuid4().hex[:8]}-1"
+    monkeypatch.setenv(PRODUCT_TMUX_SOCKET_ENV, str(socket_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    command = shlex.join([sys.executable, str(TOOLS_DIR / "codex.py"), "--mock"])
+    created = tmux_cmd(tmux_binary, socket_path, "new-session", "-d", "-s", session, "-x", "100", "-y", "35", command)
+    assert created.returncode == 0, created.stderr
+    try:
+        ready, pane = wait_for_mockcase_render(tmux_binary, socket_path, session, "Explain this codebase")
+        assert ready, pane
+        sent = tmux_cmd(tmux_binary, socket_path, "send-keys", "-t", session, f"mock capacity {scenario}".strip(), "Enter")
+        assert sent.returncode == 0, sent.stderr
+        ready, pane = wait_for_mockcase_render(tmux_binary, socket_path, session, "■ Selected model is at capacity. Please try a different model.")
+        assert ready, pane
+        for retry in range(3):
+            sent = tmux_cmd(tmux_binary, socket_path, "send-keys", "-t", session, "continue", "Enter")
+            assert sent.returncode == 0, sent.stderr
+            if scenario == "pending":
+                detected = classify_mockcase_until({"pane_target": session, "agent_kind": "codex"}, "input-draft", include_composer=True, expected_composer_key="draft")
+                assert detected.composer.text.strip() == "continue"
+                sent = tmux_cmd(tmux_binary, socket_path, "send-keys", "-t", session, "Enter")
+                assert sent.returncode == 0, sent.stderr
+            if scenario == "2" and retry == 2:
+                ready, pane = wait_for_mockcase_render(tmux_binary, socket_path, session, "• Ran sleep 1")
+                assert ready, pane
+            expected = "idle"
+            detected = classify_mockcase_until({"pane_target": session, "agent_kind": "codex"}, expected, include_composer=True, expected_composer_key="ghost", timeout=5)
+            assert detected.screen["key"] == expected
+            assert detected.composer.accepting
+            captured = tmux_cmd(tmux_binary, socket_path, "capture-pane", "-p", "-t", session)
+            assert captured.returncode == 0, captured.stderr
+            if scenario == "2" and retry == 2:
+                assert "• Done." in captured.stdout
+            else:
+                assert model_capacity_notice_visible(captured.stdout)
+        tmux_cmd(tmux_binary, socket_path, "send-keys", "-t", session, "/exit", "Enter")
+    finally:
+        tmux_cmd(tmux_binary, socket_path, "kill-server")
+        shutil.rmtree(socket_path.parent, ignore_errors=True)
+
+
+@pytest.mark.parametrize(("style", "bracketed"), [("codex", False), ("codex", True), ("claude", True), ("opencode", True)])
+@pytest.mark.parametrize("payload", ["continue", "first\nsecond"])
+def test_live_composer_bracketed_paste_preserves_text_until_return(monkeypatch, style, bracketed, payload):
+    class TtyInput:
+        def fileno(self):
+            return 0
+
+    rendered = []
+    completed = []
+    data = iter(("\x1b[200~" + payload + "\x1b[201~" if bracketed else payload) + "\r")
+
+    def read_byte():
+        byte = next(data)
+        if byte == "\r":
+            assert completed == []
+            assert payload in rendered
+        return byte
+
+    monkeypatch.setattr(sys, "stdin", TtyInput())
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", style)
+    monkeypatch.setattr(mock_agent_common.termios, "tcgetattr", lambda _fd: [])
+    monkeypatch.setattr(mock_agent_common.termios, "tcsetattr", lambda *_args: None)
+    monkeypatch.setattr(mock_agent_common.tty, "setraw", lambda _fd: None)
+    monkeypatch.setattr(mock_agent_common.select, "select", lambda *_args: ([0], [], []))
+    monkeypatch.setattr(mock_agent_common, "_has_more", lambda: True)
+    monkeypatch.setattr(mock_agent_common, "_read_byte", read_byte)
+    monkeypatch.setattr(mock_agent_common, "render_live_composer", lambda text, *_args, **_kwargs: rendered.append(text))
+    monkeypatch.setattr(mock_agent_common, "finish_live_composer", lambda text, *_args: completed.append(text))
+    monkeypatch.setattr(mock_agent_common, "set_output_region_above_live_composer", lambda **_kwargs: None)
+
+    assert mock_agent_common.read_live_composer({}) == payload
+    assert completed == [payload]
 
 
 def promoted_capture_cases():
@@ -3215,11 +3373,13 @@ def test_tmux_mock_fixture_list_wraps_rows_instead_of_printing_ellipsis_after_re
     booted, pane = visual_tmux.wait_until(session, lambda text: "› Explain this codebase" in text)
     assert booted, pane
     visual_tmux.send_keys(session, "mock", "Enter")
-    listed, pane = visual_tmux.wait_until(session, lambda text: "Mock fixture cases" in text and "question_with_answer_draft" in text)
+    listed, pane = visual_tmux.wait_until(session, lambda text: "mock capacity pending" in text and "question_with_answer_draft" in text)
     assert listed, pane
     assert "…" not in pane
     assert "..." not in pane
-    assert long_fixture_file in visual_tmux.capture(session, scrollback=True, join_wrapped=True)
+    listing = visual_tmux.capture(session, scrollback=True, join_wrapped=True)
+    assert "Mock fixture cases" in listing
+    assert long_fixture_file in listing
 
     visual_tmux.resize(session, width=150, height=42)
     resized = visual_tmux.capture(session, scrollback=True, join_wrapped=True)
