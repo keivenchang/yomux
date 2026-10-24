@@ -166,7 +166,7 @@ def send_capacity_recovery(target: str, *, dry_run: bool = False) -> AgentTuiSen
     """Reuse guarded delivery and the shared dry-run setting for both YO callers."""
     if dry_run or yolo_rules.yolo_settings()["dry_run"]:
         return AgentTuiSendResult(ok=True, sent=False, reason_code="dry-run")
-    return send_prompt(target, "continue\n\n", clear_existing=False)
+    return send_prompt(target, "continue", clear_existing=False)
 
 
 def classify_auto_approve_state(target: str, visible_text: str, prompt_source: str = DEFAULT_PROMPT_SOURCE) -> tuple[AgentPaneState, str | None]:

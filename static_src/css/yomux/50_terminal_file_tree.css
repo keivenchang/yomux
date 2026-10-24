@@ -1045,9 +1045,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   position: absolute;
   left: 8px;
   top: 8px;
-  /* #258: above the topbar (--z-topbar) so a top-row pane's toast is never painted UNDER it and
-     clipped — the whole toast incl. the Keep/x buttons stays visible. */
-  z-index: var(--z-full-screen-overlay);
+  /* Keep pane toasts below every menu/popover layer so a notice cannot cover menu choices. */
+  z-index: var(--z-toast);
   width: calc(100% - 16px);
   display: flex;
   flex-direction: column;
@@ -1057,9 +1056,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .panel-toast-stack .toast {
   width: 100%;
   pointer-events: auto;
-}
-body.app-topbar-touch-compact .attention-alerts {
-  top: calc(var(--topbar-height) + 2 * var(--pane-tab-height) + var(--space-4));
 }
 body.app-topbar-touch-compact .attention-alerts .attention-alert {
   pointer-events: none;
@@ -3205,20 +3201,23 @@ button.info-tree-tab-token.active:focus-visible {
 .err { color: var(--bad); }
 .attention-alerts {
   position: fixed;
-  /* Clear the topbar: it uses --z-topbar and occupies the top band (~--compact-control-height + padding),
-     so a top:12px / z:140 toast rendered INSIDE that band was painted over by the topbar (the Keep/x row
-     was clipped). Drop below the topbar height + a gap, and sit above it in z so it is never covered. */
-  top: calc(var(--compact-control-height) + 20px);
+  /* Global notices must leave pane headers usable, including when command notices expire. */
+  top: auto;
   right: 12px;
-  bottom: auto;
+  bottom: max(12px, calc(100vh - var(--app-root-height, 100vh) + 12px));
   left: auto;
-  z-index: var(--z-full-screen-overlay);
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
   width: min(360px, calc(100vw - 24px));
   max-width: calc(100vw - 24px);
+  max-height: max(0px, calc(min(100vh, var(--app-root-height, 100vh)) - var(--topbar-height) - 2 * var(--pane-tab-height) - var(--space-4) - 12px));
+  overflow-y: auto;
   pointer-events: none;
+}
+.attention-alerts > .toast {
+  flex-shrink: 0;
 }
 .attention-alert {
   pointer-events: auto;

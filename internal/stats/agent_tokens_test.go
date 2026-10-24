@@ -979,6 +979,13 @@ func TestAgentTokenCollectorResourceSoakStaysBounded(t *testing.T) {
 	testWriter := newAgentTokenTestWriter(t)
 
 	root := t.TempDir()
+	if runtime.GOOS == "linux" {
+		filesystem, err := exec.Command("stat", "--file-system", "--format=%T", "--", root).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("collector resource soak storage: tmpdir=%s filesystem=%s", os.TempDir(), strings.TrimSpace(string(filesystem)))
+	}
 	transcript := filepath.Join(root, "claude.jsonl")
 	writeJSONL(t, transcript, usageClaude(1788307300, "soak", 4, 3))
 	clock := &agentStatusTestClock{now: time.Unix(1788307300, 0)}
@@ -996,12 +1003,20 @@ func TestAgentTokenCollectorResourceSoakStaysBounded(t *testing.T) {
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 	baseGoroutines := runtime.NumGoroutine()
-	var maxDuration time.Duration
+	var maxDuration, coldDuration, maxWarmDuration time.Duration
+	slowestCycle := 0
 	for cycle := 0; cycle < cycles; cycle++ {
 		started := time.Now()
 		collector.RunOnce(context.Background())
-		if duration := time.Since(started); duration > maxDuration {
+		duration := time.Since(started)
+		if cycle == 0 {
+			coldDuration = duration
+		} else if duration > maxWarmDuration {
+			maxWarmDuration = duration
+		}
+		if duration > maxDuration {
 			maxDuration = duration
+			slowestCycle = cycle
 		}
 	}
 	runtime.GC()
@@ -1019,9 +1034,9 @@ func TestAgentTokenCollectorResourceSoakStaysBounded(t *testing.T) {
 		maxCycleDuration = 2 * time.Second
 	}
 	if maxDuration >= maxCycleDuration {
-		t.Fatalf("collector cycle exceeded bounded duration: max=%s", maxDuration)
+		t.Fatalf("collector cycle exceeded bounded duration: max=%s cold_cycle=%s max_warm_cycle=%s slowest_cycle_index=%d", maxDuration, coldDuration, maxWarmDuration, slowestCycle)
 	}
-	t.Logf("collector resource soak: cycles=%d max_cycle=%s heap_objects_before=%d heap_objects_after=%d heap_alloc_before=%d heap_alloc_after=%d goroutines_before=%d goroutines_after=%d", cycles, maxDuration, before.HeapObjects, after.HeapObjects, before.HeapAlloc, after.HeapAlloc, baseGoroutines, runtime.NumGoroutine())
+	t.Logf("collector resource soak: cycles=%d max_cycle=%s cold_cycle=%s max_warm_cycle=%s slowest_cycle_index=%d heap_objects_before=%d heap_objects_after=%d heap_alloc_before=%d heap_alloc_after=%d goroutines_before=%d goroutines_after=%d", cycles, maxDuration, coldDuration, maxWarmDuration, slowestCycle, before.HeapObjects, after.HeapObjects, before.HeapAlloc, after.HeapAlloc, baseGoroutines, runtime.NumGoroutine())
 }
 
 func TestAgentTokenCollectorSnapshotIsBoundedAndTracksDiagnostics(t *testing.T) {

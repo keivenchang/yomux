@@ -57,6 +57,7 @@ import {
   foldGutter,
   indentOnInput,
   syntaxHighlighting,
+  ensureSyntaxTree,
 } from "@codemirror/language";
 import {javascript} from "@codemirror/lang-javascript";
 import {python} from "@codemirror/lang-python";
@@ -65,6 +66,7 @@ import {json} from "@codemirror/lang-json";
 import {html} from "@codemirror/lang-html";
 import {css} from "@codemirror/lang-css";
 import {markdown} from "@codemirror/lang-markdown";
+import {Strikethrough, Table} from "@lezer/markdown";
 import {xml} from "@codemirror/lang-xml";
 import {yaml} from "@codemirror/lang-yaml";
 import {shell} from "@codemirror/legacy-modes/mode/shell";
@@ -73,6 +75,7 @@ import {tags} from "@lezer/highlight";
 
 window.YOmuxCodeMirror = {
   EditorState,
+  ensureSyntaxTree,
   EditorView,
   ViewPlugin,
   basicSetup,
@@ -108,6 +111,8 @@ window.YOmuxCodeMirror = {
   LanguageSupport,
   lineNumbers,
   markdown,
+  markdownStrikethrough: Strikethrough,
+  markdownTable: Table,
   MergeView,
   openSearchPanel,
   python,

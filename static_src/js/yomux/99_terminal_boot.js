@@ -3434,9 +3434,9 @@ function insertFileDragPayloadIntoTerminal(session, payload) {
   if (!references.length) return;
   const inserted = insertIntoTerminal(session, `${references.map(shellQuote).join(' ')} `);
   const label = references.length === 1 ? references[0] : tPlural('common.pathCount', references.length);
-  statusEl.innerHTML = inserted
+  setStatusHtml(inserted
     ? `<span class="ok">${localizedHtml('status.insertedInto', {name: label, session: sessionLabel(session)})}</span>`
-    : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
+    : `<span class="err">${terminalNotConnectedHtml(session)}</span>`);
 }
 
 function bindClipboardPaste() {
@@ -3840,9 +3840,9 @@ function insertUploadPaths(session, paths, options = {}) {
   if (!paths.length) return false;
   const inserted = insertIntoTerminal(session, `${paths.map(shellQuote).join(' ')} `);
   if (!options.silent) {
-    statusEl.innerHTML = inserted
+    setStatusHtml(inserted
       ? `<span class="ok">${localizedHtml('status.insertedUploadPath', {session: sessionLabel(session)})}</span>`
-      : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
+      : `<span class="err">${terminalNotConnectedHtml(session)}</span>`);
   }
   return inserted;
 }
@@ -3852,9 +3852,9 @@ function insertPasteUploadReferences(session, files, options = {}) {
   if (!references.length) return insertUploadPaths(session, files.map(file => file.path).filter(Boolean), options);
   const inserted = insertIntoTerminal(session, references.join(' '));
   if (!options.silent) {
-    statusEl.innerHTML = inserted
+    setStatusHtml(inserted
       ? `<span class="ok">${localizedHtml('status.insertedPastedImage', {session: sessionLabel(session)})}</span>`
-      : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
+      : `<span class="err">${terminalNotConnectedHtml(session)}</span>`);
   }
   return inserted;
 }
@@ -5288,13 +5288,13 @@ function updateTypingIndicator(session) {
 function updateStatus() {
   if (layoutStatusSurfaceOwnsMessage()) return;
   if (activeSessions.length === 0) {
-    statusEl.textContent = t('terminal.status.noSessionSelected');
+    showLayoutStatus(t('terminal.status.noSessionSelected'));
     statusEl.removeAttribute('title');
     return;
   }
   const activeTmuxSessions = activeSessions.filter(isTmuxSession);
   if (!activeTmuxSessions.length) {
-    statusEl.textContent = t('terminal.status.viewShown', {view: infoTabLabel()});
+    showLayoutStatus(t('terminal.status.viewShown', {view: infoTabLabel()}));
     statusEl.removeAttribute('title');
     return;
   }
@@ -5304,7 +5304,7 @@ function updateStatus() {
     if (item?.socket?.readyState === WebSocket.OPEN) open += 1;
   }
   const total = activeTmuxSessions.length;
-  statusEl.textContent = open === total ? '' : t('terminal.connection.connShort', {open, total});
+  showLayoutStatus(open === total ? '' : t('terminal.connection.connShort', {open, total}));
   statusEl.title = open === total ? '' : t('terminal.connection.socketsTitle', {open, total});
 }
 
@@ -5951,6 +5951,11 @@ function startSummaryStream(session) {
       requestAnimationFrame(renderSummary);
     }
   };
+  const finishSummary = () => {
+    // Terminal frames can arrive before the scheduled paint; retirement invalidates that callback.
+    renderSummary();
+    stopSummaryStream(session, source);
+  };
   source = new EventSource(`/api/summary-stream?session=${encodeURIComponent(session)}&lookback=${60 * 60}`);
   ownTmuxSessionStream(scope, token, source);
   renderSummary();
@@ -5985,7 +5990,7 @@ function startSummaryStream(session) {
     // — an unguarded JSON.parse throw here would leak the EventSource.
     const payload = safeJsonParse(event.data, null);
     appendSummary(`\n${t('summary.stream.error', {error: userMessageText(payload, t('summary.stream.failed'))})}\n`);
-    stopSummaryStream(session, source);
+    finishSummary();
   });
   source.addEventListener('done', event => {
     if (!streamIsCurrent()) return;
@@ -5993,12 +5998,12 @@ function startSummaryStream(session) {
     if (payload?.return_code && payload.return_code !== 0) {
       appendSummary(`\n${t('summary.stream.exited', {code: payload.return_code})}\n`);
     }
-    stopSummaryStream(session, source);
+    finishSummary();
   });
   source.onerror = () => {
     if (!streamIsCurrent()) return;
     appendSummary(`\n${t('terminal.summary.streamDisconnected')}\n`);
-    stopSummaryStream(session, source);
+    finishSummary();
   };
 }
 
@@ -6125,6 +6130,20 @@ function scheduleSelfUpdateReloadPoll(delayMs = selfUpdateReloadPollMs) {
 async function pollSelfUpdateReload() {
   if (!selfUpdateReloadState.pending) return false;
   selfUpdateReloadState.attempts += 1;
+  try {
+    const job = await apiFetchJson(`/api/self-update/status?check=${Date.now()}`, {cache: 'no-store'});
+    if (job?.job?.state === 'failed') {
+      selfUpdateReloadState.pending = false;
+      emitNotification('update', {
+        title: t('update.failed'),
+        lines: [userMessageText(job.job, t('update.seeServerLogs'))],
+        coalesceKey: 'self-update-result',
+      });
+      return false;
+    }
+  } catch (_error) {
+    // Keep checking the server while its update job is becoming available.
+  }
   try {
     const ping = await apiFetchJson(`/api/ping?selfUpdate=${Date.now()}`, {cache: 'no-store'});
     if (!ping?.version || (selfUpdateReloadState.target && ping.version !== selfUpdateReloadState.target) || !ping.instance_id || ping.instance_id === selfUpdateReloadState.oldInstanceId) {
@@ -7216,32 +7235,34 @@ function postEvent(session, type, message, details = {}) {
 
 const eventPostBatchMax = 64;
 
-function postEventBatch(events) {
+async function postEventBatch(events) {
   const batch = events.filter(event => {
     if (!event.session) return true;
     const lifecycleToken = tmuxSessionLifecycleToken(event.session);
     return !lifecycleToken || tmuxSessionLifecycleTokenIsCurrent(lifecycleToken);
   });
-  if (!batch.length) return Promise.resolve(false);
-  const requests = [];
-  for (let index = 0; index < batch.length; index += eventPostBatchMax) {
-    requests.push(apiFetch('/api/events', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({events: batch.slice(index, index + eventPostBatchMax)}),
-    }));
-  }
-  return Promise.all(requests).then(async responses => {
-    if (responses.some(response => !response.ok)) return false;
-    const results = await Promise.all(responses.map(response => response.json()));
-    if (results.some(result => result?.event_log_refresh_required === true)) {
-      const sessionIds = [...new Set(batch.map(event => String(event.session || '')).filter(Boolean))];
-      const refreshTarget = batch.some(event => !String(event.session || '')) ? {} : {sessions: sessionIds};
-      refreshEventLogsFromPush(refreshTarget).catch(error => console.warn('event batch fallback refresh failed', error));
+  const chunks = Array.from({length: Math.ceil(batch.length / eventPostBatchMax)}, (_, index) => batch.slice(index * eventPostBatchMax, (index + 1) * eventPostBatchMax));
+  const results = await Promise.all(chunks.map(async chunk => {
+    try {
+      const response = await apiFetch('/api/events', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({events: chunk}),
+      });
+      if (!response.ok) return null;
+      return {events: chunk, refreshRequired: (await response.json())?.event_log_refresh_required === true};
+    } catch {
+      return null;
     }
-    return true;
-  }).catch(() => false);
+  }));
+  const accepted = new Set(results.flatMap(result => result?.events || []));
+  if (results.some(result => result?.refreshRequired)) {
+    const sessionIds = [...new Set([...accepted].map(event => String(event.session || '')).filter(Boolean))];
+    const refreshTarget = [...accepted].some(event => !String(event.session || '')) ? {} : {sessions: sessionIds};
+    refreshEventLogsFromPush(refreshTarget).catch(error => console.warn('event batch fallback refresh failed', error));
+  }
+  return accepted;
 }
 
 function normalizeRole(role) {
@@ -7378,7 +7399,7 @@ async function boot() {
   renderTabMetaToggle();
   bindTopbarMetrics();
   syncInitialLayoutUrl();
-  statusEl.textContent = t('status.yoloLoading');
+  showLayoutStatus(t('status.yoloLoading'));
   loadNotificationDelivery();
   const initialAutoStatusesPromise = statsOnlyBootEnabled()
     ? Promise.resolve(false)

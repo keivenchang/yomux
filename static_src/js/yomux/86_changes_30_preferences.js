@@ -106,14 +106,15 @@ function valueFromPreferenceControl(control) {
 
 async function saveSettingsPatch(patch, options = {}) {
   if (readOnlyMode) return;
-  const preservedLayout = options.preserveLayout === false ? null : cloneLayoutSlots();
-  const preservedLayoutSignature = preservedLayout ? layoutSlotsSignature(preservedLayout) : '';
-  const preservedFocus = focusedPanelItem;
   const payload = await apiFetchJson('/api/settings', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({settings: patch}),
   });
+  // Preserve navigation made while the save was in flight when applying settings changes the layout.
+  const preservedLayout = options.preserveLayout === false ? null : cloneLayoutSlots();
+  const preservedLayoutSignature = preservedLayout ? layoutSlotsSignature(preservedLayout) : '';
+  const preservedFocus = focusedPanelItem;
    applySettingsPayload(payload, {
      force: true,
      applyEditorDefaults: options.applyEditorDefaults === true,
@@ -188,7 +189,7 @@ function savePreferenceControl(control) {
       if (path === 'uploads.max_bytes' && Number(value) > uploadRsyncRecommendationBytes && Number(previousValue) <= uploadRsyncRecommendationBytes) {
         showUploadRsyncRecommendation({sizeBytes: Number(value)});
       }
-      statusEl.textContent = t('status.settingSaved', {path});
+      showLayoutStatus(t('status.settingSaved', {path}));
     })
     .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
 }
@@ -199,7 +200,7 @@ function resetPreference(path) {
   saveSettingsPatch(settingPatchForPath(path, preferenceDefault(path)), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
-    .then(() => { statusEl.textContent = t('status.settingReset', {path}); })
+    .then(() => { showLayoutStatus(t('status.settingReset', {path})); })
     .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error: userMessageText(error, t('common.requestFailed'))})); });
 }
 
@@ -213,7 +214,7 @@ function resetAllPreferences() {
       writeStoredCollapsedPreferenceSections();
       setFileEditorThemeMode(editorThemeInheritMode);
       renderPreferencesPanels({force: true});
-      statusEl.textContent = t('status.preferencesResetAll');
+      showLayoutStatus(t('status.preferencesResetAll'));
     })
     .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error: userMessageText(error, t('common.requestFailed'))})); });
 }
@@ -248,7 +249,7 @@ function setEditorPreviewFontSize(value) {
   updateEditorPreviewFontControls();
   refreshFilePreviewPopouts();
   saveSettingsPatch(settingPatch('appearance.preview_font_size', next))
-    .then(() => { statusEl.textContent = t('status.previewFontSizeSaved'); })
+    .then(() => { showLayoutStatus(t('status.previewFontSizeSaved')); })
     .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
 }
 

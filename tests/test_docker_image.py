@@ -7,15 +7,103 @@ import copy
 import json
 import os
 import select
+import shutil
 import sys
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from tools import bazel_execution_contract
 from tools import docker_image
-from tools.product_environment import product_env_names
+from tools.fixture_storage import linux_sandbox_mount_arguments, require_tmpfs
+from tools.product_environment import product_env, product_env_names
+
+
+def test_docker_tmpfs_is_bound_into_the_hermetic_root():
+    flags = bazel_execution_contract.SANDBOX_FLAGS
+    assert "--sandbox_tmpfs_path=/tmp" in flags
+    assert "--sandbox_add_mount_pair=/tmp:/tmp" in flags
+    assert not any(flag.startswith("--test_tmpdir=") for flag in flags)
+
+
+def test_direct_helper_translates_tmpfs_and_distinct_mount_destinations():
+    assert linux_sandbox_mount_arguments((
+        "--sandbox_tmpfs_path=/tmp", "--sandbox_add_mount_pair=/tmp:/tmp",
+        "--sandbox_add_mount_pair=/runtime/usr:/usr",
+        "--sandbox_add_mount_pair=/opt", "--sandbox_fake_hostname",
+    )) == ["-e", "/tmp", "-M", "/tmp", "-m", "/tmp",
+           "-M", "/runtime/usr", "-m", "/usr", "-M", "/opt"]
+
+
+@pytest.mark.parametrize("filesystem", ["ext4", "overlayfs", "nfs", ""])
+def test_docker_storage_rejects_disk_or_unknown_filesystems(monkeypatch, filesystem):
+    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: filesystem + "\n")
+    with pytest.raises(ValueError, match="fixture storage is not action-private tmpfs"):
+        require_tmpfs(("/tmp",))
+
+
+def test_docker_admission_requires_kernel_storage_check(monkeypatch):
+    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: "ext4\n")
+    with pytest.raises(ValueError, match="fixture storage is not action-private tmpfs"):
+        exec(bazel_execution_contract.RUNTIME_PROBE, {"__name__": "__main__"})
+
+
+@pytest.mark.skipif(not (product_env("BAZEL_CONTRACT") and docker_image.running_inside_container()),
+                    reason="requires admitted outer Docker linux-sandbox")
+@pytest.mark.parametrize("self_bind", [False, True])
+def test_simultaneous_sandbox_storage_and_missing_self_bind(self_bind):
+    with tempfile.TemporaryDirectory(prefix="yomux-storage-regression-", dir="/var/cache/yomux-bazel") as directory:
+        _check_simultaneous_storage(Path(directory), self_bind)
+
+
+def _check_simultaneous_storage(tmp_path, self_bind):
+    output = tmp_path / "output"
+    subprocess.run(["bazel", "--batch", "--bazelrc=/dev/null", "--output_user_root=" + str(output), "help"],
+                   check=True, capture_output=True, timeout=60)
+    helper = next((output / "install").glob("*/linux-sandbox"))
+    flags = tuple(flag for flag in bazel_execution_contract.SANDBOX_FLAGS
+                  if self_bind or flag != "--sandbox_add_mount_pair=/tmp:/tmp")
+    probe = """
+import json, pathlib, sys
+from tools.fixture_storage import require_tmpfs
+filesystems = require_tmpfs(("/tmp",))
+marker = pathlib.Path('/tmp/simultaneous-storage-probe')
+with marker.open('x') as stream:
+    stream.write(sys.argv[1])
+print(json.dumps(filesystems), flush=True)
+assert sys.stdin.readline() == 'release\\n'
+assert marker.read_text() == sys.argv[1], 'another action overwrote fixture storage'
+"""
+    children = []
+    try:
+        for index in range(2):
+            sandbox = tmp_path / ("sandbox-" + str(index))
+            work = sandbox / "execroot/_main"
+            (work / "tools").mkdir(parents=True)
+            shutil.copyfile(bazel_execution_contract.ROOT / "tools/fixture_storage.py", work / "tools/fixture_storage.py")
+            command = [str(helper), "-h", str(sandbox), "-W", str(work), "-N", "-H", "-P",
+                       *linux_sandbox_mount_arguments(flags), "--", "python3", "-c", probe, str(index)]
+            children.append(subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        if self_bind:
+            # Hold both helpers alive at the same filename before releasing either.
+            for child in children:
+                assert select.select([child.stdout], [], [], 60)[0], "sandbox storage readiness timed out"
+                assert json.loads(child.stdout.readline()) == {"/tmp": "tmpfs"}
+            for child in children:
+                stdout, stderr = child.communicate("release\n", timeout=60)
+                assert child.returncode == 0, (stdout, stderr)
+        else:
+            for child in children:
+                stdout, stderr = child.communicate(timeout=60)
+                assert child.returncode != 0, stdout
+                assert "fixture storage is not action-private tmpfs: /tmp" in stderr
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=10)
 
 
 @pytest.mark.parametrize(("capacity", "status", "accepted"), [("137438953472", 0, True), ("", 0, False), ("unknown", 0, False), ("0", 0, False), ("137438953472", 1, False)])
@@ -248,6 +336,7 @@ def test_execution_contract_identity_changes_with_runner_or_sandbox_inputs(tmp_p
         "docker/sandbox-apparmor.profile",
         "docker/run-tests.sh",
         "tools/bazel_execution_contract.py",
+        "tools/fixture_storage.py",
         "tools/bazel_output_slot_entrypoint.sh",
         "tools/bazel_test_entrypoint.sh",
         "tools/bazel_test_common.sh",

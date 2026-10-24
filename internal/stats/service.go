@@ -192,6 +192,8 @@ type StatsService struct {
 	agentStatusValue        AgentStatusSnapshot
 	agentStatusErr          error
 	agentStatusNext         time.Time
+	agentStatusInvalidation uint64
+	agentStatusWake         chan struct{}
 	agentStatusCadence      time.Duration
 	agentStatusRetryCadence time.Duration
 	agentStatusRefreshMu    sync.Mutex
@@ -480,6 +482,7 @@ func NewStatsService(writer *Writer, config StatsServiceConfig) *StatsService {
 		notify:                  make(chan struct{}),
 		agentStatusCadence:      agentStatusCadence,
 		agentStatusRetryCadence: agentStatusRetryCadence,
+		agentStatusWake:         make(chan struct{}, 1),
 	}
 }
 
@@ -494,7 +497,38 @@ func (s *StatsService) AgentStatus(ctx context.Context) (AgentStatusSnapshot, er
 	if !s.agentStatusReady {
 		return AgentStatusSnapshot{}, errors.New("agent status projection is not ready")
 	}
-	return s.agentStatusValue, s.agentStatusErr
+	return s.agentStatusValue.withFreshnessAt(s.now()), s.agentStatusErr
+}
+
+// InvalidateAgentStatus is a coalesced post-commit signal. The existing stats
+// owner performs the read independently of ring materialization; collectors
+// and HTTP requests never wait for a concurrent projection read.
+func (s *StatsService) InvalidateAgentStatus() {
+	s.agentStatusMu.Lock()
+	s.agentStatusInvalidation++
+	s.agentStatusNext = time.Time{}
+	s.agentStatusMu.Unlock()
+	select {
+	case s.agentStatusWake <- struct{}{}:
+	default:
+	}
+}
+
+// RunAgentStatusRefresh belongs to the server's managed background lifetime.
+// Ring backfills can delay their own StateFunc by many seconds, so current
+// agent state needs a separate wakeup on this same serialized read owner.
+func (s *StatsService) RunAgentStatusRefresh(ctx context.Context) {
+	ticker := time.NewTicker(s.agentStatusRetryCadence)
+	defer ticker.Stop()
+	for ctx.Err() == nil {
+		_ = s.RefreshAgentStatusIfDue(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.agentStatusWake:
+		case <-ticker.C:
+		}
+	}
 }
 
 // RefreshAgentStatus runs the configured status reader from the stats owner
@@ -523,6 +557,9 @@ func (s *StatsService) RefreshAgentStatusIfDue(ctx context.Context) error {
 func (s *StatsService) refreshAgentStatus(ctx context.Context, force bool, now time.Time) error {
 	s.agentStatusRefreshMu.Lock()
 	defer s.agentStatusRefreshMu.Unlock()
+	s.agentStatusMu.RLock()
+	invalidation := s.agentStatusInvalidation
+	s.agentStatusMu.RUnlock()
 	if !force {
 		s.agentStatusMu.RLock()
 		ready := s.agentStatusReady
@@ -542,15 +579,28 @@ func (s *StatsService) refreshAgentStatus(ctx context.Context, force bool, now t
 		s.agentStatusMu.Unlock()
 		return err
 	}
-	value, err := s.agentStatus(ctx)
+	readCtx, cancel := context.WithTimeout(ctx, AgentStatusCollectionBudget)
+	defer cancel()
+	value, err := s.agentStatus(readCtx)
 	s.agentStatusMu.Lock()
 	s.agentStatusReady = true
 	s.agentStatusValue = value
 	s.agentStatusErr = err
-	if err != nil {
+	if err != nil || !value.Available {
 		s.agentStatusNext = now.Add(s.agentStatusRetryCadence)
 	} else {
 		s.agentStatusNext = now.Add(s.agentStatusCadence)
+		if value.Freshness != nil && value.Freshness.ExpiresAt > 0 {
+			expiresAt := time.Unix(0, int64(value.Freshness.ExpiresAt*1e9))
+			if expiresAt.Before(s.agentStatusNext) {
+				s.agentStatusNext = expiresAt
+			}
+		}
+	}
+	// A commit concurrent with this read must still trigger another owner
+	// read, even when SQLite returned the snapshot from before that commit.
+	if invalidation != s.agentStatusInvalidation {
+		s.agentStatusNext = time.Time{}
 	}
 	s.agentStatusMu.Unlock()
 	return err
@@ -631,6 +681,13 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 		s.mu.Unlock()
 		return nil
 	}
+	// A lifecycle pass can cross a bucket boundary before this projection reads
+	// it. Published ring heads own those bounds; zero timestamps retain legacy
+	// explicit-window admission instead of inferring a publication that is absent.
+	readWindowMetadata := s.writer.ReadRingWindowMetadata
+	if publishedAt > 0 {
+		readWindowMetadata = s.writer.readPublishedRingWindowMetadata
+	}
 	var firstErr error
 	var storeGeneration int64
 	refreshed := make(map[ProductKey]statsProduct)
@@ -658,7 +715,7 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 		}
 		alignedEnd := NextWindowEnd(now, resolution)
 		s.refreshCounters.ringReads.Add(1)
-		baseWindow, err := s.writer.ReadRingWindowMetadata(ctx, maxRange, resolution, alignedEnd)
+		baseWindow, err := readWindowMetadata(ctx, maxRange, resolution, alignedEnd)
 		if err != nil {
 			retryRingRefresh = true
 			for _, key := range keys {

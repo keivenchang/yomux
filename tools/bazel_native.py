@@ -512,7 +512,7 @@ def execute_lane(request, environment, contract, *, envelope=(), process_scope=N
                 *(["--jobs=" + str(step["jobs"])] if "jobs" in step else []),
                 *(["--local_resources=memory=" + str(step["memory_mb"])] if step.get("memory_mb") else []),
                 *(["--disk_cache=" + str(cache / "actions")] if cache_on else []),
-                "--test_output=errors", "--test_summary=terse", "--cache_test_results=" + ("yes" if reuse else "no")],
+                "--test_output=errors", "--test_summary=terse", "--cache_test_results=" + contract.test_result_cache_mode(reuse)],
                 cwd=workspace, env=environment, timeout=1800)
             print("YOMUX_NATIVE_STEP " + json.dumps({"index": index, "returncode": result.returncode,
                                                     "seconds": time.monotonic() - started}), flush=True)

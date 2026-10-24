@@ -481,7 +481,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
           <svg class="tabber-new-chat-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M13.5 5.5H6.75A2.75 2.75 0 0 0 4 8.25v9A2.75 2.75 0 0 0 6.75 20h9a2.75 2.75 0 0 0 2.75-2.75V10.5"/><path d="m11 13 8.25-8.25a2.12 2.12 0 0 1 3 3L14 16l-4 1z"/></svg>
           <span>New Chat</span>
         </button>
-        <div class="app-menu-popover tabber-new-chat-popover" role="menu" aria-label="New Chat"></div>
+        <div class="app-menu-popover tabber-new-chat-popover" popover="manual" role="menu" aria-label="New Chat"></div>
         </div>
         <button type="button" class="tabber-search" data-tabber-search aria-label="${esc(t('common.search'))}" title="${esc(t('topbar.search.aria'))}">
           <svg class="tabber-search-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.75" cy="10.75" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>
@@ -1067,14 +1067,14 @@ async function openChangedDirectoryInFinder(path) {
       const expanded = await expandFileExplorerTreesToPath(path);
       if (expanded) {
         selectFileTreePath(path);
-        statusEl.textContent = t('status.expandedIn', {path, finder: fileExplorerLabel()});
+        showLayoutStatus(t('status.expandedIn', {path, finder: fileExplorerLabel()}));
         return;
       }
     }
     const opened = await openFileExplorerAt(path, {validateKind: true});
     if (!opened) return;
     selectFileTreePath(path);
-    statusEl.textContent = t('status.expandedIn', {path, finder: fileExplorerLabel()});
+    showLayoutStatus(t('status.expandedIn', {path, finder: fileExplorerLabel()}));
   } catch (error) {
     statusErr(localizedHtml('status.expandDirectoryFailed', {error}));
   }

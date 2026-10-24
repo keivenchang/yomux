@@ -975,7 +975,9 @@ function queueFileExplorerWatchDiffRefresh(payload = {}, options = {}) {
 }
 
 async function refreshFileExplorerFromWatchDiffOnce(payload = {}, options = {}) {
-  if (!fileExplorerTreePaneIsVisible()) {
+  const watchDemand = clientServerWatchState();
+  const watchedFiles = [...watchDemand.files, ...watchDemand.background_files];
+  if (!fileExplorerTreePaneIsVisible() && !watchedFiles.length) {
     recordClientPerfCounter('finderRefresh', 0, {skipped: 1});
     return;
   }
@@ -1003,9 +1005,12 @@ async function refreshFileExplorerFromWatchDiffOnce(payload = {}, options = {}) 
     }
     if (fileExplorerFilesystemWatchToken !== previousToken || fileExplorerFilesystemPushToken !== previousPushToken) return;
     await refreshFileExplorerFromPush(diffPayload, {fromWatchDiff: true});
+    if (diffPayload.token && fileExplorerFilesystemPushToken !== String(diffPayload.token)) return;
+    await refreshOpenFilesFromPush(diffPayload);
   } catch (error) {
     console.warn('client fs watch diff refresh failed', error);
-    if (requestedFull) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, trigger: 'watch-diff-fallback'});
+    if (!fileExplorerTreePaneIsVisible()) await refreshOpenFilesIfChanged({paths: watchedFiles});
+    else if (requestedFull) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, trigger: 'watch-diff-fallback'});
     else await refreshFileExplorerIfChanged({trigger: 'watch-diff-fallback'});
   }
 }
@@ -1052,6 +1057,8 @@ function fileEntryStatusFromWatchFilePayload(item) {
 }
 
 async function refreshOpenFilesFromPush(payload = {}) {
+  // Native invalidations carry paths, while watch-diff readback owns complete file signatures.
+  if (Array.isArray(payload.paths) && !Array.isArray(payload.files)) return refreshFileExplorerFromPush(payload);
   const files = Array.isArray(payload.files) ? payload.files : [];
   for (const item of files) {
     const fetched = fileEntryStatusFromWatchFilePayload(item);
@@ -1071,6 +1078,7 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
   }
   const treeVisible = fileExplorerTreePaneIsVisible();
   const changedPaths = [
+    ...(Array.isArray(payload?.paths) ? payload.paths : []),
     ...(Array.isArray(payload?.directories) ? payload.directories.map(item => item?.path || item?.data?.path || '') : []),
     ...(Array.isArray(payload?.removed_roots) ? payload.removed_roots : []),
   ];
@@ -1100,7 +1108,7 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
     const failedDirectories = pushed.failedDirectories;
     renderedRows = Array.from(entriesByDir.values()).reduce((total, entries) => total + (Array.isArray(entries) ? entries.length : 0), 0);
     const visibleRootRemoved = treeVisible ? invalidateFileExplorerRoots(payload?.removed_roots) : false;
-    if (!entriesByDir.size && payload?.refresh === true && options.fromWatchDiff !== true) {
+    if (!entriesByDir.size && (payload?.refresh === true || Array.isArray(payload?.paths)) && options.fromWatchDiff !== true) {
       await refreshFileExplorerFromWatchDiff(payload);
       return;
     }
@@ -6082,9 +6090,9 @@ async function setFileExplorerPathExcluded(path, excluded) {
     markFileIndexRootsRefreshing([indexedRoot]);
     updateFileExplorerIndexedDirectoryRows();
     updateFileTreeGitStatusRows();
-    if (statusEl) statusEl.textContent = excluded
+    showTimedStatusNotice(excluded
       ? `${t('finder.index.excluded')}: ${compactHomePath(normalized)}`
-      : t('common.indexedPath', {path: compactHomePath(normalized)});
+      : t('common.indexedPath', {path: compactHomePath(normalized)}));
     return true;
   } catch (error) {
     statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))}));
@@ -6105,10 +6113,10 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
   if (indexed) {
     const ancestor = fileExplorerIndexedAncestor(normalized);
     if (ancestor) {
-      if (statusEl) statusEl.textContent = t('finder.index.alreadyIndexedBy', {
+      if (!applyingIndexedDirsSetting) showTimedStatusNotice(t('finder.index.alreadyIndexedBy', {
         path: compactHomePath(normalized),
         ancestor: compactHomePath(ancestor),
-      });
+      }));
       return;
     }
     fileExplorerIndexedDirs.add(normalized);
@@ -6131,8 +6139,8 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
   // add/remove so the save MERGES into the shared list instead of overwriting it with this page's set.
   if (!applyingIndexedDirsSetting) persistIndexedDirsSetting(indexed ? {add: normalized} : {remove: normalized});
   updateFileExplorerIndexedDirectoryRows();
-  if (statusEl) {
-    statusEl.textContent = t(indexed ? 'common.indexedPath' : 'finder.index.removed', {path: compactHomePath(normalized)});
+  if (!applyingIndexedDirsSetting) {
+    showTimedStatusNotice(t(indexed ? 'common.indexedPath' : 'finder.index.removed', {path: compactHomePath(normalized)}));
   }
 }
 

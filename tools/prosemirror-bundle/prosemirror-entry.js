@@ -14,7 +14,7 @@ import {baseKeymap, setBlockType, toggleMark} from 'prosemirror-commands';
 import {Decoration, DecorationSet, EditorView} from 'prosemirror-view';
 import {keymap} from 'prosemirror-keymap';
 import {history, redo, undo} from 'prosemirror-history';
-import {addListNodes, bulletList, listItem, orderedList, wrapInList} from 'prosemirror-schema-list';
+import {addListNodes, bulletList, liftListItem, listItem, orderedList, sinkListItem, splitListItem, wrapInList} from 'prosemirror-schema-list';
 import MarkdownIt from 'markdown-it';
 
 window.YOmuxProseMirror = {
@@ -39,9 +39,12 @@ window.YOmuxProseMirror = {
   keymap,
   history,
   listItem,
+  liftListItem,
   orderedList,
   redo,
   setBlockType,
+  sinkListItem,
+  splitListItem,
   toggleMark,
   undo,
   wrapInList,

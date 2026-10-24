@@ -53,10 +53,15 @@ function harness() {
   document.getElementById = id => id === 'status' ? footer : body.children.find(child => child.id === id) || null;
   const window = new Element();
   const requests = [];
+  const toasts = [];
   const timers = new Map();
   let timerId = 0;
   const context = vm.createContext({
     document, window, URL, URLSearchParams, Symbol, console,
+    toastDurationMs: 5000,
+    t(key, params = {}) { return key === 'fs.error.changedOnDisk' ? `File changed on disk: ${params.path}.` : key; },
+    showToast(title, lines, options) { toasts.push({title, lines, options}); return new Element(); },
+    terminalAuthenticationActive: () => false,
     esc: value => String(value).replaceAll('"', '&quot;'),
     domDataAttributeName: key => 'data-' + key.replace(/[A-Z]/g, letter => '-' + letter.toLowerCase()),
     setTimeout(callback) { timers.set(++timerId, callback); return timerId; },
@@ -71,15 +76,45 @@ function harness() {
     return response.json();
   }`, context);
   const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+  vm.runInContext(core.slice(core.indexOf('function showTimedStatusNotice('), core.indexOf('function localizedHtml(')), context);
   vm.runInContext(core.slice(core.indexOf('function overlayFocusableElements('), core.indexOf('function createLatestResource(')), context);
   vm.runInContext(fs.readFileSync('static_src/js/yomux/76_panel_dom_actions.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('static_src/js/yomux/15_command_registry.js', 'utf8'), context);
-  return {context, requests, timers, body, document, window, footer,
+  return {context, requests, timers, toasts, body, document, window, footer,
     run: code => vm.runInContext(code, context)};
 }
 
 async function run() {
   let h = harness();
+  for (const phase of ['pending', 'success', 'failure', 'overdue']) {
+    h = harness();
+    let authenticated = phase !== 'pending';
+    h.context.terminalAuthenticationActive = () => !authenticated;
+    const publishAuth = () => {
+      authenticated = false;
+      h.footer.textContent = 'Authentication required.';
+      h.footer.setAttribute('role', 'alert');
+      h.footer.setAttribute('aria-live', 'assertive');
+    };
+    if (phase === 'pending') publishAuth();
+    const command = h.run(`dispatchCommand(COMMAND_ROUTES['settings-save'], {payload:{theme:'dark'}})`);
+    if (phase !== 'pending') publishAuth();
+    if (phase === 'overdue') for (const callback of [...h.timers.values()]) callback();
+    assert.equal(h.footer.getAttribute('role'), 'alert', phase + ' cannot downgrade the authentication role');
+    assert.equal(h.footer.getAttribute('aria-live'), 'assertive', phase + ' cannot downgrade authentication urgency');
+    if (phase === 'failure' || phase === 'pending') {
+      const error = Object.assign(new Error('authentication required'), {terminalAuthentication:true});
+      h.requests[0].reject(error);
+      await assert.rejects(command, actual => actual === error);
+    } else {
+      h.requests[0].resolve({ok:true, json:async () => ({saved:true})});
+      await command;
+    }
+    assert.equal(h.footer.textContent, 'Authentication required.', phase);
+    assert.equal(h.footer.getAttribute('role'), 'alert', phase);
+    assert.equal(h.footer.getAttribute('aria-live'), 'assertive', phase);
+  }
+  h = harness();
   const button = h.run(`createToolbarButton({className: 'example', pressed: false, checked: true,
     ariaLabel: 'Example', title: 'Example title', hidden: true, attributes: {'aria-expanded': 'false'},
     dataset: {owner: 'toolbar'}, action: 'example'})`);
@@ -369,6 +404,40 @@ async function run() {
     assert.equal(h.footer.textContent, 'ready', 'hidden recovered errors cannot return');
   }
 
+  for (const details of [
+    {code: 'deadline_expired'},
+    {code: 'client_deadline_expired'},
+    {payload: {reason_code: 'deadline_expired'}},
+    {payload: {error_code: 'deadline_expired'}},
+    {result: {error: {code: 'deadline_expired'}}},
+  ]) {
+    h = harness();
+    h.footer.textContent = 'ready';
+    const deadline = Object.assign(new Error('deadline_expired: request exceeded its 15s deadline'), details);
+    const request = h.run(`dispatchCommand(COMMAND_ROUTES['finder-delete'], {payload:{path:'/tmp/example.md'}})`);
+    h.requests[0].reject(deadline);
+    await assert.rejects(request, error => error === deadline, 'timed notice preserves command rejection');
+    assert.equal(h.toasts.length, 1, 'deadline failures use the shared timed notice');
+    assert.equal(h.toasts[0].lines, deadline.message);
+    assert.equal(h.toasts[0].options.countdownMs, 5000);
+    assert.equal(h.footer.textContent, 'ready', 'deadline failures restore the previous global status');
+    assert.equal(h.body.children.length, 0, 'deadline failures remove the associated command overlay');
+  }
+
+  h = harness();
+  h.footer.textContent = 'ready';
+  const changedOnDisk = new Error('file changed on disk');
+  changedOnDisk.status = 409;
+  changedOnDisk.payload = {error: 'file changed on disk', error_code: 'changed_on_disk', message_key: 'fs.error.changedOnDisk', path: '/tmp/example.md'};
+  const conflict = h.run(`dispatchCommand(COMMAND_ROUTES['finder-delete'], {payload:{path:'/tmp/example.md'}})`);
+  h.requests[0].reject(changedOnDisk);
+  await assert.rejects(conflict);
+  assert.equal(h.toasts.length, 1, 'expected disk conflicts use the normal timed toast');
+  assert.equal(h.toasts[0].lines, 'File changed on disk: /tmp/example.md.');
+  assert.equal(h.toasts[0].options.countdownMs, 5000);
+  assert.equal(h.footer.textContent, 'ready', 'expected disk conflicts do not stick in the global error banner');
+  assert.equal(h.body.children.length, 0, 'expected disk conflicts leave no command-error overlay');
+
   h = harness();
   h.footer.textContent = 'ready';
   const watchFailure = h.run(`apiFetch('/api/watch/roots', {method:'POST'})`);
@@ -382,6 +451,39 @@ async function run() {
   h.requests[1].resolve({ok:true});
   await foregroundDelete;
   assert.equal(h.footer.textContent, 'ready');
+
+  h = harness();
+  const records = new Map(Array.from({length: 65}, (_, index) => [`session-${index}`, {state: {key: 'idle', reason: 'waiting', signature: 'idle:waiting'}}]));
+  Object.assign(h.context, {
+    sessions: [...records.keys()], stateTrackingReady: true,
+    transcriptMetadataState: {payload: {sessions: {}}},
+    isTmuxSession: () => true,
+    sessionState: () => ({key: 'working', reason: 'active', label: 'Working'}),
+    sessionStatusRecord: session => records.get(session),
+    stateSignature: state => `${state.key}:${state.reason}`,
+    eventMessageForState: session => `${session} changed`,
+    tmuxSessionLifecycleToken: session => session,
+    tmuxSessionLifecycleTokenIsCurrent: () => true,
+    refreshEventLogsFromPush: async () => [],
+  });
+  const bootSource = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+  vm.runInContext(bootSource.slice(bootSource.indexOf('const eventPostBatchMax ='), bootSource.indexOf('\nfunction normalizeRole', bootSource.indexOf('const eventPostBatchMax ='))), h.context);
+  const stateSource = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
+  const stateStart = stateSource.indexOf('function trackSessionStateChanges(');
+  vm.runInContext(stateSource.slice(stateStart, stateSource.indexOf('\nconst workingAgentTransitionNotificationDescriptors', stateStart)), h.context);
+  const firstBatch = h.run('trackSessionStateChanges()');
+  assert.equal(h.requests.length, 2, 'the real mutation registry admits both bounded event chunks');
+  assert.equal(h.requests[0].url, '/api/events');
+  h.requests[0].resolve({ok: true, json: async () => ({ok: true})});
+  h.requests[1].reject(new Error('second chunk unavailable'));
+  assert.equal(await firstBatch, false);
+  assert.equal([...records.values()].reduce((count, record) => count + record.pendingEventStateChanges.length, 0), 1, 'only the failed chunk stays queued');
+  const retryBatch = h.run('trackSessionStateChanges()');
+  const retriedEvents = JSON.parse(h.requests[2].options.body).events;
+  assert.deepStrictEqual(retriedEvents.map(event => event.session), ['session-64'], 'successful rows cannot be posted twice after a partial failure');
+  h.requests[2].resolve({ok: true, json: async () => ({ok: true})});
+  assert.equal(await retryBatch, true);
+  assert.equal([...records.values()].reduce((count, record) => count + record.pendingEventStateChanges.length, 0), 0);
 
   console.log('gui command controls suite: passed');
 }

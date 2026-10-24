@@ -45,6 +45,7 @@
     "static_src/js/yomux/91_preview_popout.js",
     "static_src/js/yomux/92_codemirror_editor.js",
     "static_src/js/yomux/93_prosemirror_editor.js",
+    "static_src/js/yomux/94_markdown_formatting.js",
     "static_src/js/yomux/98_terminal_runtime_facade.js",
     "static_src/js/yomux/99_terminal_boot.js",
     "static_src/js/yomux/99_client_event_transport.js",

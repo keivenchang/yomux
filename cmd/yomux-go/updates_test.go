@@ -69,6 +69,23 @@ func TestUpdateRoutesKeepStatusReadableAndInstallationAdminOnly(t *testing.T) {
 	if payload["available"] != true || payload["target_version"] != "0.10.7" {
 		t.Fatalf("unexpected cached update payload: %#v", payload)
 	}
+	if err := s.saveUpdateJob(selfUpdateJob{ID: "failed-job", State: "failed", Error: "checkout has tracked or untracked changes"}); err != nil {
+		t.Fatal(err)
+	}
+	jobStatusRequest := httptest.NewRequest(http.MethodGet, "/api/self-update/status", nil)
+	jobStatusRequest.SetBasicAuth("admin", "admin-pass")
+	jobStatusResponse := httptest.NewRecorder()
+	s.protected(http.HandlerFunc(s.selfUpdateStatus)).ServeHTTP(jobStatusResponse, jobStatusRequest)
+	if jobStatusResponse.Code != http.StatusOK {
+		t.Fatalf("admin update job status = %d, want 200", jobStatusResponse.Code)
+	}
+	if err := json.Unmarshal(jobStatusResponse.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	failedJob, _ := payload["job"].(map[string]any)
+	if failedJob["state"] != "failed" || failedJob["error"] != "checkout has tracked or untracked changes" {
+		t.Fatalf("unexpected update job status envelope: %#v", payload)
+	}
 	post := httptest.NewRequest(http.MethodPost, "/api/self-update", nil)
 	post.SetBasicAuth("reader", "reader-pass")
 	denied := httptest.NewRecorder()
@@ -84,8 +101,8 @@ func TestUpdateRoutesKeepStatusReadableAndInstallationAdminOnly(t *testing.T) {
 	post.SetBasicAuth("admin", "admin-pass")
 	accepted := httptest.NewRecorder()
 	s.protected(http.HandlerFunc(s.selfUpdate)).ServeHTTP(accepted, post)
-	if accepted.Code != http.StatusAccepted {
-		t.Fatalf("duplicate admin update status = %d, want 202: %s", accepted.Code, accepted.Body.String())
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("duplicate admin update status = %d, want 200: %s", accepted.Code, accepted.Body.String())
 	}
 	if err := json.Unmarshal(accepted.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
@@ -93,6 +110,35 @@ func TestUpdateRoutesKeepStatusReadableAndInstallationAdminOnly(t *testing.T) {
 	active, _ := payload["job"].(map[string]any)
 	if active["id"] != "active-job" {
 		t.Fatalf("duplicate click did not return active job: %#v", payload)
+	}
+	if err := os.Remove(s.updateJobPath); err != nil {
+		t.Fatal(err)
+	}
+	post = httptest.NewRequest(http.MethodPost, "/api/self-update", nil)
+	post.SetBasicAuth("admin", "admin-pass")
+	started := httptest.NewRecorder()
+	s.protected(http.HandlerFunc(s.selfUpdate)).ServeHTTP(started, post)
+	if started.Code != http.StatusOK {
+		t.Fatalf("new admin update status = %d, want 200: %s", started.Code, started.Body.String())
+	}
+	if err := json.Unmarshal(started.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["ok"] != true || payload["restarting"] != true || payload["target"] != "0.10.7" {
+		t.Fatalf("unexpected new update acknowledgement: %#v", payload)
+	}
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if completed := s.loadUpdateJob(); completed.State == "failed" {
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline:
+			t.Fatal("test update worker did not finish")
+		}
 	}
 }
 
@@ -123,7 +169,7 @@ func TestSelfUpdateDryRunDoesNotCreateOrStartJob(t *testing.T) {
 }
 
 func TestSelfUpdateRefusesDirtyAndDivergedCheckouts(t *testing.T) {
-	for _, scenario := range []string{"dirty", "diverged"} {
+	for _, scenario := range []string{"dirty", "diverged", "dirty-diverged"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			gitRun(t, root, "init", "--initial-branch=main")
@@ -143,7 +189,7 @@ func TestSelfUpdateRefusesDirtyAndDivergedCheckouts(t *testing.T) {
 			gitRun(t, root, "commit", "-m", "upstream target")
 			target := strings.TrimSpace(gitRun(t, root, "rev-parse", "HEAD"))
 			gitRun(t, root, "checkout", "main")
-			if scenario == "diverged" {
+			if scenario == "diverged" || scenario == "dirty-diverged" {
 				if err := os.WriteFile(filepath.Join(root, "local.txt"), []byte("local\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -151,7 +197,11 @@ func TestSelfUpdateRefusesDirtyAndDivergedCheckouts(t *testing.T) {
 				gitRun(t, root, "commit", "-m", "local divergent commit")
 			}
 			headBefore := strings.TrimSpace(gitRun(t, root, "rev-parse", "HEAD"))
-			if scenario == "dirty" {
+			canonicalRoot, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "dirty" || scenario == "dirty-diverged" {
 				if err := os.WriteFile(filepath.Join(root, "untracked.txt"), []byte("keep\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -159,23 +209,25 @@ func TestSelfUpdateRefusesDirtyAndDivergedCheckouts(t *testing.T) {
 			config := filepath.Join(t.TempDir(), "config")
 			jobPath := filepath.Join(config, "self-update-job.json")
 			job := selfUpdateJob{ID: scenario, State: "preparing", Target: "0.10.7", TargetSHA: target, StartedAt: time.Now()}
-			s := &server{root: root, config: config, updateJobPath: jobPath}
+			s := &server{root: canonicalRoot, config: config, updateJobPath: jobPath}
 			s.runSelfUpdate(job)
 			result := s.loadUpdateJob()
 			if result.State != "failed" {
 				t.Fatalf("job state = %q, want failed: %#v", result.State, result)
 			}
-			wantError := "checkout has tracked or untracked changes"
-			if scenario == "diverged" {
-				wantError = "checkout is not behind the pinned update"
-			}
-			if !strings.Contains(result.Error, wantError) {
-				t.Fatalf("job error = %q, want it to contain %q", result.Error, wantError)
+			for _, wantError := range map[string][]string{
+				"dirty":          {"Auto-update needs a clean checkout", "Commit or stash the local edits"},
+				"diverged":       {"branch because it has a local commit", "clean 0.10.7 checkout"},
+				"dirty-diverged": {"checkout because it has local work", "Save that work", "clean 0.10.7 checkout"},
+			}[scenario] {
+				if !strings.Contains(result.Error, wantError) {
+					t.Fatalf("job error = %q, want it to contain %q", result.Error, wantError)
+				}
 			}
 			if headAfter := strings.TrimSpace(gitRun(t, root, "rev-parse", "HEAD")); headAfter != headBefore {
 				t.Fatalf("refusal changed HEAD from %s to %s", headBefore, headAfter)
 			}
-			if scenario == "dirty" {
+			if scenario == "dirty" || scenario == "dirty-diverged" {
 				if content, err := os.ReadFile(filepath.Join(root, "untracked.txt")); err != nil || string(content) != "keep\n" {
 					t.Fatalf("dirty untracked file changed or disappeared: %q, %v", content, err)
 				}
@@ -280,6 +332,29 @@ chmod 700 "$2/bin/yomux"
 			}
 			job := selfUpdateJob{ID: scenario, State: "preparing", Target: "0.10.7", TargetSHA: targetSHA, StartedAt: time.Now()}
 			s := &server{root: runtimeRoot, config: config, port: 7110, httpMode: true, updateJobPath: filepath.Join(config, "self-update-job.json")}
+			// The detached supervisor still writes the job after boot records its
+			// invocation. Retire that writer before TempDir cleanup, even on failure.
+			t.Cleanup(func() {
+				deadline := time.NewTimer(5 * time.Second)
+				defer deadline.Stop()
+				ticker := time.NewTicker(5 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					current := s.loadUpdateJob()
+					if current.ID == job.ID && (current.State == "complete" || current.State == "failed") {
+						if scenario != "build-failure" && scenario != "native-incompatible" && current.State != "complete" {
+							t.Errorf("managed launcher did not complete: %#v", current)
+						}
+						return
+					}
+					select {
+					case <-ticker.C:
+					case <-deadline.C:
+						t.Error("self-update writer did not finish before fixture cleanup")
+						return
+					}
+				}
+			})
 			s.runSelfUpdate(job)
 			result := s.loadUpdateJob()
 			if scenario == "build-failure" || scenario == "native-incompatible" {
@@ -303,7 +378,7 @@ chmod 700 "$2/bin/yomux"
 				}
 				return
 			}
-			if result.State != "restarting" || result.TargetSHA != targetSHA {
+			if (result.State != "restarting" && result.State != "complete") || result.TargetSHA != targetSHA {
 				t.Fatalf("prepared update did not persist restart state: %#v", result)
 			}
 			if result.LauncherLog != filepath.Join(config, "self-update", targetSHA, scenario, "managed-launcher.log") {

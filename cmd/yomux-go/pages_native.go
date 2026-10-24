@@ -30,6 +30,7 @@ type nativePageView struct {
 	BootstrapJSON                                                    template.JS
 	ToggleLabels                                                     map[string]string
 	SetupStrings                                                     map[string]string
+	StarterAuthConfig                                                bool
 	SecurityHTML, AgentNoticeHTML                                    template.HTML
 	locales                                                          *pageLocales
 	version                                                          pageVersion
@@ -181,6 +182,11 @@ func (s *server) renderPreauthPage(r *http.Request, setup bool, next, message st
 	t := view.locales.text
 	if setup {
 		view.AuthPath = filepath.Join(s.config, "auth.yaml")
+		authConfig, err := os.ReadFile(view.AuthPath)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		view.StarterAuthConfig = bytes.HasPrefix(authConfig, []byte(starterAuthConfigHeader))
 		login := os.Getenv("USER")
 		if current, err := user.Current(); err == nil {
 			login = current.Username

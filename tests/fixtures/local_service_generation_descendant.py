@@ -31,6 +31,7 @@ def main() -> int:
     parser.add_argument("--idle-seconds")
     parser.add_argument("--child-pid-file", required=True)
     parser.add_argument("--spawn-on-term", action="store_true")
+    parser.add_argument("--ready-fd", type=int, required=True)
     args = parser.parse_args()
     if not args.serve:
         parser.error("--serve is required")
@@ -45,7 +46,8 @@ def main() -> int:
             os._exit(0)
 
         signal.signal(signal.SIGTERM, spawn_descendant_then_exit)
-        Path(args.child_pid_file).write_text("ready", encoding="utf-8")
+        os.write(args.ready_fd, b"1")
+        os.close(args.ready_fd)
         while True:
             time.sleep(60)
 
@@ -63,6 +65,8 @@ def main() -> int:
         encoding="utf-8",
     )
     parent_connection.close()
+    os.write(args.ready_fd, b"1")
+    os.close(args.ready_fd)
     os._exit(0)
 
 

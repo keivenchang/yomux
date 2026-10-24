@@ -372,6 +372,101 @@ async function runLayoutRestoreSuite() {
     assert.equal(events.filter(event => event.type === 'interaction').length, 20);
   });
 
+  test('resource timing never borrows a retained entry for a newer request', () => {
+    const retained = {startTime: 100, responseEnd: 110, initiatorType: 'fetch'};
+    const api = loadYomux('', ['1'], 'http:', 'Linux', 'admin', {
+      performance: {now: () => 10000, getEntriesByName: () => [retained]},
+    });
+    assert.equal(api.jsDebugResourceTimingEntryForTest('/api/ping', {start: 10000, end: 10001}), null);
+  });
+
+  test('shared status writers retire overlay styles and preserve HTML markup', () => {
+    const api = loadYomux();
+    const status = api.testElementForId('status');
+    api.showLayoutStatusForTest('blocked', 'danger');
+    assert.equal(status.getAttribute('aria-live'), 'assertive');
+    api.showLayoutStatusForTest('Saved');
+    assert.equal(api.statusKindForTest(), '');
+    assert.equal(status.classList.contains('layout-status-visible'), false);
+    assert.equal(status.getAttribute('aria-live'), 'polite');
+    api.showLayoutStatusForTest('blocked', 'danger');
+    api.setStatusHtmlForTest('<a href="/example">saved &amp; linked</a>');
+    assert.equal(api.statusHtmlForTest(), '<a href="/example">saved &amp; linked</a>');
+    assert.equal(api.statusKindForTest(), '');
+    assert.equal(status.getAttribute('aria-live'), null);
+  });
+
+  await testAsync('shared index reconciliation is silent while operator add and remove use timed notices', async () => {
+    const api = loadYomux();
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({status: 'ready', ok: true})));
+    api.setClientSettingsPatchForTest({file_explorer: {indexed_dirs: ['/repo']}});
+    api.reconcileIndexedDirsFromSettingForTest({initial: true});
+    await flushAsyncWork();
+    assert.deepStrictEqual([...api.timedStatusNoticesForTest()], [], 'startup reconciliation has no operator notice');
+    api.setClientSettingsPatchForTest({file_explorer: {indexed_dirs: ['/other']}});
+    api.reconcileIndexedDirsFromSettingForTest();
+    await flushAsyncWork();
+    assert.deepStrictEqual([...api.timedStatusNoticesForTest()], [], 'shared settings add/remove has no operator notice');
+    api.setFileExplorerDirectoryIndexedForTest('/explicit', true);
+    api.setFileExplorerDirectoryIndexedForTest('/explicit', false);
+    assert.equal(api.timedStatusNoticesForTest().length, 2);
+    assert.ok(api.timedStatusNoticesForTest()[0].includes('Indexed /explicit'));
+    assert.ok(api.timedStatusNoticesForTest()[1].includes('/explicit'));
+    await flushAsyncWork();
+  });
+
+  test('resource timing associates only one completed fetch within its native call window', () => {
+    let entries = [];
+    let now = 100;
+    const api = loadYomux('', ['1'], 'http:', 'Linux', 'admin', {
+      performance: {now: () => now, getEntriesByName: () => entries},
+    });
+    api.setFetchForTest(() => { now += 1; return Promise.resolve(); });
+    const first = {};
+    api.fetchApiRequestWithTimingForTest('/api/ping', {}, first);
+    now = 10000;
+    const second = {};
+    api.fetchApiRequestWithTimingForTest('/api/ping', {}, second);
+    const earlier = {startTime: 100.5, responseEnd: 20000, initiatorType: 'fetch'};
+    const later = {startTime: 10000.5, responseEnd: 10010, initiatorType: 'fetch'};
+    entries = [later];
+    assert.equal(api.jsDebugResourceTimingEntryForTest('/api/ping', first), null, 'a later sibling may finish first');
+    assert.equal(api.jsDebugResourceTimingEntryForTest('/api/ping', second), later);
+    entries = [later, earlier];
+    assert.equal(api.jsDebugResourceTimingEntryForTest('/api/ping', first), earlier);
+    assert.equal(api.jsDebugResourceTimingEntryForTest('/api/ping', second), later);
+    for (const invalid of [[], [{...later, responseEnd: 0}], [{...later, initiatorType: 'img'}],
+      [{...later, startTime: NaN}], [later, {...later}]]) {
+      entries = invalid;
+      assert.equal(api.jsDebugResourceTimingEntryForTest('/api/ping', second), null);
+    }
+    entries = [later];
+    const event = {};
+    api.updateApiDebugResourcePhasesForTest(event, '/api/ping', 50, first);
+    assert.equal(event.phaseTimings, undefined, 'header probes must not borrow a sibling while current headers/body are incomplete');
+    assert.equal(event.connectionProtocol, undefined);
+    assert.equal(api.jsDebugResourceTimingEntryForTest('/api/ping', undefined), null, 'synthetic responses have no native fetch window');
+  });
+
+  await testAsync('quiet requests and coarse-clock overlap never lend their entry to a sibling', async () => {
+    let now = 2000;
+    const entries = [{startTime: 2000, responseEnd: 2010, initiatorType: 'fetch'}];
+    const api = loadYomux('', ['1'], 'http:', 'Linux', 'admin', {
+      performance: {now: () => now, getEntriesByName: () => entries},
+    });
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({ok: true})));
+    await api.apiFetchJsonQuietForTest('/api/ping', {startupImmediate: true});
+    const observed = {};
+    api.fetchApiRequestWithTimingForTest('/api/ping', {}, observed);
+    assert.equal(observed.ambiguous, true, 'debug suppression does not suppress native request ownership');
+    assert.equal(api.jsDebugResourceTimingEntryForTest('/api/ping', observed), null);
+    now = 3000;
+    const separated = {};
+    api.fetchApiRequestWithTimingForTest('/api/ping', {}, separated);
+    entries[0] = {...entries[0], startTime: 3000};
+    assert.equal(api.jsDebugResourceTimingEntryForTest('/api/ping', separated), entries[0]);
+  });
+
   test('resource timing phases are non-overlapping and observation uploads stay below the route limit', () => {
     const api = loadYomux();
     const phases = api.jsDebugResourcePhaseTimingsForTest({
@@ -2470,7 +2565,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes("esc(t('brand.marker'))"), 'the YO marker glyph renders via t(brand.marker)');
     // #81: a failed autosave-on-close falls through to the explicit save/discard/cancel dialog instead of
     // silently aborting the close.
-    assert.ok(/if \(await saveFileEditor\(path, panel, \{autosave: true, closing: true\}\)\) return true;[\s\S]*?showFileEditorDecisionDialog/.test(source), '#81: autosave-on-close failure falls back to the close dialog');
+    assert.ok(/if \(result\?\.saved === true\) return savedCloseState\(result\);[\s\S]*?showFileEditorDecisionDialog/.test(source), '#81: autosave-on-close failure falls back to the close dialog after checking the completed state');
     // #85/#86/#87/#88: toast removal honors countdownMs; reconnect confirmation is single-in-flight; the
     // repo popover is viewport-clamped; an equal-mtime unknown-size entry is treated as changed (re-stat).
     assert.ok(/scheduleToastRemoval\(id, node, options\.countdownMs \|\| toastDurationMs\)/.test(source), '#85: toast removal uses options.countdownMs through the shared scheduler');
@@ -3659,8 +3754,8 @@ async function runLayoutRestoreSuite() {
     api.setPinnedTabsForTest(['1']);
     api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 2}});
     api.setTabPinned('2', true);
-    assert.equal(api.statusKindForTest(), 'advisory', 'pinning up to the cap shows an advisory status');
-    assert.ok(api.statusTextForTest().includes('tab limit 2'), 'pin-at-cap advisory names the active cap');
+    assert.equal(api.statusKindForTest(), '', 'pinning up to the cap does not leave a fixed advisory overlay');
+    assert.ok(api.timedStatusNoticesForTest().at(-1).includes('tab limit 2'), 'pin-at-cap timed notice names the active cap');
     api.setTabPinned('2', false);
     assert.equal(api.statusKindForTest(), '', 'unpinning clears the advisory layout status');
     const loweredCapSlots = api.emptyLayoutSlots();

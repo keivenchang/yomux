@@ -1,7 +1,9 @@
 import os
-import time
+import threading
+from threading import BoundedSemaphore
 from threading import Event
 from threading import Thread
+from types import SimpleNamespace
 
 import pytest
 
@@ -74,6 +76,18 @@ def test_registry_retries_real_unix_socket_capacity_refusal(operation, tmp_path,
     holding = Event()
     release = Event()
     holder_failures = []
+    handler_released = Event()
+    clock = [0.0]
+
+    class HandlerSlots(BoundedSemaphore):
+        def __init__(self, value=1):
+            super().__init__(value)
+            self._fixture_owned = threading.current_thread() is worker
+
+        def release(self, n=1):
+            super().release(n)
+            if self._fixture_owned:
+                handler_released.set()
 
     def handle(request, _body):
         action = request.get("action")
@@ -113,18 +127,26 @@ def test_registry_retries_real_unix_socket_capacity_refusal(operation, tmp_path,
         ),
         daemon=True,
     )
+    # Keep the injected factory local to the runtime, and signal only this listener's slot.
+    runtime_threading = SimpleNamespace(**vars(runtime.threading))
+    runtime_threading.BoundedSemaphore = HandlerSlots
+    monkeypatch.setattr(runtime, "threading", runtime_threading)
+    assert threading.BoundedSemaphore is BoundedSemaphore
     retry_waits = []
 
     def retry_sleep(seconds):
         retry_waits.append(seconds)
         release.set()
-        time.sleep(seconds)
+        # Fixture scheduling is independent of the retry budget; wait for its owned slot.
+        assert handler_released.wait(timeout=2.0) is True
+        clock[0] += seconds
 
     registry = LocalServiceRegistry(
         tmp_path,
         LocalServiceSpec("fixture", "tests.fixture", socket_path.name, 7),
         socket_path=socket_path,
         service_dir=tmp_path,
+        clock=lambda: clock[0],
         sleep=retry_sleep,
     )
     try:
@@ -133,10 +155,15 @@ def test_registry_retries_real_unix_socket_capacity_refusal(operation, tmp_path,
         assert socket_path.exists() is True
         holder.start()
         assert holding.wait(timeout=1.0) is True
+        foreign_slots = runtime.threading.BoundedSemaphore(1)
+        assert foreign_slots.acquire(blocking=False) is True
+        foreign_slots.release()
+        assert handler_released.is_set() is False, "an unrelated semaphore released the fixture's owned handler slot"
         if operation == "ping":
             assert registry.healthy() is True
         elif operation == "status":
-            assert registry.status()["healthy"] is True
+            status = registry.status()
+            assert status["healthy"] is True, status
         elif operation == "lease":
             monkeypatch.setattr(registry, "ensure_started", lambda: True)
             assert registry.acquire_lease()["lease_id"] == "lease-1"

@@ -859,6 +859,38 @@ func TestSearchPolicyCacheTracksSymlinkExclusionRetargeting(t *testing.T) {
 	}
 }
 
+func TestSearchPolicyBuildKeepsTheCacheKeysResolvedExclusion(t *testing.T) {
+	root := t.TempDir()
+	first, second := filepath.Join(root, "first"), filepath.Join(root, "second")
+	for _, directory := range []string{first, second} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alias := filepath.Join(t.TempDir(), "exclusion")
+	if err := os.Symlink(first, alias); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	canonicalRoot, err := CanonicalIndexRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalRules := []string{canonicalSearchPolicyRule(root, canonicalRoot, alias)}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(second, alias); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := buildSearchPolicy(root, canonicalRoot, nil, canonicalRules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.excludedPath(filepath.Join(first, "file.md")) || policy.excludedPath(filepath.Join(second, "file.md")) {
+		t.Fatalf("policy re-resolved the cache key's exclusion: %q", policy.rules[0].path)
+	}
+}
+
 func TestSearchPolicyUsesPinnedSymlinkRootForExclusions(t *testing.T) {
 	firstRoot, secondRoot := t.TempDir(), t.TempDir()
 	alias := filepath.Join(t.TempDir(), "root-alias")

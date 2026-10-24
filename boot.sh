@@ -375,7 +375,7 @@ probe_healthz() {
   if [[ "$http_mode" -eq 1 ]]; then
     scheme="http"
   fi
-  curl -sk -o /dev/null -w '%{http_code}' "${scheme}://${probe_host}:${port}/healthz" 2>/dev/null || true
+  curl --connect-timeout 1 --max-time 2 -sk -o /dev/null -w '%{http_code}' "${scheme}://${probe_host}:${port}/healthz" 2>/dev/null || true
 }
 
 wait_for_port() {

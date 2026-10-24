@@ -4430,7 +4430,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['notify.testTitle'], 'YOmux[{host}] notifications enabled', 'test notification title uses compact host bracket format');
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['notify.testToastTitle'], 'notifications enabled', 'in-page test notification title omits redundant external app context');
     const attentionCss = fs.readFileSync('static/yomux.css', 'utf8');
-    assert.ok(/\.panel-toast-stack\s*\{[\s\S]*top:\s*8px[\s\S]*z-index:\s*var\(--z-full-screen-overlay\)/.test(attentionCss), 'pane-local toast stacks render below each pane tab strip and above pane contents');
+    assert.ok(/\.panel-toast-stack\s*\{[\s\S]*top:\s*8px[\s\S]*z-index:\s*var\(--z-toast\)/.test(attentionCss), 'pane-local toast stacks stay below menu layers');
   });
 
   test('document title reflects compact session activity', () => {
@@ -8990,7 +8990,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.ok(/\.preferences-setting-control\.setting-type-select,\s*\.preferences-setting-control\.setting-type-text\s*\{[^}]*justify-content:\s*start/.test(css), 'Preferences selects/text inputs are left-aligned from the shared inset');
       assert.ok(/\.preferences-setting-control\.setting-type-number input\[type="number"\]\s*\{[^}]*margin-inline-start:\s*var\(--preferences-control-left-indent\)/.test(css), 'Preferences number inputs are left-aligned from the shared inset');
       // #258 (toast): the toast stack clears the topbar (z-index above 180) and messages wrap, not clip.
-      assert.ok(/\.panel-toast-stack\s*\{[^}]*z-index:\s*var\(--z-full-screen-overlay\)/.test(css), '#258: the toast stack renders above the topbar (var(--z-full-screen-overlay)) so it is not clipped under it');
+      assert.ok(/\.panel-toast-stack\s*\{[^}]*z-index:\s*var\(--z-toast\)/.test(css), 'pane toast stacks stay below application menus');
       assert.ok(/\.toast-line\s*\{[^}]*white-space:\s*normal/.test(css), '#258: toast messages wrap (white-space:normal) instead of ellipsis-clipping');
       assert.equal(/\.toast-line\s*\{[^}]*white-space:\s*nowrap/.test(css), false, '#258: the old nowrap/ellipsis clipping of the toast message line is gone');
     }

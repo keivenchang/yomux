@@ -247,6 +247,88 @@ func TestListAndReadExposeFinderContracts(t *testing.T) {
 	}
 }
 
+func TestFilesystemRootPreservesDirectoryCapabilities(t *testing.T) {
+	service, privateRoot := newTestService(t, nil)
+	root := string(filepath.Separator)
+	alias := filepath.Join(privateRoot, "filesystem-root")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{root, root + ".", root + "tmp/..", alias} {
+		t.Run(path, func(t *testing.T) {
+			for name, list := range map[string]func(context.Context, string) (map[string]any, *Error){
+				"fast":   service.FastList,
+				"normal": service.List,
+				"without repository": func(ctx context.Context, path string) (map[string]any, *Error) {
+					return service.ListWithOptions(ctx, path, false)
+				},
+				"filename query": func(ctx context.Context, path string) (map[string]any, *Error) {
+					return service.FastListNameQuery(ctx, path, "tmp")
+				},
+			} {
+				t.Run(name, func(t *testing.T) {
+					payload, finderErr := list(context.Background(), path)
+					if finderErr != nil || payload["path"] != filepath.Clean(path) || len(payload["entries"].([]map[string]any)) == 0 {
+						t.Fatalf("root listing failed: payload=%v, error=%v", payload, finderErr)
+					}
+					ctx, cancel := context.WithCancel(context.Background())
+					cancel()
+					if _, finderErr := list(ctx, path); finderErr == nil || finderErr.Code != "cancelled" {
+						t.Fatalf("cancelled root listing error=%v", finderErr)
+					}
+				})
+			}
+			info, finderErr := service.Info(context.Background(), path)
+			if finderErr != nil || info["kind"] != "dir" || info["realpath"] != root {
+				t.Fatalf("root metadata=%v, error=%v", info, finderErr)
+			}
+			if _, finderErr := service.WatchSignature(context.Background(), path); finderErr != nil {
+				t.Fatalf("root watch signature error=%v", finderErr)
+			}
+			if _, finderErr := service.Read(context.Background(), path); finderErr == nil || finderErr.Status != http.StatusBadRequest || finderErr.Code != "invalid_request" {
+				t.Fatalf("root read must remain a typed directory rejection: %v", finderErr)
+			}
+		})
+	}
+	if _, finderErr := service.FastList(context.Background(), filepath.Join(privateRoot, "note.md")); finderErr == nil || finderErr.Status != http.StatusBadRequest {
+		t.Fatalf("listing a file lost its kind check: %v", finderErr)
+	}
+}
+
+func TestFilesystemRootDescriptorPreservesCancellationAndIdentity(t *testing.T) {
+	root := string(filepath.Separator)
+	identities, err := captureResolvedIdentities(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []bool{false, true} {
+		file, err := openResolvedDescriptorContext(context.Background(), root, directory, identities)
+		if err != nil {
+			t.Fatalf("root descriptor with directory=%v: %v", directory, err)
+		}
+		if err := verifyOpenedChain(file, root, identities); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		wrong := identities[root]
+		wrong.ino++
+		if err := verifyOpenedChain(file, root, map[string]descriptorIdentity{root: wrong}); !errors.Is(err, errChangedOnDisk) {
+			_ = file.Close()
+			t.Fatalf("root identity change was accepted: %v", err)
+		}
+		_ = file.Close()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		file, err = openResolvedDescriptorContext(ctx, root, directory, identities)
+		if file != nil || !errors.Is(err, context.Canceled) {
+			if file != nil {
+				_ = file.Close()
+			}
+			t.Fatalf("cancelled root descriptor escaped: %v", err)
+		}
+	}
+}
+
 func TestFastListDefersRepositoryMetadata(t *testing.T) {
 	service, root := newTestService(t, nil)
 	repo := filepath.Join(root, "repo")

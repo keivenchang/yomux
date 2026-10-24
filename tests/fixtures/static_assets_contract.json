@@ -2,8 +2,8 @@
   "baseline": {
     "builder_blob": "72e3977d543e8b70ded08d0a5fc8fd0a52d5cf0b",
     "builder_path": "tools/static_build.py",
-    "source_commit": "ba0566162e7f726a95690c60004fba937b7342d1",
-    "source_state": "working tree based on the Markdown Enter release candidate with event-post delivery recovery; independent Python/native byte comparison"
+    "source_commit": "efa27eaee47fc5b51425940a41239c46ade8ffbc",
+    "source_state": "Uncommitted reviewed candidate: streamed response cleanup, cancellation and body error propagation, consumed-byte telemetry, final summary rendering, ordered event delivery, native filesystem watch readback, and editor incarnation ownership; independent Python/native outputs compared byte for byte"
   },
   "reviewed_text_changes": {},
   "sha256": {
@@ -28,7 +28,7 @@
     "locales/vi.json": "ce0da9151e44281c939ac6ff7cfe23fb78db2f1ce4b838167b947db1df7d96df",
     "locales/zh-Hans.json": "9945b404dd156252dd1f50b9a79d6bcbc295c6cc05deae1bb84eb09cf04a9b45",
     "locales/zh-Hant.json": "140c11f22782a748faefcda13d7d80becf52a8ceda2a9dedfaa9a80753403d6a",
-    "yomux.css": "c6c19074d53039b6fc447231d50cdb93627678864baf3ca1d3b8fd0f5a37113f",
-    "yomux.js": "45acc9713323e69dcae770481851ae38c9c71832a3c5315b0768414a1e1a099c"
+    "yomux.css": "443cdfb2a12990e202e10adeb0f3de12b4456a29cd507e12984d5dac3fe4b2a2",
+    "yomux.js": "82114c11581b15052330300fe0f013f85e21b8ff8b1c4c8b8647f2a83d582dee"
   }
 }

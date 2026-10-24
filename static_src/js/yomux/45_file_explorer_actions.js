@@ -286,7 +286,7 @@ async function copyFilePath(path, label, options = {}) {
 async function copyImageFileToClipboard(path, options = {}) {
   if (!globalThis.ClipboardItem || !navigator?.clipboard?.write) {
     await copyFilePath(path, 'path');
-    statusEl.textContent = t('status.imageClipboardUnavailable');
+    showLayoutStatus(t('status.imageClipboardUnavailable'));
     return;
   }
   try {
@@ -354,7 +354,7 @@ async function showFileTransferResponseError(response, fallback = '', options = 
 async function triggerFileDownload(path) {
   if (!path) return;
   const label = basenameOf(path) || path;
-  statusEl.textContent = t('fileTransfer.downloading', {name: label});
+  showLayoutStatus(t('fileTransfer.downloading', {name: label}));
   try {
     const result = await fetchRawFileBlob(path, {params: {download: 1}});
     if (!result.ok) {
@@ -363,7 +363,7 @@ async function triggerFileDownload(path) {
     }
     const filename = downloadFilenameFromContentDisposition(result.contentDisposition, basenameOf(path) || 'download');
     saveBlobDownload(result.blob, filename);
-    statusEl.textContent = t('fileTransfer.downloadStarted', {name: filename});
+    showLayoutStatus(t('fileTransfer.downloadStarted', {name: filename}));
   } catch (error) {
     showFileTransferError(error, {fallback: t('fileTransfer.downloadFailed', {name: label})});
   }
@@ -393,7 +393,7 @@ async function openRawFileInNewTab(path) {
 async function triggerFolderZipDownload(path) {
   if (!path) return;
   const label = basenameOf(path) || path;
-  statusEl.textContent = t('fileTransfer.zipping', {name: label});
+  showLayoutStatus(t('fileTransfer.zipping', {name: label}));
   try {
     const response = await apiFetch(zipFileDownloadUrl(path), {cache: 'no-store', deadlineMs: apiFetchLongOperationDeadlineMs});
     if (!response.ok) {
@@ -404,7 +404,7 @@ async function triggerFolderZipDownload(path) {
     const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackName);
     const blob = await response.blob();
     saveBlobDownload(blob, filename);
-    statusEl.textContent = t('fileTransfer.downloadStarted', {name: filename});
+    showLayoutStatus(t('fileTransfer.downloadStarted', {name: filename}));
   } catch (error) {
     showFileTransferError(error, {fallback: t('fileTransfer.downloadFailed', {name: label})});
   }
@@ -434,7 +434,7 @@ async function createFileExplorerFile() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path, content: ''}),
     });
-    statusEl.textContent = t('status.created', {name: basenameOf(path)});
+    showLayoutStatus(t('status.created', {name: basenameOf(path)}));
     invalidateFileExplorerRoots([dirnameOf(path)]);
     await refreshFileExplorerTrees();
     await openFileInEditor(path, {name: basenameOf(path)});
@@ -457,7 +457,7 @@ async function createFileExplorerFolder() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path}),
     });
-    statusEl.textContent = t('status.created', {name: basenameOf(path)});
+    showLayoutStatus(t('status.created', {name: basenameOf(path)}));
     invalidateFileExplorerRoots([dirnameOf(path)]);
     await refreshFileExplorerTrees();
   } catch (error) {
@@ -681,7 +681,7 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     for (const path of deletePaths) fileExplorerSelectedPaths.delete(path);
     markFileExplorerDeletedPaths(deletePaths);
     if (deletePaths.includes(fileExplorerSelectionAnchor)) fileExplorerSelectionAnchor = null;
-    statusEl.textContent = tPlural('status.deleted', deletePaths.length, {name: basenameOf(deletePaths[0])});
+    showLayoutStatus(tPlural('status.deleted', deletePaths.length, {name: basenameOf(deletePaths[0])}));
     invalidateFileExplorerRoots(deletePaths.map(dirnameOf));
     removeFileTreePathsImmediately(deletePaths);
     const results = await Promise.allSettled(deleteRequests);
@@ -1049,7 +1049,7 @@ async function renameFileTreePath(fullPath, entry, newName) {
       if (path === fullPath) renameOpenFilePath(path, newPath);
       else if (path.startsWith(`${fullPath}/`)) renameOpenFilePath(path, `${newPath}${path.slice(fullPath.length)}`);
     }
-    statusEl.textContent = t('common.renamed', {oldName: currentName, newName: trimmed});
+    showLayoutStatus(t('common.renamed', {oldName: currentName, newName: trimmed}));
     invalidateFileExplorerRoots([dirnameOf(fullPath), dirnameOf(newPath)]);
     await refreshFileExplorerTrees();
     return true;
@@ -1396,12 +1396,19 @@ function fileEntryChanged(state, entry) {
   return Number(state.size) !== Number(entry.size);
 }
 
-function fileEditorSelfWriteAcknowledged(path, entry) {
+function fileEditorSelfWriteRecord(path, state = fileState.get(path)) {
   const ack = fileEditorSelfWriteAcks.get(path);
-  if (!ack || ack.expiresAt < Date.now()) {
+  if (!ack) return null;
+  if (ack.expiresAt < Date.now() || !fileStateIsCurrent(path, ack.state)) {
     fileEditorSelfWriteAcks.delete(path);
-    return false;
+    return null;
   }
+  return ack.state === state ? ack : null;
+}
+
+function fileEditorSelfWriteAcknowledged(path, entry, state = fileState.get(path)) {
+  const ack = fileEditorSelfWriteRecord(path, state);
+  if (!ack) return false;
   const mtime = fileEntryMtime(entry);
   const size = entry?.size;
   const finalMatch = !ack.pending && fileMtimesMatch(mtime, ack.mtime) && Number(size) === Number(ack.size);
@@ -1410,13 +1417,8 @@ function fileEditorSelfWriteAcknowledged(path, entry) {
   return true;
 }
 
-function fileEditorSelfWritePending(path) {
-  const ack = fileEditorSelfWriteAcks.get(path);
-  if (!ack || ack.expiresAt < Date.now()) {
-    fileEditorSelfWriteAcks.delete(path);
-    return false;
-  }
-  return true;
+function fileEditorSelfWritePending(path, state = fileState.get(path)) {
+  return Boolean(fileEditorSelfWriteRecord(path, state));
 }
 
 function filePanelItemsForPath(path) {
@@ -1792,7 +1794,7 @@ function openFileAutosaveReady(path, state = fileState.get(path)) {
     && fileEditorAutosaveEnabled
     && state?.kind === 'text'
     && state.dirty
-    && (!state.externalChanged || fileEditorSelfWritePending(path))
+    && (!state.externalChanged || fileEditorSelfWritePending(path, state))
     && !state.externalMissing
     && !state.externalError;
 }
@@ -1976,8 +1978,10 @@ function showFileEditorDecisionDialog(options = {}) {
 }
 
 async function showFileConflictCompareDialog(path, panel = null, options = {}) {
-  const state = fileState.get(path);
+  const state = options.state || fileState.get(path);
+  if (!fileStateIsCurrent(path, state)) return false;
   const loaded = await openFileStateFromDisk(path);
+  if (!fileStateIsCurrent(path, state)) return false;
   const diskState = loaded.state;
   const diskText = diskState?.kind === 'text' ? diskState.content : loaded.missing ? t('dialog.missingOnDisk') : fileErrorText(diskState?.error, 'dialog.unableLoadDisk');
   const action = await showFileEditorDecisionDialog({
@@ -1991,19 +1995,22 @@ async function showFileConflictCompareDialog(path, panel = null, options = {}) {
     className: 'file-editor-compare-dialog',
     onMount: bindFileConflictCompareScroll,
   });
+  if (!fileStateIsCurrent(path, state)) return false;
+  const reloaded = action === 'reload' ? await reloadOpenFileFromDisk(path, {force: true, returnState: true}) : null;
   const result = action === 'overwrite'
     ? options.deferSave === true ? true : await saveFileEditor(path, panel, {force: true})
     : action === 'reload'
-      ? await reloadOpenFileFromDisk(path, {force: true})
+      ? reloaded?.result === true
       : false;
-  return options.returnAction === true ? {action, result} : result;
+  return options.returnAction === true ? {action, result, state: reloaded?.state || state} : result;
 }
 
 async function showFileSaveConflictDialog(path, panel = null, options = {}) {
+  const state = fileState.get(path);
+  if (!state) return false;
   if (fileConflictDialogOpen(path)) return false;
   setFileConflictDialogOpen(path, true);
   try {
-    const state = fileState.get(path);
     if (state) {
       if (!state.externalChanged && !state.externalMissing) {
         state.externalChanged = {mtime: 0, size: null};
@@ -2022,18 +2029,21 @@ async function showFileSaveConflictDialog(path, panel = null, options = {}) {
       ],
       className: 'file-editor-conflict-dialog',
     });
+    if (!fileStateIsCurrent(path, state)) return false;
+    const reloaded = action === 'reload' ? await reloadOpenFileFromDisk(path, {force: true, returnState: true}) : null;
     const result = action === 'overwrite'
       ? options.deferSave === true ? true : await saveFileEditor(path, panel, {force: true})
       : action === 'reload'
-        ? await reloadOpenFileFromDisk(path, {force: true})
+        ? reloaded?.result === true
         : action === 'compare'
-          ? await showFileConflictCompareDialog(path, panel, {returnAction: true, deferSave: options.deferSave === true})
+          ? await showFileConflictCompareDialog(path, panel, {state, returnAction: true, deferSave: options.deferSave === true})
           : false;
     return options.returnAction === true
-      ? {action, nestedAction: action === 'compare' ? result?.action || '' : '', result: action === 'compare' ? result?.result : result}
+      ? {action, nestedAction: action === 'compare' ? result?.action || '' : '', result: action === 'compare' ? result?.result : result,
+        state: action === 'compare' ? result?.state || state : reloaded?.state || state}
       : result;
   } finally {
-    setFileConflictDialogOpen(path, false);
+    state.conflictDialogOpen = false;
   }
 }
 
@@ -2056,6 +2066,7 @@ async function promptExternalChangeBeforeEditing(path, panel = null) {
     ],
     className: 'file-editor-external-change-dialog',
   });
+  if (!fileStateIsCurrent(path, state)) return false;
   if (action === 'reload') {
     await reloadOpenFileFromDisk(path, {force: true});
     return true;
@@ -2067,11 +2078,19 @@ async function promptExternalChangeBeforeEditing(path, panel = null) {
 
 async function confirmDirtyFileClose(path, panel = null) {
   const state = fileState.get(path);
-  if (!state?.dirty) return true;
+  if (!state?.dirty) return state;
   syncOpenFileContentFromPanels(path, panel);
-  if (!state.dirty) return true;
+  if (!state.dirty) return state;
+  const savedCloseState = result => {
+    if (result?.saved !== true || !fileStateIsCurrent(path, result.state)) return null;
+    const owner = result.state.contentOwnerPanel;
+    syncOpenFileContentFromPanels(path, owner?.isConnected !== false && fileEditorPanelState(owner) === result.state ? owner : null);
+    return fileStateIsCurrent(path, result.state) && !result.state.dirty ? result.state : null;
+  };
   if (fileEditorAutosaveEnabled) {
-    if (await saveFileEditor(path, panel, {autosave: true, closing: true})) return true;
+    const result = await saveFileEditor(path, panel, {autosave: true, closing: true, returnState: true});
+    if (result?.saved === true) return savedCloseState(result);
+    if (!fileStateIsCurrent(path, state)) return null;
     // autosave-on-close failed (transient error / on-disk conflict). Don't silently abort
     // the close with only a status line — fall through to the explicit save/discard/cancel dialog so
     // the user can retry, discard, or cancel.
@@ -2086,9 +2105,10 @@ async function confirmDirtyFileClose(path, panel = null) {
     ],
     className: 'file-editor-close-dialog',
   });
-  if (action === 'save') return saveFileEditor(path, panel, {closing: true});
-  if (action === 'discard') return true;
-  return false;
+  if (!fileStateIsCurrent(path, state)) return null;
+  if (action === 'save') return savedCloseState(await saveFileEditor(path, panel, {closing: true, returnState: true}));
+  if (action === 'discard') return state;
+  return null;
 }
 
 function renderOpenFilePath(path) {
@@ -2818,7 +2838,7 @@ function markOpenFileExternalError(path, error) {
 // same file was fetched twice. Serialization is not deduplication, so the dedup is explicit here.
 const openFileReloadFlights = new Map();
 
-async function replaceOpenFileStateFromDisk(path, entry = null) {
+async function replaceOpenFileStateFromDisk(path, entry = null, options = {}) {
   const load = captureOpenFileLoad(path);
   const flight = openFileReloadFlights.get(path);
   if (flight && flight.load.state === load.state) {
@@ -2827,13 +2847,15 @@ async function replaceOpenFileStateFromDisk(path, entry = null) {
     // invocation's unchanged buffer can authorize a follow-up read; waiting never renews a fence.
     if (!openFileLoadStillCurrent(path, load)
         && !(joined && flight.completed && openFileLoadStillCurrent(path, flight.completed))) return false;
-    if (!entry || !fileEntryChanged(fileState.get(path), entry)) return joined;
+    if (!entry || !fileEntryChanged(fileState.get(path), entry)) return options.returnState === true ? {result: joined, state: flight.completed?.state} : joined;
   }
   const nextFlight = {load, promise: null, completed: null};
   nextFlight.promise = loadOpenFileStateFromDisk(path, entry, completed => { nextFlight.completed = completed; });
   openFileReloadFlights.set(path, nextFlight);
   try {
-    return await nextFlight.promise;
+    const result = await nextFlight.promise;
+    // Close decisions need the state this read actually applied, even if another editor opens before this await resumes.
+    return options.returnState === true ? {result, state: nextFlight.completed?.state} : result;
   } finally {
     if (openFileReloadFlights.get(path) === nextFlight) openFileReloadFlights.delete(path);
   }
@@ -2932,7 +2954,7 @@ async function reloadOpenFileFromDisk(path, options = {}) {
     const confirmed = window.confirm(t('dialog.externalMessage', {name: basenameOf(path)}));
     if (!confirmed) return false;
   }
-  return replaceOpenFileStateFromDisk(path);
+  return replaceOpenFileStateFromDisk(path, null, options);
 }
 
 async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
@@ -2954,7 +2976,7 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
     }
     return;
   }
-  if (fileEditorSelfWriteAcknowledged(path, entry)) return;
+  if (fileEditorSelfWriteAcknowledged(path, entry, state)) return;
   if (!fileEntryChanged(state, entry)) {
     if (state.externalChanged || state.externalMissing || state.externalError) {
       clearOpenFileMissingState(state);
@@ -3597,7 +3619,7 @@ function codeMirrorLanguageExtension(api, path) {
   if (language === 'css') return safeCodeMirrorExtension(language, () => api.css?.());
   if (language === 'markdown') {
     const codeLanguages = codeMirrorMarkdownCodeLanguages(api);
-    return safeCodeMirrorExtension(language, () => (codeLanguages?.length ? api.markdown?.({codeLanguages}) : api.markdown?.()));
+    return safeCodeMirrorExtension(language, () => (api.markdown?.({codeLanguages: codeLanguages || [], extensions: [api.markdownStrikethrough, api.markdownTable].filter(Boolean)})));
   }
   if (language === 'yaml') return safeCodeMirrorExtension(language, () => api.yaml?.());
   if (language === 'shell' && api.shell) return safeCodeMirrorExtension(language, () => api.StreamLanguage?.define(api.shell));
@@ -4458,12 +4480,17 @@ async function removeOpenFile(path, options = {}) {
   if (!path) return;
   const requestedItem = options.item && fileItemPath(options.item) === path ? options.item : null;
   if (!requestedItem && !fileState.has(path)) return;
-  const state = requestedItem ? fileEditorStateForItem(path, requestedItem) : fileStateFor(path);
+  let state = requestedItem ? fileEditorStateForItem(path, requestedItem) : fileStateFor(path);
   const closeReturnToItem = requestedItem ? historicalFileReturnItem(requestedItem) : '';
   const closePanel = requestedItem ? panelNodes.get(requestedItem) : fileEditorPanelsForPath(path)[0];
   if (closePanel?._pmView) flushProseMirrorSource(closePanel, path);
   if (closePanel?._cmView) flushCodeMirrorSource(closePanel, path);
-  if (confirmDirty && state?.historical !== true && state?.dirty && !(await confirmDirtyFileClose(path, closePanel))) return false;
+  if (confirmDirty && state?.historical !== true && state?.dirty) {
+    const confirmed = await confirmDirtyFileClose(path, closePanel);
+    if (!confirmed) return false;
+    state = confirmed;
+  }
+  if ((requestedItem ? fileEditorStateForItem(path, requestedItem) : fileStateFor(path)) !== state) return false;
   const items = requestedItem ? [requestedItem] : filePanelItemsForPath(path);
   if (!items.length) return false;
   if (items.some(item => !isHistoricalFileEditorItem(item))) clearFileAutosaveTimer(path);
@@ -4552,6 +4579,11 @@ function renameOpenFilePath(oldPath, newPath) {
   const oldItem = fileEditorItemFor(oldPath);
   const newItem = fileEditorItemFor(newPath);
   const state = fileStateFor(oldPath);
+  const selfWrite = fileEditorSelfWriteAcks.get(oldPath);
+  if (selfWrite?.state === state) {
+    fileEditorSelfWriteAcks.delete(oldPath);
+    fileEditorSelfWriteAcks.set(newPath, selfWrite);
+  }
   const wasInLayout = itemInLayout(oldItem);
   const panelItems = [oldItem].filter(item => panelNodes.has(item));
   deleteFileState(oldPath);

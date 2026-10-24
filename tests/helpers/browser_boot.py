@@ -30,7 +30,7 @@ BROWSER_BOOT_ROUTES = tuple(
         ("/api/session-files", ("GET",)),
         ("/api/stats-capabilities", ("GET",)), ("/api/stats-observations", ("POST",)),
         ("/api/stats-snapshot", ("GET",)), ("/api/ping", ("GET",)),
-        ("/api/event", ("POST",)), ("/api/events", ("GET",)),
+        ("/api/event", ("POST",)), ("/api/events", ("GET", "POST")),
         ("/api/logs", ("GET",)), ("/api/tmux-window", ("POST",)),
         ("/api/fs/list", ("GET",)), ("/api/fs/batch", ("POST",)),
     )

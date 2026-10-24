@@ -2928,8 +2928,8 @@ async function flushJsDebugCurrentObservations(scope = currentObservationLifecyc
 }
 
 // The bytes finalizer for a still-open API observation. The live event already carries the
-// measured, bounded byte count (Content-Length or a response clone; rejected, hung, or
-// unconsumed bodies simply leave it absent), so this locates the reserved queue entry by live
+// measured, bounded byte count (Content-Length, a finite response clone, or consumed stream chunks;
+// unconsumed bodies leave it absent), so this locates the reserved queue entry by live
 // identity and finalizes it exactly once. A late measurement for an already-finalized (or
 // immediate-failure) observation finds no open entry and cannot rewrite its immutable content.
 function finalizeJsDebugCurrentObservationBytes(liveEvent) {

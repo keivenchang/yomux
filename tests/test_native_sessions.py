@@ -128,6 +128,9 @@ def test_cache_identity_partitions_bundles_and_grouping_policy(monkeypatch, syst
     hashes["bazel_native_entrypoint.py"] = "changed-test-policy"
     assert contract.native_identity(bundle, []) != initial
     hashes.clear()
+    hashes["fixture_storage.py"] = "changed-fixture-storage-policy"
+    assert contract.native_identity(bundle, []) != initial
+    hashes.clear()
     scope = contract.native_execution_scope(system)
     monkeypatch.setattr(contract, "native_execution_scope", lambda _system: dict(scope, sandbox_scope="obsolete"))
     assert contract.native_identity(bundle, []) != initial
@@ -198,7 +201,7 @@ def execute_mock_lane(monkeypatch, request, *, failure=None):
         return SimpleNamespace(returncode=int(failure == "graph" and "--nobuild" in command))
 
     monkeypatch.setattr(subprocess, "run", run)
-    owner = SimpleNamespace(validate_native_probe=lambda *args: None, execution_event=lambda **event: events.append(event))
+    owner = SimpleNamespace(test_result_cache_mode=contract.test_result_cache_mode, validate_native_probe=lambda *args: None, execution_event=lambda **event: events.append(event))
     return commands, events, lambda: bazel_native.execute_lane(request, {}, owner)
 
 
@@ -212,8 +215,10 @@ def test_lightweight_graph_refuses_heavy_inputs_and_compiled_server(unwanted):
 
 
 @pytest.mark.parametrize("admitted", [False, True])
-def test_lane_reuses_output_and_server_after_fresh_admission(monkeypatch, lane_request, admitted):
+@pytest.mark.parametrize("reuse", [False, True])
+def test_lane_reuses_output_and_server_after_fresh_admission(monkeypatch, lane_request, admitted, reuse):
     lane_request["admitted"] = admitted
+    lane_request["reuse"] = reuse
     commands, events, execute = execute_mock_lane(monkeypatch, lane_request)
     assert execute() == 0
     assert ("//:go_module_closure_test" in commands[0]) is not admitted
@@ -221,7 +226,7 @@ def test_lane_reuses_output_and_server_after_fresh_admission(monkeypatch, lane_r
     assert len({value for command in commands for value in command if value.startswith("--output_user_root=")}) == 1
     tests = [command for command in commands if any(step["target"] in command for step in lane_request["steps"]) and "test" in command]
     assert len(tests) == 2
-    assert all("--cache_test_results=yes" in command and "--test_timeout=1800" in command for command in tests)
+    assert all("--cache_test_results=" + ("auto" if reuse else "no") in command and "--test_timeout=1800" in command for command in tests)
     assert [event["coverage_scope"] for event in events if "coverage_scope" in event] == [step["target"] for step in lane_request["steps"]]
     assert commands[-1][-1] == "shutdown"
     with (Path(lane_request["cache"]) / "slot-0.lock").open("a") as lease:
@@ -234,7 +239,7 @@ def test_admission_failure_blocks_result_bearing_tests_and_releases_lease(monkey
     with pytest.raises(ValueError, match="admission failed|graph could not be admitted"):
         execute()
     assert not events
-    assert not any("test" in command and "--cache_test_results=yes" in command for command in commands)
+    assert not any("test" in command and "--cache_test_results=auto" in command for command in commands)
     assert commands[-1][-1] == "shutdown"
     with (Path(lane_request["cache"]) / "slot-0.lock").open("a") as lease:
         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -259,7 +264,7 @@ def test_failed_shutdown_retires_descendants_before_releasing_output_lease(monke
         return True
 
     monkeypatch.setattr(subprocess, "run", fail_shutdown)
-    owner = SimpleNamespace(validate_native_probe=lambda *args: None, execution_event=lambda **event: None)
+    owner = SimpleNamespace(test_result_cache_mode=contract.test_result_cache_mode, validate_native_probe=lambda *args: None, execution_event=lambda **event: None)
     scope = SimpleNamespace(run=fail_shutdown, retire=retire) if linux else None
     with pytest.raises(subprocess.TimeoutExpired):
         bazel_native.execute_lane(lane_request, {}, owner, process_scope=scope, retire=None if linux else retire)
@@ -277,7 +282,7 @@ def test_failed_retirement_quarantines_output_slot(monkeypatch, lane_request, ra
             raise ValueError("retirement failed")
         return False
 
-    owner = SimpleNamespace(validate_native_probe=lambda *args: None, execution_event=lambda **event: None)
+    owner = SimpleNamespace(test_result_cache_mode=contract.test_result_cache_mode, validate_native_probe=lambda *args: None, execution_event=lambda **event: None)
     with pytest.raises(ValueError, match="retirement failed|survived cleanup"):
         bazel_native.execute_lane(lane_request, {}, owner, retire=retire)
     assert (Path(lane_request["cache"]) / "slot-0.quarantine").is_file()
@@ -517,7 +522,7 @@ def test_darwin_actions_use_processwrapper_and_single_entrypoint(monkeypatch, tm
 def test_darwin_failed_retirement_preserves_invocation_state(monkeypatch, lane_request, reuse):
     _commands, _events, _execute = execute_mock_lane(monkeypatch, lane_request)
     lane_request.update(system="Darwin", reuse=reuse)
-    owner = SimpleNamespace(validate_native_probe=lambda *args: None,
+    owner = SimpleNamespace(test_result_cache_mode=contract.test_result_cache_mode, validate_native_probe=lambda *args: None,
                             execution_event=lambda **event: None)
     with bazel_native.darwin_invocation_directory() as temporary:
         lane_request["root"] = temporary
@@ -538,3 +543,11 @@ def test_darwin_successful_invocation_removes_temporary_state():
     with bazel_native.darwin_invocation_directory() as temporary:
         assert Path(temporary).is_dir()
     assert not Path(temporary).exists()
+
+
+@pytest.mark.parametrize('reuse, expected', [('yes', 'auto'), ('no', 'no')])
+def test_passing_result_cache_policy_is_shared_by_shell_and_native(monkeypatch, capsys, reuse, expected):
+    monkeypatch.setattr(sys, 'argv', ['contract', '--test-result-cache', reuse])
+    assert contract.main() == 0
+    assert capsys.readouterr().out.strip() == expected
+    assert contract.test_result_cache_mode(reuse == 'yes') == expected

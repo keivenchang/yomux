@@ -2669,7 +2669,11 @@ def read_key(timeout: float | None = None) -> str | None:
         if not _has_more():
             return char + second
         third = _read_byte()
-        return char + second + third
+        sequence = char + second + third
+        while second == "[" and not "@" <= third <= "~" and len(sequence) < 32 and _has_more():
+            third = _read_byte()
+            sequence += third
+        return sequence
     return char + second
 
 
@@ -2850,6 +2854,8 @@ def composer_render_parts(text: str, cursor: int, armed_exit: bool = False, stat
         prompt_display = prefix + visible
     elif PERMISSION_STYLE != "codex" and state and state.get("claude_working") == "1":
         prompt_display = prefix
+    elif PERMISSION_STYLE == "codex" and state and "codex_capacity" in state:
+        prompt_display = prefix + ANSI_DIM + "Ask Codex to do anything"[:text_width] + ANSI_RESET
     else:
         prompt_display = prefix + ANSI_DIM + live_composer_suggestion()[:text_width] + ANSI_RESET
     cursor_col = min(width, len(prefix) + (cursor - start) + 1)
@@ -3170,9 +3176,13 @@ def read_live_composer(state: dict[str, str] | None = None) -> str:
     history_index = history_count + 1
     draft = ""
     needs_render = True
+    capacity_submission_armed = False
+    bracketed_paste = False
     old_settings = termios.tcgetattr(sys.stdin.fileno())
     try:
         tty.setraw(sys.stdin.fileno())
+        sys.stdout.write("\x1b[?2004h")
+        sys.stdout.flush()
         while True:
             armed_exit = bool(state and state.get("last_ctrl_c_at"))
             if text and not inline_composer and clear_codex_startup_on_first_input(state):
@@ -3199,6 +3209,14 @@ def read_live_composer(state: dict[str, str] | None = None) -> str:
                 continue
             if state is not None and key != "\x03":
                 clear_ctrl_c_exit_window(state)
+            if key in {"\x1b[200~", "\x1b[201~"}:
+                bracketed_paste = key == "\x1b[200~"
+                continue
+            if bracketed_paste or (PERMISSION_STYLE == "codex" and key == "\n"):
+                text = text[:cursor] + key + text[cursor:]
+                cursor += len(key)
+                needs_render = True
+                continue
             if key == "\x1b[Z" and state is not None and not inline_composer:
                 cycle_claude_mode(state)
                 needs_render = True
@@ -3208,6 +3226,11 @@ def read_live_composer(state: dict[str, str] | None = None) -> str:
                 needs_render = True
                 continue
             if key in {"\r", "\n"}:
+                # Simulate a terminal that retained the worker's first submission.
+                # Leave the same composer intact so the retry must send Enter only.
+                if PERMISSION_STYLE == "codex" and state and state.get("codex_capacity") == "pending" and text.strip().lower() == "continue" and not capacity_submission_armed:
+                    capacity_submission_armed = True
+                    continue
                 if inline_composer:
                     finish_inline_composer(text, state)
                     if state is not None and text.strip():
@@ -3218,6 +3241,7 @@ def read_live_composer(state: dict[str, str] | None = None) -> str:
                 if text.strip():
                     readline.add_history(text)
                 return text
+            capacity_submission_armed = False
             if key == "\x03":
                 if inline_composer:
                     clear_inline_composer()
@@ -3297,6 +3321,8 @@ def read_live_composer(state: dict[str, str] | None = None) -> str:
                 cursor += len(key)
                 needs_render = True
     finally:
+        sys.stdout.write("\x1b[?2004l")
+        sys.stdout.flush()
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
 
 
@@ -3665,6 +3691,17 @@ def mock_fixture_list_cases(
     return visible_cases
 
 
+def print_mock_capacity_commands(indent: str) -> None:
+    if PERMISSION_STYLE != "codex":
+        return
+    for command, description in (
+        ("mock capacity", "Keep failing every submitted continue"),
+        ("mock capacity N", "Fail N retries, then work (example: mock capacity 2)"),
+        ("mock capacity pending", "Require two Enters per continue; keep failing"),
+    ):
+        print(f"{indent}{command:<23} {description}")
+
+
 def print_mock_fixture_list(
     include_shared: bool = False,
     include_idle: bool = False,
@@ -3677,6 +3714,10 @@ def print_mock_fixture_list(
         line = f"  ⎿  {case['case_name']} [{outcome}] {Path(case['path']).name} {mock_fixture_cursor_label(cursor)}"
         print(line)
     print()
+    if PERMISSION_STYLE == "codex" and not only_idle:
+        print(f"{transcript_bullet()} Scripted capacity scenarios")
+        print_mock_capacity_commands("  ")
+        print()
 
 
 def print_mock_fixture_dump() -> None:
@@ -4346,6 +4387,7 @@ def cmd_help() -> None:
     print('     mock list         List this agent\'s non-idle fixture cases (also: mock, mocklist)')
     print('     mock list all     Include shared generic and idle detector fixtures')
     print('     mock list idle    Show idle negative detector fixtures')
+    print_mock_capacity_commands("     ")
     print('     ask, question     AskUserQuestion demo (arrow-key choice)')
     print('     todos             Ctrl-T style task-list overlay')
     print()
@@ -4411,6 +4453,26 @@ def cmd_codex_sleep(raw_seconds: str) -> str:
     return queued_text
 
 
+def cmd_codex_capacity(state: dict[str, str], scenario: str = "") -> None:
+    state["codex_capacity"] = scenario or "persistent"
+    print("■ Selected model is at capacity. Please try a different model.")
+    print()
+
+
+def retry_codex_capacity(state: dict[str, str]) -> None:
+    scenario = state["codex_capacity"]
+    if scenario.isdecimal():
+        remaining = int(scenario)
+        if remaining == 0:
+            state.pop("codex_capacity")
+            queued_text = cmd_codex_sleep("1")
+            if queued_text:
+                state["composer_prefill"] = queued_text
+            return
+        scenario = str(remaining - 1)
+    cmd_codex_capacity(state, scenario)
+
+
 def cmd_todos() -> None:
     print_thinking(seconds=2)
     todos = [
@@ -4445,6 +4507,7 @@ def print_capabilities() -> None:
     print("    mock list          ← list this agent's non-idle fixture cases")
     print("    mock list all      ← include shared generic and idle detector fixtures")
     print("    mock list idle     ← show idle negative detector fixtures")
+    print_mock_capacity_commands("    ")
     print("    ask                ← AskUserQuestion demo with arrow-key nav")
     print("    todos              ← Ctrl-T style task-list overlay")
     print()
@@ -4463,6 +4526,7 @@ def print_mock_commands() -> None:
     print("  /status · /clear · /help · /quit · /exit")
     print()
     print("  mock urls          ← show the URL wrapping test list")
+    print_mock_capacity_commands("  ")
 
     if PERMISSION_STYLE != "opencode":
         return
@@ -4527,6 +4591,15 @@ def handle_command(user_input: str, state: dict[str, str]) -> None:
     if lower == "/status":
         cmd_status(state)
         return
+
+    if PERMISSION_STYLE == "codex":
+        capacity = re.fullmatch(r"mock capacity(?:\s+(pending|\d+))?", lower)
+        if capacity:
+            cmd_codex_capacity(state, capacity.group(1) or "")
+            return
+        if lower == "continue" and "codex_capacity" in state:
+            retry_codex_capacity(state)
+            return
 
     if lower in {"mock urls", "urls", "mock url"}:
         cmd_opencode_urls(state)

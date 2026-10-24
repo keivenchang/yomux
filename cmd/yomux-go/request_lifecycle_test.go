@@ -12,7 +12,8 @@ import (
 )
 
 func TestShutdownRetainsDependenciesUntilRequestReturns(t *testing.T) {
-	owner := newGoBackgroundOwner(t.TempDir(), "/fixture", 0)
+	// Request ordering must not depend on durable owner-record I/O.
+	owner := &goBackgroundOwner{owner: true}
 	s := &server{background: owner}
 	request := httptest.NewRequest(http.MethodGet, "/fixture", nil)
 	finish, ok := s.beginRequest(request)
@@ -40,6 +41,12 @@ func TestShutdownRetainsDependenciesUntilRequestReturns(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("shutdown did not drain")
+	}
+	owner.mu.Lock()
+	alive = owner.owner
+	owner.mu.Unlock()
+	if alive {
+		t.Fatal("dependency remained open after request drain")
 	}
 }
 

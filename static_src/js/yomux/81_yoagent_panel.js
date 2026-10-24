@@ -1401,7 +1401,7 @@ async function clearYoagentConversation() {
     applyYoagentConversationPayload(payload.conversation || {});
     showYoagentStartupInfoForLatestActivity();
     renderYoagentPanel({preserveDraft: false, scrollBottom: true});
-    statusEl.textContent = t('yoagent.statusCleared');
+    showLayoutStatus(t('yoagent.statusCleared'));
     await refreshActivitySummary({force: true, silent: true});
     showYoagentStartupInfoForLatestActivity();
     renderYoagentPanel({preserveDraft: false, scrollBottom: true});
@@ -1511,7 +1511,7 @@ async function startYoagentChatRequest(rawText, options = {}) {
         createdAt: payload.answered_at || new Date().toISOString(),
       });
     }
-    statusEl.textContent = t('yoagent.statusAnswered', {backend: yoagentBackendLabel(payload.backend_used || payload.backend)});
+    showLayoutStatus(t('yoagent.statusAnswered', {backend: yoagentBackendLabel(payload.backend_used || payload.backend)}));
   } catch (error) {
     if (yoagentChatState.activeRequest?.id !== requestId || yoagentChatAbortError(error)) return;
     if (yoagentChatNetworkError(error)) yoagentChatState.draft = text;
@@ -1567,7 +1567,7 @@ async function executeYoagentActionSend(previewId) {
       ? t('yoagent.action.sentWithAnswer', {session: payload.session, transport: payload.transport, answer: payload.answer})
       : t('yoagent.action.sent', {session: payload.session, transport: payload.transport});
     if (!payload.conversation) yoagentConversationState.messages.push({role: 'assistant', content: answer, createdAt: new Date().toISOString()});
-    statusEl.textContent = t('yoagent.statusActionSent', {session: payload.session});
+    showLayoutStatus(t('yoagent.statusActionSent', {session: payload.session}));
   } catch (error) {
     updateYoagentActionPreview(previewId, yoagentActionErrorStatusPatch(error));
     yoagentChatState.error = yoagentChatErrorState(error);

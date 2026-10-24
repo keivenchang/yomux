@@ -110,7 +110,8 @@ func TestAgentWindowMetadataRefreshBrowser(t *testing.T) {
 		defer unsubscribe()
 		releaseOnce.Do(func() { close(release) })
 		select {
-		case <-events:
+		case <-events.ready:
+			_, _ = events.dequeue()
 		case <-r.Context().Done():
 			return
 		}

@@ -31,10 +31,12 @@ from tools.instance_isolation import INHERITED_CREDENTIAL_ENV_KEYS, PRODUCT_ROOT
 from tools import bazel_native
 from tools.native_process_scope import native_execution_scope, TEST_OUTPUT_FILE_ENV_KEYS
 from tools.tmux_paths import NATIVE_ACTION_TMPDIR
+from tools.fixture_storage import linux_fixture_storage_flags, linux_sandbox_mount_arguments
 # Based on moby/moby v28.0.0 profiles/seccomp/default.json. Added namespace
 # operations need capabilities inside a newly created user namespace; the outer
 # non-root container drops every capability. clone3 retains the ENOSYS fallback.
 SANDBOX_FLAGS = (
+    *linux_fixture_storage_flags("/tmp"),
     "--spawn_strategy=linux-sandbox",
     "--strategy=TestRunner=linux-sandbox",
     "--experimental_use_hermetic_linux_sandbox",
@@ -362,11 +364,7 @@ def native_flags(bundle, credentials):
         flags.extend("--sandbox_block_path=" + str(path) for path in credentials if path.exists())
         flags.extend(("--action_env=TMPDIR=/tmp", "--host_action_env=TMPDIR=/tmp", "--experimental_use_hermetic_linux_sandbox", "--sandbox_enable_loopback_device",
                       "--sandbox_explicit_pseudoterminal", "--sandbox_fake_hostname",
-                      "--sandbox_tmpfs_path=/tmp", "--sandbox_add_mount_pair=/tmp:/tmp",
-                      "--sandbox_tmpfs_path=" + NATIVE_ACTION_TMPDIR,
-                      "--sandbox_add_mount_pair=" + NATIVE_ACTION_TMPDIR + ":" + NATIVE_ACTION_TMPDIR))
-        # Bazel 9.2 mounts tmpfs before pivot_root. Bind that fresh action-local
-        # mount into the hermetic root as well, or its /tmp stays disk-backed.
+                      *linux_fixture_storage_flags("/tmp", NATIVE_ACTION_TMPDIR)))
         filesystem = bundle.root / "rootfs"
         for path in ("usr", "bin", "lib", "lib64", "etc", "opt"):
             source = filesystem / path
@@ -398,7 +396,7 @@ def native_identity(bundle, flags, source_root=None):
     source_root = source_root or ROOT
     source_inputs = ["tools/bazel_execution_contract.py", "tools/bazel_native.py",
                      "tools/native_linux_envelope.py", "tools/native_darwin_launcher.py",
-                     "tools/bazel_native_probe.py", "tools/bazel_native_entrypoint.py",
+                     "tools/bazel_native_probe.py", "tools/bazel_native_entrypoint.py", "tools/fixture_storage.py",
                      "tools/native_process_scope.py", "tests/browser_helpers/webdriver_lease.py",
                      "yomux_lib/infra/host_identity.py", "yomux_lib/infra/filesystem_preflight.py", "yomux_lib/infra/transient_paths.py",
                      "tools/instance_isolation.py", "tools/tmux_paths.py", "tools/product_environment.py", APPARMOR_TEMPLATE,
@@ -465,6 +463,7 @@ def identity(image_id, root=ROOT, apparmor_digest=None):
     runner_files = (
         "docker/run-tests.sh",
         "tools/bazel_execution_contract.py",
+        "tools/fixture_storage.py",
         "tools/bazel_output_slot_entrypoint.sh",
         "tools/bazel_test_entrypoint.sh",
         "tools/bazel_test_common.sh",
@@ -565,8 +564,11 @@ def admit_runtime():
             raise ValueError("host credentials were forwarded: " + name)
     # Exercise the actual Bazel helper before any cache lookup, including the
     # same private PTY setup as every test. No test-result cache can admit a host.
-    with tempfile.TemporaryDirectory(prefix="yomux-bazel-admission-") as directory:
+    # Staging must be outside /tmp: its fresh mount covers earlier contents.
+    with tempfile.TemporaryDirectory(prefix="yomux-bazel-admission-", dir="/var/cache/yomux-bazel") as directory:
         root = Path(directory)
+        outer_marker = root / "outer-state-marker"
+        outer_marker.write_bytes(b"outer fixture state")
         output = root / "output"
         subprocess.run(["bazel", "--batch", "--bazelrc=/dev/null",
                         "--output_user_root=" + str(output), "help"],
@@ -577,20 +579,24 @@ def admit_runtime():
         work.mkdir(parents=True)
         shutil.copyfile(ROOT / "tools/bazel_test_entrypoint.sh", work / "entrypoint.sh")
         command = [str(helper), "-h", str(sandbox), "-W", str(work), "-N", "-H", "-P"]
-        for flag in SANDBOX_FLAGS:
-            if flag.startswith("--sandbox_add_mount_pair="):
-                command.extend(("-M", flag.partition("=")[2]))
-        command.extend(("--", "/bin/bash", "./entrypoint.sh", "python3", "-c", RUNTIME_PROBE))
+        (work / "tools").mkdir()
+        shutil.copyfile(ROOT / "tools/fixture_storage.py", work / "tools/fixture_storage.py")
+        command.extend(linux_sandbox_mount_arguments(SANDBOX_FLAGS))
+        command.extend(("--", "/bin/bash", "./entrypoint.sh", "python3", "-c", RUNTIME_PROBE, str(outer_marker)))
         try:
-            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+            result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+            print(result.stdout.decode(), end="", flush=True)
         except subprocess.CalledProcessError as error:
             raise ValueError("linux-sandbox runtime probe exited " + str(error.returncode) + ": " + redact_local_service_text(error.stderr.decode(errors="replace"))) from error
 
 
 RUNTIME_PROBE = f"""
-import os, pathlib, socket
+import os, pathlib, socket, sys
+from tools.fixture_storage import require_tmpfs
+print(require_tmpfs(("/tmp",)), flush=True)
 assert os.getuid() != 0, 'sandbox changed the runner UID'
-for path in ('/w', '/home/runner', '/var/cache/yomux-bazel',
+assert not pathlib.Path(sys.argv[1]).exists(), 'outer fixture state is visible'
+for path in ('/w', '/home/runner',
              *tuple(f"/var/cache/yomux-bazel-output-slot-{{index}}" for index in range({OUTPUT_USER_ROOT_SLOTS}))):
     assert not pathlib.Path(path).exists(), 'undeclared input visible: ' + path
 status = pathlib.Path('/proc/self/status').read_text()
@@ -619,6 +625,11 @@ for root in ('/usr', '/bin', '/lib', '/lib64', '/etc', '/opt'):
         raise AssertionError('image tools are writable: ' + root)
 """
 
+
+
+def test_result_cache_mode(reuse):
+    # Bazel yes also caches failures; auto reuses passing results and reruns failed ones.
+    return "auto" if reuse else "no"
 
 
 def command_arguments(arguments):
@@ -685,6 +696,7 @@ def main():
     parser.add_argument("--admit-runtime", action="store_true")
     parser.add_argument("--validate-options", action="store_true")
     parser.add_argument("--output-slots", action="store_true")
+    parser.add_argument("--test-result-cache", choices=("yes", "no"))
     parser.add_argument("--verify-native-bundle", nargs=3, metavar=("PAYLOAD", "MANIFEST", "SHA256"),
                         help="verify a prepared native bundle offline; does not admit a sandbox or execute tests")
     parser.add_argument("--qualified-native", action="store_true")
@@ -695,6 +707,8 @@ def main():
     args = parser.parse_args()
     args.options = command_arguments(args.options)
     try:
+        if args.test_result_cache is not None:
+            print(test_result_cache_mode(args.test_result_cache == "yes"))
         if args.qualified_native:
             return bazel_native.run_native(args.options, sys.modules[__name__])
         if args.verify_native_bundle:

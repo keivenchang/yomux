@@ -748,6 +748,9 @@ func main() {
 		releaseInstanceRootLease(rootLease)
 		fatal("Go config/journal storage is already owned or unavailable: " + err.Error())
 	}
+	if err := initializeStarterAuthConfig(filepath.Join(*configDir, "auth.yaml")); err != nil {
+		fatal("auth config setup failed: " + err.Error())
+	}
 	// Hold this descriptor until process exit, including fatal startup and shutdown.
 	// shutdown() precedes HTTP drainage and deferred collector/health writes;
 	// releasing here would let a replacement process race those final mutations.
@@ -1021,7 +1024,7 @@ func main() {
 			s.shutdown()
 			fatal("TLS setup failed: " + err.Error())
 		}
-		listener = tls.NewListener(listener, config)
+		httpServer.TLSConfig = config
 	}
 	shutdownSignal := make(chan os.Signal, 1)
 	signal.Notify(shutdownSignal, syscall.SIGINT, syscall.SIGTERM)
@@ -1095,6 +1098,9 @@ func main() {
 		},
 	})
 	s.statsService = statsService
+	if !s.startBackgroundWork(func() { statsService.RunAgentStatusRefresh(shutdownContext) }) {
+		fatal("agent status projection owner is stopping")
+	}
 	var statsRefreshGate statsProjectionRefreshGate
 	statsLifecycle := stats.NewLifecycle(statsWriter, stats.LifecycleConfig{Cadence: time.Second,
 		// Prepare a fixed startup horizon eagerly, then resume the ordinary
@@ -1183,8 +1189,7 @@ func main() {
 		statusCollector := stats.NewAgentStatusCollector(agentInventory, s.agentStatusClassifier, statsWriter, nil, stats.AgentStatusCollectorConfig{
 			// Agent activity is a persisted product, not a browser-only cache.
 			// Keep polling at the native cadence even without an SSE subscriber:
-			// direct status reads are freshness consumers and go stale after 10s.
-			ActiveCadence: 10 * time.Second, IdleCadence: time.Minute,
+			// direct status reads are freshness consumers even without browsers.
 			EpochID: fmt.Sprintf("agent-status-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
 			OwnerGeneration: uint64(os.Getpid()), SourceID: "host",
 			SnapshotRevision: func() uint64 { return uint64(time.Now().UnixNano()) },
@@ -1193,6 +1198,7 @@ func main() {
 				return acknowledged, err
 			},
 			AttentionCommitted: s.attentionSettlementsCommitted,
+			Committed:          statsService.InvalidateAgentStatus,
 		})
 		if _, statErr := os.Stat(s.statsPath); statErr == nil {
 			lifecycles, restoreErr := stats.ReadRecentAgentStatusLifecycles(shutdownContext, s.statsPath, time.Now())
@@ -1278,7 +1284,15 @@ func main() {
 	s.recoverSelfUpdateJob()
 	_, _ = s.events.publish("update_available", map[string]any{"available": false, "version": version, "bundle_revision": "go:" + version, "instance_id": s.instanceID})
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- httpServer.Serve(listener) }()
+	go func() {
+		if *httpMode {
+			serveErr <- httpServer.Serve(listener)
+		} else {
+			// ServeTLS configures ALPN before wrapping the listener; wrapping it first
+			// leaves browser SSE requests competing for the HTTP/1.1 connection limit.
+			serveErr <- httpServer.ServeTLS(listener, "", "")
+		}
+	}()
 	select {
 	case <-shutdownContext.Done():
 		select {
@@ -3046,7 +3060,8 @@ func (s *server) clientEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-sseWriter.done:
 			return
-		case event, ok := <-stream:
+		case <-stream.ready:
+			event, ok := stream.dequeue()
 			if !ok {
 				return
 			}
@@ -3133,13 +3148,14 @@ func normalizeClientID(value string) string {
 	return result.String()
 }
 
-func (b *eventBroker) decorateEvent(ch chan clientEvent, event clientEvent) clientEvent {
+func (b *eventBroker) decorateEvent(ch *eventSubscription, event clientEvent) clientEvent {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if latest, exists := b.pending[ch][event.Resource]; exists {
-		event = latest
+	// A newer state can be queued behind an ordered effect while this event is
+	// already in flight. Preserve its original payload and revision ordering.
+	if pending, exists := b.pending[ch][event.Resource]; exists && pending.ID == event.ID {
+		delete(b.pending[ch], event.Resource)
 	}
-	delete(b.pending[ch], event.Resource)
 	if len(b.repair[ch]) > 0 {
 		event.RepairResources = mapKeys(b.repair[ch])
 		sort.Strings(event.RepairResources)
@@ -4320,9 +4336,11 @@ func (s *server) eventsPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		records = append(records, record)
-		if session, _ := record["session"].(string); session != "" && !seenSessions[session] {
+		if session, _ := record["session"].(string); !seenSessions[session] {
 			seenSessions[session] = true
-			sessions = append(sessions, session)
+			if session != "" {
+				sessions = append(sessions, session)
+			}
 		}
 	}
 	if len(records) > 0 {
@@ -4330,7 +4348,11 @@ func (s *server) eventsPost(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "event persistence failed", "retryable": true})
 			return
 		}
-		refreshRequired := !s.publishEventLogChanged(map[string]any{"sessions": sessions})
+		payload := map[string]any{"sessions": sessions}
+		if seenSessions[""] {
+			payload = map[string]any{}
+		}
+		refreshRequired := !s.publishEventLogChanged(payload)
 		jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "events": records, "rejected_rows": rejectedRows, "event_log_refresh_required": refreshRequired})
 		return
 	}
@@ -5091,6 +5113,11 @@ func (s *server) unsupported(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) killSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	name := r.URL.Query().Get("session")
 	if name == "" {
 		name = r.FormValue("session")
@@ -5582,20 +5609,19 @@ func (s *server) startTerminalControls(conn *wsConn, session, tty string, resize
 }
 
 func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.admitBrowserRequest(w, r, true) {
+		return
+	}
 	user, status := s.identityStatus(r)
 	if status != 0 {
 		if rejectCredentialAdmission(w, status) {
 			return
 		}
 		http.Error(w, "authentication required", http.StatusUnauthorized)
-		return
-	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if r.Header.Get("Origin") != "" && r.Header.Get("Origin") != "http://"+r.Host && r.Header.Get("Origin") != "https://"+r.Host {
-		http.Error(w, "origin denied", http.StatusForbidden)
 		return
 	}
 	session := r.URL.Query().Get("session")

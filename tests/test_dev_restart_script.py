@@ -7,6 +7,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import tempfile
 import time
 from pathlib import Path
@@ -89,6 +90,41 @@ verify_port_stable 48123
     )
     assert result.returncode == 0, result.stderr
     assert probes.read_text().splitlines() == [expected_url] * 5
+
+
+def test_boot_health_probe_bounds_stalled_http_peer():
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    release_peer = threading.Event()
+
+    def hold_connection():
+        connection, _ = listener.accept()
+        with connection:
+            release_peer.wait(timeout=5)
+
+    peer = threading.Thread(target=hold_connection, daemon=True)
+    peer.start()
+    functions = boot_function_source("probe_healthz")
+    script = f"set -eu\nhttp_mode=1\nhost=127.0.0.1\n{functions}\nprobe_healthz {port}\n"
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            [fixture_executable("bash"), "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    finally:
+        release_peer.set()
+        listener.close()
+        peer.join(timeout=1)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "000"
+    assert time.monotonic() - started < 2.75
 
 
 def test_boot_print_command_preserves_explicit_certificate_pair(tmp_path):

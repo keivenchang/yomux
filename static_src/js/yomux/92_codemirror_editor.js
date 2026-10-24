@@ -1077,7 +1077,9 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         state: cmState,
         parent: container,
         dispatch(transaction) {
+          mapMarkdownTypingPair(panel, transaction);
           panel._cmView.update([transaction]);
+          refreshMarkdownFormattingToolbar(panel);
           if (transaction.docChanged || transaction.selectionSet) {
             updateCodeMirrorCursorStatus(panel);
             captureCodeMirrorPanelViewState(panel, path);
@@ -1144,7 +1146,9 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
         state: createdState.state,
         parent: container,
         dispatch(transaction) {
+          mapMarkdownTypingPair(panel, transaction);
           panel._cmView.update([transaction]);
+          refreshMarkdownFormattingToolbar(panel);
           if (transaction.docChanged || transaction.selectionSet) {
             updateCodeMirrorCursorStatus(panel);
             captureCodeMirrorPanelViewState(panel, path);
@@ -1176,6 +1180,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
     restoreFileEditorPanelViewState(item, panel, {restoreFresh: created});
     focusFileEditorPanelIfReady(panel, item);
     applyPendingFileEditorLineTarget(item, panel);
+    ensureMarkdownFormattingToolbar(panel);
     // if blame is on but this path isn't cached yet (file opened after the toggle), fetch it
     // and nudge the editor so the annotation appears without a manual toggle. Deduped; no-op otherwise.
     ensureEditorBlameForPath(path);
@@ -1623,6 +1628,7 @@ function updateFileEditorPanelChrome(panel, path) {
     uploadButton.hidden = readOnlyMode || state?.kind !== 'text' || previewRendererForPath(path)?.id !== 'markdown' || !['edit', 'split'].includes(viewMode);
   }
   updateFileEditorToolbarSeparators(panel);
+  ensureMarkdownFormattingToolbar(panel);
 }
 
 function fileEditorToolbarControlVisible(panel, selector) {
@@ -2449,6 +2455,7 @@ function fileEditorSaveRequest(path, panel, options, resolve = null) {
   return {
     path,
     panel,
+    state: fileEditorStateForItem(options.statePath || path, fileEditorPanelItem(panel) || options.item || fileEditorItemFor(path)),
     options: {
       ...options,
       autosave: options.autosave === true,
@@ -2469,31 +2476,36 @@ function mergeFileEditorSaveRequest(request, panel, options, resolve) {
 }
 
 function resolveFileEditorSaveRequest(request, result) {
-  for (const resolve of request?.resolvers || []) resolve(result);
+  for (const resolve of request?.resolvers || []) resolve(result, request.completedState || request.state);
 }
 
 function queueFileEditorSave(path, owner, panel, options) {
   return new Promise(resolve => {
+    const complete = options.returnState === true ? (saved, state) => resolve({saved, state}) : resolve;
+    const request = fileEditorSaveRequest(path, panel, options, complete);
     if (owner.active || owner.conflict) {
-      if (owner.pending) mergeFileEditorSaveRequest(owner.pending, panel, options, resolve);
-      else owner.pending = fileEditorSaveRequest(path, panel, options, resolve);
+      if (owner.pending?.state === request.state) mergeFileEditorSaveRequest(owner.pending, panel, options, complete);
+      else {
+        resolveFileEditorSaveRequest(owner.pending, false);
+        owner.pending = request;
+      }
       return;
     }
-    owner.active = fileEditorSaveRequest(path, panel, options, resolve);
+    owner.active = request;
     runFileEditorSaveOwner(path, owner);
   });
 }
 
-async function performFileEditorSave(path, panel, options = {}) {
+async function performFileEditorSave(path, panel, options = {}, expectedState = null) {
   if (readOnlyMode) return false;
   const statePath = options.statePath || path;
   const item = fileEditorPanelItem(panel) || options.item || fileEditorItemFor(path);
   const state = fileEditorStateForItem(statePath, item);
-  if (!state || state.kind !== 'text' || state.historical === true) return false;
+  if (!state || state.kind !== 'text' || state.historical === true || (expectedState && state !== expectedState)) return false;
   const contentPanel = panel || state.contentOwnerPanel || null;
   flushProseMirrorSource(contentPanel, statePath, {preserveTerminalNewline: true});
   syncOpenFileContentFromPanels(statePath, contentPanel);
-  if (!options.force && ((state.externalChanged && !fileEditorSelfWritePending(path)) || state.externalMissing)) {
+  if (!options.force && ((state.externalChanged && !fileEditorSelfWritePending(statePath, state)) || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
     clearFileAutosaveTimer(path);
     return {conflict: true, message: ''};
@@ -2502,6 +2514,12 @@ async function performFileEditorSave(path, panel, options = {}) {
   if (!state.dirty && options.force !== true) return true;
   const savedContent = state.content;
   setFileEditorPanelStatus(contentPanel, t(options.autosave ? 'editor.autoSaving' : 'editor.saving'), '');
+  let selfWrite = null;
+  const clearSelfWrite = () => {
+    for (const ackPath of [path, statePath, options.statePath || statePath]) {
+      if (selfWrite && fileEditorSelfWriteAcks.get(ackPath) === selfWrite) fileEditorSelfWriteAcks.delete(ackPath);
+    }
+  };
   try {
     const body = {
       path,
@@ -2511,22 +2529,30 @@ async function performFileEditorSave(path, panel, options = {}) {
     // write_file truncates in place before writing the replacement bytes. Register the expected
     // self-write before admission so watchd's zero-byte observation cannot be mistaken for an
     // external edit while the filesystem operation is still queued/in flight.
-    fileEditorSelfWriteAcks.set(path, {
+    selfWrite = {
+      state,
       mtime: state.mtime,
       size: savedContent.length,
       pending: true,
       expiresAt: Date.now() + 10000,
-    });
+    };
+    fileEditorSelfWriteAcks.set(path, selfWrite);
     const payload = await apiFetchJson('/api/fs/write', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
     const currentStatePath = options.statePath || statePath;
+    if (!fileStateIsCurrent(currentStatePath, state)) {
+      clearSelfWrite();
+      return true;
+    }
     applyFileIdentityMetadata(state, payload);
     state.mtime = filePayloadMtime(payload);
     state.size = payload.size;
-    fileEditorSelfWriteAcks.set(path, {
+    clearSelfWrite();
+    fileEditorSelfWriteAcks.set(currentStatePath, {
+      state,
       mtime: state.mtime,
       size: state.size,
       expiresAt: Date.now() + 5000,
@@ -2541,7 +2567,7 @@ async function performFileEditorSave(path, panel, options = {}) {
       yoloRulesPayload = payload.yolo_rules;
       renderPreferencesPanels();
     }
-    for (const openPanel of fileEditorPanelsForPath(path)) {
+    for (const openPanel of fileEditorPanelsForPath(currentStatePath)) {
       updateFileEditorPanelChrome(openPanel, currentStatePath);
       const status = state.dirty
         ? openFileStatus(state)
@@ -2552,7 +2578,8 @@ async function performFileEditorSave(path, panel, options = {}) {
     renderPaneTabStrips();
     return true;
   } catch (err) {
-    fileEditorSelfWriteAcks.delete(path);
+    clearSelfWrite();
+    if (!fileStateIsCurrent(options.statePath || statePath, state)) return false;
     if (err?.status === 409) {
       setFileEditorPanelStatus(panel, t('dialog.conflictTitle'), 'warn');
       return {conflict: true, message: userMessageText(err, err.message)};
@@ -2566,17 +2593,31 @@ async function runFileEditorSaveOwner(path, owner) {
   while (owner.active) {
     const request = owner.active;
     const requestPath = request.path || owner.path || path;
-    const result = await performFileEditorSave(requestPath, request.panel, request.options);
+    const result = await performFileEditorSave(requestPath, request.panel, request.options, request.state);
     if (result?.conflict === true) {
       owner.active = null;
       owner.conflict = true;
       const conflictPath = owner.path || requestPath;
+      if (!fileStateIsCurrent(conflictPath, request.state)) {
+        owner.conflict = false;
+        resolveFileEditorSaveRequest(request, false);
+        owner.active = owner.pending;
+        owner.pending = null;
+        continue;
+      }
       const conflict = await showFileSaveConflictDialog(conflictPath, request.panel, {
         message: result.message,
         returnAction: true,
         deferSave: true,
       });
       owner.conflict = false;
+      if (!fileStateIsCurrent(owner.path || requestPath, conflict?.state || request.state)) {
+        resolveFileEditorSaveRequest(request, false);
+        owner.active = owner.pending;
+        owner.pending = null;
+        continue;
+      }
+      if (conflict?.result === true && (conflict.action === 'reload' || conflict.nestedAction === 'reload')) request.completedState = conflict.state;
       const pending = owner.pending;
       owner.pending = null;
       const overwriteSelected = (
@@ -2608,7 +2649,7 @@ async function runFileEditorSaveOwner(path, owner) {
     owner.pending = null;
     const currentPath = owner.path || requestPath;
     const state = fileState.get(currentPath);
-    if (!owner.active && result === true && openFileAutosaveReady(currentPath, state)) {
+    if (!owner.active && result === true && fileStateIsCurrent(currentPath, request.state) && openFileAutosaveReady(currentPath, state)) {
       clearFileAutosaveTimer(currentPath);
       const contentOwner = state.contentOwnerPanel;
       const trailingPanel = contentOwner?.isConnected !== false && fileEditorPanelState(contentOwner) === state

@@ -54,6 +54,7 @@ for tool_root in /usr /bin /lib /lib64 /etc /opt; do
     fail "image tools are writable: $tool_root"
   fi
 done
+python3 "$(dirname "$1")/fixture_storage.py" /tmp
 python3 - <<'PY_CAPABILITIES'
 from pathlib import Path
 status = dict(line.split(':', 1) for line in Path('/proc/self/status').read_text().splitlines())

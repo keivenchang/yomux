@@ -14,13 +14,13 @@
   <h1>{{t "setup.setUp"}} {{brand "brand-title setup-brand setup-brand-waiting" "span"}}</h1>
   {{.SecurityHTML}}
   <p>{{t "common.edit"}} <code>{{.AuthPath}}</code></p>
+  {{if .StarterAuthConfig}}<pre># Uncomment the admin account already in auth.yaml.
+# Its generated password is already in the file.
+# Save the file to enable login.</pre>{{else}}<p>Add an admin account to this existing configuration, or replace its placeholder credentials. Use a unique password.</p>
   <pre>users:
   - username: "{{.Login}}"
-    password: "your-admin-password"
-    role: "admin"
-  - username: "guest"
-    password: "guest"
-    role: "readonly"</pre>
+    password: "replace-with-your-unique-password"
+    role: "admin"</pre>{{end}}
   {{.AgentNoticeHTML}}
   <p id="setupStatus" class="setup-status">{{t "setup.waiting"}}<span class="setup-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span></p>
 </main>

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -288,7 +289,7 @@ func CapacityNoticeCurrent(visible string) bool {
 	}
 	for index := composer - 1; index >= 0; index-- {
 		line := strings.TrimSpace(lines[index])
-		if line == "" || capacityComposerFooterLine(line) || capacityRuleLine(line) {
+		if agentComposerChromeLine(line, true) {
 			continue
 		}
 		return capacityNoticeLine(line)
@@ -309,9 +310,52 @@ func capacityComposerLine(line string) bool {
 	return strings.HasPrefix(line, "›") || strings.HasPrefix(line, "❯") || strings.HasPrefix(line, ">")
 }
 
-func capacityComposerFooterLine(line string) bool {
+var agentBackgroundTerminalChrome = regexp.MustCompile(`^\d+\s+background terminals? running\s+·\s+/ps to view\s+·\s+/stop to close$`)
+var agentComposerShortcutChrome = regexp.MustCompile(`^\? for shortcuts(?:\s+⚠\x{FE0F}?\s+\d+\s+warnings?\s+·\s+f2 to view)?$`)
+var agentComposerModelChrome = regexp.MustCompile(`(?i)^(?:gpt-[^ ]+\b.*|claude\s+code\b.*)$`)
+var agentComposerOtherFooterChrome = regexp.MustCompile(`(?i)^(?:bypass permissions\b.*|tip:.*)$`)
+
+func agentComposerChromeLine(line string, beforeComposer bool) bool {
+	line = strings.TrimSpace(line)
+	if line == "" || capacityRuleLine(line) {
+		return true
+	}
 	lower := strings.ToLower(line)
-	return strings.HasPrefix(lower, "gpt-") || strings.HasPrefix(lower, "claude code") || strings.HasPrefix(lower, "bypass permissions") || strings.HasPrefix(lower, "tip:")
+	if agentComposerModelChrome.MatchString(line) || agentComposerOtherFooterChrome.MatchString(line) {
+		return true
+	}
+	if beforeComposer {
+		return agentBackgroundTerminalChrome.MatchString(lower)
+	}
+	return agentComposerShortcutChrome.MatchString(lower)
+}
+
+// AgentComposerFooter recognizes the ordered chrome below a composer. A help-looking
+// continuation before the model footer is still a draft, not permission to submit it.
+func AgentComposerFooter(lines []string) bool {
+	modelFooter, shortcuts := false, false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || capacityRuleLine(line) {
+			continue
+		}
+		if shortcuts || !agentComposerChromeLine(line, false) {
+			return false
+		}
+		if agentComposerShortcutChrome.MatchString(strings.ToLower(line)) {
+			if !modelFooter {
+				return false
+			}
+			shortcuts = true
+		}
+		if agentComposerModelChrome.MatchString(line) {
+			if modelFooter {
+				return false
+			}
+			modelFooter = true
+		}
+	}
+	return true
 }
 
 func capacityRuleLine(line string) bool {
@@ -821,12 +865,13 @@ type AgentStatusCollectorConfig struct {
 	ActiveFunc            func() bool
 	AttentionAcknowledged func(string) (bool, error)
 	AttentionCommitted    func([]string) error
+	Committed             func()
 }
 
 func (c AgentStatusCollectorConfig) withDefaults() AgentStatusCollectorConfig {
 	// The family contract is fixed: active scans are every 10 seconds and idle
 	// scans every 60 seconds. Do not let a caller publish another cadence.
-	c.ActiveCadence = 10 * time.Second
+	c.ActiveCadence = AgentStatusActiveCadence
 	c.IdleCadence = time.Minute
 	if c.EpochID == "" {
 		c.EpochID = "agent-status"
@@ -969,20 +1014,32 @@ func (c *AgentStatusCollector) Start(parent context.Context) error {
 func (c *AgentStatusCollector) loop(ctx context.Context) {
 	runWithStatsProfileLabels(ctx, "agent_status_collector", "", func(ctx context.Context) {
 		defer func() { c.mu.Lock(); c.run = false; close(c.done); c.mu.Unlock() }()
-		first := true
 		for {
-			if !first {
-				if !waitCollectorCadence(ctx, c.clock, c.config.ActiveCadence, c.config.IdleCadence, c.config.ActiveFunc) {
-					return
-				}
-			}
-			first = false
 			if ctx.Err() != nil {
 				return
 			}
+			started := c.clock.Now()
 			c.runOnce(ctx)
+			if !c.waitForNextCycle(ctx, started) {
+				return
+			}
 		}
 	})
+}
+
+func (c *AgentStatusCollector) waitForNextCycle(ctx context.Context, started time.Time) bool {
+	// Anchor the next scan to this scan's start. Overruns begin one successor
+	// immediately, without overlapping scans or replaying missed deadlines.
+	elapsed := max(0, c.clock.Now().Sub(started))
+	active, idle := c.config.ActiveCadence-elapsed, c.config.IdleCadence-elapsed
+	if c.config.ActiveFunc == nil || c.config.ActiveFunc() {
+		if active <= 0 {
+			return ctx.Err() == nil
+		}
+	} else if idle <= 0 {
+		return ctx.Err() == nil
+	}
+	return waitCollectorCadence(ctx, c.clock, max(time.Nanosecond, active), idle, c.config.ActiveFunc)
 }
 
 func (c *AgentStatusCollector) Stop() {
@@ -1000,6 +1057,8 @@ func (c *AgentStatusCollector) Stop() {
 func (c *AgentStatusCollector) RunOnce(ctx context.Context) { c.runOnce(ctx) }
 
 func (c *AgentStatusCollector) runOnce(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, AgentStatusCollectionBudget)
+	defer cancel()
 	started := c.clock.Now()
 	c.counters.cycles.Add(1)
 	cadence := c.config.ActiveCadence
@@ -1025,7 +1084,7 @@ func (c *AgentStatusCollector) runOnce(parent context.Context) {
 	// was never persisted.
 	statusCache, lastSignature, lastRevision, revisionSet := c.statusStateSnapshot()
 	var batch AppendBatch
-	runWithStatsProfilePhase(parent, "agent_status_collector", "agent_status", "collection", func(phaseCtx context.Context) {
+	runWithStatsProfilePhase(ctx, "agent_status_collector", "agent_status", "collection", func(phaseCtx context.Context) {
 		batch = c.collect(phaseCtx, fact)
 	})
 	nextEpochID, nextEpochStart, nextHadSuccess := epochID, epochStart, hadSuccess
@@ -1047,7 +1106,7 @@ func (c *AgentStatusCollector) runOnce(parent context.Context) {
 	} else {
 		var result AppendResult
 		var appendErr error
-		runWithStatsProfilePhase(parent, "agent_status_collector", "agent_status", "append", func(phaseCtx context.Context) {
+		runWithStatsProfilePhase(ctx, "agent_status_collector", "agent_status", "append", func(phaseCtx context.Context) {
 			result, appendErr = c.writer.AppendBatch(phaseCtx, batch)
 		})
 		if appendErr != nil {
@@ -1062,6 +1121,12 @@ func (c *AgentStatusCollector) runOnce(parent context.Context) {
 		c.restoreStatusState(statusCache, lastSignature, lastRevision, revisionSet)
 	}
 	if appendSucceeded {
+		c.stateMu.Lock()
+		c.epochID, c.epochStart, c.hadSuccess, c.lastCadence = nextEpochID, nextEpochStart, nextHadSuccess, nextCadence
+		c.stateMu.Unlock()
+		if c.config.Committed != nil {
+			c.config.Committed()
+		}
 		if len(batch.Observations) > 0 && c.config.AttentionCommitted != nil {
 			pending := []string{}
 			c.stateMu.Lock()
@@ -1078,9 +1143,6 @@ func (c *AgentStatusCollector) runOnce(parent context.Context) {
 				c.counters.errors.Add(1)
 			}
 		}
-		c.stateMu.Lock()
-		c.epochID, c.epochStart, c.hadSuccess, c.lastCadence = nextEpochID, nextEpochStart, nextHadSuccess, nextCadence
-		c.stateMu.Unlock()
 	} else {
 		c.restoreStatusState(statusCache, lastSignature, lastRevision, revisionSet)
 	}

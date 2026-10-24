@@ -93,7 +93,7 @@ func TestQueryAgentStatusTreatsStaleObservationAsUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	result, err := database.QueryAgentStatus(context.Background(), AgentStatusQuery{Now: time.Unix(111, 0)})
+	result, err := database.QueryAgentStatus(context.Background(), AgentStatusQuery{Now: time.Unix(121, 0)})
 	if err != nil || result.Available || result.Unavailable == nil || result.Unavailable.Reason != "agent-status-stale" {
 		t.Fatalf("stale result = %+v, err = %v", result, err)
 	}
@@ -127,6 +127,10 @@ func TestQueryAgentStatusUsesIdleCoverageCadenceForFreshness(t *testing.T) {
 	result, err = database.QueryAgentStatus(context.Background(), AgentStatusQuery{Now: time.Unix(160, 0)})
 	if err != nil || !result.Available || result.Unavailable != nil {
 		t.Fatalf("idle-cadence boundary result = %+v, err = %v; the cadence boundary remains fresh", result, err)
+	}
+	result, err = database.QueryAgentStatus(context.Background(), AgentStatusQuery{Now: time.Unix(170, 1)})
+	if err != nil || result.Available || result.Unavailable == nil || result.Unavailable.Reason != "agent-status-stale" {
+		t.Fatalf("idle successor scan exceeded its budget: %+v, err=%v", result, err)
 	}
 }
 

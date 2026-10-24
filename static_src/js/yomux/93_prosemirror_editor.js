@@ -193,7 +193,9 @@ function prosemirrorMarkdownSchema(api) {
   });
   return new api.Schema({
     nodes,
-    marks,
+    // Code must serialize inside every style mark, including custom safe-HTML marks. Otherwise
+    // their tags become literal code text after a partial clear and the next parse changes content.
+    marks: marks.remove('code').addToEnd('code', marks.get('code')),
   });
 }
 
@@ -238,7 +240,7 @@ function prosemirrorMarkdownParser(api, schema) {
         }
         if (token.type === 'inline' && listItemDepth > 0) {
           const firstText = token.children?.find(child => child.type === 'text');
-          const taskMarker = String(firstText?.content || token.content || '').match(/^\[[ xX]\]\s+/);
+          const taskMarker = String(firstText?.content || token.content || '').match(/^\[[ xX]\](?:\s+|$)/);
           if (taskMarker) {
             const listItemToken = listItemTokens[listItemTokens.length - 1];
             listItemToken.meta = {
@@ -274,9 +276,9 @@ function prosemirrorMarkdownParser(api, schema) {
           continue;
         }
         if (token.type === 'html_inline') {
-          const open = html.match(/^<(u|mark|kbd|sup)(?:\s[^>]*)?>$/i)?.[1]?.toLowerCase();
-          const close = html.match(/^<\/(u|mark|kbd|sup)\s*>$/i)?.[1]?.toLowerCase();
-          const markName = {u: 'underline', mark: 'highlight', kbd: 'kbd', sup: 'superscript'};
+          const open = html.match(/^<(u|strong|em|s|mark|kbd|sup)(?:\s[^>]*)?>$/i)?.[1]?.toLowerCase();
+          const close = html.match(/^<\/(u|strong|em|s|mark|kbd|sup)\s*>$/i)?.[1]?.toLowerCase();
+          const markName = {u: 'underline', strong: 'strong', em: 'em', s: 's', mark: 'highlight', kbd: 'kbd', sup: 'superscript'};
           if (open) token.type = `${markName[open]}_open`;
           else if (close) token.type = `${markName[close]}_close`;
           else if (/^<br\s*\/?>$/i.test(html)) token.type = 'html_break';
@@ -440,7 +442,7 @@ function prosemirrorImageWidth(value) {
   return /^[1-9]\d*$/.test(width) ? width : null;
 }
 
-const PROSEMIRROR_SAFE_HTML_TAGS = new Set(['u', 'mark', 'kbd', 'sup', 'br', 'img', 'details', 'summary']);
+const PROSEMIRROR_SAFE_HTML_TAGS = new Set(['u', 'strong', 'em', 's', 'mark', 'kbd', 'sup', 'br', 'img', 'details', 'summary']);
 const PROSEMIRROR_KNOWN_HTML_TAGS = new Set([
   'a', 'abbr', 'address', 'article', 'aside', 'audio', 'b', 'bdi', 'bdo', 'blockquote', 'body', 'button',
   'caption', 'cite', 'code', 'col', 'colgroup', 'data', 'datalist', 'dd', 'del', 'div', 'dl', 'dt', 'em',
@@ -492,10 +494,10 @@ function prosemirrorMarkdownSerializer(api) {
       }
       state.closeBlock(node);
     },
-    soft_break(state) { state.write('\n'); },
+    soft_break(state) { state.write(state.inTableCell ? '<br>' : '\n'); },
     // Keep an explicit end-of-line break valid Markdown. HTML is disabled in the parser, so
     // serializing `<br>` would round-trip as literal text in the next ViewEditor refresh.
-    hard_break(state) { state.write('\\\n'); },
+    hard_break(state) { state.write(state.inTableCell ? '<br>' : '\\\n'); },
     list_item(state, node) {
       if (node.attrs.taskChecked !== null) state.write(`[${node.attrs.taskChecked ? 'x' : ' '}] `);
       state.renderContent(node);
@@ -515,11 +517,12 @@ function prosemirrorMarkdownSerializer(api) {
     },
     table(state, node) {
       const inline = cell => {
-        const saved = {out: state.out, delim: state.delim, closed: state.closed, atBlockStart: state.atBlockStart, inTightList: state.inTightList};
+        const saved = {out: state.out, delim: state.delim, closed: state.closed, atBlockStart: state.atBlockStart, inTightList: state.inTightList, inTableCell: state.inTableCell};
         state.out = '';
         state.delim = '';
         state.closed = null;
         state.atBlockStart = true;
+        state.inTableCell = true;
         state.renderInline(cell);
         const result = state.out.trim();
         Object.assign(state, saved);
@@ -545,7 +548,8 @@ function prosemirrorMarkdownSerializer(api) {
     },
   }, {
     ...api.defaultMarkdownSerializer.marks,
-    strike: {open: '~~', close: '~~', mixable: true},
+    ...Object.fromEntries(markdownFormatCommands.filter(entry => ['strong', 'em'].includes(entry.mark)).map(entry => [entry.mark, prosemirrorCodeStyleMark(entry, api.defaultMarkdownSerializer.marks[entry.mark])])),
+    strike: prosemirrorCodeStyleMark(markdownFormatCommands.find(entry => entry.id === 'strike'), {open: '~~', close: '~~', mixable: true}),
     underline: {open: '<u>', close: '</u>', mixable: true},
     highlight: {open: '<mark>', close: '</mark>', mixable: true},
     kbd: {open: '<kbd>', close: '</kbd>', mixable: true},
@@ -684,17 +688,17 @@ function prosemirrorTaskListItemNodeView(node, view, getPos) {
   const contentDOM = document.createElement('div');
   const taskLine = Number(node.attrs.taskLine || 0);
   let input = null;
-  if (taskLine > 0) {
+  if (node.attrs.taskChecked !== null) {
     input = document.createElement('input');
     input.className = `${MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS} markdown-task-checkbox`;
     input.type = 'checkbox';
     input.checked = node.attrs.taskChecked === true;
-    input.disabled = readOnlyMode;
+    input.disabled = !view.editable;
     input.dataset.sourceLine = String(taskLine);
     input.setAttribute('aria-label', t('editor.toggleTaskLine', {line: taskLine}));
     input.addEventListener('change', () => {
       const position = getPos();
-      if (!Number.isFinite(position)) return;
+      if (!view.editable || !Number.isFinite(position)) return;
       const current = view.state.doc.nodeAt(position);
       if (current?.type.name !== 'list_item') return;
       view.dispatch(view.state.tr.setNodeMarkup(position, undefined, {
@@ -1039,10 +1043,16 @@ function flushProseMirrorSource(panel, path, options = {}) {
   return commitProseMirrorSource(panel, path, options);
 }
 
+function prosemirrorTableCell(node, schema) {
+  return node.type === schema.nodes.table_cell || node.type === schema.nodes.table_header;
+}
+
 function insertProseMirrorHardBreak(api, schema) {
-  return (state, dispatch) => {
+  return (state, dispatch, view) => {
     const {$from, $to} = state.selection;
-    if (!$from.sameParent($to) || !$from.parent.isTextblock) return false;
+    if (!$from.sameParent($to)) return prosemirrorTableCell($from.parent, schema) || prosemirrorTableCell($to.parent, schema);
+    if (!$from.parent.isTextblock) return false;
+    if ($from.parent.type.spec.code) return api.baseKeymap.Enter(state, dispatch, view);
     const type = schema.nodes.hard_break;
     if (!type) return false;
     if (dispatch) {
@@ -1063,14 +1073,26 @@ function insertProseMirrorSoftBreak(api, schema) {
 }
 
 function insertProseMirrorEnter(api, schema) {
-  return (state, dispatch) => {
-    if (dispatch) {
-      // A single Markdown source newline renders as a space, so Enter must create a paragraph
-      // boundary to move the caret onto a visibly separate line.
-      const transaction = state.tr.deleteSelection();
-      dispatch(transaction.split(transaction.selection.from).scrollIntoView());
+  return (state, dispatch, view) => {
+    const {$from, $to} = state.selection;
+    // Splitting an inline-content table cell adds a column; GFM drops surplus cells on reopen.
+    if (prosemirrorTableCell($from.parent, schema) || prosemirrorTableCell($to.parent, schema)) {
+      if ($from.sameParent($to)) insertProseMirrorHardBreak(api, schema)(state, dispatch, view);
+      return true;
     }
-    return true;
+    const itemDepth = markdownListItemDepth($from);
+    const checklist = itemDepth && $from.node(itemDepth).attrs.taskChecked !== null;
+    const splitDispatch = dispatch && (transaction => {
+      const position = transaction.selection.$from;
+      const depth = markdownListItemDepth(position);
+      if (depth) {
+        const item = position.node(depth);
+        transaction.setNodeMarkup(position.before(depth), null, {...item.attrs, taskLine: 0, taskChecked: checklist ? false : item.attrs.taskChecked});
+      }
+      dispatch(transaction);
+    });
+    if (!$from.parent.type.spec.code && api.splitListItem(schema.nodes.list_item)(state, splitDispatch, view)) return true;
+    return api.baseKeymap.Enter(state, dispatch, view);
   };
 }
 
@@ -1137,31 +1159,111 @@ function prosemirrorSelectionAtClientPoint(view, event) {
   return prosemirrorSelectionContext(view);
 }
 
-function prosemirrorSelectionHasMark(view, mark) {
-  if (!mark || view.state.selection.empty) return false;
-  let sawText = false;
-  let covered = true;
-  view.state.doc.nodesBetween(view.state.selection.from, view.state.selection.to, node => {
-    if (!node.isText || !node.nodeSize) return;
-    sawText = true;
-    if (!mark.isInSet(node.marks)) covered = false;
-  });
-  return sawText && covered;
+function applyProseMirrorFormat(api, view, schema, command) {
+  const panel = view.dom.closest('.file-editor-panel');
+  if (!markdownFormattingWritable(panel, 'view-editor')) return false;
+  const entry = markdownFormatCommands.find(item => item.id === command);
+  if (!entry) return false;
+  const {selection} = view.state;
+  if (entry.mark) return api.toggleMark(schema.marks[entry.mark], null, {removeWhenPresent: false})(view.state, view.dispatch, view);
+  if (command === 'clearInline') {
+    const transaction = view.state.tr;
+    setProseMirrorTextBlock(api, transaction, schema, schema.nodes.paragraph);
+    // Selection and block changes reset stored marks, so clear typing styles after both.
+    for (const mark of Object.values(schema.marks)) {
+      if (mark.name === 'link') continue;
+      if (transaction.selection.empty) transaction.removeStoredMark(mark);
+      else transaction.removeMark(transaction.selection.from, transaction.selection.to, mark);
+    }
+    view.dispatch(transaction);
+    return true;
+  }
+  if (entry.group === 'listIndent') return applyProseMirrorListIndent(api, view, schema, command);
+  if (entry.group === 'list') return applyProseMirrorListFormat(api, view, schema, command);
+  if (command === 'pre') return applyProseMirrorPreformatted(view, schema, prosemirrorMarkdownSerializer(api));
+  const type = command === 'normal' ? schema.nodes.paragraph : schema.nodes.heading;
+  const transaction = view.state.tr;
+  setProseMirrorTextBlock(api, transaction, schema, type, /^h[1-6]$/.test(command) ? {level: Number(command.slice(1))} : null);
+  view.dispatch(transaction);
+  return true;
 }
 
-function applyProseMirrorFormat(api, view, schema, command) {
-  const marks = schema.marks;
-  const nodes = schema.nodes;
-  const run = command === 'bold' ? api.toggleMark(marks.strong)
-    : command === 'italic' ? api.toggleMark(marks.em)
-    : command === 'code' ? api.toggleMark(marks.code)
-      : command === 'strike' ? api.toggleMark(marks.strike)
-        : command === 'underline' ? api.toggleMark(marks.underline)
-      : command === 'bullet' ? api.wrapInList(nodes.bullet_list)
-          : command === 'normal' ? api.setBlockType(nodes.paragraph)
-            : /^h[1-5]$/.test(command) ? api.setBlockType(nodes.heading, {level: Number(command.slice(1))})
-              : null;
-  return run ? run(view.state, view.dispatch, view) : false;
+function setProseMirrorTextBlock(api, transaction, schema, type, attrs = null) {
+  const {selection} = transaction;
+  const codeBlocks = [];
+  transaction.doc.nodesBetween(selection.from, selection.to, (node, position) => {
+    if (node.type === schema.nodes.code_block) codeBlocks.push({node, position});
+  });
+  // Paragraph boundaries retain literal lines, including trailing empty lines, through commit.
+  for (const {node, position} of codeBlocks.slice().reverse()) {
+    const paragraphs = node.textContent.split('\n').map(text => schema.nodes.paragraph.create(null, text ? schema.text(text) : null));
+    transaction.replaceWith(position, position + node.nodeSize, paragraphs);
+  }
+  const mapPosition = position => {
+    const block = codeBlocks.find(block => position > block.position && position < block.position + block.node.nodeSize);
+    if (!block) return transaction.mapping.map(position);
+    const offset = position - block.position - 1;
+    return transaction.mapping.map(block.position, -1) + 1 + offset + (block.node.textContent.slice(0, offset).match(/\n/g) || []).length;
+  };
+  transaction.setSelection(api.TextSelection.create(transaction.doc, mapPosition(selection.anchor), mapPosition(selection.head)));
+  const from = codeBlocks.length ? Math.min(transaction.selection.from, transaction.mapping.map(codeBlocks[0].position, -1)) : transaction.selection.from;
+  const last = codeBlocks.at(-1);
+  const to = last ? Math.max(transaction.selection.to, transaction.mapping.map(last.position + last.node.nodeSize, 1)) : transaction.selection.to;
+  transaction.setBlockType(from, to, type, attrs);
+}
+
+function applyProseMirrorPreformatted(view, schema, serializer) {
+  const {selection} = view.state;
+  const blocks = [];
+  let unsupportedBlock = false;
+  if (selection.empty) {
+    const {$from} = selection;
+    if ($from.parent.isTextblock) {
+      const parent = $from.node($from.depth - 1);
+      const index = $from.index($from.depth - 1);
+      if (parent.canReplaceWith(index, index + 1, schema.nodes.code_block)) {
+        blocks.push({node: $from.parent, from: $from.before($from.depth), parent, index});
+      }
+    }
+  } else {
+    view.state.doc.nodesBetween(selection.from, selection.to, (node, position, parent, index) => {
+      if (!node.isTextblock) return;
+      if (parent.canReplaceWith(index, index + 1, schema.nodes.code_block)) blocks.push({node, from: position, parent, index});
+      else unsupportedBlock = true;
+    });
+  }
+  if (!blocks.length || unsupportedBlock) return false;
+  const groups = [];
+  for (const block of blocks) {
+    const previous = groups.at(-1);
+    if (previous && previous.parent === block.parent && previous.last.index + 1 === block.index) {
+      previous.last = block;
+      previous.blocks.push(block);
+    } else groups.push({parent: block.parent, first: block, last: block, blocks: [block]});
+  }
+  const transaction = view.state.tr;
+  const replacements = [];
+  for (const group of groups) {
+    const text = group.blocks.map(({node}) => {
+      if (node.type === schema.nodes.code_block) return node.textBetween(0, node.content.size);
+      const paragraph = schema.nodes.paragraph.create(null, node.content);
+      return serializer.serialize(schema.topNodeType.create(null, paragraph)).replace(/\n+$/, '');
+    }).join('\n');
+    const content = text ? schema.text(text) : null;
+    const attrs = group.blocks.length === 1 && group.first.node.type === schema.nodes.code_block ? group.first.node.attrs : null;
+    const codeBlock = schema.nodes.code_block.create(attrs, content);
+    const to = group.last.from + group.last.node.nodeSize;
+    replacements.push({from: group.first.from, to, text, size: codeBlock.nodeSize, codeBlock});
+  }
+  for (const replacement of replacements.slice().reverse()) {
+    transaction.replaceWith(replacement.from, replacement.to, replacement.codeBlock);
+  }
+  const lastReplacement = replacements.at(-1);
+  const precedingDelta = replacements.slice(0, -1).reduce((delta, replacement) => delta + replacement.size - (replacement.to - replacement.from), 0);
+  const caret = lastReplacement.from + precedingDelta + 1 + lastReplacement.text.length;
+  transaction.setSelection(view.state.selection.constructor.near(transaction.doc.resolve(caret), -1));
+  view.dispatch(transaction);
+  return true;
 }
 
 async function markdownLinkUrlDialog(view, currentUrl, title) {
@@ -1266,19 +1368,14 @@ function installProseMirrorInteractions(panel, path, view, schema, api) {
       href: link && view.dom.contains(link) ? link.getAttribute('href') || '' : '',
       copyHref: link && view.dom.contains(link) ? link.href : '',
       markdownPath: path,
+      surface: 'view-editor',
       modifyUrl: link && view.dom.contains(link) ? () => modifyMarkdownLinkUrl(view, link) : null,
       removeUrl: link && view.dom.contains(link) ? () => removeMarkdownLinkUrl(view, link) : null,
       addUrl: !link && context.selectedText ? () => addMarkdownLinkUrl(view) : null,
-      applyCommand: command => applyProseMirrorFormat(api, view, schema, command),
-      isActive: command => {
-        const mark = command === 'bold' ? schema.marks.strong
-          : command === 'italic' ? schema.marks.em
-            : command === 'code' ? schema.marks.code
-              : command === 'strike' ? schema.marks.strike
-                : command === 'underline' ? schema.marks.underline
-                  : null;
-        return prosemirrorSelectionHasMark(view, mark);
-      },
+      applyCommand: command => dispatchMarkdownFormat(panel, command, 'view-editor'),
+      canFormat: markdownFormattingWritable(panel, 'view-editor'),
+      formatState: command => markdownFormattingState(panel, markdownFormatCommands.find(entry => entry.id === command), 'view-editor'),
+
     });
   };
   const previewPane = panel._pmPreviewPane;
@@ -1345,6 +1442,7 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   clearProseMirrorFallback(parts);
   const view = new api.EditorView(container, {
     state: editorState,
+    editable: () => prosemirrorPanelEditable(panel),
     attributes: {
       class: prosemirrorPreviewClassName(),
       'data-md-path': path,
@@ -1359,8 +1457,10 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
       list_item: prosemirrorTaskListItemNodeView,
     },
     dispatchTransaction(transaction) {
+      if (transaction.docChanged && !markdownFormattingWritable(panel, 'view-editor')) return;
       const nextState = view.state.apply(transaction);
       view.updateState(nextState);
+      refreshMarkdownFormattingToolbar(panel);
       if (transaction.docChanged && transaction.getMeta('yomuxSourceLineRefresh') !== true) {
         panel._pmSource = null;
         panel._pmDocumentChanged = true;
@@ -1389,6 +1489,7 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   delete panel._pmFailureSource;
   parts.previewPane.dataset.prosemirrorState = 'ready';
   installProseMirrorInteractions(panel, path, view, schema, api);
+  ensureMarkdownFormattingToolbar(panel);
   return true;
 }
 

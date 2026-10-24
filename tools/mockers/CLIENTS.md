@@ -43,6 +43,9 @@ TEXT_CLIENT_BACKGROUND=dark python3 tools/mockers/claude.py -C .
 
 ## Mock Agent Fixture Replay
 
+For manual Codex capacity recovery testing, launch `python3 tools/mockers/codex.py --mock` in a tmux session, enable YO for that session, then enter one of these Codex-only commands. `mock capacity` prints the exact capacity notice above the live composer and fails every submitted `continue`. `mock capacity 2` fails the next two submitted retries, then runs the existing working simulation and finishes successfully. `mock capacity pending` fails indefinitely and requires a second Enter to accept each `continue`, exercising the worker's pending-input recovery. YO retries immediately and then every 10 seconds, using bracketed paste of exact `continue` followed by a real Enter key; a pending owned `continue` receives Enter without duplicate text. Real Codex treats a text-plus-Enter typing burst as multiline paste, so successful key delivery alone does not prove submission. Normal composer editing, resize, and exit handling remain available.
+
+
 `tools/mockers/claude.py --mock`, `tools/mockers/codex.py --mock`, and `tools/mockers/opencode.py --mock` run the TUI mocks for detector, auto-approve, and browser tests. The mock implementations live in the real client entry points plus shared code in `tools/mockers/common.py`; the old top-level `mock/` package is intentionally gone. The mocks replay the real and synthetic prompt corpus from `tests/fixtures/prompt_corpus/` so tests exercise current Claude Code, Codex CLI, and OpenCode chrome without launching the real clients for every case.
 
 - `mock list all`: print replayable prompt-corpus cases for the current agent, plus shared and idle fixtures.

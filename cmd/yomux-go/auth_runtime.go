@@ -132,6 +132,9 @@ func passwordMatches(password, stored string) bool {
 
 func (s *server) protected(next http.Handler, minimumRoles ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.admitBrowserRequest(w, r, r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions) {
+			return
+		}
 		policy := capabilities.Policy(r.Method, r.URL.RequestURI())
 		role := policy.Role
 		for _, minimum := range minimumRoles {
@@ -188,6 +191,50 @@ func (s *server) protected(next http.Handler, minimumRoles ...string) http.Handl
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, user)))
 	})
+}
+
+// Cookie names and SameSite do not isolate ports on the same host. Authenticate
+// machine clients without Origin as before, but never let a different browser
+// origin spend its ambient credentials. Forwarded headers are not trusted here.
+func (s *server) admitBrowserRequest(w http.ResponseWriter, r *http.Request, mutation bool) bool {
+	origins := r.Header.Values("Origin")
+	allowed := true
+	if len(origins) != 0 {
+		allowed = len(origins) == 1 && s.sameBrowserOrigin(r.Host, origins[0])
+	}
+	if mutation {
+		sites := r.Header.Values("Sec-Fetch-Site")
+		if len(sites) != 0 {
+			allowed = allowed && len(sites) == 1 && (sites[0] == "same-origin" || sites[0] == "none")
+		}
+	}
+	if !allowed {
+		http.Error(w, "origin denied", http.StatusForbidden)
+	}
+	return allowed
+}
+
+func (s *server) sameBrowserOrigin(host, origin string) bool {
+	scheme, defaultPort := "https", "443"
+	if s.httpMode {
+		scheme, defaultPort = "http", "80"
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme != scheme || parsed.Hostname() == "" || strings.HasSuffix(parsed.Host, ":") || parsed.User != nil || parsed.Opaque != "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.ForceQuery || strings.Contains(origin, "#") || strings.TrimSpace(origin) != origin {
+		return false
+	}
+	expected, err := url.Parse(scheme + "://" + host)
+	if err != nil || expected.Hostname() == "" || expected.User != nil || expected.Path != "" || expected.RawQuery != "" || expected.Fragment != "" {
+		return false
+	}
+	originPort, expectedPort := parsed.Port(), expected.Port()
+	if originPort == "" {
+		originPort = defaultPort
+	}
+	if expectedPort == "" {
+		expectedPort = defaultPort
+	}
+	return strings.EqualFold(parsed.Hostname(), expected.Hostname()) && originPort == expectedPort
 }
 
 func requestWantsHTML(r *http.Request) bool {
@@ -260,6 +307,9 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if r.Method == http.MethodPost && !s.admitBrowserRequest(w, r, true) {
+		return
+	}
 	users := s.users()
 	if authUsersRequireSetup(users) {
 		s.writeNativeSetupAuth(w, r)
@@ -316,6 +366,13 @@ func (s *server) writeNativeSetupAuth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.admitBrowserRequest(w, r, true) {
+		return
+	}
 	for _, name := range []string{s.authCookieName(), s.legacyAuthCookieName(), "yolomux_auth"} {
 		http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", MaxAge: 0, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: false, Expires: time.Unix(0, 0)})
 		if s.secureCookies() {

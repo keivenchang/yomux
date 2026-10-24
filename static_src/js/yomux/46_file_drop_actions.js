@@ -340,9 +340,9 @@ async function runDropAction(action, context) {
   const autoEnter = action.kind === 'shell' && action.readOnly === true && !shellActionActsAsAgentPrompt && boolSetting('uploads.suggestion_autorun', false);
   const inserted = insertIntoTerminal(context.session, `${suffix}${autoEnter ? '\r' : ''}`);
   const displayLabel = dropActionDisplayLabel(action);
-  statusEl.innerHTML = inserted
+  setStatusHtml(inserted
     ? `<span class="ok">${localizedHtml(autoEnter ? 'status.ranDropAction' : 'status.insertedDropAction', {name: displayLabel})}</span>`
-    : `<span class="err">${terminalNotConnectedHtml(context.session)}</span>`;
+    : `<span class="err">${terminalNotConnectedHtml(context.session)}</span>`);
 }
 
 async function runServerDropAction(action, paths) {

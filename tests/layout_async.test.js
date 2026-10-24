@@ -1243,6 +1243,117 @@ async function completeRenderFrames(rendering, frames) {
 }
 
 async function runLayoutAsyncSuite() {
+  await testAsync('a delayed settings save preserves navigation admitted after its request', async () => {
+    for (const mode of ['normal', 'advanced']) {
+      const api = loadYomux('', ['1']);
+      api.setTabberModeForTest(mode);
+      const settings = api.settingsStateForTest();
+      let release;
+      api.setApiFetchJsonForTest(async url => {
+        if (String(url) === '/api/settings') return new Promise(resolve => { release = resolve; });
+        if (String(url).startsWith('/api/fs/read?')) return {content: 'base', mtime: 1, size: 4};
+        return {};
+      });
+      api.setFileExplorerRootMode('fixed', {persist: true, sync: false});
+      await flushAsyncWork();
+      assert.equal(typeof release, 'function');
+      const item = await api.openFileInEditorForTest('/repo/navigation.md', 'navigation.md', {viewMode: 'edit', userInitiated: true});
+      await flushAsyncWork();
+      assert.ok(api.slotForItem(item));
+      const selectedLayout = canonical(api.layoutSlotsForTest());
+      release({...settings, mtime_ns: 2});
+      await flushAsyncWork();
+      assert.deepEqual(canonical(api.layoutSlotsForTest()), selectedLayout, 'the settings response preserves the response-time layout');
+      assert.ok(api.slotForItem(item), 'a background setting save cannot park the newly opened editor');
+    }
+  });
+
+  await testAsync('JSON requests preserve body transport failures and retain malformed JSON fallback', async () => {
+    for (const mode of ['upstream-abort', 'network-failure', 'malformed']) {
+      const api = loadYomux();
+      api.setStatsCurrentNamespaceForTest(null);
+      const failure = mode === 'network-failure' ? new TypeError('body network failure') : new DOMException('consumer retired', 'AbortError');
+      const upstream = new AbortController();
+      let body;
+      api.setFetchForTest((url, options) => new Response(mode === 'malformed' ? '{invalid' : new ReadableStream({start(controller) {
+        body = controller;
+        options.signal.addEventListener('abort', () => controller.error(failure), {once:true});
+      }}), {headers:{'Content-Type':'application/json'}}));
+      const pending = api.apiFetchJsonForTest('/api/review-body-json', {signal:upstream.signal});
+      if (mode === 'malformed') assert.deepEqual(canonical(await pending), {});
+      else {
+        await flushAsyncWork();
+        if (mode === 'upstream-abort') upstream.abort(failure);
+        else body.error(failure);
+        await assert.rejects(pending, error => error === failure, mode);
+      }
+    }
+  });
+  await testAsync('summary terminal events flush the current frame before retiring the stream', async () => {
+    const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const terminal = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+    for (const ending of ['done', 'summary_error', 'disconnect', 'replace']) {
+      const frames = [], renders = [], sources = [];
+      const node = {dataset: {}, scrollHeight: 10};
+      class SummarySource {
+        constructor() { this.listeners = new Map(); this.closeCount = 0; sources.push(this); }
+        addEventListener(name, callback) { this.listeners.set(name, callback); }
+        close() { this.closeCount++; }
+      }
+      const context = vm.createContext({
+        summaryLifecycleScopes: new Map(), EventSource: SummarySource,
+        document: {getElementById: () => node}, summaryDomId: value => value, readOnlyMode: false,
+        t: key => key, safeJsonParse: JSON.parse, userMessageText: payload => payload?.error || 'failed',
+        renderMarkdownPreviewInto: (_, raw) => renders.push(raw), requestAnimationFrame: callback => frames.push(callback),
+        tmuxSessionStreamSurfaceVisible: () => true,
+        tmuxSessionLifecycleToken: () => ({name: '1'}), tmuxSessionLifecycleTokenIsCurrent: () => true,
+        tmuxSessionLifecycleOwnScope() {}, tmuxSessionLifecycleReleaseScope() {},
+        tmuxSessionLifecycleOwnSource() {}, tmuxSessionLifecycleReleaseSource() {},
+      });
+      vm.runInContext(core.slice(core.indexOf('function createLifecycleScope('), core.indexOf('function createLatestResource(')), context);
+      vm.runInContext(terminal.slice(terminal.indexOf('function tmuxSessionStreamLifecycleScope('), terminal.indexOf('function tmuxSessionStreamSurfaceVisible(')), context);
+      vm.runInContext(terminal.slice(terminal.indexOf('function startSummaryStream('), terminal.indexOf('function reloadIsSafe(')), context);
+      context.startSummaryStream('1');
+      const source = sources[0];
+      source.listeners.get('delta')({data: JSON.stringify({text: 'final summary text'})});
+      if (ending === 'replace') context.startSummaryStream('1');
+      else if (ending === 'disconnect') source.onerror();
+      else source.listeners.get(ending)({data: JSON.stringify({error: 'provider failed', return_code: 7})});
+      for (const frame of frames) frame();
+      assert.equal(renders.at(-1).includes('final summary text'), ending !== 'replace', ending);
+      if (ending === 'summary_error') assert.ok(renders.at(-1).includes('summary.stream.error'));
+      if (ending === 'disconnect') assert.ok(renders.at(-1).includes('terminal.summary.streamDisconnected'));
+      if (ending === 'done') assert.ok(renders.at(-1).includes('summary.stream.exited'));
+      assert.equal(source.closeCount, 1, ending + ' closes its source exactly once');
+    }
+  });
+  await testAsync('stream body completion owns deadline cleanup and preserves cancellation identity', async () => {
+    const source = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const context = vm.createContext({});
+    vm.runInContext(source.slice(source.indexOf('function apiFetchResponseWithDeadline('), source.indexOf('\nlet previousApiFetchTimingWindow')), context);
+    for (const mode of ['eof', 'cancel', 'upstream-abort', 'deadline', 'failure', 'cancel-deadline', 'cancel-failure']) {
+      let cleanup = 0, consumed = 0, timeouts = 0;
+      const deadline = Object.assign(new Error('request deadline'), {code: 'deadline_expired'});
+      const failure = mode.includes('failure') ? new TypeError('network body failed') : new DOMException('aborted', 'AbortError');
+      const stream = new ReadableStream({start(controller) {
+        if (mode === 'eof') controller.close();
+        else if (mode !== 'cancel') controller.error(failure);
+      }});
+      const response = context.apiFetchResponseWithDeadline(new Response(stream), {
+        cleanup: () => cleanup++, onConsumed: () => consumed++, noteTimeout: () => timeouts++,
+        timeoutError: () => mode.includes('deadline') ? deadline : null,
+      });
+      const reader = response.body.getReader();
+      if (mode === 'cancel') await reader.cancel();
+      else if (mode === 'eof') {
+        assert.equal((await reader.read()).done, true);
+        assert.equal((await reader.read()).done, true);
+      } else await assert.rejects(mode.startsWith('cancel') ? reader.cancel() : reader.read(), error => error === (mode.includes('deadline') ? deadline : failure));
+      assert.equal(cleanup, 1, mode + ' retires its deadline and upstream listener exactly once');
+      assert.equal(consumed, 1, mode + ' records consumption once');
+      assert.equal(timeouts, mode.includes('deadline') ? 1 : 0, mode + ' records only a genuine deadline');
+    }
+  });
   await testAsync('partial and superseded directory responses preserve deletion tombstones', async () => {
     const api = loadYomux('', ['source']);
     api.markFileExplorerDeletedPathsForTest(['/tmp/deleted.md']);
@@ -2827,6 +2938,13 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(api.transcriptStreamForTest('1'), null, 'a retired transcript callback cannot schedule a replacement EventSource');
     assert.equal(api.testElementForId('body').dataset.authenticationState, 'signed-out');
     assert.equal(api.testElementForId('status').textContent, 'Authentication required.');
+    api.showLayoutStatusForTest('late success');
+    api.setStatusHtmlForTest('<span>late HTML success</span>');
+    api.showTimedStatusNoticeForTest('late indexing success');
+    assert.equal(api.testElementForId('status').textContent, 'Authentication required.');
+    assert.equal(api.testElementForId('status').getAttribute('role'), 'alert');
+    assert.equal(api.statusKindForTest(), 'danger');
+    assert.deepStrictEqual([...api.timedStatusNoticesForTest()], []);
   });
 
   await testAsync('client-events resolves its hidden HTTP failure through one bounded auth probe', async () => {
@@ -5603,6 +5721,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     const first = api.saveFileEditorForTest(oldPath, null);
     await flushAsyncWork();
     api.renameOpenFilePathForTest(oldPath, newPath);
+    assert.equal(api.fileEditorSelfWritePendingForTest(oldPath), false);
+    assert.equal(api.fileEditorSelfWritePendingForTest(newPath), true, 'renaming preserves the in-flight state-owned acknowledgement');
     api.patchOpenFileStateForTest(newPath, {content: 'second\n', dirty: true});
     const second = api.saveFileEditorForTest(newPath, null);
     await flushAsyncWork();
@@ -5617,6 +5737,413 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(await second, true);
     assert.equal(api.currentFileStateForTest(newPath).dirty, false);
     assert.equal(api.openFileStateForTest(oldPath), null);
+  });
+
+  await testAsync('save acknowledgements and callbacks belong to the editor state that started the write', async () => {
+    for (const dirty of [false,true]) {
+      const api = loadYomux('', ['1']);
+      const settings = api.settingsStateForTest();
+      api.applySettingsPayloadForTest({...settings, settings:{...settings.settings,editor:{...settings.settings.editor,autosave:false}},mtime_ns:2});
+      const path = '/repo/reopened-save.md';
+      let release;
+      api.setFetchForTest(() => new Promise(resolve => {release = resolve;}));
+      api.setOpenFileStateForTest(path,{kind:'text',mtime:1,size:4,original:'base',content:'old saved',dirty:true});
+      const saving = api.saveFileEditorForTest(path,null);
+      await flushAsyncWork();
+      const fresh = {kind:'text',mtime:1,size:4,original:'base',content:dirty ? 'new unsaved' : 'base',dirty};
+      api.setOpenFileStateForTest(path,fresh);
+      assert.equal(api.fileEditorSelfWritePendingForTest(path),false,'the old pending truncate window cannot authorize a new editor state');
+      assert.equal(api.fileEditorSelfWriteAcknowledgedForTest(path,{mtime:1,size:0}),false);
+      release(jsonResponse({mtime:2,size:9}));
+      assert.equal(await saving,true,'a retired successful write still reports its actual disk commit');
+      assert.equal(api.fileEditorSelfWritePendingForTest(path),false,'the old final acknowledgement cannot mask the new incarnation');
+      assert.equal(api.fileEditorSelfWriteAcknowledgedForTest(path,{mtime:2,size:9}),false);
+      assert.equal(api.currentFileStateForTest(path).content,fresh.content);
+      assert.equal(api.currentFileStateForTest(path).original,'base');
+      assert.equal(api.currentFileStateForTest(path).dirty,dirty);
+      assert.equal(api.currentFileStateForTest(path).mtime,1);
+    }
+  });
+
+  await testAsync('a queued save never merges options or resolvers across editor state replacement', async () => {
+    const api = loadYomux('', ['1']);
+    const settings = api.settingsStateForTest();
+    api.applySettingsPayloadForTest({...settings, settings:{...settings.settings,editor:{...settings.settings.editor,autosave:false}},mtime_ns:2});
+    const path = '/repo/reopened-pending.md', writes = [];
+    let release;
+    api.setFetchForTest((url,options) => {
+      writes.push(JSON.parse(options.body));
+      if (writes.length === 1) return new Promise(resolve => {release = resolve;});
+      return Promise.resolve(jsonResponse({mtime:12,size:10}));
+    });
+    api.setOpenFileStateForTest(path,{kind:'text',mtime:10,size:4,original:'base',content:'old active',dirty:true});
+    const first = api.saveFileEditorForTest(path,null);
+    await flushAsyncWork();
+    const retiredPending = api.saveFileEditorForTest(path,null,{force:true});
+    api.setOpenFileStateForTest(path,{kind:'text',mtime:11,size:10,original:'old active',content:'fresh edit',dirty:true});
+    const freshPending = api.saveFileEditorForTest(path,null);
+    release(jsonResponse({mtime:11,size:10}));
+    assert.equal(await first,true);
+    assert.equal(await retiredPending,false,'the retired pending request is not resolved by a different editor save');
+    assert.equal(await freshPending,true);
+    assert.deepEqual(writes,[{path,content:'old active',expected_mtime:10},{path,content:'fresh edit',expected_mtime:11}],
+      'the new pending write remains serialized and does not inherit the old force option');
+    assert.equal(api.currentFileStateForTest(path).original,'fresh edit');
+  });
+
+  await testAsync('retired save failures cannot open a conflict or clear the replacement buffer state', async () => {
+    for (const status of [409,500]) {
+      const api = loadYomux('', ['1']);
+      const path = '/repo/reopened-failure.md';
+      let reject;
+      api.setApiFetchJsonForTest(() => new Promise((_,failure) => {reject = failure;}));
+      api.setOpenFileStateForTest(path,{kind:'text',mtime:1,size:4,original:'base',content:'old saved',dirty:true});
+      const saving = api.saveFileEditorForTest(path,null);
+      await flushAsyncWork();
+      api.setOpenFileStateForTest(path,{kind:'text',mtime:3,size:8,original:'new base',content:'new unsaved',dirty:true,externalChanged:{mtime:4,size:9}});
+      reject(Object.assign(new Error('old write failed'),{status}));
+      assert.equal(await saving,false);
+      const state = api.currentFileStateForTest(path);
+      assert.equal(state.content,'new unsaved');
+      assert.equal(state.original,'new base');
+      assert.equal(state.mtime,3);
+      assert.deepEqual(canonical(state.externalChanged),{mtime:4,size:9});
+    }
+  });
+
+  await testAsync('a same-incarnation second edit retains self-write correlation after the first save', async () => {
+    const api = loadYomux('', ['1']);
+    const settings = api.settingsStateForTest();
+    api.applySettingsPayloadForTest({...settings, settings:{...settings.settings,editor:{...settings.settings.editor,autosave:false}},mtime_ns:2});
+    const path = '/repo/same-incarnation.md';
+    let release;
+    api.setFetchForTest(() => new Promise(resolve => {release = resolve;}));
+    api.setOpenFileStateForTest(path,{kind:'text',mtime:1,size:4,original:'base',content:'first edit',dirty:true});
+    const saving = api.saveFileEditorForTest(path,null);
+    await flushAsyncWork();
+    api.patchOpenFileStateForTest(path,{content:'second edit',dirty:true});
+    release(jsonResponse({mtime:2,size:10}));
+    assert.equal(await saving,true);
+    assert.equal(api.fileEditorSelfWritePendingForTest(path),true);
+    assert.equal(api.fileEditorSelfWriteAcknowledgedForTest(path,{mtime:2,size:10}),true);
+    const state = api.currentFileStateForTest(path);
+    assert.equal(state.content,'second edit');
+    assert.equal(state.original,'first edit');
+    assert.equal(state.dirty,true);
+  });
+
+  await testAsync('an old conflict decision cannot force a reopened editor save', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/reopened-conflict.md', writes = [];
+    api.setFetchForTest((url, options) => {
+      writes.push(JSON.parse(options.body));
+      return Promise.resolve(writes.length === 1
+        ? jsonResponse({error:'Changed on disk'},409)
+        : jsonResponse({mtime:4,size:10}));
+    });
+    api.setOpenFileStateForTest(path,{kind:'text',mtime:1,size:4,original:'base',content:'old edit',dirty:true});
+    const oldSave = api.saveFileEditorForTest(path,null);
+    await flushAsyncWork();
+    const dialog = api.testElementForId('appOverlayRoot').querySelector('.file-editor-conflict-dialog');
+    assert.ok(dialog);
+    api.setOpenFileStateForTest(path,{kind:'text',mtime:3,size:8,original:'new base',content:'fresh edit',dirty:true});
+    const freshSave = api.saveFileEditorForTest(path,null);
+    const overwrite = dialog.querySelector('[data-dialog-action="overwrite"]');
+    dialog.listeners.get('click')[0]({target:overwrite,preventDefault() {}});
+    assert.equal(await oldSave,false);
+    assert.equal(await freshSave,true);
+    assert.deepEqual(writes,[{path,content:'old edit',expected_mtime:1},{path,content:'fresh edit',expected_mtime:3}]);
+    assert.equal(api.currentFileStateForTest(path).original,'fresh edit');
+  });
+
+  await testAsync('retired conflict reload and compare actions cannot replace a fresh dirty buffer', async () => {
+    for (const action of ['reload','compare']) {
+      const api = loadYomux('', ['1']);
+      const path = '/repo/stale-conflict-action.md', reads = [];
+      api.setApiFetchJsonForTest(async url => {
+        if (String(url) === '/api/fs/write') throw Object.assign(new Error('Changed on disk'),{status:409});
+        if (String(url).startsWith('/api/fs/read?')) {
+          reads.push(url);
+          return {content:'disk replacement',mtime:4,size:16};
+        }
+        return {};
+      });
+      api.setOpenFileStateForTest(path,{kind:'text',mtime:1,size:4,original:'base',content:'old edit',dirty:true});
+      const saving = api.saveFileEditorForTest(path,null);
+      await flushAsyncWork();
+      const overlay = api.testElementForId('appOverlayRoot');
+      const dialog = overlay.querySelector('.file-editor-conflict-dialog');
+      assert.ok(dialog);
+      api.setOpenFileStateForTest(path,{kind:'text',mtime:3,size:8,original:'new base',content:'fresh unsaved',dirty:true,conflictDialogOpen:true});
+      const button = dialog.querySelector(`[data-dialog-action="${action}"]`);
+      dialog.listeners.get('click')[0]({target:button,preventDefault() {}});
+      await flushAsyncWork();
+      assert.equal(reads.length,0,'retired decisions cannot start a read against the reopened editor');
+      assert.equal(overlay.querySelector('.file-editor-compare-dialog'),null);
+      assert.equal(await saving,false);
+      const state = api.currentFileStateForTest(path);
+      assert.equal(state.content,'fresh unsaved');
+      assert.equal(state.dirty,true);
+      assert.equal(state.conflictDialogOpen,true,'an old finally cannot release the replacement state conflict owner');
+    }
+  });
+
+  await testAsync('a delayed compare read cannot publish a dialog for a replaced editor state', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/stale-compare-read.md';
+    let release;
+    api.setApiFetchJsonForTest(async url => {
+      if (String(url) === '/api/fs/write') throw Object.assign(new Error('Changed on disk'),{status:409});
+      if (String(url).startsWith('/api/fs/read?')) return new Promise(resolve => {release = resolve;});
+      return {};
+    });
+    api.setOpenFileStateForTest(path,{kind:'text',mtime:1,size:4,original:'base',content:'old edit',dirty:true});
+    const saving = api.saveFileEditorForTest(path,null);
+    await flushAsyncWork();
+    const overlay = api.testElementForId('appOverlayRoot');
+    const dialog = overlay.querySelector('.file-editor-conflict-dialog');
+    dialog.listeners.get('click')[0]({target:dialog.querySelector('[data-dialog-action="compare"]'),preventDefault() {}});
+    await flushAsyncWork();
+    assert.equal(typeof release,'function');
+    api.setOpenFileStateForTest(path,{kind:'text',mtime:3,size:8,original:'new base',content:'fresh unsaved',dirty:true,conflictDialogOpen:true});
+    release({content:'disk replacement',mtime:4,size:16});
+    await flushAsyncWork();
+    assert.equal(overlay.querySelector('.file-editor-compare-dialog'),null,'a stale comparison read cannot reopen its modal');
+    assert.equal(await saving,false);
+    assert.equal(api.currentFileStateForTest(path).content,'fresh unsaved');
+    assert.equal(api.currentFileStateForTest(path).conflictDialogOpen,true);
+  });
+
+  await testAsync('all nested compare decisions stay owned by their original editor state', async () => {
+    for (const action of ['reload','overwrite','cancel']) {
+      const api = loadYomux('', ['1']);
+      const path = '/repo/stale-nested-compare.md', requests = [];
+      api.setApiFetchJsonForTest(async url => {
+        requests.push(String(url));
+        if (String(url) === '/api/fs/write') throw Object.assign(new Error('Changed on disk'),{status:409});
+        if (String(url).startsWith('/api/fs/read?')) return {content:'disk replacement',mtime:4,size:16};
+        return {};
+      });
+      api.setOpenFileStateForTest(path,{kind:'text',mtime:1,size:4,original:'base',content:'old edit',dirty:true});
+      const saving = api.saveFileEditorForTest(path,null);
+      await flushAsyncWork();
+      const overlay = api.testElementForId('appOverlayRoot');
+      const conflict = overlay.querySelector('.file-editor-conflict-dialog');
+      conflict.listeners.get('click')[0]({target:conflict.querySelector('[data-dialog-action="compare"]'),preventDefault() {}});
+      await flushAsyncWork();
+      const compare = overlay.querySelector('.file-editor-compare-dialog');
+      assert.ok(compare);
+      const admitted = [...requests];
+      api.setOpenFileStateForTest(path,{kind:'text',mtime:3,size:8,original:'new base',content:'fresh unsaved',dirty:true});
+      compare.listeners.get('click')[0]({target:compare.querySelector(`[data-dialog-action="${action}"]`),preventDefault() {}});
+      assert.equal(await saving,false);
+      assert.deepEqual(requests,admitted,'a retired nested decision cannot admit another read or write');
+      assert.equal(api.currentFileStateForTest(path).content,'fresh unsaved');
+      assert.equal(api.currentFileStateForTest(path).dirty,true);
+    }
+  });
+
+  await testAsync('an awaited close cannot remove a reopened editor incarnation', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/close-reopen.md';
+    let release;
+    api.setClientSettingsPatchForTest({editor:{autosave:true}});
+    api.setApiFetchJsonForTest(async (url,options={}) => {
+      if (String(url) === '/api/fs/write') return new Promise(resolve => {release = resolve;});
+      if (String(url).startsWith('/api/fs/read?')) return {content:'base',mtime:1,size:4};
+      return {};
+    });
+    await api.openFileInEditorForTest(path,'close-reopen.md');
+    api.patchOpenFileStateForTest(path,{content:'old saved',dirty:true});
+    const closing = api.closeFileTabForTest(path);
+    await flushAsyncWork();
+    assert.equal(await api.closeFileTabForTest(path,{confirmDirty:false}),true);
+    await api.openFileInEditorForTest(path,'close-reopen.md');
+    release({mtime:2,size:9});
+    assert.equal(await closing,false,'the old close authorization cannot transfer to the reopened state');
+    assert.equal(api.currentFileStateForTest(path).content,'base');
+  });
+
+  await testAsync('a retired close dialog cannot save a replacement buffer', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/stale-close-decision.md', writes = [];
+    const settings = api.settingsStateForTest();
+    api.applySettingsPayloadForTest({...settings,settings:{...settings.settings,editor:{...settings.settings.editor,autosave:false}},mtime_ns:2});
+    api.setApiFetchJsonForTest(async (url,options={}) => {
+      if (String(url) === '/api/fs/write') writes.push(JSON.parse(options.body));
+      return {content:'base',mtime:1,size:4};
+    });
+    await api.openFileInEditorForTest(path,'stale-close-decision.md');
+    api.patchOpenFileStateForTest(path,{content:'old edit',dirty:true});
+    const closing = api.closeFileTabForTest(path);
+    await flushAsyncWork();
+    const dialog = api.testElementForId('appOverlayRoot').querySelector('.file-editor-close-dialog');
+    assert.ok(dialog);
+    api.setOpenFileStateForTest(path,{kind:'text',mtime:3,size:8,original:'new base',content:'fresh unsaved',dirty:true});
+    dialog.listeners.get('click')[0]({target:dialog.querySelector('[data-dialog-action="save"]'),preventDefault() {}});
+    assert.equal(await closing,false);
+    assert.deepEqual(writes,[]);
+    assert.equal(api.currentFileStateForTest(path).content,'fresh unsaved');
+    assert.equal(api.currentFileStateForTest(path).dirty,true);
+  });
+
+  await testAsync('save and close preserves a newer edit during both direct and queued writes', async () => {
+    for (const autosave of [false,true]) for (const queued of [false,true]) {
+      const api = loadYomux('', ['1']);
+      const path = '/repo/close-second-edit.md', writes = [], releases = [];
+      const settings = api.settingsStateForTest();
+      api.applySettingsPayloadForTest({...settings,settings:{...settings.settings,editor:{...settings.settings.editor,autosave}},mtime_ns:2});
+      api.setApiFetchJsonForTest(async (url,options={}) => {
+        if (String(url) === '/api/fs/write') {
+          writes.push(JSON.parse(options.body));
+          return new Promise(resolve => {releases.push(resolve);});
+        }
+        return {content:'base',mtime:1,size:4};
+      });
+      await api.openFileInEditorForTest(path,'close-second-edit.md');
+      api.patchOpenFileStateForTest(path,{content:'first edit',dirty:true});
+      const prior = queued ? api.saveFileEditorForTest(path,null) : null;
+      const closing = api.closeFileTabForTest(path);
+      await flushAsyncWork();
+      if (!autosave) {
+        const dialog = api.testElementForId('appOverlayRoot').querySelector('.file-editor-close-dialog');
+        dialog.listeners.get('click')[0]({target:dialog.querySelector('[data-dialog-action="save"]'),preventDefault() {}});
+        await flushAsyncWork();
+      }
+      if (queued) {
+        api.patchOpenFileStateForTest(path,{content:'queued edit',dirty:true});
+        releases.shift()({mtime:2,size:10});
+        assert.equal(await prior,true);
+        await flushAsyncWork();
+      }
+      assert.equal(releases.length,1,`the close write is held: autosave=${autosave}, queued=${queued}`);
+      api.patchOpenFileStateForTest(path,{content:'second unsaved',dirty:true});
+      releases.shift()({mtime:3,size:10});
+      assert.equal(await closing,false,`newer edits keep the editor open: autosave=${autosave}, queued=${queued}`);
+      assert.equal(api.currentFileStateForTest(path).content,'second unsaved');
+      assert.equal(api.currentFileStateForTest(path).dirty,true);
+      await flushAsyncWork();
+      for (const release of releases.splice(0)) release({mtime:4,size:14});
+      await flushAsyncWork();
+      assert.equal(writes[0].content,'first edit');
+    }
+  });
+
+  await testAsync('authorized direct and compared disk reloads still complete save and close', async () => {
+    for (const autosave of [false,true]) for (const nested of [false,true]) {
+      const api = loadYomux('', ['1']);
+      const path = '/repo/close-authorized-reload.md';
+      const settings = api.settingsStateForTest();
+      api.applySettingsPayloadForTest({...settings,settings:{...settings.settings,editor:{...settings.settings.editor,autosave}},mtime_ns:2});
+      api.setApiFetchJsonForTest(async url => {
+        if (String(url) === '/api/fs/write') throw Object.assign(new Error('Changed on disk'),{status:409});
+        return {content:'disk replacement',mtime:4,size:16};
+      });
+      await api.openFileInEditorForTest(path,'close-authorized-reload.md');
+      api.patchOpenFileStateForTest(path,{content:'old edit',dirty:true});
+      const closing = api.closeFileTabForTest(path);
+      await flushAsyncWork();
+      const overlay = api.testElementForId('appOverlayRoot');
+      if (!autosave) {
+        const close = overlay.querySelector('.file-editor-close-dialog');
+        close.listeners.get('click')[0]({target:close.querySelector('[data-dialog-action="save"]'),preventDefault() {}});
+        await flushAsyncWork();
+      }
+      const conflict = overlay.querySelector('.file-editor-conflict-dialog');
+      assert.ok(conflict);
+      let dialog = conflict;
+      if (nested) {
+        conflict.listeners.get('click')[0]({target:conflict.querySelector('[data-dialog-action="compare"]'),preventDefault() {}});
+        await flushAsyncWork();
+        dialog = overlay.querySelector('.file-editor-compare-dialog');
+        assert.ok(dialog);
+      }
+      dialog.listeners.get('click')[0]({target:dialog.querySelector('[data-dialog-action="reload"]'),preventDefault() {}});
+      assert.equal(await closing,true,`an authorized disk reload permits close: autosave=${autosave}, nested=${nested}`);
+      assert.equal(api.openFileStateForTest(path),null);
+    }
+  });
+
+  await testAsync('reload completion cannot authorize a replacement opened before its dialog resumes', async () => {
+    const path = '/repo/post-reload-reopen.md';
+    let api, replaceAfterApply = false, replaced = false;
+    api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame() {
+        if (replaceAfterApply && !replaced && api.currentFileStateForTest(path)?.content === 'disk replacement') {
+          replaced = true;
+          api.setOpenFileStateForTest(path,{kind:'text',mtime:8,size:8,original:'new base',content:'fresh unsaved',dirty:true});
+        }
+        return 1;
+      },
+    });
+    api.setApiFetchJsonForTest(async url => {
+      if (String(url) === '/api/fs/write') throw Object.assign(new Error('Changed on disk'),{status:409});
+      return {content:'disk replacement',mtime:4,size:16};
+    });
+    api.setOpenFileStateForTest(path,{kind:'text',mtime:1,size:4,original:'base',content:'old edit',dirty:true});
+    const saving = api.saveFileEditorForTest(path,null);
+    await flushAsyncWork();
+    const dialog = api.testElementForId('appOverlayRoot').querySelector('.file-editor-conflict-dialog');
+    replaceAfterApply = true;
+    dialog.listeners.get('click')[0]({target:dialog.querySelector('[data-dialog-action="reload"]'),preventDefault() {}});
+    assert.equal(await saving,false);
+    assert.equal(replaced,true,'the reload applied before the new editor replaced it');
+    assert.equal(api.currentFileStateForTest(path).content,'fresh unsaved');
+    assert.equal(api.currentFileStateForTest(path).dirty,true);
+  });
+
+  await testAsync('a conflict reload does not transfer its dialog flag to the replacement state', async () => {
+    for (const nested of [false,true]) {
+      const api = loadYomux('', ['1']);
+      const path = '/repo/reloaded-conflict-owner.md';
+      api.setApiFetchJsonForTest(async url => {
+        if (String(url) === '/api/fs/write') throw Object.assign(new Error('Changed on disk'),{status:409});
+        return {content:'disk replacement',mtime:4,size:16};
+      });
+      api.setOpenFileStateForTest(path,{kind:'text',mtime:1,size:4,original:'base',content:'old edit',dirty:true});
+      const first = api.saveFileEditorForTest(path,null);
+      await flushAsyncWork();
+      const overlay = api.testElementForId('appOverlayRoot');
+      let dialog = overlay.querySelector('.file-editor-conflict-dialog');
+      if (nested) {
+        dialog.listeners.get('click')[0]({target:dialog.querySelector('[data-dialog-action="compare"]'),preventDefault() {}});
+        await flushAsyncWork();
+        dialog = overlay.querySelector('.file-editor-compare-dialog');
+      }
+      dialog.listeners.get('click')[0]({target:dialog.querySelector('[data-dialog-action="reload"]'),preventDefault() {}});
+      assert.equal(await first,true);
+      assert.equal(api.currentFileStateForTest(path).conflictDialogOpen,false,'the retired modal does not own the reload replacement');
+      api.patchOpenFileStateForTest(path,{content:'new edit',dirty:true});
+      const second = api.saveFileEditorForTest(path,null);
+      await flushAsyncWork();
+      dialog = overlay.querySelector('.file-editor-conflict-dialog');
+      assert.ok(dialog,'a later conflict remains actionable');
+      dialog.listeners.get('click')[0]({target:dialog.querySelector('[data-dialog-action="cancel"]'),preventDefault() {}});
+      assert.equal(await second,false);
+    }
+  });
+
+  await testAsync('a retired external-change prompt cannot reload the replacement buffer', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/stale-external-decision.md', reads = [];
+    const panel = api.testElementForId('external-change-panel');
+    panel.dataset.filePath = path;
+    panel.dataset.layoutItem = api.fileEditorItemFor(path);
+    api.setPanelNodeForTest(panel.dataset.layoutItem,panel);
+    api.setApiFetchJsonForTest(async url => {
+      reads.push(String(url));
+      return {content:'disk replacement',mtime:4,size:16};
+    });
+    api.setOpenFileStateForTest(path,{kind:'text',mtime:1,size:4,original:'base',content:'old edit',dirty:true,externalChanged:{mtime:2,size:10}});
+    api.handleFileEditorContentChangedForTest(panel,path,'old edit',{deferAutosave:true});
+    const dialog = api.testElementForId('appOverlayRoot').querySelector('.file-editor-external-change-dialog');
+    assert.ok(dialog);
+    api.setOpenFileStateForTest(path,{kind:'text',mtime:3,size:8,original:'new base',content:'fresh unsaved',dirty:true});
+    dialog.listeners.get('click')[0]({target:dialog.querySelector('[data-dialog-action="reload"]'),preventDefault() {}});
+    await flushAsyncWork();
+    assert.deepEqual(reads,[]);
+    assert.equal(api.currentFileStateForTest(path).content,'fresh unsaved');
+    assert.equal(api.currentFileStateForTest(path).dirty,true);
   });
 
   await testAsync('editor keeps a genuine write conflict actionable and overwrite cannot deadlock', async () => {
@@ -7568,22 +8095,26 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
   });
 
   await testAsync('keyed patches at revisions 401/402/403 apply in one frame strictly in order', async () => {
-    const api = loadYomux('', ['1']);
+    const frames = [];
+    const api = loadYomux('', ['1', '2', '3'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+    });
     const requests = [];
     api.setFetchForTest(url => { requests.push(String(url)); return Promise.resolve(jsonResponse({})); });
     api.setDocumentVisibilityForTest('hidden');
     const base = {
       agent_window_snapshot_revision: 400,
-      session_order: ['1'],
-      sessions: {'1': {target: '1', enabled: false, agent_windows: [{window_index: 0, state: 'idle'}]}},
+      session_order: ['1', '2', '3'],
+      sessions: Object.fromEntries(['1', '2', '3'].map(target => [target, {target, enabled: false, agent_windows: [{window_index: 0, state: 'idle'}]}])),
       rules: {mode: 'safe'},
     };
     // Seed the single applied revision at 400 with a full snapshot.
     assert.equal(api.handleClientPushEventForTest('auto_approve_changed', {data: base}, {epoch: 'server-a', resource: 'auto_approve_changed', resource_revision: 400}), true);
+    api.setDocumentVisibilityForTest('visible');
     const patch = revision => ({
       patch: true,
       collection: 'sessions',
-      changes: {'1': {target: '1', enabled: revision % 2 === 1, agent_windows: [{window_index: 0, state: `rev-${revision}`}]}},
+      changes: {[String(revision - 400)]: {target: String(revision - 400), enabled: true, agent_windows: [{window_index: 0, state: `rev-${revision}`}]}},
       removed_keys: [],
       fields: {agent_window_snapshot_revision: revision},
       removed_fields: [],
@@ -7595,14 +8126,126 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         true,
         `revision ${revision} applies on its immediate predecessor`,
       );
-      assert.equal(api.clientEventTransportStateForTest().resourceRevisions.auto_approve_changed, revision, 'the single applied revision advances only at validated apply');
+      assert.equal(api.clientEventTransportStateForTest().resourceRevisions.auto_approve_changed, revision, 'acceptance advances only for a contiguous retained patch');
     }
-    assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'rev-403', 'the last in-order patch is the applied state');
+    assert.equal(api.autoApproveStateForTest('1').enabled, false, 'the visible queue waits for its held display frame');
+    for (const frame of frames.splice(0)) frame();
+    for (const revision of [401, 402, 403]) assert.equal(api.autoApproveStateForTest(String(revision - 400)).agent_windows[0].state, `rev-${revision}`, 'every disjoint patch survives the same frame');
     // A re-delivered 402 (<= the applied 403) is superseded and cannot walk the applied revision back.
     assert.equal(api.handleClientPushEventForTest('auto_approve_changed', patch(402), {epoch: 'server-a', resource: 'auto_approve_changed', base_resource_revision: 401, resource_revision: 402}), false, 'a superseded revision cannot walk the applied revision backward');
     assert.equal(api.clientEventTransportStateForTest().resourceRevisions.auto_approve_changed, 403, 'a rejected out-of-order frame never advances the applied revision');
     await flushAsyncWork();
     assert.deepStrictEqual(requests.filter(url => url === '/api/auto-approve'), [], 'in-order patches repair nothing over ordinary HTTP');
+  });
+
+  await testAsync('visible event batching preserves scoped progress and additive filesystem and attention changes', async () => {
+    const frames = [];
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+    });
+    for (const [index, scope] of ['scope-a', 'scope-b'].entries()) {
+      assert.equal(api.handleClientPushEventForTest('search_progress', {scope_id:scope, generation:1, index_state:'error'},
+        {epoch:'server-a', resource:`search_progress:${scope}`, resource_revision:1}), true);
+      assert.equal(api.handleClientPushEventForTest('fs_changed', {mode:'delta', removed_paths:[`/tmp/review-${scope}.md`], directories:[], removed_roots:[], token:scope},
+        {epoch:'server-a', resource:'fs_changed', resource_revision:index+1}), true);
+      assert.equal(api.handleClientPushEventForTest('attention_acks_changed', {acknowledged:[scope]},
+        {epoch:'server-a', resource:'attention_acks_changed', resource_revision:index+1}), true);
+    }
+    assert.equal(api.clientEventTransportStateForTest().queued, 6);
+    for (const frame of frames.splice(0)) frame();
+    assert.deepEqual([...api.fileQuickOpenStateForTest().searchProgressSequences.keys()].sort(), ['scope-a', 'scope-b']);
+    assert.deepEqual(api.fileExplorerDeletedPathTombstonesForTest().sort(), ['/tmp/review-scope-a.md', '/tmp/review-scope-b.md']);
+    for (const scope of ['scope-a', 'scope-b']) assert.equal(api.attentionAcknowledgementKeyIsRecordedForTest(scope), true);
+  });
+
+  await testAsync('full status snapshots and dependent tmux patches retain their queued lineage', async () => {
+    for (const kind of ['auto_approve_changed', 'tmux_signals_changed']) {
+      const frames = [];
+      const api = loadYomux('', ['1', '2'], 'http:', 'Linux x86_64', 'admin', {
+        requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+      });
+      const full = kind === 'auto_approve_changed'
+        ? {data:{session_order:['1','2'], sessions:{'1':{target:'1',enabled:false},'2':{target:'2',enabled:false}}, rules:{mode:'safe'}}}
+        : {data:{windows:[{key:'1:0',session:'1',window_index:0,active:false},{key:'2:0',session:'2',window_index:0,active:false}]}};
+      assert.equal(api.handleClientPushEventForTest(kind, full, {epoch:'server-a',resource:kind,resource_revision:1}), true);
+      assert.equal(api.handleClientPushEventForTest(kind, full, {epoch:'server-a',resource:kind,resource_revision:2}), true);
+      assert.equal(api.clientEventTransportStateForTest().queued, 1, 'complete replacement snapshots still coalesce');
+      for (const [index, session] of ['1','2'].entries()) {
+        const patch = {patch:true, collection:kind === 'auto_approve_changed' ? 'sessions' : 'windows',
+          changes:{[kind === 'auto_approve_changed' ? session : `${session}:0`]:kind === 'auto_approve_changed'
+            ? {target:session,enabled:true} : {key:`${session}:0`,session,window_index:0,active:true}},
+          fields:{},removed_keys:[],removed_fields:[]};
+        assert.equal(api.handleClientPushEventForTest(kind, patch,
+          {epoch:'server-a',resource:kind,base_resource_revision:index+2,resource_revision:index+3}), true);
+      }
+      assert.equal(api.handleClientPushEventForTest(kind, full, {epoch:'server-a',resource:kind,resource_revision:1}), false, 'stale full replay cannot replace the queued lineage');
+      for (const frame of frames.splice(0)) frame();
+      if (kind === 'auto_approve_changed') for (const session of ['1','2']) assert.equal(api.autoApproveStateForTest(session).enabled, true);
+      else assert.deepEqual([...api.tmuxSignalStateForTest().windows].map(row => row.active), [true,true]);
+      assert.equal(api.clientEventTransportStateForTest().resourceRevisions[kind], 4);
+    }
+  });
+
+  await testAsync('ordered event pressure stays bounded and stale frame callbacks cannot drain its successor', async () => {
+    const frames = [], cancelled = [];
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+      cancelAnimationFrame(id) { cancelled.push(id); },
+    });
+    for (let index = 0; index < 300; index++) {
+      api.handleClientPushEventForTest('attention_acks_changed', {acknowledged:[`pressure-${index}`]},
+        {epoch:'server-a',resource:'attention_acks_changed',resource_revision:index+1});
+      assert.ok(api.clientEventTransportStateForTest().queued < 256, 'pressure uses the same bounded queue drain');
+    }
+    assert.equal(api.attentionAcknowledgementKeyIsRecordedForTest('pressure-0'), true);
+    assert.equal(api.attentionAcknowledgementKeyIsRecordedForTest('pressure-299'), false);
+    assert.ok(cancelled.length > 0, 'pressure retires its held frame');
+    const queued = api.clientEventTransportStateForTest().queued;
+    frames.shift()();
+    assert.equal(api.clientEventTransportStateForTest().queued, queued, 'the cancelled frame cannot flush the newer batch');
+    for (const frame of frames.splice(0)) frame();
+    for (let index = 0; index < 300; index++) assert.equal(api.attentionAcknowledgementKeyIsRecordedForTest(`pressure-${index}`), true);
+    assert.equal(api.clientEventTransportStateForTest().queued, 0);
+  });
+
+  test('a queued full snapshot keeps its dependent patch baseline across a later full snapshot', () => {
+    const frames = [];
+    const api = loadYomux('', ['1','2'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+    });
+    const send = (payload, revision, base) => api.handleClientPushEventForTest('auto_approve_changed', payload,
+      {epoch:'server-a',resource:'auto_approve_changed',resource_revision:revision,...(base ? {base_resource_revision:base} : {})});
+    const full = enabled => ({data:{session_order:['1','2'],sessions:Object.fromEntries(['1','2'].map(target => [target,{target,enabled}]))}});
+    const patch = (session, enabled) => ({patch:true,collection:'sessions',changes:{[session]:{target:session,enabled}},fields:{},removed_keys:[],removed_fields:[]});
+    send(full(false),1);
+    send(patch('1',true),2,1);
+    send(full(true),3);
+    send(patch('2',false),4,3);
+    assert.equal(api.clientEventTransportStateForTest().queued,4,'the earlier full snapshot remains ahead of its dependent patch');
+    for (const frame of frames.splice(0)) frame();
+    assert.equal(api.autoApproveStateForTest('1').enabled,true);
+    assert.equal(api.autoApproveStateForTest('2').enabled,false);
+  });
+
+  test('event queue semantics distinguish incremental effects from scoped replacement state', () => {
+    const source = fs.readFileSync('static_src/js/yomux/99_client_event_transport.js','utf8');
+    const context = vm.createContext({clientPushEventSessionKey:payload => payload.session || ''});
+    vm.runInContext(source.slice(source.indexOf('const clientPushEventQueueLimit'),source.indexOf('function queueClientPushEvent(')),context);
+    for (const type of ['files_changed','fs_changed','attention_acks_changed','event_log_changed','stats_sample','yoagent_stream_delta']) {
+      assert.equal(context.clientPushEventRequiresOrder(type,{}),true,type);
+    }
+    for (const [type,payload] of [['auto_approve_changed',{patch:true}],['tmux_signals_changed',{patch:true}],
+      ['yoagent_jobs_changed',{notification:{body:'fired'}}],['tmux_roster_changed',{renames:[{old_session:'a',new_session:'b'}]}]]) {
+      assert.equal(context.clientPushEventRequiresOrder(type,payload),true,type);
+    }
+    for (const type of ['settings_changed','backend_health_changed','auto_approve_changed','tmux_signals_changed','chat_messages_changed']) {
+      assert.equal(context.clientPushEventRequiresOrder(type,{}),false,type);
+    }
+    for (const type of ['search_progress','background_refresh_done']) {
+      assert.notEqual(context.clientPushEventCoalesceKey(type,{}, {resource:'scope-a'}),context.clientPushEventCoalesceKey(type,{}, {resource:'scope-b'}));
+    }
+    assert.notEqual(context.clientPushEventCoalesceKey('search_progress',{scope_id:'a'}),context.clientPushEventCoalesceKey('search_progress',{scope_id:'b'}));
+    assert.notEqual(context.clientPushEventCoalesceKey('background_refresh_done',{role:'search-index',root:'/a'}),context.clientPushEventCoalesceKey('background_refresh_done',{role:'search-index',root:'/b'}));
   });
 
   await testAsync('a revision-only agent-window patch advances the revision without HTTP or a row rebuild', async () => {
@@ -7746,7 +8389,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       isTmuxSession: () => true,
       postEventBatch: events => {
         batches.push(events);
-        return Promise.resolve(batchesSucceed);
+        return Promise.resolve(new Set(batchesSucceed ? events : []));
       },
     });
     states.set('one', {state: {key: 'idle', reason: 'waiting', signature: 'idle:waiting'}});
@@ -7767,7 +8410,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
 
   await testAsync('event batches keep the existing per-session lifecycle guard', async () => {
     const source = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
-    const start = source.indexOf('function postEventBatch(');
+    const start = source.indexOf('async function postEventBatch(');
     const end = source.indexOf('\nfunction normalizeRole', start);
     const requests = [];
     const refreshes = [];
@@ -7794,7 +8437,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       {session: 'fresh', type: 'state_changed', message: 'fresh'},
       {session: 'stale', type: 'state_changed', message: 'stale'},
     ]);
-    assert.equal(result, true);
+    assert.equal(result.size, 1);
     assert.equal(requests.length, 1, 'all current transitions share one HTTP request');
     assert.equal(requests[0].url, '/api/events');
     assert.equal(requests[0].options.method, 'POST');
@@ -7804,7 +8447,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     await context.postEventBatch([{session: 'fresh', type: 'state_changed', message: 'changed'}]);
     assert.deepStrictEqual(canonical(refreshes), [{sessions: ['fresh']}]);
     responseOK = false;
-    assert.equal(await context.postEventBatch([{session: 'fresh', type: 'state_changed', message: 'failed'}]), false, 'HTTP failure keeps transition queued');
+    assert.equal((await context.postEventBatch([{session: 'fresh', type: 'state_changed', message: 'failed'}])).size, 0, 'HTTP failure keeps transition queued');
     requests.length = 0;
     await context.postEventBatch(Array.from({length: 65}, (_, index) => ({session: `session-${index}`, type: 'state_changed', message: 'changed'})));
     assert.deepStrictEqual(requests.map(request => JSON.parse(request.options.body).events.length), [64, 1], 'large transition bursts stay within the server batch limit');
@@ -10777,7 +11420,10 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.ok(source.includes('const fileExplorerFsBatchRequestLimit = fileExplorerServerStatedLimit(fileExplorerFsBatchLimits.maxRequests, 1);'), 'the flush splits at the request bound the server states');
     assert.ok(source.includes('const fileExplorerFsBatchTriggerCountLimit = fileExplorerServerStatedLimit(fileExplorerFsBatchLimits.triggerCountLimit, 1);'), 'coalesced trigger counts are capped at the ceiling the server states');
     assert.equal(/(?:fileExplorerFsBatchRequestLimit|fileExplorerFsBatchTriggerCountLimit)\s*=\s*\d/.test(source), false, 'neither batch bound may be a literal in the bundle');
-    assert.ok(/catch \(error\)[\s\S]{0,260}trigger: 'watch-diff-fallback'/.test(source), 'watch-diff failure repairs remain attributable');
+    const watchDiffStart = source.indexOf('async function refreshFileExplorerFromWatchDiffOnce(');
+    const watchDiffEnd = source.indexOf('\nfunction refreshFileExplorerFromWatchDiff(', watchDiffStart);
+    assert.ok(watchDiffStart >= 0 && watchDiffEnd > watchDiffStart);
+    assert.ok(/catch \(error\)[\s\S]*trigger: 'watch-diff-fallback'/.test(source.slice(watchDiffStart, watchDiffEnd)), 'watch-diff failure repairs remain attributable within the shared owner');
     assert.ok(source.includes("trigger: 'deferred-interaction'"), 'the deferred interaction repair is distinguishable from the watch fallback');
     assert.ok(actionsSource.includes('async function refreshFileExplorerIfChanged(options = {})') && actionsSource.includes('trigger: options.trigger'), 'the fallback owner forwards its trigger to the shared batch request');
   });
@@ -12799,42 +13445,45 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(api.filesystemWatchTokenForTest(), 'new-token', 'watch-diff response advances the client baseline token');
     }
 
-    await testAsync('an out-of-order watch-diff response cannot regress a newer full keyframe cursor', async () => {
-      const api = loadYomux('', ['1']);
-      const pendingDiff = deferredFetch();
-      api.setFileExplorerRootForTest('/repo');
-      api.setFilesystemWatchTokenForTest('old-token');
-      api.setFilesystemLastFullAtForTest(Date.now());
-      api.setFetchForTest(url => {
-        const parsed = new URL(String(url), 'https://yolomux.test');
-        assert.equal(parsed.pathname, '/api/fs/watch-diff');
-        assert.equal(parsed.searchParams.get('since'), 'old-token');
-        return pendingDiff.promise;
+    for (const native of [false, true]) {
+      await testAsync(`an out-of-order ${native ? 'native' : 'legacy'} watch-diff response cannot regress a newer full keyframe cursor`, async () => {
+        const api = loadYomux('', ['1']);
+        const pendingDiff = deferredFetch();
+        api.setFileExplorerRootForTest('/repo');
+        api.setFilesystemWatchTokenForTest('old-token');
+        api.setFilesystemLastFullAtForTest(Date.now());
+        api.setFetchForTest(url => {
+          const parsed = new URL(String(url), 'https://yolomux.test');
+          assert.equal(parsed.pathname, '/api/fs/watch-diff');
+          assert.equal(parsed.searchParams.get('since'), 'old-token');
+          return pendingDiff.promise;
+        });
+
+        const compactRefresh = api.refreshFileExplorerFromPushForTest(native ? {
+          paths: ['/repo/changed.json'], reason: 'filesystem-change', token: 'compact-push-token', revision: 2,
+        } : {
+          refresh: true,
+          mode: 'diff',
+          token: 'compact-push-token',
+          roots: ['/repo'],
+          change_summary: {roots_changed: 1},
+        });
+        await flushAsyncWork();
+        assert.equal(api.filesystemPushTokenForTest(), 'compact-push-token', 'the live push token records the compact invalidation while its diff is pending');
+        assert.equal(api.filesystemWatchTokenForTest(), 'old-token', 'a compact invalidation cannot advance the watch-diff cursor before its response');
+
+        await api.refreshFileExplorerFromPushForTest({mode: 'full', token: 'full-keyframe-token', directories: []});
+        assert.equal(api.filesystemPushTokenForTest(), 'full-keyframe-token', 'the newer full keyframe becomes the live push token');
+        assert.equal(api.filesystemWatchTokenForTest(), 'full-keyframe-token', 'the newer full keyframe advances the watch-diff cursor');
+
+        pendingDiff.resolve(jsonResponse({mode: 'diff', token: 'stale-diff-token', since: 'old-token', directories: []}));
+        await compactRefresh;
+        await flushAsyncWork();
+
+        assert.equal(api.filesystemPushTokenForTest(), 'full-keyframe-token', 'the stale watch-diff completion cannot replace the live full-keyframe push token');
+        assert.equal(api.filesystemWatchTokenForTest(), 'full-keyframe-token', 'the stale watch-diff completion cannot regress the full-keyframe cursor');
       });
-
-      const compactRefresh = api.refreshFileExplorerFromPushForTest({
-        refresh: true,
-        mode: 'diff',
-        token: 'compact-push-token',
-        roots: ['/repo'],
-        change_summary: {roots_changed: 1},
-      });
-      await flushAsyncWork();
-      assert.equal(api.filesystemPushTokenForTest(), 'compact-push-token', 'the live push token records the compact invalidation while its diff is pending');
-      assert.equal(api.filesystemWatchTokenForTest(), 'old-token', 'a compact invalidation cannot advance the watch-diff cursor before its response');
-
-      await api.refreshFileExplorerFromPushForTest({mode: 'full', token: 'full-keyframe-token', directories: []});
-      assert.equal(api.filesystemPushTokenForTest(), 'full-keyframe-token', 'the newer full keyframe becomes the live push token');
-      assert.equal(api.filesystemWatchTokenForTest(), 'full-keyframe-token', 'the newer full keyframe advances the watch-diff cursor');
-
-      pendingDiff.resolve(jsonResponse({mode: 'diff', token: 'stale-diff-token', since: 'old-token', directories: []}));
-      await compactRefresh;
-      await flushAsyncWork();
-
-      assert.equal(api.filesystemPushTokenForTest(), 'full-keyframe-token', 'the stale watch-diff completion cannot replace the live full-keyframe push token');
-      assert.equal(api.filesystemWatchTokenForTest(), 'full-keyframe-token', 'the stale watch-diff completion cannot regress the full-keyframe cursor');
-    });
-
+    }
     await testAsync('watch-diff 202 waits for its operation terminal result without a Finder batch fallback', async () => {
       const api = loadYomux('', ['1']);
       const calls = [];
@@ -15955,6 +16604,29 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       await typingApi.pollSelfUpdateReloadForTest();
       assert.equal(typingApi.reloadCountForTest(), 0, 'active typing blocks self-update auto reload');
       assert.ok(typingToasts.some(item => item.title === 'Software Update' && String(item.lines[0]).includes('active typing')), 'typing deferral shows a self-update-specific toast');
+    });
+
+    await testAsync('self-update: a failed install job replaces the pending message with its error', async () => {
+      const api = loadYomux('', ['1']);
+      const toasts = [];
+      api.setShowToastForTest((title, lines) => {
+        toasts.push({title, lines: Array.isArray(lines) ? lines : [lines]});
+        return null;
+      });
+      api.setFetchForTest(url => {
+        if (String(url).startsWith('/api/self-update/status')) {
+          return Promise.resolve(jsonResponse({job: {
+            state: 'failed',
+            error: "Auto-update can't use this checkout because it has local work. Save that work, then run this instance from a clean 0.10.10 checkout.",
+          }}));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      });
+
+      api.startSelfUpdateReloadPollingForTest('0.10.10');
+      await api.pollSelfUpdateReloadForTest();
+      assert.equal(api.selfUpdateReloadStateForTest().pending, false, 'a failed install stops restart polling');
+      assert.ok(toasts.some(item => item.title === 'Update failed' && String(item.lines[0]).includes('clean 0.10.10 checkout')), `the offered release and action are shown to the user: ${JSON.stringify(toasts)}`);
     });
 
     await testAsync('self-update: restart polling record replaces timers and terminates one attempt', async () => {

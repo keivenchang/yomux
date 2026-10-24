@@ -32,54 +32,55 @@ import (
 
 const (
 	goYoloPollInterval       = 500 * time.Millisecond
-	goYoloCapacityRetryDelay = 3 * time.Second
+	goYoloCapacityRetryDelay = 10 * time.Second
+	goYoloApprovalRetryDelay = 3 * time.Second
 	goYoloCaptureTimeout     = 2 * time.Second
 )
 
-var goNewerPromptEvidence = regexp.MustCompile(`(?im)(?:would you like to|do you want to|press enter to confirm|allow once|allow always|permission required|needs your approval|\bapprove\b|\breject\b)`)
 var goComposerPromptLine = regexp.MustCompile(`^\s*[❯›>](.*)$`)
 var goComposerPlaceholder = regexp.MustCompile(`(?i)^(?:ask (?:codex|claude)(?: to do anything)?|ask anything|type your message)$`)
-var goComposerFooterLine = regexp.MustCompile(`(?i)^(?:gpt-[^ ]+\b.*|claude\s+code\b.*|bypass permissions\b.*|tip:.*)$`)
-var goComposerRuleLine = regexp.MustCompile(`^[─━╭╮╰╯│┌┐└┘─]+$`)
 var goYoloPositiveOption = regexp.MustCompile(`(?i)^\s*(?:yes\b|allow\b|approve\b|proceed\b|accept\b)`)
 var goYoloNegativeOption = regexp.MustCompile(`(?i)^\s*(?:no\b|reject\b|cancel\b|tell claude what to change\b|tell codex what to do differently\b)`)
 
-func goComposerHasUnsentText(visible string) bool {
+func goComposerDraft(visible string) (string, bool) {
 	lines := strings.Split(visible, "\n")
-	start := max(0, len(lines)-12)
-	promptIndex := -1
-	for index := len(lines) - 1; index >= start; index-- {
-		if goComposerPromptLine.MatchString(strings.TrimSpace(lines[index])) {
-			promptIndex = index
-			break
-		}
-	}
-	if promptIndex < 0 {
-		return true
-	}
-	match := goComposerPromptLine.FindStringSubmatch(strings.TrimSpace(lines[promptIndex]))
-	if len(match) != 2 {
-		return true
-	}
-	promptText := strings.TrimSpace(match[1])
-	if promptText != "" && !goComposerPlaceholder.MatchString(promptText) {
-		return true
-	}
-	for _, line := range lines[promptIndex+1:] {
-		line = strings.TrimSpace(line)
-		if line == "" || goComposerFooterLine.MatchString(line) || goComposerRuleLine.MatchString(line) {
+	for index := len(lines) - 1; index >= max(0, len(lines)-12); index-- {
+		match := goComposerPromptLine.FindStringSubmatch(strings.TrimSpace(lines[index]))
+		if len(match) != 2 {
 			continue
 		}
-		return true
+		if !stats.AgentComposerFooter(lines[index+1:]) {
+			return "", false
+		}
+		draft := strings.TrimSpace(match[1])
+		if goComposerPlaceholder.MatchString(draft) {
+			draft = ""
+		}
+		return draft, true
 	}
-	return false
+	return "", false
+}
+
+func goCapacityRecoveryKeys(agentState, visible string, pending bool) []string {
+	state := strings.ToLower(strings.TrimSpace(agentState))
+	if (state != "idle" && state != "blocked") || !goCapacityNoticeCurrent(visible) {
+		return nil
+	}
+	draft, valid := goComposerDraft(visible)
+	if !valid {
+		return nil
+	}
+	if draft == "" {
+		return []string{"continue", "Enter"}
+	}
+	if pending && draft == "continue" {
+		return []string{"Enter"}
+	}
+	return nil
 }
 
 func goCapacityRecoveryAllowed(agentState, visible string) bool {
-	if !strings.EqualFold(strings.TrimSpace(agentState), "idle") || goNewerPromptEvidence.MatchString(visible) || goComposerHasUnsentText(visible) {
-		return false
-	}
-	return goCapacityNoticeCurrent(visible)
+	return goCapacityRecoveryKeys(agentState, visible, false) != nil
 }
 
 func goCapacityNoticeCurrent(visible string) bool {
@@ -88,6 +89,14 @@ func goCapacityNoticeCurrent(visible string) bool {
 
 func goCapacityRetryDue(now, lastSent time.Time) bool {
 	return lastSent.IsZero() || now.Sub(lastSent) >= goYoloCapacityRetryDelay
+}
+
+// Delivery and pending input belong to this session, pane and process instance.
+type goYoloCapacityRecovery struct {
+	pending         bool
+	pastedAt        time.Time
+	sessionIdentity string
+	processIdentity string
 }
 
 type goYoloWorker struct {
@@ -122,13 +131,14 @@ type goYoloStore struct {
 	metadataRefreshAt map[string]time.Time
 	closed            bool
 	lastSent          map[string]time.Time
+	capacityRecovery  map[string]goYoloCapacityRecovery
 }
 
 func newGoYoloStore(configDir string) (*goYoloStore, error) {
 	store := &goYoloStore{
 		path:    filepath.Join(configDir, "go-yolo-enabled.json"),
 		enabled: make(map[string]bool), identities: make(map[string]string), agentIDs: make(map[string]map[string]string), workers: make(map[string]*goYoloWorker), lockOwners: make(map[string]map[string]any), transitions: make(map[string]*sync.Mutex),
-		lastSent: make(map[string]time.Time), lastAction: make(map[string]string), lastError: make(map[string]string),
+		lastSent: make(map[string]time.Time), capacityRecovery: make(map[string]goYoloCapacityRecovery), lastAction: make(map[string]string), lastError: make(map[string]string),
 		lastPrompt: make(map[string]string), lastPromptAt: make(map[string]time.Time), approved: make(map[string]int), declined: make(map[string]int), blocked: make(map[string]int),
 		attempts: make(map[string]int), failures: make(map[string]int), lastAttempt: make(map[string]time.Time), lastSuccess: make(map[string]time.Time), metadataRefreshAt: make(map[string]time.Time),
 	}
@@ -283,6 +293,7 @@ func (store *goYoloStore) setIfIdentity(session, expectedIdentity string, enable
 		for target := range store.lastSent {
 			if strings.HasPrefix(target, session+"\x00") {
 				delete(store.lastSent, target)
+				delete(store.capacityRecovery, target)
 			}
 		}
 	}
@@ -596,11 +607,6 @@ func (s *server) yoloRulesOpen(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, s.goYoloPolicyStatus())
 }
 
-func (s *server) goYoloAgentIdleNow(ctx context.Context, agent map[string]any) bool {
-	state, fresh := s.goYoloAgentStatusNow(ctx, agent)
-	return fresh && state == "idle"
-}
-
 func (s *server) goYoloAgentStatusNow(ctx context.Context, agent map[string]any) (string, bool) {
 	if s.agentStatusClassifier == nil {
 		observedAt, _ := agent["status_observed_at"].(float64)
@@ -743,49 +749,70 @@ func (s *server) goYoloAgentBelongsToPane(ctx context.Context, target string, ag
 	return goYoloProcessBelongsToPane(processes, panePID, agentPID), nil
 }
 
+type goYoloKeyDelivery struct {
+	pasted        bool
+	keysAttempted bool
+	keysSent      bool
+}
+
 // goYoloGuardedSendKeys is the only automated terminal write path. It gathers
 // live ownership and agent evidence before the final capture, then sends only
 // a small allowlisted key sequence when the caller's exact screen guard holds.
-func (s *server) goYoloGuardedSendKeys(ctx context.Context, session, target, expectedIdentity string, agent map[string]any, keys []string, allowedStates []string, screenGuard func(string) bool) (bool, error) {
+func (s *server) goYoloGuardedSendKeys(ctx context.Context, session, target, expectedIdentity string, agent map[string]any, keys []string, allowedStates []string, screenGuard func(string) bool) (goYoloKeyDelivery, error) {
 	if len(keys) == 0 || len(keys) > 3 || screenGuard == nil {
-		return false, errors.New("invalid guarded YO key sequence")
+		return goYoloKeyDelivery{}, errors.New("invalid guarded YO key sequence")
 	}
 	switch strings.Join(keys, "\x00") {
-	case "continue\x00Enter\x00Enter", "Enter", "Up", "Down":
+	case "continue\x00Enter", "Enter", "Up", "Down":
 	default:
-		return false, errors.New("unsupported guarded YO key sequence")
+		return goYoloKeyDelivery{}, errors.New("unsupported guarded YO key sequence")
 	}
 	if ctx.Err() != nil || s.yolo == nil || !s.yolo.isEnabled(session) {
-		return false, nil
+		return goYoloKeyDelivery{}, nil
 	}
-	sessionIdentity, sessionErr := s.goYoloSessionIdentity(ctx, session)
-	targetIdentity, targetErr := s.goYoloPaneSessionIdentity(ctx, target)
-	if sessionErr != nil || targetErr != nil || sessionIdentity != expectedIdentity || targetIdentity != expectedIdentity {
-		return false, nil
+	guard := func() (bool, error) {
+		sessionIdentity, sessionErr := s.goYoloSessionIdentity(ctx, session)
+		targetIdentity, targetErr := s.goYoloPaneSessionIdentity(ctx, target)
+		if sessionErr != nil || targetErr != nil || sessionIdentity != expectedIdentity || targetIdentity != expectedIdentity {
+			return false, nil
+		}
+		state, fresh := s.goYoloAgentStatusNow(ctx, agent)
+		if !fresh || !slices.Contains(allowedStates, state) {
+			return false, nil
+		}
+		instanceCurrent, instanceErr := s.goYoloRevalidateAgentInstance(ctx, session, expectedIdentity, target, agent)
+		if instanceErr != nil || !instanceCurrent {
+			return false, instanceErr
+		}
+		dryRun, settingsErr := s.goYoloDryRun()
+		if settingsErr != nil || dryRun {
+			return false, settingsErr
+		}
+		// Keep the guarded screen capture directly adjacent to each terminal write. In
+		// particular, never clear or submit a draft that appeared during the
+		// preceding identity and status checks.
+		visible, captureErr := s.goYoloCapture(ctx, target)
+		return captureErr == nil && screenGuard(visible) && ctx.Err() == nil && s.yolo.isEnabled(session), captureErr
 	}
-	state, fresh := s.goYoloAgentStatusNow(ctx, agent)
-	if !fresh || !slices.Contains(allowedStates, state) {
-		return false, nil
-	}
-	instanceCurrent, instanceErr := s.goYoloRevalidateAgentInstance(ctx, session, expectedIdentity, target, agent)
-	if instanceErr != nil || !instanceCurrent {
-		return false, instanceErr
-	}
-	// Keep the guarded screen capture directly adjacent to send-keys. In
-	// particular, never clear or submit a draft that appeared during the
-	// preceding identity and status checks.
-	visible, captureErr := s.goYoloCapture(ctx, target)
-	if captureErr != nil {
-		return false, captureErr
-	}
-	if !screenGuard(visible) || ctx.Err() != nil || !s.yolo.isEnabled(session) {
-		return false, nil
+	if len(keys) == 2 && keys[0] == "continue" {
+		pasted, err := s.pasteTerminalText(ctx, target, keys[0], guard)
+		if err != nil || !pasted {
+			return goYoloKeyDelivery{pasted: pasted}, err
+		}
+		// Paste and submission are separate writes. Reuse every ownership and
+		// admission check before Return, including the exact pasted composer.
+		submission, err := s.goYoloGuardedSendKeys(ctx, session, target, expectedIdentity, agent, []string{"Enter"}, allowedStates, func(screen string) bool {
+			return slices.Equal(goCapacityRecoveryKeys("idle", screen, true), []string{"Enter"})
+		})
+		return goYoloKeyDelivery{pasted: true, keysAttempted: submission.keysAttempted, keysSent: submission.keysSent}, err
+	} else if allowed, err := guard(); err != nil || !allowed {
+		return goYoloKeyDelivery{}, err
 	}
 	commandArgs := append([]string{"send-keys", "-t", target}, keys...)
 	if err := s.tmuxCommandContext(ctx, commandArgs...).Run(); err != nil {
-		return false, err
+		return goYoloKeyDelivery{keysAttempted: true}, err
 	}
-	return true, nil
+	return goYoloKeyDelivery{keysAttempted: true, keysSent: true}, nil
 }
 
 func (store *goYoloStore) identity(session string) string {
@@ -1207,14 +1234,47 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 			continue
 		}
 		liveState, statusFresh := s.goYoloAgentStatusNow(ctx, agent)
+		if statusFresh && liveState == "working" {
+			s.yolo.mu.Lock()
+			delivery, delivered := s.yolo.capacityRecovery[key]
+			delivery.pending = false
+			if delivered {
+				s.yolo.capacityRecovery[key] = delivery
+			}
+			s.yolo.mu.Unlock()
+			if !delivered && s.yolo.recoverSuspended(session) {
+				s.publishGoYoloState(session)
+			}
+			if delivered && delivery.pastedAt.IsZero() && delivery.sessionIdentity == expectedIdentity && delivery.processIdentity == processIdentity {
+				screen, captureErr := s.goYoloCapture(ctx, target)
+				current, instanceErr := s.goYoloRevalidateAgentInstance(ctx, session, expectedIdentity, target, agent)
+				if captureErr == nil && instanceErr == nil && current && !goCapacityNoticeCurrent(screen) {
+					s.yolo.mu.Lock()
+					delete(s.yolo.capacityRecovery, key)
+					delete(s.yolo.lastSent, key)
+					s.yolo.mu.Unlock()
+					s.yolo.record(session, "submitted continue for the capacity notice; agent working confirmed", "", false, true)
+					s.publishGoYoloAuditEvent(session, "yolo_capacity_recovery_resumed", "agent resumed work after capacity recovery delivery", map[string]any{"attempted": false, "succeeded": true})
+					s.publishGoYoloState(session)
+				}
+			}
+			continue
+		}
 		if !statusFresh || liveState != state {
+			s.yolo.mu.Lock()
+			delete(s.yolo.capacityRecovery, key)
+			s.yolo.mu.Unlock()
 			s.recordGoYoloStatus(session, "suspended: current agent status could not be confirmed", "", false, false)
 			continue
 		}
 		if s.yolo.recoverSuspended(session) {
 			s.publishGoYoloState(session)
 		}
-		if state != "idle" && state != "needs-input" {
+		if state != "idle" && state != "needs-input" && !(kind == "codex" && state == "blocked") {
+			s.yolo.mu.Lock()
+			delete(s.yolo.capacityRecovery, key)
+			delete(s.yolo.lastSent, key)
+			s.yolo.mu.Unlock()
 			continue
 		}
 		visible, err := s.goYoloCapture(ctx, target)
@@ -1225,19 +1285,53 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 		if s.yolo.recoverSuspended(session) {
 			s.publishGoYoloState(session)
 		}
-		if prompt := yolo.ClassifyPrompt(visible, ""); prompt.Actionable && strings.EqualFold(string(prompt.Agent), kind) {
+		if prompt := yolo.ClassifyPrompt(visible, ""); state != "blocked" && prompt.Actionable && strings.EqualFold(string(prompt.Agent), kind) {
+			s.yolo.mu.Lock()
+			delete(s.yolo.capacityRecovery, key)
+			delete(s.yolo.lastSent, key)
+			s.yolo.mu.Unlock()
 			if err := s.goYoloApprovalCycle(ctx, session, target, expectedIdentity, agent, prompt); err != nil {
 				return err
 			}
 			continue
 		}
-		if kind != "codex" || state != "idle" {
+		if kind != "codex" {
 			continue
 		}
-		if !goCapacityRecoveryAllowed(state, visible) {
+		s.yolo.mu.Lock()
+		pendingOwner := s.yolo.capacityRecovery[key]
+		pending := pendingOwner.pending && pendingOwner.sessionIdentity == expectedIdentity && pendingOwner.processIdentity == processIdentity
+		s.yolo.mu.Unlock()
+		if pending && !pendingOwner.pastedAt.IsZero() {
+			if time.Since(pendingOwner.pastedAt) >= goYoloCapacityRetryDelay {
+				s.yolo.mu.Lock()
+				delete(s.yolo.capacityRecovery, key)
+				s.yolo.mu.Unlock()
+				s.recordGoYoloStatus(session, "suspended: pasted recovery text could not be confirmed", "", false, false)
+				continue
+			}
+			if draft, valid := goComposerDraft(visible); valid && draft == "" && goCapacityNoticeCurrent(visible) {
+				continue
+			}
+		}
+		if draft, valid := goComposerDraft(visible); valid && draft == "" {
+			s.yolo.mu.Lock()
+			if delivery, exists := s.yolo.capacityRecovery[key]; exists {
+				delivery.pending = false
+				s.yolo.capacityRecovery[key] = delivery
+			}
+			s.yolo.mu.Unlock()
+			pending = false
+		}
+		keys := goCapacityRecoveryKeys(state, visible, pending)
+		if len(keys) == 0 {
+			s.yolo.mu.Lock()
+			delete(s.yolo.capacityRecovery, key)
+			s.yolo.mu.Unlock()
 			if !goCapacityNoticeCurrent(visible) {
 				s.yolo.mu.Lock()
 				delete(s.yolo.lastSent, key)
+				delete(s.yolo.capacityRecovery, key)
 				s.yolo.mu.Unlock()
 			}
 			continue
@@ -1251,16 +1345,13 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 		// Capture again immediately before sending so an approval or question that
 		// replaced the capacity notice cannot inherit this retry decision.
 		latest, err := s.goYoloCapture(ctx, target)
-		if err != nil || !goCapacityRecoveryAllowed(state, latest) {
+		if err != nil || !slices.Equal(keys, goCapacityRecoveryKeys(state, latest, pending)) {
 			if err == nil && !goCapacityNoticeCurrent(latest) {
 				s.yolo.mu.Lock()
 				delete(s.yolo.lastSent, key)
+				delete(s.yolo.capacityRecovery, key)
 				s.yolo.mu.Unlock()
 			}
-			continue
-		}
-		if !s.goYoloAgentIdleNow(ctx, agent) {
-			s.recordGoYoloStatus(session, "suspended: current agent status is no longer idle", "", false, false)
 			continue
 		}
 		latestSessionIdentity, sessionErr := s.goYoloSessionIdentity(ctx, session)
@@ -1285,23 +1376,44 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 			s.publishGoYoloState(session)
 			continue
 		}
-		attemptedAt := time.Now()
-		s.yolo.mu.Lock()
-		s.yolo.lastSent[key] = attemptedAt
-		s.yolo.mu.Unlock()
-		sent, err := s.goYoloGuardedSendKeys(ctx, session, target, expectedIdentity, agent, []string{"continue", "Enter", "Enter"}, []string{"idle"}, func(screen string) bool {
-			return goCapacityRecoveryAllowed("idle", screen)
+		delivery, err := s.goYoloGuardedSendKeys(ctx, session, target, expectedIdentity, agent, keys, []string{"idle", "blocked"}, func(screen string) bool {
+			return slices.Equal(keys, goCapacityRecoveryKeys(state, screen, pending))
 		})
+		if delivery.pasted {
+			s.yolo.mu.Lock()
+			if s.yolo.enabled[session] && s.yolo.identities[session] == expectedIdentity && s.yolo.agentIDs[session][target] == processIdentity {
+				s.yolo.capacityRecovery[key] = goYoloCapacityRecovery{
+					sessionIdentity: expectedIdentity, processIdentity: processIdentity,
+					pending: true, pastedAt: time.Now(),
+				}
+			}
+			s.yolo.mu.Unlock()
+		}
+		if delivery.keysAttempted {
+			s.yolo.mu.Lock()
+			s.yolo.lastSent[key] = time.Now()
+			s.yolo.mu.Unlock()
+		}
 		if err != nil {
-			s.yolo.record(session, "capacity recovery submission failed", err.Error(), true, false)
-			s.publishGoYoloAuditEvent(session, "yolo_capacity_recovery_failed", "capacity recovery submission failed", map[string]any{"error": err.Error(), "attempted": true, "succeeded": false})
+			s.yolo.record(session, "capacity recovery submission failed", err.Error(), delivery.keysAttempted, false)
+			s.publishGoYoloAuditEvent(session, "yolo_capacity_recovery_failed", "capacity recovery submission failed", map[string]any{"error": err.Error(), "attempted": delivery.keysAttempted, "succeeded": false})
 			s.publishGoYoloState(session)
 			return fmt.Errorf("send capacity recovery: %w", err)
 		}
-		if !sent {
+		if !delivery.keysSent {
+			if delivery.pasted {
+				s.recordGoYoloStatus(session, "capacity recovery text pasted; submission not yet confirmed", "", false, false)
+			}
 			continue
 		}
 		responseScreen, responseCaptureErr := s.goYoloCapture(ctx, target)
+		draft, validDraft := goComposerDraft(responseScreen)
+		s.yolo.mu.Lock()
+		s.yolo.capacityRecovery[key] = goYoloCapacityRecovery{
+			sessionIdentity: expectedIdentity, processIdentity: processIdentity,
+			pending: responseCaptureErr == nil && validDraft && draft == "continue" && goCapacityNoticeCurrent(responseScreen),
+		}
+		s.yolo.mu.Unlock()
 		responseState, responseStatusFresh := s.goYoloAgentStatusNow(ctx, agent)
 		if responseCaptureErr != nil || !responseStatusFresh || responseState != "working" || goCapacityNoticeCurrent(responseScreen) {
 			s.yolo.record(session, "capacity recovery submission sent; agent response not yet confirmed", "", true, false)
@@ -1309,6 +1421,9 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 			s.publishGoYoloState(session)
 			continue
 		}
+		s.yolo.mu.Lock()
+		delete(s.yolo.capacityRecovery, key)
+		s.yolo.mu.Unlock()
 		s.yolo.record(session, "submitted continue for the current capacity notice", "", true, true)
 		s.publishGoYoloAuditEvent(session, "yolo_capacity_recovery_attempt", "submitted continue for the current capacity notice", map[string]any{"attempted": true, "succeeded": true})
 		s.publishGoYoloState(session)
@@ -1317,6 +1432,7 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 	for key := range s.yolo.lastSent {
 		if strings.HasPrefix(key, session+"\x00") && !seenTargets[key] {
 			delete(s.yolo.lastSent, key)
+			delete(s.yolo.capacityRecovery, key)
 		}
 	}
 	s.yolo.mu.Unlock()
@@ -1362,7 +1478,7 @@ func (s *server) goYoloApprovalCycle(ctx context.Context, session, target, expec
 	}
 	decision := yolo.LoadAndEvaluate(rulesPath, prompt.RuleInput, s.dangerouslyYolo)
 	activeAction := decision.Action == yolo.Approve || decision.Action == yolo.Decline
-	if prompt.Hash == lastHash && !lastAt.IsZero() && (!activeAction || time.Since(lastAt) < goYoloCapacityRetryDelay) {
+	if prompt.Hash == lastHash && !lastAt.IsZero() && (!activeAction || time.Since(lastAt) < goYoloApprovalRetryDelay) {
 		return nil
 	}
 	if decision.Error != "" && decision.Action == yolo.Ask {
@@ -1490,7 +1606,7 @@ func (s *server) goYoloSubmitApproval(ctx context.Context, session, target, expe
 		if sendErr != nil {
 			return false, false, fmt.Errorf("move approval selection: %w", sendErr)
 		}
-		if !sent {
+		if !sent.keysSent {
 			return false, false, nil
 		}
 		var moved bool
@@ -1510,7 +1626,7 @@ func (s *server) goYoloSubmitApproval(ctx context.Context, session, target, expe
 	if err != nil {
 		return false, false, fmt.Errorf("submit approval option: %w", err)
 	}
-	if !sent {
+	if !sent.keysSent {
 		return false, false, nil
 	}
 	response, responseErr := s.goYoloCapture(ctx, target)
@@ -1692,7 +1808,7 @@ func (s *server) autoApprove(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusOK, s.goYoloSessionPayload(session))
 			return
 		}
-		topology, _ := s.tmuxTopologySnapshot()
+		topology, _ := s.goYoloReadTopologySnapshot()
 		projection := s.currentAgentWindowProjection(r.Context(), topology)
 		sessionStates := make(map[string]any, len(topology.sessions))
 		for _, name := range topology.sessions {
@@ -1797,12 +1913,23 @@ func (s *server) autoApprove(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, s.goYoloSessionPayload(session))
 }
 
+// YO status readers can use the same fresh cached topology as session metadata;
+// they must not wait for an unrelated forced roster fetch to finish.
+func (s *server) goYoloReadTopologySnapshot() (goTmuxTopology, error) {
+	if s.tmuxSessionRosterFresh() {
+		if topology, known := s.cachedTmuxTopologySnapshot(); known {
+			return topology, nil
+		}
+	}
+	return s.tmuxTopologySnapshot()
+}
+
 func (s *server) goYoloSessionPayload(session string, projections ...*goAgentWindowProjection) map[string]any {
 	var projection goAgentWindowProjection
 	if len(projections) > 0 {
 		projection = *projections[0]
 	} else {
-		topology, _ := s.tmuxTopologySnapshot()
+		topology, _ := s.goYoloReadTopologySnapshot()
 		statusContext, cancel := context.WithTimeout(context.Background(), goYoloCaptureTimeout)
 		projection = s.currentAgentWindowProjection(statusContext, topology)
 		cancel()

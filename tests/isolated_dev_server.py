@@ -13,6 +13,7 @@ import hashlib
 import os
 import selectors
 import signal
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from http import HTTPStatus
 from http.client import HTTPConnection
+from http.client import HTTPSConnection
 from pathlib import Path
 from typing import Any
 
@@ -257,6 +259,7 @@ def wait_until_serving(
     label: str = "isolated dev server",
     product_name: str = "YOmux",
     timeout_seconds: float = SERVER_READY_TIMEOUT_SECONDS,
+    scheme: str = "http",
 ) -> None:
     """Block until the server prints its own serving line, or fail with what it printed instead.
 
@@ -267,7 +270,7 @@ def wait_until_serving(
 
     stdout = process.stdout
     assert stdout is not None
-    expected = f"Serving {product_name} on http://127.0.0.1:{port}/"
+    expected = f"Serving {product_name} on {scheme}://127.0.0.1:{port}/"
     go_expected = "YOmux Go backend version="
     deadline = time.monotonic() + timeout_seconds
     with selectors.DefaultSelector() as selector:
@@ -296,7 +299,7 @@ def wait_until_serving(
             if expected in line or (
                 go_expected in line
                 and f"addr=127.0.0.1:{port}" in line
-                and "scheme=http" in line
+                and f"scheme={scheme}" in line.split()
             ):
                 return
 
@@ -358,16 +361,23 @@ class IsolatedDevServer:
     server_start_identity: str
     port_lease: HttpPortLease | None
     auth_bypass: bool = True
+    tls: bool = False
     env_overrides: dict[str, str] | None = None
     output: list[str] = field(default_factory=list)
     stopped: bool = False
 
     @property
     def base_url(self) -> str:
-        return f"http://127.0.0.1:{self.port}"
+        scheme = "https" if self.tls else "http"
+        return f"{scheme}://127.0.0.1:{self.port}"
 
     def request(self, path: str, *, timeout: float = 5.0) -> tuple[int, dict[str, str], bytes]:
-        connection = HTTPConnection("127.0.0.1", self.port, timeout=timeout)
+        if self.tls:
+            certificate = self.paths.tmp_dir / f"yomux-go-tls-{self.port}" / "self-signed.crt"
+            context = ssl.create_default_context(cafile=str(certificate))
+            connection = HTTPSConnection("127.0.0.1", self.port, timeout=timeout, context=context)
+        else:
+            connection = HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         try:
             connection.request("GET", path)
             response = connection.getresponse()
@@ -431,6 +441,7 @@ class IsolatedDevServer:
                 self.paths,
                 self.tmux,
                 auth_bypass=self.auth_bypass,
+                tls=self.tls,
                 sessions=sessions,
                 port=self.port,
                 port_lease=self.port_lease,
@@ -465,6 +476,7 @@ def start_isolated_dev_server(
     tmux_runtime: Any,
     *,
     auth_bypass: bool = True,
+    tls: bool = False,
     sessions: tuple[str, ...] = (),
     port: int | None = None,
     port_lease: HttpPortLease | None = None,
@@ -490,7 +502,7 @@ def start_isolated_dev_server(
     try:
         command = [
             *server_entrypoint_arguments(source_root),
-            "--http",
+            *([] if tls else ["--http"]),
             "--host",
             "127.0.0.1",
             "--port",
@@ -545,11 +557,12 @@ def start_isolated_dev_server(
             server_start_identity=server_start_identity,
             port_lease=port_lease,
             auth_bypass=auth_bypass,
+            tls=tls,
             env_overrides=env_overrides,
         )
         if not server_start_identity:
             raise AssertionError(f"{label} server process has no stable start identity")
-        wait_until_serving(process, port, server.output, label=label)
+        wait_until_serving(process, port, server.output, label=label, scheme="https" if tls else "http")
         return server
     except BaseException as start_error:
         cleanup_error: BaseException | None = None
@@ -566,6 +579,7 @@ def start_isolated_dev_server(
                         server_start_identity="",
                         port_lease=port_lease,
                         auth_bypass=auth_bypass,
+                        tls=tls,
                         env_overrides=env_overrides,
                     )
                 stop_and_reap_daemons(server)
@@ -710,6 +724,7 @@ def isolated_dev_server_factory(
         source_root: Path = REPO_ROOT,
         state_dir: Path | None = None,
         auth_bypass: bool = True,
+        tls: bool = False,
         session_count: int = 1,
         env_overrides: dict[str, str] | None = None,
     ) -> IsolatedDevServer:
@@ -723,6 +738,7 @@ def isolated_dev_server_factory(
             paths,
             tmux_runtime,
             auth_bypass=auth_bypass,
+            tls=tls,
             env_overrides=env_overrides,
         )
         servers.append(server)

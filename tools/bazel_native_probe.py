@@ -17,6 +17,7 @@ ROOT = Path(__file__).absolute().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tools.fixture_storage import require_tmpfs
 from tools.instance_isolation import INHERITED_CREDENTIAL_ENV_KEYS
 from tools.product_environment import require_product_env
 from tools.tmux_paths import SHORT_TMPDIR_ENV, short_temp_directory
@@ -62,11 +63,7 @@ def probe(*, admission=True, tools=True):
     require(home.is_relative_to(fixture_root), "HOME is not fixture-owned")
     require(not INHERITED_CREDENTIAL_ENV_KEYS.intersection(os.environ), "ambient credential environment was inherited")
     if system == "Linux":
-        for directory in (Path("/tmp"), fixture_root, home):
-            # Query the kernel through the admitted GNU stat. A mount inventory
-            # can include covered mounts at the same path and misclassify them.
-            filesystem = subprocess.check_output(["stat", "--file-system", "--format=%T", "--", str(directory)], text=True, timeout=5).strip()
-            require(filesystem == "tmpfs", "fixture storage is not action-private tmpfs: " + str(directory))
+        require_tmpfs((Path("/tmp"), fixture_root, home))
     if admission:
         if tools:
             admit_tools()

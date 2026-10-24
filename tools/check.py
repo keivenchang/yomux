@@ -501,9 +501,11 @@ def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dic
     e2e_memory = pytest_memory_limit_mb(int(e2e_workers), serial=serial, cpu_percent=cpu_percent)
     parallel_single_worker_memory = pytest_memory_limit_mb(1, serial=serial, cpu_percent=cpu_percent)
     final_serial_memory = pytest_memory_limit_mb(1, serial=True, cpu_percent=cpu_percent)
-    # Keep worker allocation bounded, but let pytest containers borrow idle host
-    # capacity when other lanes finish early or reuse cached results.
-    pytest_container_cpu_limit = "unlimited"
+    # Worker counts do not cap their subprocesses; enforce the same CPU shares in each container.
+    nonbrowser_cpu_limit, browser_cpu_limit, e2e_cpu_limit = pytest_cpu_limits(
+        (nonbrowser_workers, browser_workers, e2e_workers)
+    )
+    single_cpu_limit = pytest_cpu_limit(1)
     browser_single_cpu = pytest_cpu_limit(1, per_worker=2, minimum=2)
     catalog = {
         StepId.PY_COMPILE: Step("py_compile", ["python3", "-m", "py_compile", *py_compile_files()]),
@@ -515,12 +517,12 @@ def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dic
         StepId.NODE_WALL_SYNTAX: Step("node --check static/tmux-wall.js", ["node", "--check", "static/tmux-wall.js"]),
         StepId.NODE_LAYOUT: Step("node tests/layout_url.test.js", ["node", "tests/layout_url.test.js", *NODE_LAYOUT_FILES]),
         StepId.BAZEL_GO: Step(lane_spec("bazel-go").label, ["tools/run_bazel_tests.sh", "--jobs", bazel_jobs, "--memory-mb", bazel_memory]),
-        StepId.PYTEST_NONBROWSER: Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser"), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not gate_serial and not e2e and not browser", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), nonbrowser_memory))),
-        StepId.PYTEST_GATE_SERIAL: Step("pytest timing-sensitive serial", ["python3", "-m", "pytest", *pytest_files("gate_serial"), "-m", "gate_serial", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), final_serial_memory))),
-        StepId.PYTEST_BOOT: Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot"), "-m", "boot", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), parallel_single_worker_memory))),
-        StepId.PYTEST_BROWSER: Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), browser_memory))),
-        StepId.PYTEST_BROWSER_GOLDEN: Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden"), "-m", "visual_golden", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), parallel_single_worker_memory))),
-        StepId.PYTEST_E2E: Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e"), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", *[arg for nodeid in BAZEL_GO_BROWSER_TESTS for arg in ("--deselect", nodeid)], "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), e2e_memory))),
+        StepId.PYTEST_NONBROWSER: Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser"), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not gate_serial and not e2e and not browser", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), nonbrowser_cpu_limit), (product_env_name('TEST_MEMORY_MB'), nonbrowser_memory))),
+        StepId.PYTEST_GATE_SERIAL: Step("pytest timing-sensitive serial", ["python3", "-m", "pytest", *pytest_files("gate_serial"), "-m", "gate_serial", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), single_cpu_limit), (product_env_name('TEST_MEMORY_MB'), final_serial_memory))),
+        StepId.PYTEST_BOOT: Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot"), "-m", "boot", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), browser_single_cpu), (product_env_name('TEST_MEMORY_MB'), parallel_single_worker_memory))),
+        StepId.PYTEST_BROWSER: Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), browser_cpu_limit), (product_env_name('TEST_MEMORY_MB'), browser_memory))),
+        StepId.PYTEST_BROWSER_GOLDEN: Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden"), "-m", "visual_golden", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), browser_single_cpu), (product_env_name('TEST_MEMORY_MB'), parallel_single_worker_memory))),
+        StepId.PYTEST_E2E: Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e"), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", *[arg for nodeid in BAZEL_GO_BROWSER_TESTS for arg in ("--deselect", nodeid)], "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), e2e_cpu_limit), (product_env_name('TEST_MEMORY_MB'), e2e_memory))),
         StepId.WHITESPACE: Step("git diff --check", ["git", "-c", f"safe.directory={REPO_ROOT}", "diff", "--check"]),
     }
 

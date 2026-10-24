@@ -21,6 +21,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -520,8 +521,16 @@ def _endpoint_environment(client: str, endpoint: str) -> dict[str, str]:
     return {}
 
 
-def _capture(tmux_binary: str, socket_path: Path, session: str) -> str:
-    return _tmux(tmux_binary, socket_path, "capture-pane", "-p", "-J", "-t", f"{session}:").stdout
+def _capture(tmux_binary: str, socket_path: Path, session: str, *, scrollback: bool = False) -> str:
+    history = ["-S", "-2000"] if scrollback else []
+    captured = _tmux(tmux_binary, socket_path, "capture-pane", "-p", "-J", *history, "-t", f"{session}:")
+    return captured.stdout
+
+
+@pytest.mark.parametrize("scrollback", [False, True])
+def test_capture_preserves_empty_pane_after_noninteractive_client_exit(monkeypatch, tmp_path, scrollback):
+    monkeypatch.setattr(sys.modules[__name__], "_tmux", lambda *_args: subprocess.CompletedProcess("tmux", 1, "", "can't find pane"))
+    assert _capture("tmux", tmp_path / "s", "exited-client", scrollback=scrollback) == ""
 
 
 def _pane_process(tmux_binary: str, socket_path: Path, session: str) -> dict[str, str]:
@@ -578,22 +587,64 @@ def _wait_for_mock_state(
     client: str,
     expected: set[str],
     timeout: float = 5.0,
-    pane_markers: tuple[str, ...] = (),
+    response_markers: tuple[str, ...] = (),
 ) -> tuple[str, dict[str, object]]:
     deadline = time.monotonic() + timeout
     pane = ""
+    transcript = ""
     state: dict[str, object] = {}
     while time.monotonic() < deadline:
         pane = _capture(tmux_binary, socket_path, session)
         state = prompt_detector.agent_screen_state(pane, pane_target=f"%{session}", agent_kind=client)
-        markers_ready = not pane_markers or any(marker in pane.lower() for marker in pane_markers)
+        if client == "opencode" and state.get("key") == "idle" and "idle" not in expected:
+            # Match the production fallback when OpenCode's footer hides the choice block.
+            state = prompt_detector.agent_screen_state(pane, pane_target=f"%{session}")
+        # A completed response can scroll above the viewport; only the visible pane owns activity.
+        transcript = _capture(tmux_binary, socket_path, session, scrollback=True) if response_markers else ""
+        markers_ready = not response_markers or any(marker in transcript.lower() for marker in response_markers)
         if state.get("key") in expected and markers_ready:
             return pane, state
         time.sleep(0.1)
-    return pane, state
+    raise AssertionError(f"mock state deadline exceeded: {json.dumps({'socket': str(socket_path), 'session': session, 'client': client, 'expected': sorted(expected), 'state': state, 'response_markers': response_markers, 'pane': pane, 'transcript': transcript})}")
 
 
-def _wait_for_mock_input_ready(ready_file: Path, timeout: float = 5.0) -> str:
+@pytest.mark.parametrize("client", CLIENTS)
+def test_mock_state_classifies_visible_pane_and_finds_scrolled_response(monkeypatch, tmp_path, client):
+    module = sys.modules[__name__]
+    visible = "idle composer"
+    transcript = "response marker\nDo you want to proceed?\n" + visible
+    monkeypatch.setattr(module, "_capture", lambda *_args, scrollback=False: transcript if scrollback else visible)
+
+    def classify(pane, **_kwargs):
+        assert pane == visible, "historic prompts must not enter the activity classifier"
+        return {"key": "idle"}
+
+    monkeypatch.setattr(prompt_detector, "agent_screen_state", classify)
+    pane, state = _wait_for_mock_state("tmux", tmp_path / "s", "fixture", client, {"idle"}, response_markers=("response marker",))
+    assert pane == visible and state["key"] == "idle"
+
+
+@pytest.mark.parametrize("key,transcript", [("idle", "missing response"), ("working", "response marker")])
+def test_mock_state_deadline_rejects_missing_response_or_wrong_state(monkeypatch, tmp_path, key, transcript):
+    module = sys.modules[__name__]
+    clock = iter((0.0, 0.0, 6.0))
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: next(clock), sleep=lambda _seconds: None))
+    monkeypatch.setattr(module, "_capture", lambda *_args, scrollback=False: transcript if scrollback else "visible pane")
+    monkeypatch.setattr(prompt_detector, "agent_screen_state", lambda *_args, **_kwargs: {"key": key})
+    with pytest.raises(AssertionError, match="mock state deadline exceeded") as failure:
+        _wait_for_mock_state("tmux", tmp_path / "s", "fixture", "codex", {"idle"}, response_markers=("response marker",))
+    assert "visible pane" in str(failure.value) and transcript in str(failure.value)
+
+
+def test_mock_state_wait_preserves_opencode_choice_fallback(monkeypatch, tmp_path):
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_capture", lambda *_args, **_kwargs: "choice block above footer")
+    monkeypatch.setattr(prompt_detector, "agent_screen_state", lambda *_args, **kwargs: {"key": "idle" if kwargs.get("agent_kind") else "needs-input"})
+    _, state = _wait_for_mock_state("tmux", tmp_path / "s", "fixture", "opencode", {"needs-input", "approval"})
+    assert state["key"] == "needs-input"
+
+
+def _wait_for_mock_input_ready(ready_file: Path, tmux_binary: str, socket_path: Path, session: str, timeout: float = 5.0) -> str:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -603,7 +654,27 @@ def _wait_for_mock_input_ready(ready_file: Path, timeout: float = 5.0) -> str:
         if "input_surface=ready" in marker:
             return marker
         time.sleep(0.05)
-    raise AssertionError(f"mock input surface did not become ready: {ready_file}")
+    pane = _tmux(tmux_binary, socket_path, "capture-pane", "-p", "-t", f"{session}:")
+    processes = _tmux(tmux_binary, socket_path, "list-panes", "-t", session, "-F", "#{pane_pid}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}")
+    process_rows = subprocess.run(["ps", "-eo", "pid,ppid,stat,comm"], capture_output=True, text=True, check=False, timeout=8)
+    diagnostics = {
+        "ready_file": str(ready_file), "ready_file_exists": ready_file.exists(),
+        "pane": pane.stdout, "pane_error": pane.stderr,
+        "pane_process": processes.stdout, "pane_process_error": processes.stderr,
+        "processes": process_rows.stdout,
+    }
+    pane_pid = processes.stdout.partition("\t")[0].strip()
+    if pane_pid.isdecimal():
+        try:
+            raw_environment = Path(f"/proc/{pane_pid}/environ").read_bytes()
+        except (FileNotFoundError, PermissionError) as error:
+            diagnostics["marker_environment_error"] = str(error)
+        else:
+            diagnostics["marker_environment"] = [
+                value.decode("utf-8", errors="replace") for value in raw_environment.split(b"\x00")
+                if value.startswith((b"YOMUX_MOCK_INPUT_READY_FILE=", b"YOLOMUX_MOCK_INPUT_READY_FILE="))
+            ]
+    raise AssertionError(f"mock input surface did not become ready: {json.dumps(diagnostics)}")
 
 
 @pytest.mark.parametrize("client", CLIENTS)
@@ -624,17 +695,12 @@ def test_mock_tmux_state_lane_classifies_active_done_ask_and_query(client: str, 
             session = f"yolo-state-{client}-{state_name}-{uuid.uuid4().hex[:8]}"
             ready_file = tmp_path / f"mock-ready-{client}-{state_name}-{uuid.uuid4().hex[:8]}"
             _start_private_mock(tmux_binary, socket_path, session, client, tmp_path, ready_file)
-            _wait_for_mock_input_ready(ready_file)
+            _wait_for_mock_input_ready(ready_file, tmux_binary, socket_path, session)
             _wait_for_mock_state(tmux_binary, socket_path, session, client, {"idle", "working", "needs-input", "approval"})
             input_value = fixture if command == "raw" else f"{command} {fixture}"
             _send_mock_input(tmux_binary, socket_path, session, input_value)
             expected = {"working"} if state_name == "active" else {"idle"} if state_name == "done" else {"needs-input", "approval"}
             pane, state = _wait_for_mock_state(tmux_binary, socket_path, session, client, expected)
-            if client == "opencode" and state_name == "ask" and state.get("key") == "idle":
-                # OpenCode's renderer can leave the choice block below its special
-                # footer parser boundary. The shared detector still recognizes it
-                # when the client hint is omitted, which is the production fallback.
-                state = prompt_detector.agent_screen_state(pane, pane_target=f"%{session}")
             evidence["states"][state_name] = {"key": state.get("key"), "pane": pane}
             assert state.get("key") in expected, evidence
             _cleanup_tmux_session(tmux_binary, socket_path, session)
@@ -642,16 +708,18 @@ def test_mock_tmux_state_lane_classifies_active_done_ask_and_query(client: str, 
         session = f"yolo-state-{client}-query-{uuid.uuid4().hex[:8]}"
         ready_file = tmp_path / f"mock-ready-{client}-query-{uuid.uuid4().hex[:8]}"
         _start_private_mock(tmux_binary, socket_path, session, client, tmp_path, ready_file)
-        _wait_for_mock_input_ready(ready_file)
+        _wait_for_mock_input_ready(ready_file, tmux_binary, socket_path, session)
         _wait_for_mock_state(tmux_binary, socket_path, session, client, {"idle"})
         _send_mock_input(tmux_binary, socket_path, session, "What model are you using?")
         response_marker = "i'm running" if client == "opencode" else "i don't know how to handle"
         pane, state = _wait_for_mock_state(
-            tmux_binary, socket_path, session, client, {"idle"}, pane_markers=(response_marker,)
+            tmux_binary, socket_path, session, client, {"idle"}, response_markers=(response_marker,)
         )
-        evidence["query"] = {"key": state.get("key"), "pane": pane}
+        transcript = _capture(tmux_binary, socket_path, session, scrollback=True)
+        evidence["query"] = {"key": state.get("key"), "pane": pane, "transcript": transcript,
+            "socket": str(socket_path), "session": session, "process": _pane_process(tmux_binary, socket_path, session), "root": str(tmp_path)}
         assert state.get("key") == "idle", evidence
-        assert response_marker in pane.lower(), evidence
+        assert response_marker in transcript.lower(), evidence
     finally:
         _cleanup_all_tmux_sessions(tmux_binary, socket_path)
         _remove_owned_directory(socket_dir, "tmux socket directory")
