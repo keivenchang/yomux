@@ -2811,6 +2811,9 @@ func TestActivityPublishesQueuedCodexQuestionWithoutReplacingWorkingState(t *tes
 	if len(metadataAgents) != 1 || metadataAgents[0]["status"] != "working" || metadataAgents[0]["queued_followup_question"] != true {
 		t.Fatalf("Go metadata for queued Codex question = %#v, want working plus queued_followup_question", metadataAgents)
 	}
+	if metadataAgents[0]["process_instance_id"] != "" {
+		t.Fatal("synthetic PID 42 consulted the host process table without an injected reader")
+	}
 	metadata["session_identity"] = goTmuxSessionIdentity("codex-live", "codex-live")
 	s.metadataPayload = map[string]any{
 		"sessions":            map[string]any{"codex-live": metadata},

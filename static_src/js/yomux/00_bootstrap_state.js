@@ -900,6 +900,9 @@ const latencySamplesMax = 24;
 let toastDurationMs = initialSetting('notifications.toast_duration_ms');
 const toastMaxLines = 3;
 const toastMaxLineChars = 180;
+const toastCoalesceKeyLimit = 64;
+const toastRecentContentWindowMs = 30_000;
+const toastRecentContentLimit = 128;
 let pinnedTabItems = readStoredPinnedTabs();
 let popoverShowDelayMs = initialSetting('performance.popover_show_delay_ms');
 let popoverHideDelayMs = initialSetting('performance.popover_hide_delay_ms');
@@ -1235,10 +1238,7 @@ const clientPerfDurableExemplarLimit = 20;
 const clientPerfCounters = new Map();
 let clientPerfLongTaskSamples = [];
 let clientPerfLongTaskObserverInstalled = false;
-let clientPerfLongTaskDurableCount = 0;
 let clientPerfInteractionObserverInstalled = false;
-let clientPerfInteractionDurableCount = 0;
-let clientPerfInteractionMaximumMs = 0;
 const terminalRemovalLatencyPending = new Map();
 let terminalRemovalLatencySamples = [];
 const terminalRemovalLatencySampleLimit = 40;
@@ -1753,6 +1753,20 @@ function appModifier(event) {
     : event.ctrlKey === true && event.metaKey !== true;
 }
 
+function appShortcutKeyMatches(event, shortcutKey) {
+  const key = String(event.key || '').toLowerCase();
+  const expected = String(shortcutKey || '').toLowerCase();
+  if (!expected) return false;
+  // Logical letters follow the active layout: Dvorak C has code KeyI.
+  // Option and Shift can replace a base key with a symbol (Option-C, Shift-7).
+  if (key && key !== 'unidentified' && (/^[a-z]$/.test(key) || !event.altKey && !event.shiftKey)) {
+    return key === expected;
+  }
+  const code = expected === '\\' ? 'Backslash' : expected === '[' ? 'BracketLeft' : expected === ']' ? 'BracketRight'
+    : /^\d$/.test(expected) ? `Digit${expected}` : `Key${expected.toUpperCase()}`;
+  return key === expected || event.code === code;
+}
+
 function appShortcutModifierLabel() {
   return isMacPlatform() ? '⌘' : 'Ctrl';
 }
@@ -2154,6 +2168,7 @@ let notificationDelivery = {...notificationDeliveryDefaults};
 const sessionStatusRecords = new Map();
 const watchedPrRecords = new Map();
 const toastRecords = new Map();
+const toastRecentContentByContainer = new WeakMap();
 const browserNotificationsByTarget = new Map();
 const browserNotificationLifecycleKeys = new WeakMap();
 

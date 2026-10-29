@@ -55,12 +55,17 @@ function harness() {
   const requests = [];
   const toasts = [];
   const timers = new Map();
+  const notifications = [];
   let timerId = 0;
   const context = vm.createContext({
     document, window, URL, URLSearchParams, Symbol, console,
     toastDurationMs: 5000,
     t(key, params = {}) { return key === 'fs.error.changedOnDisk' ? `File changed on disk: ${params.path}.` : key; },
     showToast(title, lines, options) { toasts.push({title, lines, options}); return new Element(); },
+    emitNotification(type, payload) {
+      notifications.push({type, payload});
+      return {inApp: context.showToast('', payload.lines, payload)};
+    },
     terminalAuthenticationActive: () => false,
     esc: value => String(value).replaceAll('"', '&quot;'),
     domDataAttributeName: key => 'data-' + key.replace(/[A-Z]/g, letter => '-' + letter.toLowerCase()),
@@ -80,12 +85,18 @@ function harness() {
   vm.runInContext(core.slice(core.indexOf('function overlayFocusableElements('), core.indexOf('function createLatestResource(')), context);
   vm.runInContext(fs.readFileSync('static_src/js/yomux/76_panel_dom_actions.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('static_src/js/yomux/15_command_registry.js', 'utf8'), context);
-  return {context, requests, timers, toasts, body, document, window, footer,
+  return {context, requests, timers, toasts, notifications, body, document, window, footer,
     run: code => vm.runInContext(code, context)};
 }
 
 async function run() {
   let h = harness();
+  h.run(`showTimedStatusNotice('repeated command failure'); showTimedStatusNotice('repeated command failure')`);
+  assert.equal(h.notifications.length, 2);
+  assert.ok(h.notifications.every(({type}) => type === 'commandNotice'));
+  assert.equal(h.notifications[0].payload.coalesceKey, 'timed-status:repeated command failure');
+  assert.equal(h.notifications[1].payload.coalesceKey, h.notifications[0].payload.coalesceKey,
+    'identical timed notices use the same shared coalescing key');
   for (const phase of ['pending', 'success', 'failure', 'overdue']) {
     h = harness();
     let authenticated = phase !== 'pending';
@@ -201,9 +212,9 @@ async function run() {
   h.requests[1].reject(new Error('delayed failure'));
   await urlA;
   await assert.rejects(urlB, /delayed failure/);
-  assert.equal(h.body.children.length, 1);
-  assert.equal(h.body.children[0].dataset.commandStatusPhase, 'error');
-  assert.equal(h.body.children[0].textContent, 'delayed failure');
+  assert.equal(h.body.children.length, 0, 'failed commands remove their floating pending surface');
+  assert.equal(h.toasts.at(-1).lines, 'delayed failure');
+  assert.equal(h.toasts.at(-1).options.countdownMs, 5000);
 
   h = harness();
   const source = new Element('button');
@@ -245,7 +256,8 @@ async function run() {
   const response = {ok: false, status: 503};
   h.requests[0].resolve(response);
   assert.equal(await raw, response, 'raw callers retain their response and error interpretation');
-  assert.equal(h.body.children[0].dataset.commandStatusPhase, 'error');
+  assert.equal(h.body.children.length, 0, 'raw HTTP errors also remove the floating status');
+  assert.match(h.toasts.at(-1).lines, /HTTP 503/);
   await assert.rejects(h.run(`apiFetch('/api/settings', {method: 'POST', commandRouteId: 'kill-session'})`), /unregistered_mutating_command/);
 
   h = harness();
@@ -321,7 +333,8 @@ async function run() {
   [...h.timers.values()].forEach(callback => callback());
   h.requests[0].resolve({ok: true, json: async () => ({saved: true})});
   await success;
-  assert.equal(h.footer.textContent, 'newer failure', 'older successful commands cannot erase a newer command error');
+  assert.equal(h.footer.textContent, 'ready', 'overlapping failure and success restore the footer');
+  assert.equal(h.toasts.at(-1).lines, 'newer failure', 'the failure remains in its independent timed notice');
 
   h = harness();
   h.footer.textContent = 'ready';
@@ -332,14 +345,16 @@ async function run() {
   h.requests[0].resolve(rejection);
   assert.equal(await rejected, rejection);
   assert.equal(originalRead, false, 'raw error decoding preserves the original body');
-  assert.equal(h.footer.textContent, 'Finder watch registration: list exceeds 128 entries');
+  assert.equal(h.footer.textContent, 'ready');
+  assert.equal(h.toasts.at(-1).lines, 'Finder watch registration: list exceeds 128 entries');
   const oldRetry = h.run(`apiFetch('/api/watch/roots', {method:'POST'})`);
   const newerFailure = h.run(`apiFetch('/api/watch/roots', {method:'POST'})`);
   h.requests[2].resolve(rejection);
   await newerFailure;
   h.requests[1].resolve({ok:true});
   await oldRetry;
-  assert.match(h.footer.textContent, /128 entries/, 'older success cannot clear a newer failure');
+  assert.equal(h.footer.textContent, 'ready');
+  assert.match(h.toasts.at(-1).lines, /128 entries/, 'older success cannot erase a timed failure notice');
   const recovery = h.run(`apiFetch('/api/watch/roots', {method:'POST'})`);
   h.requests[3].resolve({ok:true});
   await recovery;
@@ -353,7 +368,8 @@ async function run() {
   const otherDelete = h.run(`dispatchCommand(COMMAND_ROUTES['finder-delete'], {payload:{path:'/other'}})`);
   h.requests[1].resolve({ok:true,json:async()=>({})});
   await otherDelete;
-  assert.equal(h.footer.textContent, 'cannot delete first');
+  assert.equal(h.footer.textContent, 'ready');
+  assert.equal(h.toasts.at(-1).lines, 'cannot delete first');
   h = harness();
   h.footer.textContent = 'ready';
   const staleFailure = h.run(`apiFetch('/api/watch/roots', {method:'POST'})`);

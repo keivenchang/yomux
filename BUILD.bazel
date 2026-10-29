@@ -164,6 +164,7 @@ filegroup(
     srcs = [
         "tests/fixtures/current_model_usage/observed.claude.jsonl",
         "tests/fixtures/current_model_usage/observed.codex.jsonl",
+        ":agent_status_prompt_fixtures",
         ":go_cmd_test_support_inputs",
     ],
 )
@@ -270,6 +271,7 @@ filegroup(
         "tests/helpers/fixture_content_root.py",
         "tests/helpers/fixture_tools.py",
         "tests/helpers/route_contract.py",
+        "tests/helpers/terminal_url_fixtures.py",
         "tests/isolated_dev_server.py",
         "tests/native_gate_fixtures.py",
         "tests/test_browser_stats_widen.py",
@@ -337,6 +339,8 @@ filegroup(
         "pyproject.toml",
         "pytest.ini",
         "tests/conftest.py",
+        "tests/helpers/__init__.py",
+        "tests/helpers/agent_client_fixtures.py",
         "tests/test_agent_status_docker.py",
         "tools/auto_approve_tmux.py",
         "tools/docker_image.py",
@@ -810,6 +814,7 @@ QUALIFIED_GATE_STEPS = [
     "pytest-boot",
     "pytest-browser",
     "pytest-browser-golden",
+    "pytest-real-agent-urls",
     "pytest-e2e",
 ]
 

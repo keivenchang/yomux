@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
@@ -1756,30 +1757,67 @@ func wireRevision(wire map[string]any) any {
 }
 
 func (s *server) statsObservations(w http.ResponseWriter, r *http.Request) {
+	requestID := statsRequestID(r)
+	r.Header.Set("X-YOmux-Request-ID", requestID)
+	logged := &loggingResponseWriter{ResponseWriter: w}
+	w = logged
+	w.Header().Set("X-YOmux-Request-ID", requestID)
+	started := time.Now()
+	phaseStarted := started
+	phase := "admission"
+	bodyBytes := 0
+	bodyMS, validationMS := 0.0, 0.0
+	appendTimings := &stats.AppendTimings{}
+	errorCode := ""
+	ms := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
+	finishPhase := func() {
+		if phase == "body" {
+			bodyMS = ms(time.Since(phaseStarted))
+		}
+		if phase == "validation" {
+			validationMS = ms(time.Since(phaseStarted))
+		}
+		w.Header().Set("Server-Timing", fmt.Sprintf("body;dur=%.3f, validation;dur=%.3f, writer_wait;dur=%.3f, writer_validation;dur=%.3f, writer_transaction;dur=%.3f, writer_commit;dur=%.3f", bodyMS, validationMS, ms(appendTimings.Wait), ms(appendTimings.Validation), ms(appendTimings.Transaction), ms(appendTimings.Commit)))
+	}
+	fail := func(status int, legacy map[string]any) {
+		errorCode = phase + "_failed"
+		finishPhase()
+		statsObservationFailure(w, r, status, legacy)
+	}
+	defer func() {
+		slog.Info("stats_observation_request", "request_id", requestID, "body_bytes", bodyBytes,
+			"body_read_ms", bodyMS, "validation_ms", validationMS, "writer_wait_ms", ms(appendTimings.Wait),
+			"writer_validation_ms", ms(appendTimings.Validation), "writer_transaction_ms", ms(appendTimings.Transaction), "writer_commit_ms", ms(appendTimings.Commit),
+			"cancelled", r.Context().Err() != nil, "error_code", errorCode, "status", logged.status, "duration_ms", ms(time.Since(started)))
+	}()
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if r.ContentLength > 128*1024 {
-		statsObservationFailure(w, r, http.StatusRequestEntityTooLarge, map[string]any{
+		fail(http.StatusRequestEntityTooLarge, map[string]any{
 			"error":        "content too large",
 			"user_message": map[string]any{"key": "request.error.contentTooLarge", "params": map[string]any{"max": 128 * 1024}, "fallback": "content too large"},
 		})
 		return
 	}
 	defer r.Body.Close()
+	phase, phaseStarted = "body", time.Now()
 	body, readErr := io.ReadAll(io.LimitReader(r.Body, 128*1024+1))
+	bodyBytes = len(body)
+	finishPhase()
 	if readErr != nil {
-		statsObservationFailure(w, r, http.StatusBadRequest, statsObservationUnsupported("invalid observations JSON"))
+		fail(http.StatusBadRequest, statsObservationUnsupported("invalid observations JSON"))
 		return
 	}
 	if len(body) > 128*1024 {
-		statsObservationFailure(w, r, http.StatusRequestEntityTooLarge, map[string]any{
+		fail(http.StatusRequestEntityTooLarge, map[string]any{
 			"error":        "content too large",
 			"user_message": map[string]any{"key": "request.error.contentTooLarge", "params": map[string]any{"max": 128 * 1024}, "fallback": "content too large"},
 		})
 		return
 	}
+	phase, phaseStarted = "validation", time.Now()
 	var raw map[string]json.RawMessage
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
@@ -1788,26 +1826,26 @@ func (s *server) statsObservations(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(reason, "unexpected end of JSON input") || strings.Contains(reason, "unexpected EOF") {
 			reason = fmt.Sprintf("Expecting ',' delimiter: line 1 column %d (char %d)", len(body)+1, len(body))
 		}
-		statsObservationFailure(w, r, http.StatusBadRequest, statsObservationUnsupported(reason))
+		fail(http.StatusBadRequest, statsObservationUnsupported(reason))
 		return
 	}
 	firstValueOffset := decoder.InputOffset()
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		statsObservationFailure(w, r, http.StatusBadRequest, statsObservationUnsupported(trailingJSONReason(body, firstValueOffset)))
+		fail(http.StatusBadRequest, statsObservationUnsupported(trailingJSONReason(body, firstValueOffset)))
 		return
 	}
 	if !hasExactKeys(raw, "protocol_version", "schema_generation", "client_id", "observations") {
-		statsObservationFailure(w, r, http.StatusBadRequest, statsObservationUnsupported("browser observation upload fields must be exactly ['client_id', 'observations', 'protocol_version', 'schema_generation']"))
+		fail(http.StatusBadRequest, statsObservationUnsupported("browser observation upload fields must be exactly ['client_id', 'observations', 'protocol_version', 'schema_generation']"))
 		return
 	}
 	var envelope browserObservationEnvelope
 	if err := unmarshalRaw(raw, &envelope); err != nil {
-		statsObservationFailure(w, r, http.StatusBadRequest, statsObservationUnsupported(err.Error()))
+		fail(http.StatusBadRequest, statsObservationUnsupported(err.Error()))
 		return
 	}
 	if envelope.ProtocolVersion != statsWriterProtocol || envelope.SchemaGeneration != statsSchemaGeneration {
-		statsObservationFailure(w, r, http.StatusUpgradeRequired, map[string]any{
+		fail(http.StatusUpgradeRequired, map[string]any{
 			"status": "upgrade_required", "protocol_version": statsWireVersion,
 			"required_protocol_version": statsWriterProtocol, "required_schema_generation": statsSchemaGeneration,
 			"required_build": "8", "reason": "client or writer is too old", "caller_outcome_owner": "statsd.browser_upload",
@@ -1829,12 +1867,12 @@ func (s *server) statsObservations(w http.ResponseWriter, r *http.Request) {
 	}
 	secret := s.authSecret()
 	if len(secret) == 0 {
-		statsObservationFailure(w, r, http.StatusFailedDependency, statsObservationUnsupported("client binding unavailable"))
+		fail(http.StatusFailedDependency, statsObservationUnsupported("client binding unavailable"))
 		return
 	}
 	observations, err := parseBrowserObservationEnvelope(raw, user.username, secret)
 	if err != nil {
-		statsObservationFailure(w, r, http.StatusBadRequest, statsObservationUnsupported(err.Error()))
+		fail(http.StatusBadRequest, statsObservationUnsupported(err.Error()))
 		return
 	}
 	requestEventIDs := make(map[string]struct{}, len(envelope.Observations))
@@ -1842,24 +1880,27 @@ func (s *server) statsObservations(w http.ResponseWriter, r *http.Request) {
 		var item map[string]json.RawMessage
 		var eventID string
 		if json.Unmarshal(rawItem, &item) != nil || decodeText(item["event_id"], &eventID, 512) != nil {
-			statsObservationFailure(w, r, http.StatusBadRequest, statsObservationUnsupported(fmt.Sprintf("observations[%d] has invalid identity", index)))
+			fail(http.StatusBadRequest, statsObservationUnsupported(fmt.Sprintf("observations[%d] has invalid identity", index)))
 			return
 		}
 		if _, exists := requestEventIDs[eventID]; exists {
-			statsObservationFailure(w, r, http.StatusBadRequest, statsObservationUnsupported("browser observation event IDs must be unique within one upload"))
+			fail(http.StatusBadRequest, statsObservationUnsupported("browser observation event IDs must be unique within one upload"))
 			return
 		}
 		requestEventIDs[eventID] = struct{}{}
 	}
 	if s.statsWriter == nil {
-		statsObservationFailure(w, r, http.StatusFailedDependency, statsObservationUnsupported("stats writer unavailable"))
+		fail(http.StatusFailedDependency, statsObservationUnsupported("stats writer unavailable"))
 		return
 	}
-	result, err := s.statsWriter.AppendBatch(r.Context(), stats.AppendBatch{Observations: observations})
+	finishPhase()
+	phase = "writer"
+	result, err := s.statsWriter.AppendBatch(stats.WithAppendTimings(r.Context(), appendTimings), stats.AppendBatch{Observations: observations})
 	if err != nil {
-		statsObservationFailure(w, r, http.StatusBadRequest, statsObservationUnsupported(err.Error()))
+		fail(http.StatusBadRequest, statsObservationUnsupported(err.Error()))
 		return
 	}
+	finishPhase()
 	accepted := make(map[string]struct{}, len(result.AcceptedObservationIDs))
 	for _, eventID := range result.AcceptedObservationIDs {
 		accepted[eventID] = struct{}{}
@@ -2237,8 +2278,8 @@ var browserEventKinds = map[string]bool{
 var browserCommonFields = map[string]bool{"journey_id": true, "code_revision": true, "browser_family": true}
 
 var browserObservationFields = map[string]map[string]bool{
-	"api":                {"latency_ms": true, "bytes": true, "endpoint": true, "method": true, "request_id": true, "status": true, "connection_protocol": true, "queue_ms": true, "connect_ms": true, "tls_ms": true, "ttfb_ms": true, "download_ms": true, "apply_render_ms": true},
-	"sse":                {"latency_ms": true, "bytes": true},
+	"api":                {"server_request_id": true, "server_body_ms": true, "server_validation_ms": true, "server_writer_wait_ms": true, "server_writer_validation_ms": true, "server_writer_transaction_ms": true, "server_writer_commit_ms": true, "latency_ms": true, "bytes": true, "endpoint": true, "method": true, "request_id": true, "status": true, "connection_protocol": true, "queue_ms": true, "connect_ms": true, "tls_ms": true, "ttfb_ms": true, "download_ms": true, "apply_render_ms": true},
+	"sse":                {"latency_ms": true, "bytes": true, "server_event_id": true, "publication_time_ms": true, "clock_ahead_ms": true, "replay_count": true, "server_epoch": true},
 	"heartbeat":          {"latency_ms": true, "bytes": true, "upload_queue_depth": true, "upload_drops": true, "upload_retries": true, "instrumentation_cost_ms": true},
 	"disconnect":         {"duration_ms": true},
 	"page_load":          {"endpoint": true, "fanout_count": true, "max_concurrency": true, "navigation_ms": true, "bundle_parse_eval_ms": true, "first_paint_ms": true, "first_contentful_paint_ms": true, "first_api_ms": true, "fanout_ms": true, "interactive_ms": true, "app_ready_ms": true},
@@ -2252,6 +2293,8 @@ var browserObservationFields = map[string]map[string]bool{
 }
 
 var browserNumericFields = map[string]bool{
+	"server_body_ms": true, "server_validation_ms": true, "server_writer_wait_ms": true, "server_writer_validation_ms": true, "server_writer_transaction_ms": true, "server_writer_commit_ms": true,
+	"server_event_id": true, "publication_time_ms": true, "clock_ahead_ms": true, "replay_count": true,
 	"latency_ms": true, "bytes": true, "duration_ms": true, "status": true, "queue_ms": true, "connect_ms": true, "tls_ms": true, "ttfb_ms": true, "download_ms": true, "apply_render_ms": true,
 	"fanout_count": true, "max_concurrency": true, "navigation_ms": true, "bundle_parse_eval_ms": true, "first_paint_ms": true, "first_contentful_paint_ms": true, "first_api_ms": true, "fanout_ms": true, "interactive_ms": true, "app_ready_ms": true,
 	"entry_count": true, "input_delay_ms": true, "processing_ms": true, "presentation_delay_ms": true, "line": true, "column": true,
@@ -2259,7 +2302,9 @@ var browserNumericFields = map[string]bool{
 }
 
 var browserStringFields = map[string]bool{
-	"endpoint": true, "method": true, "request_id": true, "connection_protocol": true, "interaction_type": true, "operation_kind": true, "outcome": true,
+	"server_request_id": true,
+	"server_epoch":      true,
+	"endpoint":          true, "method": true, "request_id": true, "connection_protocol": true, "interaction_type": true, "operation_kind": true, "outcome": true,
 	"signature": true, "message": true, "stack": true, "source": true, "provenance": true, "route": true, "event_type": true, "wall_time": true, "delivery_outcome": true,
 }
 

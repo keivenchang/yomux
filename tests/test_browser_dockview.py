@@ -4259,9 +4259,9 @@ def test_codex_queued_followup_question_shows_red_ask_without_replacing_working(
 
 @pytest.mark.parametrize("layout", ["classic", "dockview"])
 @pytest.mark.parametrize("gesture", ["body", "tab"])
-@pytest.mark.parametrize("state,queued,label", [("needs-input", False, "ASK"), ("blocked", False, "BLK"), ("working", True, "ASK")])
-def test_attention_badge_and_ball_acknowledge_already_focused_body(browser, tmp_path, layout, gesture, state, queued, label):
-    agent = {"kind": "codex", "state": state, "window_index": 0, "pane_target": "%42", "attention_key": f"go:attention:body-{state}", "queued_followup_question": queued, "current": True, "window_active": True}
+@pytest.mark.parametrize("state,attention_kind,queued,label", [("needs-input", "approval", False, "ASK"), ("needs-input", "question", False, "ASK"), ("blocked", "", False, "BLK"), ("working", "", True, "ASK")])
+def test_attention_badge_and_ball_acknowledge_already_focused_body(browser, tmp_path, layout, gesture, state, attention_kind, queued, label):
+    agent = {"kind": "codex", "state": state, "attention_kind": attention_kind, "window_index": 0, "pane_target": "%42", "attention_key": f"go:attention:body-{state}", "queued_followup_question": queued, "current": True, "window_active": True}
     info = {"panes": [{"target": "%42", "window": 0, "window_name": "codex", "active": True, "window_active": True, "process_label": "codex"}], "agents": [agent]}
     payload = {"session_order": ["1"], "sessions": {"1": {"target": "1", "enabled": False, "agent_windows": [agent]}}}
     loader = load_dockview_runtime_boot_fixture if layout == "dockview" else load_live_runtime_boot_fixture
@@ -4272,7 +4272,7 @@ def test_attention_badge_and_ball_acknowledge_already_focused_body(browser, tmp_
         assert browser.execute_script("return dockviewLayoutActive()") is (layout == "dockview")
     finally:
         browser.execute_cdp_cmd("Network.setBlockedURLs", {"urls": []})
-    WebDriverWait(browser, 5).until(lambda _driver: browser.execute_script("return !!document.querySelector('.pane-tab[data-pane-tab=\"1\"] .session-state-badge')"))
+    WebDriverWait(browser, 5).until(lambda _driver: browser.execute_script("return !!document.querySelector('.pane-tab[data-pane-tab=\"1\"] .session-state-badge') && typeof terminals.get('1')?.term?._onData === 'function' && terminals.get('1')?.socket?.readyState === WebSocket.OPEN"))
     before = browser.execute_script("""
       const tab = document.querySelector('.pane-tab[data-pane-tab="1"]');
       const badge = tab.querySelector('.session-state-badge');
@@ -4288,6 +4288,22 @@ def test_attention_badge_and_ball_acknowledge_already_focused_body(browser, tmp_
       const badge = tab.querySelector('.session-state-badge');
       return {gray: badge?.classList.contains('status-indicator--acknowledged'), color: badge ? getComputedStyle(badge).color : '', green: !!tab.querySelector('.status-indicator--working')};
     """)
+    if queued or attention_kind == "question":
+        assert immediate["gray"] is False and immediate["color"] == before["color"], immediate
+        draft = browser.execute_script("""
+          terminals.get('1').term._onData('draft answer');
+          const badge=document.querySelector('.pane-tab[data-pane-tab="1"] .session-state-badge');
+          return {label:badge?.textContent,gray:badge?.classList.contains('status-indicator--acknowledged'),
+            ackPosts:window.__bootFetches.filter(entry=>entry.path==='/api/attention-ack').length};
+        """)
+        assert draft == {"label": "ASK", "gray": False, "ackPosts": 0}, draft
+        immediate = browser.execute_script("""
+          terminals.get('1').term._onData('\\r');
+          const tab=document.querySelector('.pane-tab[data-pane-tab="1"]');
+          const badge=tab.querySelector('.session-state-badge');
+          return {gray:badge?.classList.contains('status-indicator--acknowledged'),color:badge?getComputedStyle(badge).color:'',
+            green:!!tab.querySelector('.status-indicator--working')};
+        """)
     assert immediate["gray"] is True and immediate["color"] != before["color"], immediate
     if queued:
         assert immediate["green"] is True, immediate
@@ -5895,14 +5911,14 @@ def test_dockview_drag_reorders_two_tab_pane(browser, tmp_path):
     assert dockview_layout_metrics(browser)["groups"][0]["tabs"] == ["2", "1"]
 
 
-def test_dockview_pointercancel_reorders_from_last_tab_target(browser, tmp_path):
+@pytest.mark.parametrize("event_loop_stall_ms", [0, 150])
+def test_dockview_pointercancel_reorders_from_last_tab_target(browser, tmp_path, event_loop_stall_ms):
     """Dockview cancels the mouse pointer stream after its final drag position."""
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2,3&layout=left&tabs=left:1,2,3", sessions=["1", "2", "3"])
     wait_for_dockview(browser, min_tabs=3)
     wait_for_dockview_tab_geometry(browser, min_tabs=3)
-    result = browser.execute_async_script(
+    preview_aliases = browser.execute_script(
         """
-        const done = arguments[arguments.length - 1];
         const source = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
         const target = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
         const sourceRect = source.getBoundingClientRect();
@@ -5920,15 +5936,27 @@ def test_dockview_pointercancel_reorders_from_last_tab_target(browser, tmp_path)
           clientX: 0,
           clientY: 0,
         }));
-        setTimeout(() => done({
+        // Exercise an overdue cancellation timer, as under suite load.
+        const blockedUntil = performance.now() + arguments[0];
+        while (performance.now() < blockedUntil) {}
+        return previewAliases;
+        """,
+        event_loop_stall_ms,
+    )
+    assert preview_aliases == {"canonical": True}, preview_aliases
+    # Cancellation queues the reorder in a second task; timer expiry is not completion.
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return paneTabs('left').join(',') === '2,1,3';")
+    )
+    result = browser.execute_script("""
+        return {
           tabs: paneTabs('left'),
           pointerDragActive: Boolean(dockviewLayoutState.tabPointerDrag),
-          previewAliases,
+          previewAliases: arguments[0],
           insertionPreview: Boolean(document.querySelector('[data-yomux-tab-insertion-preview]')),
           errors: jsDebugFailureEvents('error'),
-        }), 125);
-        """
-    )
+        };
+        """, preview_aliases)
     assert result == {
         "tabs": ["2", "1", "3"],
         "pointerDragActive": False,
@@ -5936,6 +5964,7 @@ def test_dockview_pointercancel_reorders_from_last_tab_target(browser, tmp_path)
         "insertionPreview": False,
         "errors": [],
     }, result
+    assert dockview_layout_metrics(browser)["groups"][0]["tabs"] == ["2", "1", "3"]
 
 
 def test_dockview_drag_reorders_into_first_top_left_tab_without_root_split(browser, tmp_path):
@@ -6016,7 +6045,7 @@ def test_dockview_pinned_tabs_render_first_after_pin_toggle(browser, tmp_path):
     assert pinned == {"item": "2", "pinned": True, "hasIcon": True}
 
 
-def test_dockview_refused_move_to_full_pinned_pane_shows_danger_status(browser, tmp_path):
+def test_dockview_refused_move_to_full_pinned_pane_shows_timed_notice(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -6036,16 +6065,16 @@ def test_dockview_refused_move_to_full_pinned_pane_shows_danger_status(browser, 
         moveSessionToSlot('3', 'right', 'left', 2).then(moved => {
           updateStatus();
           requestAnimationFrame(() => {
-            const status = document.getElementById('status');
+            const status = Array.from(document.querySelectorAll('#attentionAlerts .command-notice')).find(node => node.textContent.includes('right') && node.textContent.includes('tab limit 2'));
             const rect = status.getBoundingClientRect();
             const style = getComputedStyle(status);
             done({
               moved,
               before,
               after: JSON.stringify({left: paneTabs('left'), right: paneTabs('right')}),
-              text: status.textContent,
-              classes: Array.from(status.classList),
-              kind: status.dataset.layoutStatusKind || '',
+              text: status?.textContent || '',
+              classes: Array.from(status?.classList || []),
+              remaining: Number(status?.dataset.toastRemainingMs || 0),
               rect: {width: rect.width, height: rect.height, top: rect.top, right: rect.right},
               display: style.display,
               position: style.position,
@@ -6061,16 +6090,16 @@ def test_dockview_refused_move_to_full_pinned_pane_shows_danger_status(browser, 
     assert result["before"] == result["after"], result
     assert "tab limit 2" in result["text"], result
     assert "right" in result["text"], result
-    assert result["kind"] == "danger", result
-    assert "layout-status-visible" in result["classes"], result
-    assert "layout-status-danger" in result["classes"], result
+    assert result["remaining"] > 0, result
+    assert "command-notice" in result["classes"], result
+    assert "layout-status-danger" not in result["classes"], result
     assert result["display"] != "none", result
-    assert result["position"] == "fixed", result
+    assert result["position"] != "fixed", result
     assert result["rect"]["width"] > 80 and result["rect"]["height"] > 20, result
     assert result["borderColor"] != result["color"], result
 
 
-def test_dockview_drag_to_full_pinned_pane_uses_danger_preview_and_status(browser, tmp_path):
+def test_dockview_drag_to_full_pinned_pane_uses_danger_preview_and_timed_notice(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -6105,17 +6134,17 @@ def test_dockview_drag_to_full_pinned_pane_uses_danger_preview_and_status(browse
             result
             if (result := driver.execute_script(
                 """
-                const status = document.getElementById('status');
+                const status = Array.from(document.querySelectorAll('#attentionAlerts .command-notice')).find(node => node.textContent.includes('right') && node.textContent.includes('tab limit 2'));
                 return {
                   left: paneTabs('left'),
                   right: paneTabs('right'),
-                  text: status.textContent,
-                  classes: Array.from(status.classList),
-                  kind: status.dataset.layoutStatusKind || '',
+                  text: status?.textContent || '',
+                  classes: Array.from(status?.classList || []),
+                  remaining: Number(status?.dataset.toastRemainingMs || 0),
                   invalidPreview: document.querySelector('.yomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false,
                 };
                 """
-            ))["kind"] == "danger"
+            ))["remaining"] > 0
             else False
         )
     )
@@ -6124,8 +6153,8 @@ def test_dockview_drag_to_full_pinned_pane_uses_danger_preview_and_status(browse
     assert status["left"] == before["left"]["tabs"], status
     assert status["right"] == before["right"]["tabs"], status
     assert "tab limit 2" in status["text"] and "right" in status["text"], status
-    assert "layout-status-visible" in status["classes"], status
-    assert "layout-status-danger" in status["classes"], status
+    assert "command-notice" in status["classes"], status
+    assert "layout-status-danger" not in status["classes"], status
     assert status["invalidPreview"] is False, status
     assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
@@ -11065,6 +11094,32 @@ def test_dockview_tabber_normal_shows_recency_for_agent_and_bash_windows(browser
     assert all(date["text"] and not date["hidden"] and date["width"] > 0 and date["display"] != "none" for date in result["dates"]), result
     assert all(token in row["primary"] for row, token in zip(result["undated"], ["0:codex", "1:bash"]))
     assert all("MAIN" in row["primary"] and not row["date"] for row in result["undated"]), result
+
+
+@pytest.mark.parametrize("mode", ["normal", "advanced"])
+def test_tabber_idle_conversation_dates_ignore_repaint_and_observation(browser, tmp_path, mode):
+    load_dockview_runtime_boot_fixture(browser, tmp_path,
+        "?sessions=tabber,1&layout=row@22(side,main)&tabs=side:@side-left,tabber;main:1", sessions=["1"])
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_script("""
+      setTabberMode(arguments[0]);
+      const info=transcriptMetadataState.payload.sessions['1'], now=Date.now()/1000;
+      info.panes=[{...info.panes[0],window:'0',window_index:0,window_name:'codex',command:'codex',active:true,window_active:true}];
+      tabberActivityPayload={activity:{'1:0':{active_recency_ts:now-7200,last_output_ts:now-7200}},agents:[]};
+      autoApproveStates.set('1',{agent_windows:[{kind:'codex',window_index:0,state:'idle',status_observed_at:now}]});
+      setFileExplorerTreeDateMode('relative','tabber');
+      const date=()=>document.querySelector('#panel-__tabber__ .file-tree-row[data-tabber-session="1"] .file-tree-date')?.textContent.trim()||'';
+      refreshTabberPanels();const before=date();
+      tabberActivityPayload.activity['1:0'].last_output_ts=now;
+      refreshTabberPanels();const repaint=date();
+      tabberActivityPayload.activity['1:0'].active_recency_ts=0;
+      refreshTabberPanels();const unavailable=date();
+      tabberActivityPayload.activity['1:0'].active_recency_ts=now-60;
+      tabberActivityPayload.activity['1:0'].last_user_input_ts=now-60;
+      refreshTabberPanels();const input=date();
+      return {before,repaint,unavailable,input};
+    """, mode)
+    assert result == {"before": "2 hours ago", "repaint": "2 hours ago", "unavailable": "", "input": "1 min ago"}, result
 
 
 def test_dockview_tabber_native_click_selects_numbered_sessions(browser, tmp_path):

@@ -3,9 +3,13 @@
 """Native filesystem event delivery through the rendered Finder."""
 
 import json
+import shlex
+import tempfile
 from http.client import HTTPConnection
 from pathlib import Path
 from urllib.parse import urlencode
+
+import pytest
 
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
@@ -14,7 +18,212 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
+from tests.tmux_runtime import run_isolated_tmux
+from tests.helpers.terminal_url_fixtures import terminal_url_matrix_examples
 from tools.product_environment import product_env
+
+
+def test_native_codex_wrapped_file_context_menu_opens_complete_path(browser, isolated_dev_server_factory, request):
+    server = isolated_dev_server_factory('codex-wrapped-file')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    session = server.tmux.sessions[0]
+    browser.get(server.base_url + f'/?sessions={session}&layout=left&tabs=left:{session}')
+    WebDriverWait(browser, 15).until(lambda driver: driver.execute_script(
+        "return typeof terminalReferenceAtClientPoint === 'function' && terminals.get(arguments[0])?.term?.element && initialAppShellPainted",
+        session,
+    ))
+    with tempfile.TemporaryDirectory(prefix='yfl-', dir='/tmp') as directory:
+        path = Path(directory) / 'ssc-resident-cintas-schedule-2026-10-26.md'
+        content = 'Wrapped file link reached the complete file.\n'
+        path.write_text(content, encoding='utf-8')
+        for split in ('ssc-resident-', 'ssc-resident-cintas-'):
+            rows = [f'See ({directory}/{split}', f'  {path.name[len(split):]}) to require all units', '  unrelated following prose']
+            for row in (1, 2):
+                browser.execute_script("selectSession(arguments[0]); terminals.get(arguments[0]).term.yomuxAgentKind='codex'", session)
+                # The fixture shell is the only output producer; browser injection races its startup stream.
+                output_format = r'\033[2J\033[H\033[3J' + r'%s\r\n' * len(rows)
+                command = 'printf ' + ' '.join(shlex.quote(value) for value in [output_format, *rows])
+                run_isolated_tmux(server.tmux, 'send-keys', '-t', f'{session}:', command, 'Enter')
+                point = browser.execute_async_script(r"""
+                  const session=arguments[0],rows=arguments[1],row=arguments[2],done=arguments[arguments.length-1];
+                  (async()=>{
+                    await selectSession(session);
+                    const {term}=terminals.get(session),container=document.getElementById(`term-${session}`);
+                    term.yomuxAgentKind='codex';
+                    try {
+                      await window.__yomuxTestWaitFor(()=>rows.every((text,index)=>
+                        term.buffer.active.getLine(term.buffer.active.viewportY+index)?.translateToString(true)===text),{timeoutMs:10000});
+                    } catch(error) {
+                      return {error:String(error),cols:term.cols,viewportY:term.buffer.active.viewportY,
+                        actual:Array.from({length:Math.min(term.buffer.active.length,30)},(_,index)=>term.buffer.active.getLine(index)?.translateToString(true))};
+                    }
+                    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+                    const screen=terminalScreenElement(container),rect=screen.getBoundingClientRect();
+                    const cell=terminalCellDimensions(term,container);
+                    const x=row===1?rows[0].indexOf('/')+1:3;
+                    const point={x:rect.left+(x-0.5)*cell.width,y:rect.top+(row-0.5)*cell.height};
+                    const ref=terminalReferenceAtClientPoint(term,container,point.x,point.y);
+                    return {...point,path:ref?.path,cols:term.cols,rows:rows.map((_,i)=>term.buffer.active.getLine(term.buffer.active.viewportY+i).translateToString(true))};
+                  })().then(done,error=>done({error:String(error.stack||error)}));
+                """, session, rows, row)
+                assert 'error' not in point, json.dumps(point)
+                assert point['cols'] >= max(map(len, rows)), point
+                assert point['path'] == str(path), point
+                for event_type in ('mousePressed', 'mouseReleased'):
+                    browser.execute_cdp_cmd('Input.dispatchMouseEvent', {
+                        'type': event_type, 'x': point['x'], 'y': point['y'], 'button': 'right', 'clickCount': 1,
+                    })
+                open_button = WebDriverWait(browser, 5).until(lambda driver: next((
+                    button for button in driver.find_elements(By.CSS_SELECTOR, '.terminal-context-menu button')
+                    if button.text == 'Open file'
+                ), None))
+                open_button.click()
+                WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("""
+                  const panel=panelNodes.get(fileEditorItemFor(arguments[0]));
+                  return itemIsActivePaneTab(fileEditorItemFor(arguments[0]))
+                    && panel?.getBoundingClientRect().height>0
+                    && panel?._cmView?.state.doc.toString()===arguments[1];
+                """, str(path), content))
+
+
+@pytest.mark.parametrize('width', [40, 64, 80, 120])
+def test_native_tmux_random_url_clipboard_matrix(browser, isolated_dev_server_factory, request, tmp_path, width):
+    server = isolated_dev_server_factory(f'url-matrix-{width}')
+    (server.paths.config_dir / 'settings.yaml').write_text('general:\n  startup_tips: false\n', encoding='utf-8')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    session = server.tmux.sessions[0]
+    original_size = browser.get_window_size()
+    request.addfinalizer(lambda: browser.set_window_size(original_size['width'], original_size['height']))
+    browser.set_window_size(1500, 1900)
+    browser.get(server.base_url + f'/?sessions={session}&layout=left&tabs=left:{session}')
+    WebDriverWait(browser, 15).until(lambda driver: driver.execute_script(
+        "return initialAppShellPainted && terminals.get(arguments[0])?.socket?.readyState === WebSocket.OPEN && document.querySelector('.xterm-rows')",
+        session,
+    ))
+    assert browser.execute_script('return startupHelpersEnabled') is False
+    browser.execute_cdp_cmd('Browser.grantPermissions', {
+        'origin': server.base_url, 'permissions': ['clipboardReadWrite', 'clipboardSanitizedWrite'],
+    })
+    fitted = browser.execute_async_script("""
+      const session=arguments[0],width=arguments[1],done=arguments[arguments.length-1];
+      (async()=>{
+        const {term,container}=terminals.get(session),cell=terminalCellDimensions(term,container);
+        const style=getComputedStyle(container);
+        container.style.setProperty('width',`${Math.ceil(width*cell.width+2+parseFloat(style.paddingLeft)+parseFloat(style.paddingRight))}px`,'important');
+        container.style.setProperty('height',`${Math.ceil(80*cell.height+terminalFitBottomReservePx+parseFloat(style.paddingTop)+parseFloat(style.paddingBottom))}px`,'important');
+        fitTerminal(session,{force:true,claim:true});
+        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+        return {cols:term.cols,rows:term.rows};
+      })().then(done,error=>done({error:String(error.stack||error)}));
+    """, session, width)
+    assert fitted == {'cols':width,'rows':80}, fitted
+    for args in [('set-window-option', '-t', session, 'window-size', 'manual'),
+                 ('resize-window', '-t', session, '-x', str(width), '-y', '80'),
+                 ('send-keys', '-t', session, 'stty -echo; PS1=; PROMPT_COMMAND=', 'Enter')]:
+        completed = run_isolated_tmux(server.tmux, *args)
+        assert completed.returncode == 0, completed.stderr
+    failures, results = [], []
+    examples = terminal_url_matrix_examples()
+    cases = [(index, expected, 'soft') for index, expected in enumerate(examples)]
+    cases.extend((index, examples[index], layout) for index in [0, 13, 59] for layout in ['codex', 'opencode', 'quote'])
+    evidence = Path(product_env('E2E_EVIDENCE_DIR', '') or tmp_path)
+    evidence.mkdir(parents=True, exist_ok=True)
+    report = evidence / f'terminal-url-matrix-{width}.json'
+    progress = evidence / f'terminal-url-matrix-{width}.jsonl'
+    for index, expected, layout in cases:
+        prefix = {'soft': '', 'codex': '    ', 'opencode': '   ', 'quote': '  | '}[layout]
+        content_width = width - len(prefix)
+        if layout == 'soft':
+            printed = [expected]
+        else:
+            # Repeated OpenCode gutters use an initial URL delimiter to distinguish a wrapped token
+            # from a complete URL followed by an unrelated indented word.
+            first_width = content_width
+            if layout == 'opencode' and len(expected) > content_width:
+                first_width = max(position + 1 for position, char in enumerate(expected[:content_width]) if char in '/-.?&=#%')
+            printed = [prefix + expected[:first_width]]
+            printed.extend(prefix + expected[offset:offset + content_width] for offset in range(first_width, len(expected), content_width))
+        marker = f'URL-MATRIX-DONE-{index}-{layout}'
+        command = 'printf ' + ' '.join(shlex.quote(value) for value in [
+            r'\033[2J\033[H\033[3J' + r'%s\r\n' * (len(printed) + 1), *printed, marker,
+        ])
+        completed = run_isolated_tmux(server.tmux, 'send-keys', '-t', session, command, 'Enter')
+        assert completed.returncode == 0, completed.stderr
+        observation = browser.execute_async_script("""
+          const session=arguments[0],marker=arguments[1],kind=arguments[2],prefix=arguments[3],done=arguments[arguments.length-1];
+          (async()=>{
+            const {term}=terminals.get(session);
+            term.yomuxAgentKind=kind;
+            await window.__yomuxTestWaitFor(()=>Array.from({length:term.rows},(_,index)=>
+              term.buffer.active.getLine(term.buffer.active.viewportY+index)?.translateToString(true)||'').some(line=>line===marker),
+              {timeoutMs:10000,description:marker});
+            await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+            const active=term.buffer.active;
+            const lines=Array.from({length:term.rows},(_,index)=>active.getLine(active.viewportY+index)?.translateToString(true)||'');
+            const end=lines.indexOf(marker);
+            const rows=lines.slice(0,end);
+            const container=document.getElementById(`term-${session}`),rect=terminalScreenElement(container).getBoundingClientRect();
+            const cell=terminalCellDimensions(term,container);
+            const points=[...new Set([0,Math.floor((rows.length-1)/2),rows.length-1])].map(row=>{
+              const text=rows[row],indent=text.startsWith(prefix)?prefix.length:(text.match(/^\\s*/)||[''])[0].length;
+              const column=row===rows.length-1?text.length-1:indent;
+              return {row,column,x:rect.left+(column+0.5)*cell.width,y:rect.top+(row+0.5)*cell.height,
+                reference:terminalReferenceAtPosition(term,{x:column+1,y:active.viewportY+row+1})?.href||null};
+            });
+            const afterColumn=rows.at(-1).length;
+            const after=afterColumn<term.cols?{x:afterColumn+1,y:active.viewportY+rows.length}:{x:1,y:active.viewportY+rows.length+1};
+            return {cols:term.cols,rows,points,realXterm:term.element.classList.contains('xterm'),
+              wrapped:rows.map((_,index)=>active.getLine(active.viewportY+index).isWrapped),
+              afterReference:terminalReferenceAtPosition(term,after)?.href||null};
+          })().then(done,error=>done({error:String(error.stack||error)}));
+        """, session, marker, 'opencode' if layout in ('opencode', 'quote') else 'codex', prefix)
+        assert 'error' not in observation, observation
+        tmux_width = run_isolated_tmux(server.tmux, 'display-message', '-p', '-t', session, '#{pane_width}').stdout.strip()
+        assert observation['realXterm'] and observation['cols'] == width and tmux_width == str(width), observation
+        captured = run_isolated_tmux(server.tmux, 'capture-pane', '-p', '-t', session).stdout.splitlines()
+        assert captured[:captured.index(marker)] == observation['rows'], {'tmux':captured, 'xterm':observation}
+        copied_values = []
+        for point in observation['points']:
+            point['hit'] = browser.execute_script("""
+              const x=arguments[0],y=arguments[1],session=arguments[2],hit=document.elementFromPoint(x,y);
+              const {term,container}=terminals.get(session);
+              return {tag:hit?.tagName,className:hit?.className,inside:container.contains(hit),
+                href:terminalReferenceAtClientPoint(term,container,x,y)?.href||null};
+            """, point['x'], point['y'], session)
+            assert point['hit']['inside'], {'index':index,'layout':layout,'point':point}
+            for event_type in ('mousePressed', 'mouseReleased'):
+                browser.execute_cdp_cmd('Input.dispatchMouseEvent', {
+                    'type':event_type, 'x':point['x'], 'y':point['y'], 'button':'right', 'clickCount':1,
+                })
+            copy_button = next((button for button in browser.find_elements(By.CSS_SELECTOR, '.terminal-context-menu button')
+                                if button.text == 'Copy URL'), None)
+            if copy_button is None:
+                copied_values.append({'row':point['row'], 'error':'Copy URL is missing', 'reference':point['reference'],
+                                      'labels':[button.text for button in browser.find_elements(By.CSS_SELECTOR, '.terminal-context-menu button')]})
+                browser.execute_script('closeTerminalContextMenu()')
+                continue
+            browser.execute_script('window.__urlMatrixCopyButton=arguments[0]', copy_button)
+            copy_button.click()
+            copied = browser.execute_async_script("""
+              const done=arguments[arguments.length-1];
+              window.__yomuxTestWaitFor(()=>window.__urlMatrixCopyButton.dataset.copyFeedbackActive==='true',{timeoutMs:5000})
+                .then(()=>navigator.clipboard.readText()).then(done,error=>done({error:String(error)}));
+            """)
+            copied_values.append({'row':point['row'], 'copied':copied, 'reference':point['reference']})
+        result = {'index':index,'width':width,'layout':layout,'expected':expected,**observation,'copies':copied_values}
+        results.append(result)
+        with progress.open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps(result) + '\n')
+        if observation['afterReference'] is not None or any(value.get('copied') != expected for value in copied_values):
+            failures.append(result)
+    report.write_text(json.dumps({'seed':20261026,'results':results,'failures':failures}, indent=2), encoding='utf-8')
+    print(json.dumps({'width':width,'urls':len(examples),'combinations':len(results),'copies':sum(len(row['copies']) for row in results),
+                      'failures':len(failures),'evidence':str(report)}))
+    assert not failures, json.dumps({'failed':len(failures),'examples':[
+        {'index':row['index'],'layout':row['layout'],'length':len(row['expected']),'rows':len(row['rows']),
+         'copies':[{'row':value['row'],'error':value.get('error'),'length':len(value.get('copied','')),
+                    'correct':value.get('copied')==row['expected']} for value in row['copies']]}
+        for row in failures[:3]],'evidence':str(report)})
 
 
 def test_native_mixed_notices_scroll_below_editor_controls_on_short_viewports(browser, isolated_dev_server_factory, request):
@@ -51,25 +260,36 @@ def test_native_mixed_notices_scroll_below_editor_controls_on_short_viewports(br
                     await new Promise(requestAnimationFrame);
                     const enabled=startupHelpersEnabled;startupHelpersEnabled=true;
                     const tip=showStartupHelperTip();startupHelpersEnabled=enabled;
-                    const command=showTimedStatusNotice('The command could not complete. Please review the request and try again.');
+                    // Each geometry case owns a distinct notice, including its rolling dedupe identity.
+                    const command=showTimedStatusNotice(`The command could not complete. Please review request ${innerWidth}/${innerHeight}/${compact} and try again.`);
                     window.__shortNoticeIds=[tip,command].map(node=>Number(node.dataset.alertId));
-                    const stack=tip.parentElement,bounds=stack.getBoundingClientRect();
-                    const reload=panelNodes.get(item).querySelector('.file-editor-reload-panel'),button=reload.getBoundingClientRect();
+                    const stack=tip.parentElement;
+                    const reload=panelNodes.get(item).querySelector('.file-editor-reload-panel');
+                    await window.__yomuxTestWaitFor(()=>{
+                      const bounds=stack.getBoundingClientRect(),button=reload.getBoundingClientRect();
+                      const header=reload.closest('.file-editor-toolbars').getBoundingClientRect();
+                      return Math.abs(bounds.top-(Math.ceil(header.bottom)+12))<=1
+                        && document.elementFromPoint(button.x+button.width/2,button.y+button.height/2)===reload;
+                    },{timeoutMs:5000,description:'notice and header geometry converge after viewport change'});
+                    const bounds=stack.getBoundingClientRect(),button=reload.getBoundingClientRect();
                     const body=tip.querySelector('.toast-body').getBoundingClientRect();
                     const bodyHit=document.elementFromPoint(body.left+4,Math.max(body.top,bounds.top)+2);
-                    return {top:bounds.top,bottom:bounds.bottom,height:Math.min(innerHeight,appViewport().height),reloadBottom:button.bottom,
+                    return {top:bounds.top,bottom:bounds.bottom,height:Math.min(innerHeight,appViewport().height),reloadBottom:button.bottom,headerBottom:reload.closest('.file-editor-toolbars').getBoundingClientRect().bottom,
                       hit:document.elementFromPoint(button.x+button.width/2,button.y+button.height/2)===reload,
                       passthrough:!bodyHit?.closest('.attention-alerts'),
                       scrollHeight:stack.scrollHeight,clientHeight:stack.clientHeight,
                       horizontalOverflow:stack.scrollWidth > stack.clientWidth+1,
                       clipped:[tip,command].some(node=>node.scrollHeight > node.clientHeight+1),
                       remaining:Number(command.dataset.toastRemainingMs),
-                      tipId:tip.dataset.alertId,commandId:command.dataset.alertId};
+                      tipId:tip.dataset.alertId,commandId:command.dataset.alertId,
+                      groups:[...document.querySelectorAll('.dv-groupview')].map(node=>({rect:node.getBoundingClientRect().toJSON(),heads:[...node.querySelectorAll('.panel-head,.file-editor-toolbars')].map(head=>head.getBoundingClientRect().toJSON())})),
+                      button:button.toJSON(),width:innerWidth,compact};
                   })().then(done,error=>done({error:String(error.stack||error)}));
                 """, setup['item'], compact)
                 assert 'error' not in geometry, geometry
-                assert geometry['hit'] and geometry['top'] >= geometry['reloadBottom'], geometry
-                assert abs(geometry['bottom'] - (geometry['height'] - 12)) <= 1, geometry
+                assert geometry['hit'] and geometry['top'] >= geometry['reloadBottom'], json.dumps(geometry)
+                assert abs(geometry['top'] - (geometry['headerBottom'] + 12)) <= 1, geometry
+                assert geometry['bottom'] <= geometry['height'] - 12 + 1, geometry
                 assert geometry['scrollHeight'] > geometry['clientHeight'] and geometry['remaining'] > 0 and not geometry['clipped'] and not geometry['horizontalOverflow'], geometry
                 if compact:
                     assert geometry['passthrough'], geometry
@@ -340,7 +560,7 @@ def test_native_filesystem_events_refresh_visible_finder_and_hidden_finder_edito
         )
         assert toast_geometry["kind"] == "startup-helper", toast_geometry
         assert all(sample["hit"] and sample["top"] >= sample["reloadBottom"]
-                   and abs(sample["bottom"] - (sample["viewport"] - 12)) <= 1
+                   and sample["bottom"] <= sample["viewport"] - 12 + 1
                    for sample in toast_geometry["samples"]), toast_geometry
         browser.execute_script(
             "return panelNodes.get(arguments[0]).querySelector('.file-editor-reload-panel');", editor_setup["item"]

@@ -1261,6 +1261,27 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(mouseReportApi.attentionAcknowledgementKeyIsRecordedForTest(attentionKey), true, 'typed xterm bytes acknowledge the active red/yellow agent status');
     assert.equal(mouseReportApi.fileExplorerSessionFilesTargetSessionForTest(), '8002', 'typed xterm bytes acknowledge attention without retargeting Differ through the explicit-input helper');
   });
+  test('question ASK stays visible through draft typing and clears when the next prompt is submitted', () => {
+    const questionApi = loadYomux('', ['1']);
+    const questionKey = '["agent-window","1","0","%1","codex","needs-input","question"]';
+    questionApi.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send() {}});
+    questionApi.setTranscriptInfoForTest('1', {panes: [{window: 0, target: '%1', active: true, window_active: true, process_label: 'codex'}]});
+    questionApi.setAutoApproveStateForTest('1', {agent_windows: [
+      {kind: 'codex', state: 'needs-input', attention_kind: 'question', window_index: 0, pane_target: '%1', current: true, window_active: true, attention_key: questionKey},
+    ]});
+    assert.equal(questionApi.sessionAgentWindowStatusModelForTest('1').agents[0]?.attention_kind, 'question', 'the canonical status retains the question subtype');
+    const info = {agents: questionApi.sessionAgentWindowStatusModelForTest('1').agents};
+    const render = () => questionApi.tmuxPaneTabHtml('1', info, questionApi.sessionState('1', info), false);
+    assert.match(render(), />ASK<\/span>/, 'the current question renders its red ASK marker');
+    const attentionOptions = {localOnly: true, acknowledgeAgentWindowDelayMs: 0};
+    assert.equal(questionApi.acknowledgeAgentWindowActivityForTest('1', 0, attentionOptions), false, 'viewing a question does not mark it read');
+    assert.equal(questionApi.handleTerminalDataForTest('1', 'answer', {attentionOptions}), true, 'draft response bytes still reach the terminal');
+    assert.equal(questionApi.attentionAcknowledgementKeyIsRecordedForTest(questionKey), false, 'draft typing leaves ASK unacknowledged');
+    assert.match(render(), />ASK<\/span>/, 'draft typing keeps the visible ASK marker');
+    assert.equal(questionApi.handleTerminalDataForTest('1', '\r', {attentionOptions}), true, 'submitting the next prompt reaches the terminal');
+    assert.equal(questionApi.attentionAcknowledgementKeyIsRecordedForTest(questionKey), true, 'prompt submission marks the question read');
+    assert.match(render(), /status-indicator--acknowledged[^>]*>ASK<\/span>/, 'the submitted question changes to the acknowledged ASK marker');
+  });
   test('typed input acknowledgement survives a stale cooldown snapshot', () => {
     const cooldownApi = loadYomux('', ['1']);
     const cooldownKey = '["agent-window","1","0","%1","codex","cooldown","4000"]';
@@ -2096,8 +2117,8 @@ async function runCrossSurfaceStateSuite() {
     const terminalContainerBindingBody = appSource.slice(terminalContainerBindingStart, terminalContainerBindingEnd);
     const terminalDataHandlerStart = appSource.indexOf('function handleTerminalData(');
     const terminalDataHandlerBody = appSource.slice(terminalDataHandlerStart, appSource.indexOf('function shellQuote(', terminalDataHandlerStart));
-    assert.ok(/scope\.ownEvent\('keydown', container, 'keydown', (?:\(\)|event) => \{[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/scope\.ownEvent\('keydown'[\s\S]{0,300}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal keydown keeps the touch key palette open while committing the Finder Modified-files target');
-    assert.ok(/scope\.ownEvent\('paste', container, 'paste', (?:\(\)|event) => \{[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/scope\.ownEvent\('paste'[\s\S]{0,240}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal paste keeps the touch key palette open while committing the Finder Modified-files target');
+    assert.ok(/scope\.ownEvent\('keydown', container, 'keydown', (?:\(\)|event) => \{[\s\S]*noteTerminalExplicitInput\(session, event\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/scope\.ownEvent\('keydown'[\s\S]{0,300}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal keydown keeps the touch key palette open while committing the Finder Modified-files target');
+    assert.ok(/scope\.ownEvent\('paste', container, 'paste', (?:\(\)|event) => \{[\s\S]*noteTerminalExplicitInput\(session, event\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/scope\.ownEvent\('paste'[\s\S]{0,240}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal paste keeps the touch key palette open while committing the Finder Modified-files target');
     assert.ok(terminalInputBody.includes('bindTerminalContainerForSession(session, term, container);'), 'startTerminal uses the shared terminal container binding path');
     assert.ok(/term\.onData\(data => \{[\s\S]*recordTerminalMobileInputTrace\(session, 'on-data'[\s\S]*handleTerminalData\(session, data\);[\s\S]*\}\);/.test(terminalInputBody), 'startTerminal traces metadata then routes terminal bytes through the shared terminal data handler');
     assert.ok(/allowProposedApi:\s*true/.test(terminalInputBody), 'xterm opts into the unicode service needed by the Unicode11 addon');
@@ -4039,6 +4060,13 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(cmdCResult, false, 'Mac Cmd-C with no browser/xterm selection is swallowed instead of reaching the PTY');
     assert.equal(prevented, 1, 'Mac Cmd-C with no browser/xterm selection prevents the terminal default');
     assert.deepStrictEqual(fetchCalls, [], 'Mac Cmd-C with no browser/xterm selection does not ask tmux for copy-mode text');
+    for (const [key, code, handled] of [['c', 'KeyI', true], ['j', 'KeyC', false]]) {
+      prevented = 0;
+      const result = copyShortcutHandler({type: 'keydown', key, code, metaKey: true,
+        ctrlKey: false, altKey: false, shiftKey: false, preventDefault() { prevented += 1; }});
+      assert.equal(result, !handled, `Dvorak Cmd-${key.toUpperCase()} follows its character in the terminal`);
+      assert.equal(prevented, handled ? 1 : 0, 'only the logical Copy shortcut is consumed');
+    }
     let domKeydownHandler = null;
     let domKeydownOptions = null;
     let domCopyShortcutHandler = null;

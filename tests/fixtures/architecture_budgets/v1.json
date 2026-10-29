@@ -97,6 +97,7 @@
       "focused_alias_of": null,
       "name": "pytest-browser",
       "step_ids": [
+        "pytest-real-agent-urls",
         "pytest-browser",
         "pytest-browser-golden"
       ]
@@ -143,25 +144,7 @@
     },
     {
       "count": 1,
-      "name": "clientPerfInteractionDurableCount",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 1,
-      "name": "clientPerfInteractionMaximumMs",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 1,
       "name": "clientPerfInteractionObserverInstalled",
-      "owner": "static_src/js/yomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yomux/10_core_utils.js"
-    },
-    {
-      "count": 1,
-      "name": "clientPerfLongTaskDurableCount",
       "owner": "static_src/js/yomux/00_bootstrap_state.js",
       "writer": "static_src/js/yomux/10_core_utils.js"
     },

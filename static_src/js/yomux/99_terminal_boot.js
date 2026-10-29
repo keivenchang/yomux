@@ -3961,10 +3961,24 @@ function insertIntoTerminal(session, text) {
   return true;
 }
 
-function noteTerminalExplicitInput(session) {
+function noteTerminalExplicitInput(session, event = null) {
   const item = terminals.get(session);
   if (!item) return;
-  item.lastExplicitInputStartedAt = performanceNow();
+  const eventType = String(event?.type || 'keydown');
+  const modifierOnly = eventType === 'keydown' && ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'Dead', 'Process'].includes(event?.key);
+  if (!modifierOnly && event?.isComposing !== true && item.lastExplicitInputStartedAt == null) {
+    item.lastExplicitInputStartedAt = performanceNow();
+    item.explicitInputEventType = eventType;
+    const startedAt = item.lastExplicitInputStartedAt;
+    // Chromium runs microtasks between native capture and target listeners.
+    // Expire in a task so xterm can process the originating event first.
+    setTimeout(function expireTerminalInput() {
+      if (terminals.get(session) !== item || item.lastExplicitInputStartedAt !== startedAt) return;
+      item.lastExplicitInputStartedAt = null;
+      item.explicitInputEventType = null;
+    }, 0);
+    recordTerminalMobileInputTrace(session, 'input-start', {eventType, composing: event?.isComposing === true});
+  }
   if (item.explicitInputOwnershipScheduled) return;
   item.explicitInputOwnershipScheduled = true;
   Promise.resolve().then(() => {
@@ -4010,11 +4024,17 @@ function terminalDataShouldAcknowledgeAttention(data, options = {}) {
   return terminalDataWithoutPassiveReports(data, options).length > 0;
 }
 
+function terminalInputSubmitsPrompt(data, options = {}) {
+  return /[\r\n]$/.test(terminalDataWithoutPassiveReports(data, options));
+}
+
 function acknowledgeTerminalAttentionFromTransportInput(session, data, options = {}) {
   if (options.acknowledgeAttention === false) return false;
   if (!terminalDataShouldAcknowledgeAttention(data)) return false;
   if (typeof acknowledgeTerminalAttentionFromUserAction !== 'function') return false;
-  return acknowledgeTerminalAttentionFromUserAction(session, null, options.attentionOptions || {});
+  const attentionOptions = {...(options.attentionOptions || {})};
+  if (terminalInputSubmitsPrompt(data, options)) attentionOptions.questionPromptSubmitted = true;
+  return acknowledgeTerminalAttentionFromUserAction(session, null, attentionOptions);
 }
 
 const terminalTmuxInputStates = new Map();
@@ -4391,11 +4411,14 @@ function handleTerminalDataMeasured(session, data, options = {}) {
   if (!filtered) return false;
   const current = terminals.get(session);
   const explicitInputStartedAt = Number(current?.lastExplicitInputStartedAt);
-  const explicitInput = current?.lastExplicitInputStartedAt != null && Number.isFinite(explicitInputStartedAt);
+  const explicitInput = current?.lastExplicitInputStartedAt != null && Number.isFinite(explicitInputStartedAt)
+    && terminalDataShouldAcknowledgeAttention(filtered, {explicitInput: true});
   if (explicitInput) {
     const durationMs = performanceNow() - explicitInputStartedAt;
     current.lastExplicitInputStartedAt = null;
-    recordClientPerfCounter('keydownToTermData', durationMs, {bytes: utf8ByteLength(filtered)});
+    recordClientPerfCounter(current.explicitInputEventType === 'keydown' ? 'keydownToTermData' : 'inputToTermData', durationMs, {bytes: utf8ByteLength(filtered)});
+    recordTerminalMobileInputTrace(session, 'input-data', {eventType: current.explicitInputEventType, durationMs, bytes: utf8ByteLength(filtered)});
+    current.explicitInputEventType = null;
   }
   const socket = current?.socket;
   if (socket?.readyState !== WebSocket.OPEN) {
@@ -4417,7 +4440,10 @@ function handleTerminalDataMeasured(session, data, options = {}) {
     : JSON.stringify({type: 'input', data: filtered, user_input: userInput}));
   clientPerfEnd(sendPerf, {bytes: utf8ByteLength(filtered)});
   if (userInput) noteTabberTerminalInput(session);
-  current.lastInputSentAt = performanceNow();
+  if (userInput) {
+    current.lastInputSentAt = performanceNow();
+    recordTerminalMobileInputTrace(session, 'websocket-send', {bytes: utf8ByteLength(filtered)});
+  }
   observeTerminalTmuxPrefixWindowSwitches(session, filtered);
   acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
   // Physical/mobile key input can arrive without another pointer event. Retire a touch-opened
@@ -5063,16 +5089,17 @@ function recoverTerminalAfterFrameFailure(session, item, error) {
 // written to xterm.
 function processTerminalSocketFrame(session, item, data) {
   const dataBytes = data instanceof ArrayBuffer ? data.byteLength : utf8ByteLength(data);
-  const inputSentAt = Number(item.lastInputSentAt || 0);
-  if (inputSentAt > 0) {
-    recordClientPerfCounter('echoToTermWrite', performanceNow() - inputSentAt, {bytes: dataBytes});
-    item.lastInputSentAt = 0;
-  }
   const writePerf = clientPerfStart('xtermWrite');
   let consumedControl = false;
   if (consumeTerminalControlMessage(session, data)) {
     consumedControl = true;
   } else {
+    const inputSentAt = Number(item.lastInputSentAt || 0);
+    if (inputSentAt > 0) {
+      recordClientPerfCounter('inputToFirstOutput', performanceNow() - inputSentAt, {bytes: dataBytes});
+      recordTerminalMobileInputTrace(session, 'first-output', {durationMs: performanceNow() - inputSentAt, bytes: dataBytes});
+      item.lastInputSentAt = 0;
+    }
     writeTerminalOutput(session, item, data);
   }
   clientPerfEnd(writePerf, {bytes: dataBytes});
@@ -5133,15 +5160,15 @@ function bindTerminalContainerForSession(session, term, container) {
   scope.ownEvent('keydown', container, 'keydown', event => {
     const keyKind = ['Backspace', 'Enter'].includes(event.key) ? event.key.toLowerCase() : (event.key?.length === 1 ? 'printable' : 'control');
     recordTerminalMobileInputTrace(session, 'keydown', {keyKind, composing: event.isComposing === true});
-    noteTerminalExplicitInput(session);
+    noteTerminalExplicitInput(session, event);
   }, {capture: true});
   scope.ownEvent('paste', container, 'paste', event => {
     recordTerminalMobileInputTrace(session, 'paste', {types: Array.from(event.clipboardData?.types || [])});
-    noteTerminalExplicitInput(session);
+    noteTerminalExplicitInput(session, event);
   }, {capture: true});
   scope.ownEvent('beforeinput', container, 'beforeinput', event => {
     recordTerminalMobileInputTrace(session, 'beforeinput', {inputType: String(event.inputType || ''), composing: event.isComposing === true});
-    noteTerminalExplicitInput(session);
+    noteTerminalExplicitInput(session, event);
   }, {capture: true});
   scope.ownEvent('compositionstart', container, 'compositionstart', () => {
     recordTerminalMobileInputTrace(session, 'compositionstart');

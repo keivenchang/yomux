@@ -194,7 +194,7 @@ def _client_perf_trace(driver) -> dict[str, object]:
           focusSet: counters.focusSet || null,
           termOnData: counters['term.onData'] || null,
           wsSend: counters.wsSend || null,
-          echoToTermWrite: counters.echoToTermWrite || null,
+          inputToFirstOutput: counters.inputToFirstOutput || null,
           xtermWrite: counters.xtermWrite || null,
           longTasks: clientPerfLongTaskSummary(),
         };
@@ -601,7 +601,7 @@ def _keystroke_round(
         "ws_send_bytes": _counter_total(trace["wsSend"], "bytes"),
         "term_on_data_count": _counter_total(trace["termOnData"], "count"),
         "term_on_data_bytes": _counter_total(trace["termOnData"], "bytes"),
-        "echo_count": _counter_total(trace["echoToTermWrite"], "count"),
+        "echo_count": _counter_total(trace["inputToFirstOutput"], "count"),
         "pressure_bytes_observed": xterm_bytes_after - xterm_bytes_before,
         "long_tasks": trace["longTasks"],
     }
@@ -632,7 +632,7 @@ def _keystroke_delivery_failures(observed: dict[str, object]) -> list[str]:
             f"observed count={observed['term_on_data_count']} bytes={observed['term_on_data_bytes']}"
         )
     if observed["echo_count"] < 1:
-        failures.append(f"socket-echo: the session must answer at least one send while typing; echoToTermWrite count={observed['echo_count']}")
+        failures.append(f"socket-echo: the session must answer at least one send while typing; inputToFirstOutput count={observed['echo_count']}")
     if observed["pressure"] and int(observed["pressure_bytes_observed"]) < TERMINAL_PRESSURE_SAMPLING_MIN_BYTES:
         failures.append(
             f"output-pressure: xterm must keep consuming the streaming session during the round; "
@@ -1156,7 +1156,7 @@ def test_s1_pressure_round_waits_for_the_existing_byte_floor_before_final_observ
             "focusSet": None,
             "wsSend": {"count": sent_keys, "bytes": sent_keys},
             "termOnData": {"count": sent_keys, "bytes": sent_keys},
-            "echoToTermWrite": {"count": 1},
+            "inputToFirstOutput": {"count": 1},
             "xtermWrite": {"bytes": baseline_bytes + TERMINAL_PRESSURE_SAMPLING_MIN_BYTES + 17},
             "longTasks": {"count": 0, "maxMs": 0},
         },
@@ -1608,6 +1608,38 @@ def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="
         if profile:
             browser.execute_cdp_cmd("Profiler.disable", {})
         browser.execute_script("if (typeof window.__activationProbe?.dispose === 'function') window.__activationProbe.dispose(); window.__activationRestoreFetch?.();")
+        browser.get("about:blank")
+
+
+@pytest.mark.parametrize("pressure", [False, True])
+@pytest.mark.browser
+def test_native_input_diagnostics_and_visible_echo_remain_correlated(browser, isolated_dev_server_factory, pressure):
+    runtime = isolated_dev_server_factory("input-diagnostics", session_count=1)
+    session = runtime.tmux.sessions[0]
+    _start_marker_echo_process(runtime, session, pressure=pressure)
+    query = urlencode({"sessions": session, "layout": "left", "tabs": f"left:{session}", "debug": "1"})
+    try:
+        browser.get(f"{runtime.base_url}/?{query}")
+        assert_live_runtime_boot_healthy(browser, "input-diagnostics", timeout=20)
+        WebDriverWait(browser, 20).until(lambda driver: driver.execute_script(
+            "const item=terminals.get(arguments[0]); return item?.terminalOutputSeen && item.term?.onRender && item.container.querySelector('.xterm-screen');", session))
+        browser.execute_script("const item=terminals.get(arguments[0]); setFocusedTerminal(arguments[0]); item.term.focus(); clearClientPerfCounters();", session)
+        _install_visible_echo_probe(browser, session)
+        # A native modifier must not arm a timer that a focus report can consume.
+        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Shift", "code": "ShiftLeft", "windowsVirtualKeyCode": 16})
+        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Shift", "code": "ShiftLeft", "windowsVirtualKeyCode": 16})
+        browser.execute_script("handleTerminalData(arguments[0], '\\x1b[I');", session)
+        assert _client_perf_counter(browser, "keydownToTermData") is None
+        for index in range(1, 11):
+            _send_native_key(browser, "a")
+            counter = _client_perf_counter(browser, "keydownToTermData")
+            assert _counter_total(counter, "count") == index, counter
+            WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
+                "return window.__tabSwitchEchoProbe.samples[arguments[0] - 1]?.paintedAt > 0;", index))
+        samples = browser.execute_script("return window.__tabSwitchEchoProbe.samples;")
+        assert len(samples) == 10 and all(sample["trusted"] and sample["paintedAt"] >= sample["eventAt"] for sample in samples), samples
+    finally:
+        browser.execute_script("window.__tabSwitchEchoProbe?.dispose?.();")
         browser.get("about:blank")
 
 

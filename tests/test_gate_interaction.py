@@ -717,13 +717,14 @@ def test_yolo_toggle_completion_preserves_a_newer_status_message(browser, tmp_pa
         showLayoutStatus('Newer unrelated status', 'advisory');
         window.__fixtureReleaseAutoApprove();
         request.then(() => {
-          const text = document.getElementById('status').textContent;
-          showLayoutStatus('');
+          const notice=[...document.querySelectorAll('.attention-alerts .command-notice')].find(node=>node.textContent.includes('Newer unrelated status'));
+          const text=notice?.textContent || '';
+          if(notice) removeAttentionAlert(Number(notice.dataset.alertId));
           done(text);
         });
         """
     )
-    assert result == "Newer unrelated status"
+    assert "Newer unrelated status" in result
 
 
 def test_k2_submitted_control_disables_before_request_and_reenables_in_finally(browser, tmp_path):
@@ -825,8 +826,8 @@ def test_k5_mutation_acknowledgement_preserves_live_status_semantics(browser, tm
     assert semantics["live"] in {"polite", "assertive"}, semantics
 
 
-def test_k6_failed_mutation_renders_its_typed_reason_in_a_visible_control_associated_error(browser, tmp_path):
-    """A rejected YOLO toggle clears pending state and shows its typed reason beside the initiating control."""
+def test_k6_failed_mutation_renders_its_typed_reason_in_a_visible_timed_notice(browser, tmp_path):
+    """A rejected YOLO toggle clears pending state and shows its typed reason in the shared timed notice."""
     _load_toggle_fixture(browser, tmp_path)
     result = browser.execute_async_script(
         """
@@ -859,7 +860,9 @@ def test_k6_failed_mutation_renders_its_typed_reason_in_a_visible_control_associ
           request.then(() => requestAnimationFrame(() => {
             const ids = (button.getAttribute('aria-describedby') || '').split(/\\s+/).filter(Boolean);
             const described = ids.map(id => document.getElementById(id)).filter(Boolean);
-            const errorNode = described.find(node => visible(node) && (node.textContent || '').includes(error.payload.reason));
+            const errorNode = [...document.querySelectorAll('.attention-alerts .command-notice')]
+              .find(node => visible(node) && (node.textContent || '').includes(error.payload.reason));
+            if (described.length) throw new Error('settled control retains a command description');
             const delegatedWatchRoots = window.__bootFetches.filter(item => (
               item.path === '/api/watch/roots' && item.body?.roots?.includes(delegationRoot)
             ));
@@ -929,11 +932,8 @@ def test_k7_overdue_mutation_keeps_its_control_disabled_without_abort_and_conver
           request.then(() => requestAnimationFrame(() => {
             const afterIds = (button.getAttribute('aria-describedby') || '').split(/\\s+/).filter(Boolean);
             const overdueAfter = afterIds.map(id => document.getElementById(id)).find(node => visible(node) && /overdue|taking longer|still working/i.test(node.textContent || ''));
-            const errorVisible = Array.from(document.querySelectorAll('[aria-describedby]'))
-              .some(control => (control.getAttribute('aria-describedby') || '').split(/\\s+/).some(id => {
-                const node = document.getElementById(id);
-                return visible(node) && (node.textContent || '').includes('fixture late mutation failure');
-              }));
+            const errorVisible = [...document.querySelectorAll('.attention-alerts .command-notice')]
+              .some(node => visible(node) && (node.textContent || '').includes('fixture late mutation failure'));
             restoreFetch();
             done({
               pending,

@@ -269,8 +269,10 @@ def test_shared_button_overlay_and_command_lifecycle(browser, tmp_path):
     ({"error": "file changed on disk", "error_code": "changed_on_disk", "message_key": "fs.error.changedOnDisk", "path": "/tmp/example.md"}, "File changed on disk: /tmp/example.md."),
     ({"error": "deadline_expired: request exceeded its 15s deadline", "reason_code": "deadline_expired"}, "deadline_expired: request exceeded its 15s deadline"),
     ({"localDeadline": True}, "deadline_expired: request exceeded its 15s deadline"),
+    ({"error": "path not found: /Users/keivenc/dev/yomux/yo8881/tmp/808.md", "watchFailure": True}, "Finder watch registration: path not found: /Users/keivenc/dev/yomux/yo8881/tmp/808.md"),
+    ({"error": "permission denied"}, "permission denied"),
 ])
-def test_command_notice_uses_timed_yellow_toast(browser, tmp_path, failure, expected):
+def test_command_notice_uses_timed_notification_card(browser, tmp_path, failure, expected):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script("""
       const done = arguments[arguments.length - 1];
@@ -284,22 +286,36 @@ def test_command_notice_uses_timed_yellow_toast(browser, tmp_path, failure, expe
         const priorFocus = document.activeElement;
         const originalFetch = window.fetch;
         const originalDuration = toastDurationMs;
+        const route = COMMAND_ROUTES[failure.watchFailure ? 'watch-roots-sync' : 'finder-file-create'];
         toastDurationMs = 400;
-        window.fetch = (url, options) => String(url) === '/api/fs/write'
+        window.fetch = (url, options) => String(url) === route.path
           ? (failure.localDeadline ? Promise.reject(apiFetchDeadlineError(15000))
             : Promise.resolve(new Response(JSON.stringify(failure), {status:409})))
           : originalFetch(url, options);
         try {
-          await dispatchCommand(COMMAND_ROUTES['finder-file-create'], {payload:{path:'/tmp/example.md'},
+          await dispatchCommand(route, {payload:{path:'/tmp/example.md'},
             internalOptions:{quietStatuses:[409]}}).catch(() => {});
           const toast = document.querySelector('.attention-alerts .toast');
+          const priorLightTheme = document.body.classList.contains('theme-light');
+          const toastPaint = () => {
+            const style = toast ? getComputedStyle(toast) : null;
+            return style ? {background: style.backgroundColor, color: style.color} : null;
+          };
+          document.body.classList.remove('theme-light');
+          const darkToastPaint = toastPaint();
+          document.body.classList.add('theme-light');
+          const lightToastPaint = toastPaint();
+          document.body.classList.toggle('theme-light', priorLightTheme);
           const rect = document.querySelector('.app-menu[data-app-menu="view"] > .app-menu-popover').getBoundingClientRect();
           const point = {x:rect.left + rect.width / 2, y:rect.top + Math.min(32, rect.height / 2)};
           const toastRect = toast?.getBoundingClientRect();
           const result = {message: toast?.textContent.replace(/\\s+/g, ' ').trim() || '',
             persistent: toast?.dataset.toastPersistent === 'true', remaining: Number(toast?.dataset.toastRemainingMs || 0),
             background: toast ? getComputedStyle(toast).backgroundColor : '',
-            toastBelowMenu: Boolean(toastRect && toastRect.top >= rect.bottom),
+            themePaint: {dark: darkToastPaint, light: lightToastPaint},
+            toastBelowTabs: Boolean(toastRect && toastRect.top >= Math.max(...Array.from(document.querySelectorAll('.dv-tabs-and-actions-container')).map(node => node.getBoundingClientRect().bottom), 0)),
+            radius: toast ? parseFloat(getComputedStyle(toast).borderRadius) : 0,
+            blur: toast ? getComputedStyle(toast).backdropFilter : '',
             menuOpen: document.querySelector('.app-menu[data-app-menu="view"]').classList.contains('open'),
             menuReceivesHit: document.elementFromPoint(point.x, point.y)?.closest('.app-menu-popover') === document.querySelector('.app-menu[data-app-menu="view"] > .app-menu-popover'),
             globalDanger: document.getElementById('status').classList.contains('layout-status-danger'),
@@ -318,9 +334,13 @@ def test_command_notice_uses_timed_yellow_toast(browser, tmp_path, failure, expe
     """, failure)
     assert "error" not in metrics, metrics
     assert expected in metrics["message"], metrics
+    assert metrics["themePaint"] == {
+        "dark": {"background": "rgb(242, 213, 107)", "color": "rgb(41, 34, 11)"},
+        "light": {"background": "rgb(255, 241, 118)", "color": "rgb(41, 34, 11)"},
+    }, metrics
     assert metrics["persistent"] is False and metrics["remaining"] > 0, metrics
-    assert "255, 244, 194" in metrics["background"], metrics
-    assert metrics["toastBelowMenu"] is True, metrics
+    assert metrics["radius"] == 20 and metrics["blur"] == "none", metrics
+    assert metrics["toastBelowTabs"] is True, metrics
     assert metrics["menuOpen"] is True and metrics["menuReceivesHit"] is True, metrics
     assert metrics["globalDanger"] is False and metrics["commandErrors"] == 0, metrics
     assert metrics["expired"] is True, metrics
@@ -328,6 +348,57 @@ def test_command_notice_uses_timed_yellow_toast(browser, tmp_path, failure, expe
     if failure.get("localDeadline"):
         consume_only_expected_js_debug_api_errors(browser, [{"method": "POST", "path": "/api/fs/write",
             "status": None, "ok": None, "error": "deadline_expired: request exceeded its 15s deadline"}])
+    elif failure.get("watchFailure"):
+        consume_only_expected_js_debug_api_errors(browser, [{"method": "POST", "path": "/api/watch/roots",
+            "status": 409, "ok": False}])
+
+
+def test_notification_cards_follow_light_and_dark_themes(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2", sessions=["1", "2"])
+    metrics = browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      (async()=>{
+        await window.__yomuxTestWaitFor(()=>initialAppShellPainted && typeof showToast==='function');
+        const light=document.body.classList.contains('theme-light'),samples=[];
+        const nodes=[];
+        try {
+          for(const theme of ['dark','light']) {
+            document.body.classList.toggle('theme-light',theme==='light');
+            for(const variant of ['attention-alert toast','attention-alert toast toast-update']) {
+              const toast=showToast(`YOmux ${theme} ${variant}`,'A file changed on disk. Review the file before saving.',{className:variant});
+              nodes.push(toast);
+              const style=getComputedStyle(toast),button=getComputedStyle(toast.querySelector('[data-toast-keep]'));
+              const rect=toast.getBoundingClientRect();
+              const holders=[...document.querySelectorAll('.dv-tabs-and-actions-container,.pane-info-bar,.file-editor-toolbars')].filter(node=>node.getBoundingClientRect().height>0);
+              samples.push({theme,variant,color:style.color,background:style.backgroundColor,buttonColor:button.color,
+                radius:parseFloat(style.borderRadius),blur:style.backdropFilter,
+                top:rect.top,right:rect.right,viewport:innerWidth,
+                headersClear:holders.every(node=>{
+                  const r=node.getBoundingClientRect(),hit=document.elementFromPoint(r.right-5,r.top+r.height/2);
+                  return rect.top>=r.bottom && !hit?.closest('.attention-alerts');
+                })});
+              removeAttentionAlert(Number(toast.dataset.alertId));
+            }
+          }
+          return samples;
+        } finally {
+          for(const node of nodes) removeAttentionAlert(Number(node.dataset.alertId));
+          document.body.classList.toggle('theme-light',light);
+        }
+      })().then(done,error=>done({error:String(error.stack||error)}));
+    """)
+    assert isinstance(metrics, list) and len(metrics) == 4, metrics
+    expected_background = {
+        'dark': 'rgb(242, 213, 107)',
+        'light': 'rgb(255, 241, 118)',
+    }
+    for row in metrics:
+        assert row['radius'] == 20 and row['headersClear'], row
+        assert abs(row['right'] - (row['viewport'] - 12)) <= 1, row
+        assert row['color'] == row['buttonColor'], row
+        assert row['background'] == expected_background[row['theme']], row
+        assert row['color'] == 'rgb(41, 34, 11)' and row['blur'] == 'none', row
+    assert metrics[0]['background'] != metrics[2]['background'], metrics
 
 
 def test_changed_on_disk_toasts_stack_without_overlap(browser, tmp_path):
@@ -360,6 +431,202 @@ def test_changed_on_disk_toasts_stack_without_overlap(browser, tmp_path):
     assert metrics["second"]["top"] > metrics["first"]["top"], metrics
     assert metrics["first"]["right"] == metrics["second"]["right"], metrics
     assert metrics["stack"]["bottom"] <= metrics["viewportBottom"], metrics
+
+
+def test_agent_notice_uses_compact_padding_and_full_width_continuation(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=['1'])
+    metrics = browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      (async()=>{
+        await window.__yomuxTestWaitFor(()=>typeof agentToastTargetLine==='function' && typeof showToast==='function',{timeoutMs:5000});
+        const host=document.createElement('div');Object.assign(host.style,{position:'fixed',left:'20px',top:'100px'});document.body.append(host);
+        const wasLight=document.body.classList.contains('theme-light'),results=[];
+        try {
+          for(const light of [false,true])for(const width of [280,360,640])for(const font of [13,16]){
+            document.body.classList.toggle('theme-light',light);host.style.width=`${width}px`;
+            host.style.setProperty('--ui-font-size-sm',`${font}px`);
+            const session='398-445-mfeil-reviews';
+            const reason=`Codex in tmux session ${session} finished working.`;
+            const toast=showToast('Working AI finished',agentToastTargetLine(session,{
+              kind:'codex',state:STATE_KEY.idle,window_index:1,window_label:'1:codex',
+            },{reason}),{container:host,countdownMs:60000});
+            await new Promise(resolve=>requestAnimationFrame(resolve));
+            const controls=toast.querySelector('.attention-toast-controls'),text=toast.querySelector('.attention-toast-reason');
+            const box=toast.getBoundingClientRect(),badges=controls.getBoundingClientRect(),body=text.getBoundingClientRect(),style=getComputedStyle(toast);
+            const word=document.createRange();word.setStart(text.firstChild,0);word.setEnd(text.firstChild,5);
+            results.push({width,light,font,padding:parseFloat(style.paddingLeft),reason: text.textContent,
+              separateRow:body.top>=badges.bottom,aligned:Math.abs(body.left-badges.left)<1,
+              fullWidth:body.width>=toast.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight)-1,
+              wordFragments:word.getClientRects().length,overflow:toast.scrollWidth>toast.clientWidth,
+              badgesContained:[...controls.children].every(node=>{const r=node.getBoundingClientRect();return r.left>=box.left && r.right<=box.right;})});
+            removeAttentionAlert(Number(toast.dataset.alertId));
+          }
+          return results;
+        }finally{host.remove();document.body.classList.toggle('theme-light',wasLight);}
+      })().then(done,error=>done({error:String(error.stack||error)}));
+    """)
+    assert isinstance(metrics, list), metrics
+    for result in metrics:
+        assert result['padding'] <= 10, result
+        assert result['separateRow'] and result['aligned'] and result['fullWidth'], result
+        assert result['wordFragments'] == 1 and not result['overflow'] and result['badgesContained'], result
+
+
+def test_repeated_identical_timed_notices_coalesce(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script("""
+      const done = arguments[arguments.length - 1];
+      (async () => {
+        await window.__yomuxTestWaitFor(() => typeof showTimedStatusNotice === 'function' && typeof emitNotification === 'function',
+          {timeoutMs: 5000, description: 'shared timed notification owner'});
+        const message = 'deadline_expired: request exceeded its 15s deadline';
+        const first = showTimedStatusNotice(message);
+        const second = showTimedStatusNotice(message);
+        const sameMessage = showTimedStatusNotice('another command failure');
+        const notices = [...document.querySelectorAll('.attention-alerts .command-notice')];
+        const result = {
+          count: notices.length,
+          repeatedCount: notices.filter(node => node.textContent.includes(message)).length,
+          distinctCount: notices.filter(node => node.textContent.includes('another command failure')).length,
+          sameCard: first === second,
+          latestConnected: second?.isConnected === true && sameMessage?.isConnected === true,
+          keys: notices.map(node => node.dataset.toastCoalesceKey),
+        };
+        for (const node of notices) removeAttentionAlert(Number(node.dataset.alertId));
+        done(result);
+      })().catch(error => done({error:String(error.stack || error)}));
+    """)
+    assert "error" not in metrics, metrics
+    assert metrics["count"] == 2 and metrics["repeatedCount"] == 1 and metrics["distinctCount"] == 1, metrics
+    assert metrics["sameCard"] and metrics["latestConnected"], metrics
+    assert len(set(metrics["keys"])) == 2, metrics
+
+
+def test_visually_identical_failure_notices_preserve_one_kept_card(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script("""
+      const done = arguments[arguments.length - 1];
+      (async () => {
+        await window.__yomuxTestWaitFor(() => typeof showTimedStatusNotice === 'function', {timeoutMs:5000});
+        const first = showTimedStatusNotice('Failed to fetch');
+        first.querySelector('[data-toast-keep]').click();
+        const close = first.querySelector('[data-toast-close]');
+        close.focus();
+        const notices = ['Failed  to fetch', ' Failed to fetch ', 'Failed\\tto fetch', 'Failed to fetch\\n'];
+        for (const message of notices) showTimedStatusNotice(message);
+        for (let index = 0; index < 5; index += 1) {
+          emitNotification('commandNotice', {lines:'Failed to fetch', coalesceKey:`different-producer:${index}`});
+        }
+        showTimedStatusNotice('A different failure');
+        const cards = [...document.querySelectorAll('.attention-alerts .command-notice, .attention-alerts [data-toast-event="commandNotice"]')];
+        const matching = cards.filter(node => node.querySelector('.toast-body').textContent === 'Failed to fetch');
+        const result = {count:cards.length, matching:matching.length, same:matching[0] === first,
+          kept:first.classList.contains('kept'), focused:document.activeElement === close};
+        emitNotification('commandNotice', {lines:'Changed failure', coalesceKey:'different-producer:0'});
+        result.aliasUpdated = !first.isConnected && [...document.querySelectorAll('.attention-alerts .toast-body')].some(node => node.textContent === 'Changed failure');
+        for (const node of [...document.querySelectorAll('.attention-alerts .toast')]) removeAttentionAlert(Number(node.dataset.alertId));
+        return result;
+      })().then(done, error => done({error:String(error.stack || error)}));
+    """)
+    assert metrics == {"count": 2, "matching": 1, "same": True, "kept": True, "focused": True, "aliasUpdated": True}, metrics
+
+
+def test_passive_identical_notices_use_a_rolling_thirty_second_window(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      (async()=>{
+        await window.__yomuxTestWaitFor(()=>typeof showTimedStatusNotice==='function',{timeoutMs:5000});
+        const originalNow=Date.now;
+        let now=1_000_000;
+        Date.now=()=>now;
+        try {
+          const first=showTimedStatusNotice('Failed to fetch');
+          removeAttentionAlert(Number(first.dataset.alertId));
+          now+=29_000;
+          const second=emitNotification('commandNotice',{lines:'Failed  to fetch',coalesceKey:'other-fetch-producer',
+            className:'attention-alert toast command-notice'}).inApp;
+          now+=29_000;
+          const third=showTimedStatusNotice('Failed to fetch');
+          const during=[...attentionAlerts.querySelectorAll('.command-notice')].length;
+          now+=30_001;
+          const after=showTimedStatusNotice('Failed to fetch');
+          const result={suppressedSecond:second===null,suppressedThird:third===null,during,shownAfterWindow:after?.isConnected===true};
+          for(const node of [...attentionAlerts.querySelectorAll('.command-notice')]) removeAttentionAlert(Number(node.dataset.alertId));
+          return result;
+        } finally { Date.now=originalNow; }
+      })().then(done,error=>done({error:String(error.stack||error)}));
+    """)
+    assert metrics == {"suppressedSecond": True, "suppressedThird": True, "during": 0, "shownAfterWindow": True}, metrics
+
+
+def test_suppressed_old_notice_does_not_dismiss_a_newer_message_with_its_key(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      (async()=>{
+        await window.__yomuxTestWaitFor(()=>typeof showTimedStatusNotice==='function',{timeoutMs:5000});
+        const first=showTimedStatusNotice('Failed to fetch');
+        const key=first.dataset.toastCoalesceKey;
+        removeAttentionAlert(Number(first.dataset.alertId));
+        const newer=emitNotification('commandNotice',{lines:'Different failure',coalesceKey:key}).inApp;
+        const repeated=showTimedStatusNotice('Failed to fetch');
+        const result={repeatSuppressed:repeated===null,newerSurvived:newer?.isConnected===true,
+          visible:[...attentionAlerts.querySelectorAll('.toast-body')].map(node=>node.textContent)};
+        for(const node of [...attentionAlerts.querySelectorAll('.toast')]) removeAttentionAlert(Number(node.dataset.alertId));
+        return result;
+      })().then(done,error=>done({error:String(error.stack||error)}));
+    """)
+    assert metrics == {"repeatSuppressed": True, "newerSurvived": True, "visible": ["Different failure"]}, metrics
+
+
+def test_notification_identity_matches_the_visible_summary(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      (async()=>{
+        await window.__yomuxTestWaitFor(()=>typeof emitNotification==='function',{timeoutMs:5000});
+        const results=[];
+        for (const [index,lines] of [
+          ['x'.repeat(200)+'first','x'.repeat(200)+'second'],
+          [['same first','same second','hidden one','hidden two'],['same first','same second','different one','different two']],
+        ].entries()) {
+          const first=emitNotification('commandNotice',{lines:lines[0],coalesceKey:`summary:${index}:first`}).inApp;
+          const timer=toastRecords.get(Number(first.dataset.alertId)).timer;
+          const second=emitNotification('commandNotice',{lines:lines[1],coalesceKey:`summary:${index}:second`}).inApp;
+          results.push({same:first===second,timer:toastRecords.get(Number(first.dataset.alertId))?.timer===timer,
+            count:[...attentionAlerts.children].filter(node=>node.querySelector('.toast-body')?.textContent===first.querySelector('.toast-body').textContent).length});
+        }
+        for (const node of [...attentionAlerts.children]) removeAttentionAlert(Number(node.dataset.alertId));
+        return results;
+      })().then(done,error=>done({error:String(error.stack||error)}));
+    """)
+    assert metrics == [{"same": True, "timer": True, "count": 1}] * 2, metrics
+
+
+def test_kept_repeated_notice_bounds_producer_and_lifecycle_aliases(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      (async()=>{
+        await window.__yomuxTestWaitFor(()=>typeof emitNotification==='function',{timeoutMs:5000});
+        let first;
+        for (let index=0;index<256;index+=1) {
+          const card=emitNotification('commandNotice',{lines:'x'.repeat(200)+index,
+            coalesceKey:`producer:${index}`,lifecycleKeys:[`lifecycle:${index}`]}).inApp;
+          if (!first) { first=card; first.querySelector('[data-toast-keep]').click(); }
+        }
+        const record=toastRecords.get(Number(first.dataset.alertId));
+        const result={count:[...attentionAlerts.children].filter(node=>node===first).length,
+          cards:[...attentionAlerts.children].filter(node=>node.dataset.toastEvent==='commandNotice').length,
+          aliases:record.coalesceKeys.size,lifecycles:record.lifecycleKeys.size,
+          latest:record.coalesceKeys.has('producer:255')&&record.lifecycleKeys.has('lifecycle:255'),
+          kept:first.classList.contains('kept')};
+        for (const node of [...attentionAlerts.children]) removeAttentionAlert(Number(node.dataset.alertId));
+        return result;
+      })().then(done,error=>done({error:String(error.stack||error)}));
+    """)
+    assert metrics == {"count": 1, "cards": 1, "aliases": 64, "lifecycles": 64, "latest": True, "kept": True}, metrics
 
 
 def test_index_action_uses_timed_notice_without_overwriting_pending_command(browser, tmp_path):

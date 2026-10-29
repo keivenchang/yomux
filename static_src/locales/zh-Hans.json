@@ -2548,5 +2548,9 @@
   "status.tmux.windowKill.confirm": "要结束 tmux 会话“{session}”中的 {window} 吗？",
   "status.tmux.windowKill.pending": "正在结束 tmux 会话“{session}”中的 {window}",
   "status.tmux.windowKill.failed": "无法结束 tmux 会话“{session}”中的 {window}",
-  "status.tmux.windowKill.success": "已结束 tmux 会话“{session}”中的 {window}"
+  "status.tmux.windowKill.success": "已结束 tmux 会话“{session}”中的 {window}",
+  "debug.graph.metric.apiDuration": "API 耗时",
+  "debug.graph.metric.apiDuration.desc": "HTTP 请求耗时，与 ping 往返时间分开统计。",
+  "debug.graph.metric.sseAge": "SSE 发布年龄",
+  "debug.graph.metric.sseAge.desc": "从发布到接收的时间，包含重放和时钟偏差；不是传输延迟。"
 }

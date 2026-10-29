@@ -2548,5 +2548,9 @@
   "status.tmux.windowKill.confirm": "{window} beëindigen in tmux-sessie '{session}'?",
   "status.tmux.windowKill.pending": "{window} beëindigen in tmux-sessie '{session}'",
   "status.tmux.windowKill.failed": "{window} beëindigen in tmux-sessie '{session}' is mislukt",
-  "status.tmux.windowKill.success": "{window} beëindigd in tmux-sessie '{session}'"
+  "status.tmux.windowKill.success": "{window} beëindigd in tmux-sessie '{session}'",
+  "debug.graph.metric.apiDuration": "API-duur",
+  "debug.graph.metric.apiDuration.desc": "Duur van het HTTP-verzoek, apart van de ping-rondreistijd.",
+  "debug.graph.metric.sseAge": "Leeftijd SSE-publicatie",
+  "debug.graph.metric.sseAge.desc": "Tijd sinds publicatie, inclusief herhaling en klokverschil; geen bezorgvertraging."
 }

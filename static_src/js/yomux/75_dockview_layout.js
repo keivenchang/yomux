@@ -1868,7 +1868,10 @@ function dockviewInit() {
     dockviewInstallFileDropBridge(host),
     dockviewInstallHostResizeObserver(host, api),
     dockviewInstallTabPointerReorderFallback(),
-    api.onDidLayoutChange(() => queueDockviewLayoutAdoption()),
+    api.onDidLayoutChange(() => {
+      queueDockviewLayoutAdoption();
+      updateNotificationStackGeometry();
+    }),
     api.onDidRemoveGroup?.(group => dockviewHandleRemovedGroup(group)),
     api.onDidActivePanelChange(panel => {
       if (dockviewLayoutState.applyingFromLayout) return;

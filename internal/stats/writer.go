@@ -772,6 +772,17 @@ func (w *Writer) statsDatabaseIdentity() (string, error) {
 	return fmt.Sprintf("%d:%d", device, inode), nil
 }
 
+// AppendTimings records metadata for one request without retaining its facts.
+// Transaction includes commit and post-commit publication; it is not additive with Commit.
+type AppendTimings struct {
+	Wait, Validation, Transaction, Commit time.Duration
+}
+type appendTimingsKey struct{}
+
+func WithAppendTimings(ctx context.Context, timings *AppendTimings) context.Context {
+	return context.WithValue(ctx, appendTimingsKey{}, timings)
+}
+
 // AppendBatch applies all facts and tombstones atomically. Tombstones are
 // intentionally not persisted as rows: their proof is the matching atom's
 // deletion, and replay of an already-applied tombstone is a duplicate.
@@ -801,8 +812,20 @@ func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, ch
 	// transaction to detect direct/legacy writers. Serialize all generation-
 	// mutating transactions so a concurrent append from this same Writer cannot
 	// be mistaken for an external owner and trigger a full reconciliation scan.
+	timings, _ := ctx.Value(appendTimingsKey{}).(*AppendTimings)
+	phaseStarted := time.Now()
 	w.mutationMu.Lock()
+	if timings != nil {
+		timings.Wait = time.Since(phaseStarted)
+	}
+	phaseStarted = time.Now()
 	defer w.mutationMu.Unlock()
+	validationDone := false
+	defer func() {
+		if timings != nil && !validationDone {
+			timings.Validation = time.Since(phaseStarted)
+		}
+	}()
 	validated, err := batch.Validate()
 	if err != nil {
 		return result, err
@@ -815,6 +838,16 @@ func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, ch
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
+	if timings != nil {
+		timings.Validation = time.Since(phaseStarted)
+	}
+	validationDone = true
+	transactionStarted := time.Now()
+	defer func() {
+		if timings != nil {
+			timings.Transaction = time.Since(transactionStarted)
+		}
+	}()
 	ownedChanges, err := w.startupOwnedChanges(ctx)
 	if err != nil {
 		return result, err
@@ -1073,7 +1106,12 @@ func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, ch
 			return rollback(queryErr)
 		}
 	}
-	if err = tx.Commit(); err != nil {
+	commitStarted := time.Now()
+	err = tx.Commit()
+	if timings != nil {
+		timings.Commit = time.Since(commitStarted)
+	}
+	if err != nil {
 		return AppendResult{}, fmt.Errorf("commit stats append: %w", err)
 	}
 	w.sourceGeneration.Store(result.Generation)

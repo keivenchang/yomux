@@ -3039,6 +3039,8 @@ globalThis.__layoutTestApi = {
   terminalLineLinks,
   terminalWrappedLineLinks,
   terminalWrappedLineReferences,
+  terminalWrappedUrlMaxRows,
+  withTerminalVisibleSelectionCleanup,
   terminalReferenceAtPosition,
   terminalReferenceProviderLinks,
   terminalFileReferenceUnderlineSegments,

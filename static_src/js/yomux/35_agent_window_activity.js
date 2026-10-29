@@ -545,6 +545,7 @@ function sessionPromptAttentionEvent(session, payload = autoApproveStates.get(se
   if (!signature) return null;
   const state = payload.screen?.key === STATE_KEY.blocked ? STATE_KEY.blocked : STATE_KEY.needsInput;
   const agent = {kind: agentWindowKind(payload.agent_kind || payload.screen?.agent_kind) || 'codex', state,
+    attention_kind: payload.attention_kind || payload.prompt?.attention_kind || payload.screen?.attention_kind || '',
     attention_key: promptAttentionClearKey(session, signature, payload),
     attention_acknowledged: payload.prompt_attention_acknowledged === true || payload.prompt?.attention_acknowledged === true};
   return agentWindowAttentionEvent(agent, session, {transitionKey: `prompt:${session}`, scheduleRefresh: false});
@@ -1173,6 +1174,7 @@ function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, o
   const item = event.queued ? event.item : agentWindowActivityIconForStatusItem(agent, agent.kind, sessionKey, itemOptions);
   if (item?.acknowledged === true) return null;
   if (!['attention', 'blocked', 'cooldown'].includes(item?.state)) return null;
+  if ((event.queued || String(agent.attention_kind || '').toLowerCase() === 'question') && options.questionPromptSubmitted !== true) return null;
   const transitionKey = agentWindowActivityTransitionKey(agent.kind, event.options);
   const previous = transitionKey ? agentWindowActivityRecord(transitionKey)?.activity : null;
   const stoppedAt = Number(previous?.stoppedAt || itemOptions.working_stopped_ts || 0);

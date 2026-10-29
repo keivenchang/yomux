@@ -6,6 +6,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -15,6 +17,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/keivenchang/yomux/internal/testsupport"
 )
@@ -310,4 +313,96 @@ func mustFindTerminalTestProcess(t *testing.T) *os.Process {
 		t.Fatal(err)
 	}
 	return process
+}
+
+// The browser owns hyperlink interpretation. The native bridge must preserve
+// escape targets and UTF-8 bytes even when PTY reads split them arbitrarily.
+func TestTerminalHyperlinkByteFidelityAcrossEverySplit(t *testing.T) {
+	target := "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array?q=a%20b&next=%2F#fragment"
+	corpora := []string{
+		"\x1b]8;;" + target + "\aArray label\x1b]8;;\a",
+		"\x1b]8;id=first;" + target + "\x1b\\first\x1b]8;;\x1b\\",
+		"\x1b]8;;" + target + "\asecond\x1b]8;;\a\x1b]8;;https://example.com/other\aother\x1b]8;;\a",
+		"  https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/\r\n  Global_Objects/Array",
+		"界 café 🦀 \x1b]8;;" + target + "\awide label\x1b]8;;\a",
+		"\x1b[?1049h\x1b]8;;" + target + "\aalternate\x1b]8;;\a\x1b[2K\x1b[?1049l",
+		strings.Repeat("https://example.com/path?q=%2F&x=y#fragment\r\n", 1800),
+	}
+	for _, jsonInput := range []bool{false, true} {
+		t.Run(map[bool]string{false: "binary", true: "json"}[jsonInput], func(t *testing.T) {
+			s, root := terminalControlFixture(t)
+			scriptPath := filepath.Join(root, "tmux")
+			script, err := os.ReadFile(scriptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			script = []byte(strings.Replace(string(script), "exec cat", `stty raw -echo
+  : > "$TERMINAL_CONTROL_FIXTURE/raw"
+  exec cat`, 1))
+			if err := os.WriteFile(scriptPath, script, 0700); err != nil {
+				t.Fatal(err)
+			}
+			connection := terminalBridgeConnection(t, s)
+			if err := writeFrame(connection, 1, []byte(`{"type":"resize","rows":60,"cols":75,"foreground":true}`)); err != nil {
+				t.Fatal(err)
+			}
+			waitTerminalControlFile(t, filepath.Join(root, "raw"), 2*time.Second)
+			reader := bufio.NewReader(connection)
+			roundTrip := func(t *testing.T, chunk []byte) {
+				t.Helper()
+				payload, opcode := chunk, byte(2)
+				if jsonInput {
+					payload, err = json.Marshal(map[string]string{"type": "input", "data": string(chunk)})
+					if err != nil {
+						t.Fatal(err)
+					}
+					opcode = 1
+				}
+				// net.Pipe deliberately requires a reader while the server
+				// delivers large output; don't block both directions on writes.
+				written := make(chan error, 1)
+				go func() { written <- writeFrame(connection, opcode, payload) }()
+				if err := connection.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				var received []byte
+				for len(received) < len(chunk) {
+					kind, frame, readErr := readFrame(reader)
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					if kind == 2 {
+						received = append(received, frame...)
+					}
+				}
+				if err := <-written; err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(received, chunk) {
+					t.Fatalf("PTY/WebSocket bytes changed: got %q want %q", received, chunk)
+				}
+			}
+			for index, text := range corpora {
+				data := []byte(text)
+				// Every byte boundary for escape/Unicode cases; the large
+				// corpus separately crosses the 32 KiB bridge buffer boundary.
+				splits := []int{1, 32767, 32768, 32769, len(data) - 1}
+				if len(data) < 1024 {
+					splits = make([]int, len(data)-1)
+					for i := range splits {
+						splits[i] = i + 1
+					}
+				}
+				for _, split := range splits {
+					if jsonInput && (!utf8.Valid(data[:split]) || !utf8.Valid(data[split:])) {
+						continue
+					}
+					t.Run(fmt.Sprintf("corpus%d/split%d", index, split), func(t *testing.T) {
+						roundTrip(t, data[:split])
+						roundTrip(t, data[split:])
+					})
+				}
+			}
+		})
+	}
 }

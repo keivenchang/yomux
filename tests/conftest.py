@@ -285,6 +285,9 @@ def pytest_runtest_call(item):
 def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
+    if report.outcome == "skipped" and item.get_closest_marker("real_agent_urls") is not None:
+        report.outcome = "failed"
+        report.longrepr = f"{item.nodeid}: required real-client URL sample did not run: {report.longrepr}"
     if report.when != "call":
         return
     path = item.stash.get(_attribution_path_key, _defect2_attribution_path())

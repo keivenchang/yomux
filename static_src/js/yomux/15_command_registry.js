@@ -8,9 +8,6 @@ let commandStatusSequence = 0;
 const commandGlobalPending = new Set();
 let commandGlobalStatusPrevious = null;
 let commandGlobalStatusNode = null;
-let commandGlobalFailure = null;
-let commandOperationSequence = 0;
-const commandLatestSettlements = new Map();
 
 function commandRoute(specification = {}) {
   const id = String(specification.id || '').trim();
@@ -200,21 +197,18 @@ function commandPlaceAssociatedStatus(status, control) {
   status.style.padding = '2px 4px';
 }
 
-function commandPublishGlobalStatus(message, tone = 'advisory') {
+function commandPublishGlobalStatus(message) {
   if (typeof terminalAuthenticationActive === 'function' && terminalAuthenticationActive()) return null;
   const status = globalThis.document?.getElementById?.('status') || null;
   if (!status) return;
   status.setAttribute('role', 'status');
-  status.setAttribute('aria-live', tone === 'danger' ? 'assertive' : 'polite');
+  status.setAttribute('aria-live', 'polite');
   status.setAttribute('aria-atomic', 'true');
   if (typeof showLayoutStatus === 'function') {
-    showLayoutStatus(String(message || ''), tone);
+    showLayoutStatus(String(message || ''));
     return status.firstChild;
   }
   status.textContent = String(message || '');
-  status.classList?.add?.('layout-status-visible');
-  status.classList?.toggle?.('layout-status-danger', tone === 'danger');
-  status.classList?.toggle?.('layout-status-advisory', tone !== 'danger');
   return status.firstChild;
 }
 
@@ -247,9 +241,7 @@ function beginCommandGlobalStatus(state) {
   const status = globalThis.document?.getElementById?.('status');
   if (!status) return;
   if (!commandGlobalPending.size || !commandOwnsGlobalStatus()) {
-    commandGlobalStatusPrevious = commandGlobalFailure?.key === state.statusKey
-      && status.firstChild === commandGlobalFailure.node
-      ? commandGlobalFailure.previous : commandGlobalStatusSnapshot(status);
+    commandGlobalStatusPrevious = commandGlobalStatusSnapshot(status);
   }
   commandGlobalPending.add(state);
   commandGlobalStatusNode = commandPublishGlobalStatus(state.route.pendingLabel);
@@ -261,48 +253,9 @@ function publishCommandOverdueStatus(state) {
   commandGlobalStatusNode = commandPublishGlobalStatus(state.route.overdueLabel);
 }
 
-function settleCommandGlobalStatus(state, error) {
+function settleCommandGlobalStatus(state) {
   commandGlobalPending.delete(state);
-  const latest = commandLatestSettlements.get(state.statusKey) || 0;
-  if (state.sequence < latest) error = null;
-  else {
-    commandLatestSettlements.delete(state.statusKey);
-    commandLatestSettlements.set(state.statusKey, state.sequence);
-  }
-  if (commandLatestSettlements.size > 128) commandLatestSettlements.delete(commandLatestSettlements.keys().next().value);
-  const status = globalThis.document?.getElementById?.('status');
-  if (!error) {
-    for (let owner = commandGlobalFailure; owner?.previousFailure; owner = owner.previousFailure) {
-      const hidden = owner.previousFailure;
-      if (hidden.key === state.statusKey && state.sequence > hidden.sequence) {
-        owner.previous = hidden.previous;
-        owner.previousFailure = hidden.previousFailure;
-      }
-    }
-  }
-  if (error) {
-    if (commandGlobalFailure && state.sequence < commandGlobalFailure.sequence) return;
-    const previous = commandGlobalFailure?.key === state.statusKey
-      ? commandGlobalFailure.previous : commandGlobalStatusPrevious || (status ? commandGlobalStatusSnapshot(status) : null);
-    const previousFailure = commandGlobalFailure?.key === state.statusKey ? commandGlobalFailure.previousFailure : commandGlobalFailure;
-    const node = commandPublishGlobalStatus(commandFailureText(error), 'danger');
-    commandGlobalFailure = {key: state.statusKey, sequence: state.sequence, node, previous, previousFailure};
-    commandGlobalStatusNode = null;
-  } else if (commandGlobalFailure?.key === state.statusKey
-      && state.sequence > commandGlobalFailure.sequence
-      && (status?.firstChild === commandGlobalFailure.node || commandOwnsGlobalStatus())) {
-    const previous = commandGlobalFailure.previous;
-    commandGlobalFailure = commandGlobalFailure.previousFailure || null;
-    if (status && previous) {
-      restoreCommandGlobalStatus(status, previous);
-      if (commandGlobalFailure) commandGlobalFailure.node = status.firstChild;
-    }
-    const remaining = [...commandGlobalPending].at(-1);
-    if (remaining) {
-      commandGlobalStatusPrevious = previous;
-      commandGlobalStatusNode = commandPublishGlobalStatus(remaining.overdue ? remaining.route.overdueLabel : remaining.route.pendingLabel);
-    }
-  } else if (commandOwnsGlobalStatus()) {
+  if (commandOwnsGlobalStatus()) {
     const remaining = [...commandGlobalPending].at(-1);
     if (remaining) {
       commandGlobalStatusNode = commandPublishGlobalStatus(remaining.overdue
@@ -334,7 +287,7 @@ function commandRemoveOwnedDescriptions(control) {
   else control.removeAttribute?.('aria-describedby');
 }
 
-function commandPendingState(route, source, statusKey = route.id) {
+function commandPendingState(route, source) {
   const control = source && typeof source === 'object' ? source : null;
   const active = control ? commandControlPending.get(control) : null;
   if (!active) commandRemoveOwnedDescriptions(control);
@@ -366,7 +319,7 @@ function commandPendingState(route, source, statusKey = route.id) {
     control.setAttribute?.('aria-busy', 'true');
     if (status) control.setAttribute?.('aria-describedby', [...commandDescriptionIds(control), status.id].join(' '));
   }
-  const state = {control, previous, status, route, sequence: ++commandOperationSequence, statusKey, overdueTimer: null, overdue: false, settled: false};
+  const state = {control, previous, status, route, overdueTimer: null, overdue: false, settled: false};
   beginCommandGlobalStatus(state);
   if (control) {
     const owner = active || {previous, states: new Set()};
@@ -437,44 +390,21 @@ function settleCommandPendingState(state, error = null) {
     if (state.previous.ariaBusy === null) state.control.removeAttribute?.('aria-busy');
     else state.control.setAttribute?.('aria-busy', state.previous.ariaBusy);
   }
-  if (error) {
-    const fileChangedOnDisk = commandFileChangedOnDiskError(error);
-    // Deadline failures already reject the caller; a timed notice keeps unrelated controls usable.
-    if (fileChangedOnDisk || commandErrorCodes(error).some(code => code === 'deadline_expired' || code === 'client_deadline_expired')) {
-      if (state.status) state.status.remove?.();
-      if (state.control) {
-        const descriptions = commandDescriptionIds(state.control).filter(id => id !== state.status?.id);
-        if (descriptions.length) state.control.setAttribute?.('aria-describedby', descriptions.join(' '));
-        else state.control.removeAttribute?.('aria-describedby');
-      }
-      settleCommandGlobalStatus(state, null);
-      if (typeof showTimedStatusNotice === 'function') {
-        try {
-          showTimedStatusNotice(fileChangedOnDisk ? commandFileChangedOnDiskText(error) : commandFailureText(error));
-        } catch (toastError) {
-          console.error('Unable to show command notice', toastError);
-        }
-      }
-      return;
-    }
-    const reason = commandFailureText(error);
-    if (state.status) {
-      state.status.className = 'command-error-status';
-      state.status.dataset.commandStatusPhase = 'error';
-      state.status.setAttribute('role', 'alert');
-      state.status.setAttribute('aria-live', 'assertive');
-      state.status.textContent = reason;
-    }
-    settleCommandGlobalStatus(state, error);
-    return;
-  }
   if (state.control) {
     const descriptions = commandDescriptionIds(state.control).filter(id => id !== state.status?.id);
     if (descriptions.length) state.control.setAttribute?.('aria-describedby', descriptions.join(' '));
     else state.control.removeAttribute?.('aria-describedby');
   }
   state.status?.remove?.();
-  settleCommandGlobalStatus(state, null);
+  settleCommandGlobalStatus(state);
+  if (error && typeof showTimedStatusNotice === 'function') {
+    // Every failure uses the existing timed notice; settlement must release all pending UI ownership.
+    try {
+      showTimedStatusNotice(commandFileChangedOnDiskError(error) ? commandFileChangedOnDiskText(error) : commandFailureText(error));
+    } catch (toastError) {
+      console.error('Unable to show command notice', toastError);
+    }
+  }
 }
 
 function commandInFlightMap(source) {
@@ -520,7 +450,7 @@ function dispatchCommand(route, params = {}, source = null) {
   const existing = inFlight.get(identity);
   if (existing) return existing;
 
-  const pendingState = commandPendingState(descriptor, source, JSON.stringify([descriptor.id, url, descriptor.id === 'watch-roots-sync' ? '' : requestOptions.body || '']));
+  const pendingState = commandPendingState(descriptor, source);
   const operation = (async () => {
     let undo;
     let failure = null;

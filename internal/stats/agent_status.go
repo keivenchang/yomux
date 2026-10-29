@@ -75,6 +75,7 @@ type AgentStatusProcess struct {
 	Executable      string
 	StartedIdentity string
 	Alive           bool
+	StartedAt       float64
 }
 
 type AgentStatusRequest struct {
@@ -112,6 +113,7 @@ type AgentStatusSources struct {
 	CapturePane   func(context.Context, string) (AgentStatusPane, error)
 	Process       func(context.Context, int) (AgentStatusProcess, error)
 	OpenCodeState func(context.Context, AgentStatusRequest) (string, []string, error)
+	CodexTurn     func(context.Context, int, float64) AgentStatus
 }
 
 // ClassifyAgentStatus classifies one inventory record. Claude and Codex use
@@ -149,6 +151,7 @@ func ClassifyAgentStatus(ctx context.Context, request AgentStatusRequest, source
 	if sources.CapturePane == nil || strings.TrimSpace(request.PaneTarget) == "" {
 		return unavailable("pane-capture-unavailable")
 	}
+	processStartedAt := float64(0)
 	if request.PID > 0 && sources.Process != nil {
 		process, err := sources.Process(ctx, request.PID)
 		processObservedAt := time.Now()
@@ -161,6 +164,7 @@ func ClassifyAgentStatus(ctx context.Context, request AgentStatusRequest, source
 		if strings.TrimSpace(process.Command) != "" && request.Command == "" {
 			request.Command = process.Command
 		}
+		processStartedAt = process.StartedAt
 	}
 	pane, err := sources.CapturePane(ctx, request.PaneTarget)
 	if pane.ObservedAt.IsZero() {
@@ -177,6 +181,21 @@ func ClassifyAgentStatus(ctx context.Context, request AgentStatusRequest, source
 		return unavailableAt("empty-pane-capture", pane.ObservedAt)
 	}
 	classified := classifyPaneStatus(pane, request)
+	if kind == "codex" && sources.CodexTurn != nil && (classified.Status == AgentStatusIdle || classified.Status == AgentStatusTransition || (classified.Status == AgentStatusUnavailable && classified.Reason == "ambiguous-pane-evidence")) {
+		// Codex removes its busy row while streaming commentary. A composer is
+		// not proof of completion while this process is still emitting turn events.
+		switch sources.CodexTurn(ctx, request.PID, processStartedAt) {
+		case AgentStatusRun:
+			classified = result(AgentStatusRun, []string{"codex-active-turn"})
+		case AgentStatusUnavailable:
+			// Unknown history cannot erase explicit completion or its acknowledgement.
+			if !agentStatusHasEvidence(classified, "completion-screen", "settled-completion", "structured-transition-status") && classified.RawStatus != "cooldown" && classified.RawStatus != "transition" {
+				classified = unavailable("codex-turn-evidence-unavailable")
+			}
+		case AgentStatusError:
+			classified = result(AgentStatusError, []string{"codex-failed-turn"})
+		}
+	}
 	if classified.Status == AgentStatusAsk || classified.Status == AgentStatusError || classified.QueuedFollowupQuestion {
 		text := currentAgentPaneText(pane.VisibleText)
 		lines := strings.Split(text, "\n")
@@ -441,8 +460,8 @@ func classifyVisibleAgentText(text string) AgentStatusResult {
 		errorState = false
 		ask = containsAny(currentUnquotedPromptText(lines[tailStart+workingFooter+1:]), "enter to select", "esc to cancel", "approval required", "would you like to run the following")
 	}
-	if workingFooter < 0 && currentComposerQuestion(lines[tailStart:]) {
-		ask, run, transition, errorState = true, false, false, false
+	if workingFooter < 0 && !ask && !run && !errorState && currentComposerQuestion(lines[tailStart:]) {
+		ask, transition = true, false
 	}
 	if interruptionWins {
 		// An explicit Codex interruption after the last work marker ends that
@@ -453,7 +472,7 @@ func classifyVisibleAgentText(text string) AgentStatusResult {
 	if workedForCompletion && !interruptionWins && !ask && !run && !errorState {
 		return result(AgentStatusTransition, []string{"completion-screen"})
 	}
-	idle := containsAny(tail, "ask anything", "ask codex to do anything", "type your message", "use /", "new task", "claude code") || hasIdleComposerLine(lines[tailStart:])
+	idle := containsAny(tail, "ask anything", "ask codex to do anything", "type your message", "use /", "new task", "claude code") || hasIdleComposerLine(lines[tailStart:], !transition)
 	// A live status counter is stronger than generic footer words such as
 	// "background terminals running". Compaction and background-terminal wait
 	// lines are also working states without the interrupt affordance.
@@ -538,12 +557,71 @@ func codexQueuedFollowupQuestionAfter(lines []string, workingFooter int) bool {
 }
 
 func currentWorkingFooterIndex(lines []string) int {
-	for index := len(lines) - 1; index >= 0; index-- {
-		if isWorkingStatusLine(lines[index]) {
-			return index
+	latest := -1
+	for index := 0; index < len(lines); index++ {
+		text := strings.TrimSpace(lines[index])
+		if strings.HasPrefix(text, "```") {
+			// A literal unmatched fence in tool output cannot hide the live TUI
+			// footer. Exclude complete quoted examples, not the rest of the pane.
+			for end := index + 1; end < len(lines); end++ {
+				if strings.HasPrefix(strings.TrimSpace(lines[end]), "```") {
+					index = end
+					break
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(text, ">") || strings.HasPrefix(text, "`") || strings.HasPrefix(text, "\"") || strings.HasPrefix(text, "'") || strings.HasPrefix(text, "$") {
+			continue
+		}
+		if isWorkingStatusLine(lines[index]) || currentClaudeInterruptFooter(lines, index) {
+			latest = index
 		}
 	}
-	return -1
+	return latest
+}
+
+var claudeInterruptFooter = regexp.MustCompile(`^[\p{S}\s]*(?:[a-z]+ mode|bypass permissions|accept edits) on(?: \(shift\+tab to cycle\))?(?:\s*·\s*[^·]*)*$`)
+
+// Claude's activity verb and spinner are animated. Its interrupt control below
+// the ruled composer is stable; prose or an older footer above that composer is
+// not evidence that the current turn is still running.
+func currentClaudeInterruptFooter(lines []string, index int) bool {
+	line := strings.ToLower(strings.TrimSpace(lines[index]))
+	if !claudeInterruptFooter.MatchString(line) {
+		return false
+	}
+	interrupt := false
+	for _, control := range strings.Split(line, "·") {
+		interrupt = interrupt || strings.TrimSpace(control) == "esc to interrupt"
+	}
+	if !interrupt {
+		return false
+	}
+	for _, later := range lines[index+1:] {
+		text := strings.TrimSpace(later)
+		if strings.HasPrefix(text, "❯") || strings.HasPrefix(text, "›") {
+			return false
+		}
+	}
+	ruleSeen := false
+	for previous := index - 1; previous >= 0; previous-- {
+		text := strings.TrimSpace(lines[previous])
+		if text == "" {
+			continue
+		}
+		if capacityRuleLine(text) {
+			ruleSeen = true
+			continue
+		}
+		if strings.HasPrefix(text, "❯") {
+			return ruleSeen
+		}
+		if !ruleSeen {
+			return false
+		}
+	}
+	return false
 }
 
 func currentWorkedForFooterIndex(lines []string) int {
@@ -582,12 +660,7 @@ func currentConversationInterruptedIndex(lines []string) int {
 }
 
 func containsWorkingScreenSignal(text string) bool {
-	for _, line := range strings.Split(text, "\n") {
-		if isWorkingStatusLine(line) {
-			return true
-		}
-	}
-	return false
+	return currentWorkingFooterIndex(strings.Split(text, "\n")) >= 0
 }
 
 func containsStatusLinePrefix(text string, prefixes ...string) bool {
@@ -625,7 +698,17 @@ func isWorkingStatusLine(line string) bool {
 
 func normalizedStatusLine(line string) string {
 	line = strings.ToLower(strings.TrimSpace(line))
-	return strings.TrimLeft(line, "◦•*· ")
+	line = strings.TrimLeft(line, "◦•*· ")
+	// A spinner's phase changes the glyph, not the status. Strip one standalone
+	// Unicode symbol rather than pinning the currently observed animation frames.
+	first, size := utf8.DecodeRuneInString(line)
+	if first > unicode.MaxASCII && unicode.IsSymbol(first) && len(line) > size {
+		next, _ := utf8.DecodeRuneInString(line[size:])
+		if unicode.IsSpace(next) {
+			return strings.TrimSpace(line[size:])
+		}
+	}
+	return line
 }
 
 func hasStatusLinePrefix(line, prefix string) bool {
@@ -679,22 +762,61 @@ func currentUnquotedPromptText(lines []string) string {
 	return strings.Join(current, "\n")
 }
 
-// Only a current unquoted question immediately above the idle composer requests input.
+var agentQuestionURL = regexp.MustCompile(`(?i)(?:https?://|file://|www\.)\S+`)
+
+func agentQuestionLineText(lines []string, index int) string {
+	text := strings.TrimSpace(lines[index])
+	withoutURLs := strings.TrimSpace(agentQuestionURL.ReplaceAllString(text, ""))
+	if withoutURLs != text || len(strings.Fields(text)) != 1 {
+		return withoutURLs
+	}
+	queryContinues := index+1 < len(lines) && len(strings.Fields(lines[index+1])) == 1 && strings.Contains(lines[index+1], "=")
+	if !strings.ContainsAny(text, "/=&%#") && !queryContinues {
+		return text
+	}
+	// Hard wrapping can put the query delimiter on a later row than its scheme.
+	// Keep a standalone prose question after a URL, such as "Continue?".
+	for previous := index - 1; previous >= 0; previous-- {
+		fragment := strings.TrimSpace(lines[previous])
+		if agentQuestionURL.MatchString(fragment) {
+			return ""
+		}
+		if len(strings.Fields(fragment)) != 1 {
+			break
+		}
+	}
+	return text
+}
+
+// A current unquoted question near the composer requests input. Codex can place
+// explanatory text and its duration footer between the question and composer.
 func currentComposerQuestion(lines []string) bool {
 	for index := len(lines) - 1; index >= 0; index-- {
 		line := strings.TrimSpace(lines[index])
 		if !strings.HasPrefix(line, "›") && !strings.HasPrefix(line, "❯") {
 			continue
 		}
-		for previous := index - 1; previous >= max(0, index-8); previous-- {
-			text := strings.TrimSpace(lines[previous])
+		promptLines := strings.Split(currentUnquotedPromptText(lines[max(0, index-16):index]), "\n")
+		for previous := len(promptLines) - 1; previous >= 0; previous-- {
+			text := strings.TrimSpace(promptLines[previous])
 			if text == "" || strings.Trim(text, "─━-") == "" {
 				continue
 			}
+			lower := strings.ToLower(text)
 			if strings.HasPrefix(text, ">") || strings.HasPrefix(text, "`") || strings.HasPrefix(text, "$") || strings.HasPrefix(text, "›") || strings.HasPrefix(text, "❯") {
 				return false
 			}
-			return strings.HasSuffix(text, "?")
+			if strings.HasPrefix(lower, "worked for ") {
+				continue
+			}
+			if containsStatusLinePrefix(normalizedStatusLine(lower), "all done", "goal achieved", "all tasks complete", "all tasks completed", "task completed", "finished") {
+				return false
+			}
+			// A query delimiter can end a physical URL row in a hard-wrapped TUI.
+			// Only punctuation outside the URL can establish a user question.
+			if strings.HasSuffix(agentQuestionLineText(promptLines, previous), "?") {
+				return true
+			}
 		}
 		return false
 	}
@@ -710,14 +832,22 @@ func containsAny(text string, needles ...string) bool {
 	return false
 }
 
-func hasIdleComposerLine(lines []string) bool {
+func hasIdleComposerLine(lines []string, allowEmpty bool) bool {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if len(trimmed) < 2 || (!strings.HasPrefix(trimmed, "› ") && !strings.HasPrefix(trimmed, "❯ ")) {
+		prompt, size := utf8.DecodeRuneInString(trimmed)
+		if prompt != '›' && prompt != '❯' {
 			continue
 		}
-		composer := strings.TrimSpace(trimmed[2:])
-		if composer == "" || (len(composer) >= 2 && composer[0] >= '0' && composer[0] <= '9' && composer[1] == '.') {
+		// The empty Unicode composer remains an idle prompt after a long reply
+		// scrolls the banner away. Slice by the rune width, not ASCII byte offsets.
+		composer := strings.TrimSpace(trimmed[size:])
+		// A blank composer accompanies explicit completion screens too; retain
+		// their transition while allowing named idle suggestions to supersede prose.
+		if composer == "" && !allowEmpty {
+			continue
+		}
+		if len(composer) >= 2 && composer[0] >= '0' && composer[0] <= '9' && composer[1] == '.' {
 			continue
 		}
 		return true
@@ -735,6 +865,17 @@ func result(status AgentStatus, evidence []string) AgentStatusResult {
 		classified.AttentionKind = "unknown"
 	}
 	return classified
+}
+
+func agentStatusHasEvidence(classified AgentStatusResult, matches ...string) bool {
+	for _, evidence := range classified.Evidence {
+		for _, match := range matches {
+			if evidence == match {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func resultAt(status AgentStatus, evidence []string, observedAt time.Time) AgentStatusResult {
@@ -1236,7 +1377,7 @@ func (c *AgentStatusCollector) collect(parent context.Context, fact HostFactCont
 		request.WorkingStoppedAt = cached.workingStoppedAt
 		c.stateMu.Unlock()
 		result := c.classifier(parent, request)
-		if cached.completionSettled && result.Status == AgentStatusTransition && containsAny(strings.Join(result.Evidence, " "), "completion-screen") {
+		if cached.completionSettled && result.Status == AgentStatusTransition && agentStatusHasEvidence(result, "completion-screen") {
 			result.Status = AgentStatusIdle
 			result.Evidence = []string{"settled-completion"}
 		}

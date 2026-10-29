@@ -288,7 +288,7 @@
   "debug.graph.chart.gpuMemory.desc": "GPU memory used against device capacity, when GPU telemetry is available.",
   "debug.graph.chart.gpuUtil": "GPU utilization",
   "debug.graph.chart.gpuUtil.desc": "GPU utilization percent per detected device, when GPU telemetry is available.",
-  "debug.graph.chart.latency.desc": "Browser to YOmux round-trip latency in milliseconds from lightweight ping samples.",
+  "debug.graph.chart.latency.desc": "Round-trip duration of /api/ping only. API durations and SSE publication ages are reported separately.",
   "debug.graph.chart.memory": "System memory",
   "debug.graph.chart.memory.desc": "Host system memory in use against total capacity, sampled by the server.",
   "debug.graph.chart.systemDisk": "Space used %",
@@ -2548,5 +2548,9 @@
   "debug.system.roster.detail.searchCaches": "Search & caches",
   "debug.system.roster.detail.sampler": "YO!stats sampler",
   "pref.section.editor_options": "Editor options",
-  "status.copiedStyledText": "Copied with style"
+  "status.copiedStyledText": "Copied with style",
+  "debug.graph.metric.apiDuration": "API duration",
+  "debug.graph.metric.apiDuration.desc": "HTTP request duration. Includes upload, server work and response delivery; separate from ping RTT.",
+  "debug.graph.metric.sseAge": "SSE publication age",
+  "debug.graph.metric.sseAge.desc": "Time since publication at receipt, including replay and clock offset. This is not delivery latency."
 }

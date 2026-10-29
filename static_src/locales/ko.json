@@ -2548,5 +2548,9 @@
   "status.tmux.windowKill.confirm": "tmux 세션 '{session}'에서 {window}을(를) 종료할까요?",
   "status.tmux.windowKill.pending": "tmux 세션 '{session}'에서 {window} 종료 중",
   "status.tmux.windowKill.failed": "tmux 세션 '{session}'에서 {window}을(를) 종료하지 못했습니다",
-  "status.tmux.windowKill.success": "tmux 세션 '{session}'에서 {window} 종료됨"
+  "status.tmux.windowKill.success": "tmux 세션 '{session}'에서 {window} 종료됨",
+  "debug.graph.metric.apiDuration": "API 소요 시간",
+  "debug.graph.metric.apiDuration.desc": "ping 왕복 시간과 별도로 측정한 HTTP 요청 소요 시간입니다.",
+  "debug.graph.metric.sseAge": "SSE 게시 후 경과 시간",
+  "debug.graph.metric.sseAge.desc": "재전송과 시계 차이를 포함한 게시 후 시간이며 전송 지연이 아닙니다."
 }

@@ -10386,7 +10386,10 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     for (let index = 0; index < 3; index += 1) {
       await api.syncServerWatchRootsNowForTest({force:true,user:true});
       assert.equal(api.serverWatchRootsStateForTest().registered, false, 'unaccepted or malformed JSON cannot register');
-      if (index === 0) assert.match(api.statusTextForTest(), /Finder watch registration: registration rejected/);
+      if (index === 0) {
+        assert.match(api.timedStatusNoticesForTest().at(-1), /Finder watch registration: registration rejected/);
+        assert.equal(api.statusTextForTest(), '', 'the failure does not leave a blocking footer banner');
+      }
     }
     await api.syncServerWatchRootsNowForTest({force:true,user:true});
     assert.equal(api.serverWatchRootsStateForTest().registered, true);
@@ -16403,6 +16406,33 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const afterPassive = Object.fromEntries(api.clientPerfSummaryForTest().map(counter => [counter.name, counter]));
       assert.equal(afterPassive.keydownToTermData.count, 1, 'a consumed native timestamp cannot become page uptime for passive reports');
     }
+
+    await testAsync('native input timers cannot survive a non-producing event or be consumed by focus reports', async () => {
+      const tasks = [];
+      const api = loadYomux('', ['1'], 'http:', 'Linux', 'admin', {setTimeout(callback) { if (callback.name === 'expireTerminalInput') tasks.push(callback); return 1; }});
+      api.registerTerminalForTest('1', {focus() {}}, {readyState: WebSocket.OPEN, send() {}});
+      api.setFocusedTerminal('1');
+      api.clearClientPerfCountersForTest();
+      api.noteTerminalExplicitInputForTest('1', {type: 'keydown', key: 'Shift'});
+      api.handleTerminalDataForTest('1', '\x1b[I');
+      assert.equal(api.clientPerfSummaryForTest().some(item => item.name === 'keydownToTermData'), false);
+      api.noteTerminalExplicitInputForTest('1', {type: 'keydown', key: 'c', ctrlKey: true});
+      await Promise.resolve();
+      tasks.splice(0).forEach(callback => callback());
+      api.handleTerminalDataForTest('1', '\x1b[O');
+      assert.equal(api.clientPerfSummaryForTest().some(item => item.name === 'keydownToTermData'), false);
+      api.noteTerminalExplicitInputForTest('1', {type: 'keydown', key: 'a'});
+      api.handleTerminalDataForTest('1', '\x1b[I');
+      api.noteTerminalExplicitInputForTest('1', {type: 'beforeinput', inputType: 'insertText'});
+      api.handleTerminalDataForTest('1', 'a');
+      const counters = Object.fromEntries(api.clientPerfSummaryForTest().map(item => [item.name, item]));
+      assert.equal(counters.keydownToTermData.count, 1, 'beforeinput retains keydown provenance and focus reports do not consume it');
+      for (const event of [{type:'paste'}, {type:'beforeinput', inputType:'insertFromComposition'}]) {
+        api.noteTerminalExplicitInputForTest('1', event);
+        api.handleTerminalDataForTest('1', 'text');
+      }
+      assert.equal(api.clientPerfSummaryForTest().find(item => item.name === 'inputToTermData').count, 2);
+    });
 
     await testAsync('server/client version mismatch asks whether to reload the browser', async () => {
       const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {

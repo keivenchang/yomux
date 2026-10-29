@@ -5,10 +5,15 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/keivenchang/yomux/internal/stats"
 )
 
 // Input clocks use tmux identities rather than names or window ordinals. Renames
@@ -21,6 +26,92 @@ type terminalActivityState struct {
 type tabberActivityState struct {
 	mu     sync.Mutex
 	clocks map[string]float64
+}
+
+// A pane repaint is output too: attaching or resizing an idle TUI advances
+// tmux's window_activity. Conversation dates must not inherit that clock.
+func (s *server) mergeAgentConversationActivity(ctx context.Context, activity map[string]any, sessions map[string]any) error {
+	clocks := make(map[string]float64)
+	for session, raw := range sessions {
+		info, _ := raw.(map[string]any)
+		agents, _ := info["agents"].([]map[string]any)
+		for _, agent := range agents {
+			index, ok := agent["window_index"].(int)
+			if ok && index >= 0 {
+				clocks[session+":"+strconv.Itoa(index)] = 0
+			}
+		}
+	}
+	if len(clocks) == 0 {
+		return nil
+	}
+	// Failed validation leaves history unavailable, never a recent repaint.
+	defer func() {
+		for key, ts := range clocks {
+			row, _ := activity[key].(map[string]any)
+			if row == nil {
+				row = map[string]any{}
+				activity[key] = row
+			}
+			row["active_recency_ts"] = ts
+		}
+	}()
+	if s.agentProcessSnapshot == nil || s.processEntriesFn == nil {
+		return errors.New("conversation activity process reader unavailable")
+	}
+	output, err := s.tmuxCommandContext(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_id}\t#{window_index}\t#{pane_pid}").Output()
+	if err != nil {
+		return fmt.Errorf("conversation activity pane inventory: %w", err)
+	}
+	processes, err := s.processEntriesFn()
+	if err != nil {
+		return fmt.Errorf("conversation activity process inventory: %w", err)
+	}
+	panes := make(map[string][]string)
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) == 4 {
+			panes[fields[0]+"/"+fields[1]] = fields[2:]
+		}
+	}
+	clocks = make(map[string]float64)
+	var validationErrors []error
+	for session, raw := range sessions {
+		info, _ := raw.(map[string]any)
+		agents, _ := info["agents"].([]map[string]any)
+		for _, agent := range agents {
+			kind := stringValue(agent["kind"])
+			if kind != "codex" && kind != "claude" && kind != "opencode" {
+				continue
+			}
+			pane := panes[session+"/"+stringValue(agent["pane_target"])]
+			if len(pane) != 2 {
+				continue
+			}
+			key := session + ":" + pane[0]
+			panePID, err := strconv.Atoi(pane[1])
+			if err != nil {
+				clocks[key] = max(clocks[key], 0)
+				validationErrors = append(validationErrors, errors.New("conversation activity pane process ID invalid"))
+				continue
+			}
+			pidValue, _ := settingsNumber(agent["pid"])
+			pid := int(pidValue)
+			process, err := s.agentProcessSnapshot(ctx, pid)
+			identity := stats.AgentStatusProcessInstanceID(stats.AgentRecord{PID: pid, StartedIdentity: process.StartedIdentity})
+			if err != nil || process.StartedIdentity == "" {
+				clocks[key] = max(clocks[key], 0)
+				validationErrors = append(validationErrors, fmt.Errorf("conversation activity process %d unavailable", pid))
+				continue
+			}
+			if !process.Alive || identity != stringValue(agent["process_instance_id"]) || !goYoloProcessBelongsToPane(processes, panePID, pid) {
+				continue
+			}
+			ts, _ := agent["last_used_ts"].(float64)
+			clocks[key] = max(clocks[key], ts)
+		}
+	}
+	return errors.Join(validationErrors...)
 }
 
 func recordActivityClock(clocks map[string]float64, key string, now float64) map[string]float64 {

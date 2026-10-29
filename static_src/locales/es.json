@@ -2593,5 +2593,9 @@
   "status.tmux.windowKill.confirm": "¿Cerrar {window} en la sesión tmux '{session}'?",
   "status.tmux.windowKill.pending": "Cerrando {window} en la sesión tmux '{session}'",
   "status.tmux.windowKill.failed": "No se pudo cerrar {window} en la sesión tmux '{session}'",
-  "status.tmux.windowKill.success": "{window} se cerró en la sesión tmux '{session}'"
+  "status.tmux.windowKill.success": "{window} se cerró en la sesión tmux '{session}'",
+  "debug.graph.metric.apiDuration": "Duración de API",
+  "debug.graph.metric.apiDuration.desc": "Duración de la solicitud HTTP, separada del tiempo de ida y vuelta del ping.",
+  "debug.graph.metric.sseAge": "Antigüedad de publicación SSE",
+  "debug.graph.metric.sseAge.desc": "Tiempo desde la publicación, incluidas repeticiones y desfase de reloj; no es latencia de entrega."
 }

@@ -76,13 +76,11 @@ NOVEL_COMPONENT_COLOR_ALLOWLIST: dict[str, tuple[frozenset[str], str]] = {
     ),
     "static_src/css/yomux/50_terminal_file_tree.css": (
         frozenset({
-            "#14171d", "#2a1e00", "#314154",
-            "#3a2b00", "#3b82f6", "#6f7b8d", "#6fce8a", "#b98c24",
-            "#c8941e", "#d28b00", "#e8b04b", "#ffe7a3", "#fff3c6",
-            "#fff4c2", "rgb(0 0 0 / 0.35)", "rgb(112 167 255 / 0.65)",
+            "#2a1e00", "#314154",
+            "#3b82f6", "#6f7b8d", "#6fce8a",
+            "#c8941e", "#e8b04b", "#ffe7a3",
+            "rgb(0 0 0 / 0.35)", "rgb(112 167 255 / 0.65)",
             "rgb(226 232 240 / 0.16)", "rgb(255 102 115 / 0.14)",
-            "rgb(255 243 198 / 0.72)", "rgb(255 244 194 / 0.58)",
-            "rgb(255 255 255 / 0.26)",
         }),
         "reviewed pre-token component palette (2026-07-07)",
     ),

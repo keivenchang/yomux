@@ -2548,5 +2548,9 @@
   "status.tmux.windowKill.confirm": "tmux सत्र '{session}' में {window} बंद करें?",
   "status.tmux.windowKill.pending": "tmux सत्र '{session}' में {window} बंद हो रहा है",
   "status.tmux.windowKill.failed": "tmux सत्र '{session}' में {window} बंद नहीं हो सका",
-  "status.tmux.windowKill.success": "tmux सत्र '{session}' में {window} बंद किया गया"
+  "status.tmux.windowKill.success": "tmux सत्र '{session}' में {window} बंद किया गया",
+  "debug.graph.metric.apiDuration": "API अवधि",
+  "debug.graph.metric.apiDuration.desc": "HTTP अनुरोध की अवधि, पिंग के आने-जाने के समय से अलग।",
+  "debug.graph.metric.sseAge": "SSE प्रकाशन आयु",
+  "debug.graph.metric.sseAge.desc": "प्रकाशन के बाद का समय, जिसमें पुनः प्रसारण और घड़ी का अंतर शामिल है; यह वितरण विलंब नहीं है।"
 }

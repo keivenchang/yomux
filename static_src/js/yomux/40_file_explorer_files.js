@@ -6934,8 +6934,8 @@ function tabberRecency(key) {
   }
   const localTs = tabberPendingInput.get(key)?.timestamp || 0;
   if (!rec) return localTs;
-  const derived = Number(rec.active_recency_ts || 0);
-  if (Number.isFinite(derived) && derived > 0) return Math.max(localTs, derived);
+  const derived = Number(rec.active_recency_ts);
+  if (rec.active_recency_ts !== null && rec.active_recency_ts !== undefined && Number.isFinite(derived) && derived >= 0) return Math.max(localTs, derived);
   return Math.max(localTs, Number(rec.last_user_input_ts || 0), Number(rec.last_agent_active_ts || 0), Number(rec.last_output_ts || 0));
 }
 
@@ -6989,6 +6989,7 @@ function tabberWindowRecency(row, nowSeconds = Date.now() / 1000) {
     const workingTs = agentWindowWorkingRecencyTs(row?.agentStatus, nowSeconds);
     const activityTs = tabberAgentRecency(row?.agentActivity);
     const statusTs = Number(row?.agentStatus?.idle_since || row?.agentStatus?.last_active_ts || 0);
+    const stoppedTs = Number(row?.agentStatus?.working_stopped_ts || 0);
     const session = String(row?.session || '').trim();
     const windowIndex = row?.windowIndex ?? row?.record?.index;
     const windowActivityTs = session && windowIndex !== null && windowIndex !== undefined && windowIndex !== ''
@@ -6996,7 +6997,7 @@ function tabberWindowRecency(row, nowSeconds = Date.now() / 1000) {
       : 0;
     const idleStatusTs = String(row?.agentStatus?.state || STATE_KEY.idle) === STATE_KEY.idle
       && Number.isFinite(statusTs) && statusTs > 0 ? statusTs : 0;
-    return Math.max(workingTs, activityTs, idleStatusTs, windowActivityTs);
+    return Math.max(workingTs, activityTs, idleStatusTs, Number.isFinite(stoppedTs) ? stoppedTs : 0, windowActivityTs);
   }
   const session = String(row?.session || '').trim();
   const windowIndex = row?.windowIndex ?? row?.record?.index;

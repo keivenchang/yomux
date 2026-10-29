@@ -28,12 +28,10 @@ function markdownFormatShortcutCommand(event, mac = isMacPlatform()) {
     if (!command.key) return false;
     const strike = command.id === 'strike' && !mac;
     const platformMod = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
-    const key = String(event.key || '').toLowerCase();
-    const code = command.key === '\\' ? 'Backslash' : command.key === '[' ? 'BracketLeft' : command.key === ']' ? 'BracketRight' : /^\d$/.test(command.key) ? `Digit${command.key}` : `Key${command.key.toUpperCase()}`;
     return (strike ? !event.ctrlKey && !event.metaKey : platformMod)
       && Boolean(event.altKey) === (strike || Boolean(command.alt))
       && Boolean(event.shiftKey) === Boolean(command.shift)
-      && (strike ? event.code === 'Digit5' || key === '5' : event.code === code || key === command.key);
+      && appShortcutKeyMatches(event, strike ? '5' : command.key);
   }) || null;
 }
 

@@ -2593,5 +2593,9 @@
   "status.tmux.windowKill.confirm": "לסגור את {window} בהפעלת tmux '{session}'?",
   "status.tmux.windowKill.pending": "סוגר את {window} בהפעלת tmux '{session}'",
   "status.tmux.windowKill.failed": "לא ניתן לסגור את {window} בהפעלת tmux '{session}'",
-  "status.tmux.windowKill.success": "{window} נסגר בהפעלת tmux '{session}'"
+  "status.tmux.windowKill.success": "{window} נסגר בהפעלת tmux '{session}'",
+  "debug.graph.metric.apiDuration": "משך API",
+  "debug.graph.metric.apiDuration.desc": "משך בקשת HTTP, בנפרד מזמן הלוך ושוב של פינג.",
+  "debug.graph.metric.sseAge": "גיל פרסום SSE",
+  "debug.graph.metric.sseAge.desc": "זמן מאז הפרסום, כולל שידור חוזר והפרש שעון; אינו זמן מסירה."
 }

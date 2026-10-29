@@ -484,6 +484,8 @@ def new_chrome_driver(window_size: str | tuple[int, int] | None = None, *, profi
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--ignore-certificate-errors")
     options.set_capability("acceptInsecureCerts", True)
+    if os.environ.get("YOMUX_BROWSER_BLOCK_EXTERNAL_DNS") == "1":
+        options.add_argument("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1")
     requested_size = window_size or DEFAULT_BROWSER_WINDOW_SIZE
     window_size_arg = ",".join(str(value) for value in requested_size) if isinstance(requested_size, tuple) else str(requested_size)
     options.add_argument(f"--window-size={window_size_arg}")

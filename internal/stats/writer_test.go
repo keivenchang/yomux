@@ -1402,3 +1402,32 @@ func TestCoverageAndUnavailableChangesInvalidateIntersectingCells(t *testing.T) 
 		t.Fatalf("unavailable pending cells = %v, want [10 20]", got)
 	}
 }
+
+func TestAppendTimingsSeparateWriterContentionAndCommit(t *testing.T) {
+	writer, err := OpenWriter(context.Background(), filepath.Join(t.TempDir(), "stats.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	timings := &AppendTimings{}
+	writer.mutationMu.Lock()
+	started, done := make(chan struct{}), make(chan error, 1)
+	go func() {
+		close(started)
+		_, err := writer.AppendBatch(WithAppendTimings(context.Background(), timings), writerBatch())
+		done <- err
+	}()
+	<-started
+	select {
+	case err := <-done:
+		t.Fatalf("writer escaped held mutex: %v", err)
+	default:
+	}
+	writer.mutationMu.Unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if timings.Wait <= 0 || timings.Validation <= 0 || timings.Transaction <= 0 || timings.Commit <= 0 || timings.Commit > timings.Transaction {
+		t.Fatalf("phase measurements = %+v", timings)
+	}
+}
