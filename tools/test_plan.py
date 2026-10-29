@@ -30,6 +30,7 @@ TEST_PHASE_SPECS: Final[tuple[TestPhaseSpec, ...]] = (
     TestPhaseSpec("e2e", "e2e"),
     TestPhaseSpec("golden", "visual_golden"),
     TestPhaseSpec("boot", "boot"),
+    TestPhaseSpec("real_agent_urls", "real_agent_urls"),
     TestPhaseSpec("browser", "browser"),
     TestPhaseSpec("nonbrowser"),
 )
@@ -113,6 +114,7 @@ class StepId(StrEnum):
     PYTEST_GATE_SERIAL = "pytest-gate-serial"
     PYTEST_BOOT = "pytest-boot"
     PYTEST_BROWSER = "pytest-browser"
+    PYTEST_REAL_AGENT_URLS = "pytest-real-agent-urls"
     PYTEST_BROWSER_GOLDEN = "pytest-browser-golden"
     PYTEST_E2E = "pytest-e2e"
     WHITESPACE = "whitespace"
@@ -132,6 +134,7 @@ STEP_PHASES: Final[dict[StepId, tuple[str, ...]]] = {
     StepId.PYTEST_GATE_SERIAL: ("gate_serial",),
     StepId.PYTEST_BOOT: ("boot",),
     StepId.PYTEST_BROWSER: ("browser",),
+    StepId.PYTEST_REAL_AGENT_URLS: ("real_agent_urls",),
     StepId.PYTEST_BROWSER_GOLDEN: ("golden",),
     StepId.PYTEST_E2E: ("e2e",),
     StepId.WHITESPACE: (),
@@ -149,10 +152,10 @@ LANE_SPECS: Final[tuple[LaneSpec, ...]] = (
     LaneSpec(
         "pytest-browser",
         "pytest browser",
-        (StepId.PYTEST_BROWSER, StepId.PYTEST_BROWSER_GOLDEN),
+        (StepId.PYTEST_REAL_AGENT_URLS, StepId.PYTEST_BROWSER, StepId.PYTEST_BROWSER_GOLDEN),
         True,
         prerequisites=("pytest-boot",),
-        phases=("boot", "browser", "golden"),
+        phases=("boot", "real_agent_urls", "browser", "golden"),
         worker_class="pytest-mixed",
     ),
     LaneSpec("pytest-e2e", "pytest e2e", (StepId.PYTEST_E2E,), True, phases=("e2e",), worker_class="pytest-xdist"),

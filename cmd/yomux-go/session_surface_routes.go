@@ -1306,22 +1306,21 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 			}
 		}
 		processInstanceID := ""
-		if s.agentStatusCollector != nil {
-			sources := stats.CurrentPlatformAgentInventorySources()
-			if sources.Started != nil {
-				if started, err := sources.Started(agentPID); err == nil {
-					processInstanceID = stats.AgentStatusProcessInstanceID(stats.AgentRecord{PID: agentPID, StartedIdentity: started})
-				}
+		if s.agentProcessSnapshot != nil {
+			if process, err := s.agentProcessSnapshot(context.Background(), agentPID); err == nil && process.Alive && process.StartedIdentity != "" {
+				processInstanceID = stats.AgentStatusProcessInstanceID(stats.AgentRecord{PID: agentPID, StartedIdentity: process.StartedIdentity})
 			}
 		}
-		agents = append(agents, map[string]any{
+		agent := map[string]any{
 			"session": session, "kind": kind, "pid": agentPID, "pane_target": parts[4], "command": agentCommand, "executable": agentExecutable,
 			"cwd": cwd, "status": status, "queued_followup_question": queuedFollowupQuestion, "attention_signature": attentionSignature,
 			"status_observed_at": float64(statusObservedAt.UnixNano()) / 1e9, "session_id": sessionID, "transcript": transcript,
 			"process_instance_id": processInstanceID, "attention_pending": s.agentStatusCollector != nil && attentionSignature != "",
 			"error": "", "window": parts[1], "window_index": windowIndex, "pane": parts[3],
 			"window_active": windowActive, "current": active && windowActive,
-		})
+		}
+		agent["last_used_ts"] = agentConversationActivityTS(agent)
+		agents = append(agents, agent)
 	}
 	windowMetadata := make([]map[string]any, 0, len(windows))
 	for _, item := range windows {
@@ -1850,7 +1849,11 @@ func transcriptPathIdentity(path string) (int64, int64, string) {
 }
 
 func readContextItems(path string, limit int) ([]map[string]any, error) {
-	data, err := readTranscriptTailWithByteLimit(path, maxContextTranscriptLines, maxContextTranscriptBytes)
+	return readContextItemsWithLimits(path, limit, maxContextTranscriptLines, maxContextTranscriptBytes)
+}
+
+func readContextItemsWithLimits(path string, limit, lines int, byteLimit int64) ([]map[string]any, error) {
+	data, err := readTranscriptTailWithByteLimit(path, lines, byteLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -1866,6 +1869,37 @@ func readContextItems(path string, limit int) ([]map[string]any, error) {
 		all = all[len(all)-limit:]
 	}
 	return all, nil
+}
+
+// Reuse the conversation decoder; filesystem writes and observation times do
+// not establish that the user or agent did work.
+func agentConversationActivityTS(agent map[string]any) float64 {
+	path := stringValue(agent["transcript"])
+	if path == "" {
+		return 0
+	}
+	var items []map[string]any
+	var err error
+	if stringValue(agent["kind"]) == "opencode" {
+		items, err = readContextItemsForAgent(path, agent, 128)
+	} else {
+		items, err = readContextItemsWithLimits(path, 128, 128, 256*1024)
+	}
+	if err != nil {
+		return 0
+	}
+	var latest float64
+	for _, item := range items {
+		switch stringValue(item["role"]) {
+		case "user", "assistant", "tool", "tool_use", "tool_result":
+		default:
+			continue
+		}
+		if timestamp, err := time.Parse(time.RFC3339Nano, stringValue(item["timestamp"])); err == nil {
+			latest = max(latest, float64(timestamp.UnixNano())/1e9)
+		}
+	}
+	return latest
 }
 
 func readContextItemsForAgent(path string, agent map[string]any, limit int) ([]map[string]any, error) {

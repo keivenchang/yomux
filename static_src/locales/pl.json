@@ -2638,5 +2638,9 @@
   "status.tmux.windowKill.confirm": "Zakończyć {window} w sesji tmux '{session}'?",
   "status.tmux.windowKill.pending": "Kończenie {window} w sesji tmux '{session}'",
   "status.tmux.windowKill.failed": "Nie udało się zakończyć {window} w sesji tmux '{session}'",
-  "status.tmux.windowKill.success": "Zakończono {window} w sesji tmux '{session}'"
+  "status.tmux.windowKill.success": "Zakończono {window} w sesji tmux '{session}'",
+  "debug.graph.metric.apiDuration": "Czas API",
+  "debug.graph.metric.apiDuration.desc": "Czas żądania HTTP, oddzielny od czasu ping w obie strony.",
+  "debug.graph.metric.sseAge": "Wiek publikacji SSE",
+  "debug.graph.metric.sseAge.desc": "Czas od publikacji, w tym powtórzenia i różnica zegarów; nie opóźnienie dostarczenia."
 }

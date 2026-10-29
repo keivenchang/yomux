@@ -53,6 +53,83 @@ let passed = 0;
 let failed = 0;
 const pending = [];
 
+test('primary latency excludes API duration and replay publication age', () => {
+  const start = source.indexOf('function debugGraphLatencyMs(');
+  const end = source.indexOf('\nfunction ', start + 1);
+  const context = {};
+  vm.runInNewContext(`${source.slice(start, end)}; result = [
+    debugGraphLatencyMs({type: 'api', durationMs: 96.6}),
+    debugGraphLatencyMs({type: 'sse', receiveLatencyMs: 780000, replay: true}),
+    debugGraphLatencyMs({type: 'heartbeat', durationMs: 12.8}),
+  ];`, context);
+  assert.ok(Number.isNaN(context.result[0]));
+  assert.ok(Number.isNaN(context.result[1]));
+  assert.equal(context.result[2], 12.8);
+});
+
+test('SSE replay identity, publication age and publisher clock offset survive diagnostics', () => {
+  const start = terminalSource.indexOf('function recordSseDebugEvent(');
+  const end = terminalSource.indexOf('\nfunction ', start + 1);
+  const events = [];
+  const context = {Date: {now: () => 900000}, clientEventPayloadFromEnvelope: value => value.payload || {}, utf8ByteLength: value => Buffer.byteLength(value), recordJsDebugEvent: (_kind, value) => events.push(value)};
+  vm.runInNewContext(`${terminalSource.slice(start, end)}; recordSseDebugEvent('search_progress', {id: 7, epoch:'epoch', replay:true, time:120}); recordSseDebugEvent('search_progress', {id: 8, time:901});`, context);
+  assert.equal(events[0].receiveLatencyMs, 780000);
+  assert.equal(events[0].publicationTimeMs, 120000);
+  assert.equal(events[0].replayCount, 1);
+  assert.equal(events[0].serverEventId, 7);
+  assert.equal(events[0].serverEpoch, 'epoch');
+  assert.equal(events[1].clockAheadMs, 1000);
+});
+
+test('rolling exemplars retain later larger stalls and continue past twenty windows', () => {
+  const start = coreSource.indexOf('const clientPerfDurableWindows =');
+  const end = coreSource.indexOf('\nfunction installClientPerfInteractionObserver', start);
+  const tasks = [], events = [];
+  const context = {setTimeout: callback => tasks.push(callback), recordJsDebugEvent: (kind, event) => events.push({kind, event}), clientPerfDurableExemplarLimit: 20};
+  vm.runInNewContext(coreSource.slice(start, end), context);
+  for (let index = 0; index < 60; index += 1) {
+    context.queueClientPerfDurableExemplar('interaction', {durationMs: 16});
+    context.queueClientPerfDurableExemplar('interaction', {durationMs: 2000});
+    assert.equal(tasks.length, 1);
+    tasks.shift()();
+    assert.equal(events.at(-1).event.durationMs, 2000);
+  }
+  assert.equal(events.length, 60);
+});
+
+test('missing duration samples do not become zero-valued client measurements', () => {
+  const context = {Map, jsDebugStatsClientIdForRequest: () => 'self', jsDebugGraphOtherClientsAverageAggregate: 'other'};
+  vm.runInNewContext(`${sourceFunction('debugGraphThisClientMetricBucket', 'debugGraphProcessCpuBucketValue')}
+    const metric = {key:'apiDuration', unit:'ms', hasData:b => b.count > 0, value:b => b.total / b.count};
+    const bucket = {clients:new Map([['self',{count:0}],['a',{count:1,total:100}],['b',{count:0}]])};
+    result = [debugGraphOtherClientMetricAverage(bucket, metric), debugGraphClientSeriesDef(metric, {clientAggregate:'self'}).hasData(bucket)];`, context);
+  assert.deepEqual([...context.result], [100, false]);
+});
+
+test('observation uploads capture request diagnostics without recursively uploading themselves', () => {
+  const uploader = sourceFunction('flushJsDebugCurrentObservations', 'jsDebugApplyCurrentObservationReceipt');
+  assert.match(uploader, /await apiFetchJson\('\/api\/stats-observations'/);
+  const recorder = coreSource.slice(coreSource.indexOf('function recordApiDebugEvent('), coreSource.indexOf('function recordApiDebugResponseBytes('));
+  const events = [];
+  const context = {jsDebugUrlText: value => value, jsDebugEndpointText: value => value, jsDebugDurationMs: () => 1,
+    recordJsDebugEvent: (kind, payload, options) => {events.push({kind,payload,options});}};
+  vm.runInNewContext(`${recorder}; recordApiDebugEvent('/api/stats-observations','POST',0,{requestId:'r-upload',status:400,ok:false});`, context);
+  assert.equal(events[0].options.graph, false);
+  assert.equal(events[0].payload.requestId, 'r-upload');
+  assert.equal(events[0].payload.status, 400);
+});
+
+test('copied diagnostics label SSE age and upload phases independently of duration', () => {
+  const context = {debugTimeText:()=>'', debugEventStatusText:()=>'', debugEventTypeLabel:value=>value, debugEventDetailText:()=>'', t:()=>''};
+  vm.runInNewContext(`${sourceFunction('debugPhaseTimingText', 'debugEventMetaText')}
+    ${sourceFunction('debugEventLineText', 'debugApiSummaryKey')}
+    result = [debugEventLineText({type:'sse', receiveLatencyMs:780000, replayCount:1, serverEventId:7, serverEpoch:'epoch'}),
+      debugEventLineText({type:'api', durationMs:12, requestId:'r-upload', serverRequestId:'r-upload', serverPhases:{body:10,writer_commit:1}})];`, context);
+  assert.match(context.result[0], /publication_age_ms=780000 replay=yes epoch=epoch event_id=7/);
+  assert.doesNotMatch(context.result[0], /780000ms/);
+  assert.match(context.result[1], /request=r-upload server_request=r-upload timings=server_body=10.0ms,server_writer_commit=1.0ms/);
+});
+
 test('bootstrap capability mapping keeps bootstrap, Tabber, agent, and YO routes distinct', () => {
   const context = {URL, globalThis: {location: {href: 'https://example.test/'}}};
   vm.runInNewContext(`${capabilityRequestSource}\nresult = [
@@ -2751,7 +2828,7 @@ test('client failures use the existing bounded observation uploader without debu
 
 test('browser observation uploader emits a periodic heartbeat when the page is otherwise idle', () => {
   assert.match(source, /const jsDebugCurrentObservationHeartbeatMs = 10_000/);
-  assert.match(source, /function installJsDebugCurrentObservationLiveness\(\)[\s\S]*const scope = currentObservationLifecycleScope\(\)[\s\S]*recordJsDebugClientHealthObservation\(0, 0\)[\s\S]*setInterval[\s\S]*scope\.ownTimer\('liveness'/);
+  assert.match(source, /function installJsDebugCurrentObservationLiveness\(\)[\s\S]*const scope = currentObservationLifecycleScope\(\)[\s\S]*recordJsDebugClientHealthObservation\(null, 0\)[\s\S]*setInterval[\s\S]*scope\.ownTimer\('liveness'/);
   assert.match(source, /installJsDebugCurrentObservationLiveness\(\);/);
   const functionText = source.slice(
     source.indexOf('function installJsDebugCurrentObservationLiveness()'),
@@ -2784,19 +2861,19 @@ test('browser observation uploader emits a periodic heartbeat when the page is o
   assert.deepEqual(denied.calls, [], 'clients without host-request capability do not queue observation heartbeats');
   assert.deepEqual(denied.timers, [], 'clients without host-request capability do not install the heartbeat timer');
   const context = runFixture(true);
-  assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[0, 0]], 'boot queues an idle heartbeat immediately');
+  assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[null, 0]], 'boot queues an idle heartbeat immediately');
   assert.equal(context.timers.length, 1, 'boot owns exactly one periodic heartbeat timer');
   context.installForTest();
   assert.equal(context.timers.length, 1, 'starting observation liveness twice retains one timer owner');
   assert.equal(context.timers[0].delay, 10000);
   context.timers[0].callback();
-  assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[0, 0], [0, 0]], 'the periodic timer emits another heartbeat without other traffic');
+  assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[null, 0], [null, 0]], 'the periodic timer emits another heartbeat without other traffic');
   context.retireForTest();
   context.timers[0].callback();
-  assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[0, 0], [0, 0]], 'a page-retired heartbeat callback cannot publish stale liveness');
+  assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[null, 0], [null, 0]], 'a page-retired heartbeat callback cannot publish stale liveness');
   context.resumeForTest();
   assert.equal(context.timers.length, 2, 'bfcache resume owns one fresh heartbeat timer');
-  assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[0, 0], [0, 0], [0, 0]], 'bfcache resume publishes one fresh liveness sample');
+  assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[null, 0], [null, 0], [null, 0]], 'bfcache resume publishes one fresh liveness sample');
 });
 
 test('observation, pricing, and graph resources share lifecycle scopes with pagehide disposal and bfcache resume', () => {
@@ -3052,7 +3129,7 @@ testAsync('browser observation writer fences acknowledge, retry authentication, 
       localStorage: fallbackStorage,
       setTimeout(callback, delay) { timers.push({callback, delay}); return timers.length; },
       clearTimeout(_timer) {},
-      apiFetchJsonQuiet: async (url, options) => {
+      apiFetchJson: async (url, options) => {
         const body = JSON.parse(options.body);
         requests.push({url, body});
         const outcome = await (outcomes.shift() || {ok: true, accepted: body.observations.length, duplicates: 0});

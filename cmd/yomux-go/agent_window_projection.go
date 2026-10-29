@@ -53,7 +53,7 @@ func (s *server) projectAgentWindows(sessions map[string]any, topologyGeneration
 			row := map[string]any{"session": session, "window": strconv.Itoa(window), "window_index": window,
 				"pane_target": agent["pane_target"], "kind": agent["kind"], "agent_kind": agent["kind"], "state": stringValue(agent["status"]),
 				"current": agent["current"], "window_active": agent["window_active"]}
-			for _, field := range []string{"process_instance_id", "status_observed_at", "working_stopped_ts", "transition_id", "cooldown_attention_key", "cooldown_acknowledged", "attention_key", "attention_signature", "attention_acknowledged", "queued_followup_question"} {
+			for _, field := range []string{"last_used_ts", "process_instance_id", "status_observed_at", "working_stopped_ts", "transition_id", "cooldown_attention_key", "cooldown_acknowledged", "attention_key", "attention_signature", "attention_acknowledged", "queued_followup_question"} {
 				if value, exists := agent[field]; exists {
 					row[field] = value
 				}

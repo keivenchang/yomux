@@ -2548,5 +2548,9 @@
   "status.tmux.windowKill.confirm": "tmux oturumunda '{session}' {window} süreci sonlandırılsın mı?",
   "status.tmux.windowKill.pending": "tmux oturumunda '{session}' {window} sonlandırılıyor",
   "status.tmux.windowKill.failed": "tmux oturumunda '{session}' {window} sonlandırılamadı",
-  "status.tmux.windowKill.success": "tmux oturumunda '{session}' {window} sonlandırıldı"
+  "status.tmux.windowKill.success": "tmux oturumunda '{session}' {window} sonlandırıldı",
+  "debug.graph.metric.apiDuration": "API süresi",
+  "debug.graph.metric.apiDuration.desc": "Ping gidiş dönüş süresinden ayrı HTTP istek süresi.",
+  "debug.graph.metric.sseAge": "SSE yayın yaşı",
+  "debug.graph.metric.sseAge.desc": "Tekrarlar ve saat farkı dahil yayından bu yana geçen süre; teslim gecikmesi değildir."
 }

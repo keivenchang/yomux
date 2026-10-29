@@ -2548,5 +2548,9 @@
   "status.tmux.windowKill.confirm": "ปิด {window} ในเซสชัน tmux '{session}' หรือไม่",
   "status.tmux.windowKill.pending": "กำลังปิด {window} ในเซสชัน tmux '{session}'",
   "status.tmux.windowKill.failed": "ปิด {window} ในเซสชัน tmux '{session}' ไม่สำเร็จ",
-  "status.tmux.windowKill.success": "ปิด {window} ในเซสชัน tmux '{session}' แล้ว"
+  "status.tmux.windowKill.success": "ปิด {window} ในเซสชัน tmux '{session}' แล้ว",
+  "debug.graph.metric.apiDuration": "ระยะเวลา API",
+  "debug.graph.metric.apiDuration.desc": "ระยะเวลาคำขอ HTTP แยกจากเวลาไปกลับของ ping",
+  "debug.graph.metric.sseAge": "อายุการเผยแพร่ SSE",
+  "debug.graph.metric.sseAge.desc": "เวลาตั้งแต่เผยแพร่ รวมการส่งซ้ำและความต่างของนาฬิกา ไม่ใช่ความหน่วงในการส่ง"
 }

@@ -526,6 +526,34 @@ def test_exact_browser_network_error_consumer_rejects_an_unrelated_warning():
         )
 
 
+@pytest.mark.parametrize('unexpected', [
+    browser_log_entry('SEVERE', 'network', 'http://127.0.0.1:7000/api/chat/delta - Failed to load resource: net::ERR_NAME_NOT_RESOLVED'),
+    browser_log_entry('SEVERE', 'network', 'https://example.test/clicked/other - Failed to load resource: net::ERR_NAME_NOT_RESOLVED'),
+    browser_log_entry('SEVERE', 'network', 'https://example.test/clicked - Failed to load resource: net::ERR_CONNECTION_REFUSED'),
+    browser_log_entry('WARNING', 'console-api', 'application warning'),
+])
+def test_cancelled_browser_network_error_consumer_rejects_other_failures(unexpected):
+    with pytest.raises(AssertionError, match='matching browser network error'):
+        browser_console.assert_only_expected_browser_network_error(
+            BrowserLogDriver((unexpected,)), url=('https://example.test/clicked',),
+            reason='net::ERR_NAME_NOT_RESOLVED', count=None,
+        )
+
+
+@pytest.mark.parametrize('count', [0, 1, 2])
+def test_cancelled_browser_network_error_consumer_records_actual_count(count):
+    entry = browser_log_entry('SEVERE', 'network', 'https://example.test/clicked - Failed to load resource: net::ERR_NAME_NOT_RESOLVED')
+    assert browser_console.assert_only_expected_browser_network_error(
+        BrowserLogDriver((entry,) * count), url=('https://example.test/clicked',),
+        reason='net::ERR_NAME_NOT_RESOLVED', count=None,
+    ) == (entry,) * count
+    if count != 1:
+        with pytest.raises(AssertionError, match='matching browser network error'):
+            browser_console.assert_only_expected_browser_network_error(
+                BrowserLogDriver((entry,) * count), url='https://example.test/clicked', reason='net::ERR_NAME_NOT_RESOLVED',
+            )
+
+
 def test_full_browser_gate_keeps_network_ring_404_fatal():
     class Driver:
         def execute_script(self, source, *_args):

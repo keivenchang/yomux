@@ -53,6 +53,10 @@ function debugGraphApplyServerRecord(record) {
   bucket.apiCount = Math.max(bucket.apiCount, Number(record.api_count || 0));
   bucket.sseCount = Math.max(bucket.sseCount, Number(record.sse_count || 0));
   bucket.latencyTotalMs = Math.max(bucket.latencyTotalMs, Number(record.latency_total_ms || 0));
+  bucket.apiDurationTotalMs = Math.max(bucket.apiDurationTotalMs, Number(record.api_duration_total_ms || 0));
+  bucket.apiDurationCount = Math.max(bucket.apiDurationCount, Number(record.api_duration_count || 0));
+  bucket.sseAgeTotalMs = Math.max(bucket.sseAgeTotalMs, Number(record.sse_age_total_ms || 0));
+  bucket.sseAgeCount = Math.max(bucket.sseAgeCount, Number(record.sse_age_count || 0));
   bucket.latencyCount = Math.max(bucket.latencyCount, Number(record.latency_count || 0));
   bucket.bandwidthBytes = Math.max(bucket.bandwidthBytes, Number(record.bandwidth_bytes || 0));
   bucket.heartbeatCount = Math.max(bucket.heartbeatCount, Number(record.heartbeat_count || 0));
@@ -282,6 +286,10 @@ function debugGraphApplyServerClients(bucket, clients) {
     client.apiCount = Math.max(client.apiCount, Number(record.api_count || 0));
     client.sseCount = Math.max(client.sseCount, Number(record.sse_count || 0));
     client.latencyTotalMs = Math.max(client.latencyTotalMs, Number(record.latency_total_ms || 0));
+    client.apiDurationTotalMs = Math.max(client.apiDurationTotalMs, Number(record.api_duration_total_ms || 0));
+    client.apiDurationCount = Math.max(client.apiDurationCount, Number(record.api_duration_count || 0));
+    client.sseAgeTotalMs = Math.max(client.sseAgeTotalMs, Number(record.sse_age_total_ms || 0));
+    client.sseAgeCount = Math.max(client.sseAgeCount, Number(record.sse_age_count || 0));
     client.latencyCount = Math.max(client.latencyCount, Number(record.latency_count || 0));
     client.bandwidthBytes = Math.max(client.bandwidthBytes, Number(record.bandwidth_bytes || 0));
     client.heartbeatCount = Math.max(client.heartbeatCount, Number(record.heartbeat_count || 0));
@@ -739,7 +747,7 @@ function debugGraphOtherClientMetricBuckets(bucket, metric) {
   const thisClientId = jsDebugStatsClientIdForRequest();
   return [...bucket.clients.entries()]
     .filter(([clientId, clientBucket]) => clientId !== thisClientId
-      && (metric.key !== 'latency' || metric.hasData(clientBucket)))
+      && (metric.unit !== 'ms' || metric.hasData(clientBucket)))
     .map(([, clientBucket]) => clientBucket);
 }
 
@@ -755,7 +763,7 @@ function debugGraphClientSeriesDef(metric, {key = metric.key, labelKey, clientId
     ...metric, key, labelKey, metricLabelKey: metric.labelKey, cssKey: metric.key, clientMetric: true, metricKey: metric.key, clientId, clientAggregate, clientLinePattern,
     ...(color ? {color} : {}),
     value: bucket => otherClients ? debugGraphOtherClientMetricAverage(bucket, metric) : (() => { const clientBucket = debugGraphThisClientMetricBucket(bucket, metric); return clientBucket ? metric.value(clientBucket) : 0; })(),
-    hasData: bucket => otherClients ? debugGraphOtherClientMetricBuckets(bucket, metric).length > 0 : (() => { const clientBucket = debugGraphThisClientMetricBucket(bucket, metric); return Boolean(clientBucket && (metric.key !== 'latency' || metric.hasData(clientBucket))); })(),
+    hasData: bucket => otherClients ? debugGraphOtherClientMetricBuckets(bucket, metric).length > 0 : (() => { const clientBucket = debugGraphThisClientMetricBucket(bucket, metric); return Boolean(clientBucket && (metric.unit !== 'ms' || metric.hasData(clientBucket))); })(),
   };
 }
 
@@ -1011,7 +1019,7 @@ function debugRemovalLatencyMetaItem() {
 
 function debugClientPerfRows() {
   if (typeof clientPerfSummary !== 'function') return [];
-  const preferred = ['focusSet', 'tabActivationPaint', 'tabberFullRefresh', 'tabberLayoutSync', 'statsHistoryFetch', 'statsHistoryParse', 'statsHistoryApply', 'statsHistoryRender', 'statsHistoryPaint', 'statsHistoryLoading', 'statsNoDataSweep', 'keydownToTermData', 'term.onData', 'wsSend', 'echoToTermWrite', 'xtermWrite', 'terminalUnderlineRender', 'terminalAttentionScan', 'terminalBlankProbe', 'finderRefresh', 'sessionFilesRefresh', 'sessionFilesRender', 'renderInfoPanel', 'renderSessionButtons', 'renderPaneTabStrips', 'renderPanels', 'sseEvent', 'autoStatusRender', 'longTask'];
+  const preferred = ['focusSet', 'tabActivationPaint', 'tabberFullRefresh', 'tabberLayoutSync', 'statsHistoryFetch', 'statsHistoryParse', 'statsHistoryApply', 'statsHistoryRender', 'statsHistoryPaint', 'statsHistoryLoading', 'statsNoDataSweep', 'keydownToTermData', 'term.onData', 'wsSend', 'inputToFirstOutput', 'xtermWrite', 'terminalUnderlineRender', 'terminalAttentionScan', 'terminalBlankProbe', 'finderRefresh', 'sessionFilesRefresh', 'sessionFilesRender', 'renderInfoPanel', 'renderSessionButtons', 'renderPaneTabStrips', 'renderPanels', 'sseEvent', 'autoStatusRender', 'longTask'];
   const order = new Map(preferred.map((name, index) => [name, index]));
   return clientPerfSummary()
     .filter(row => Number(row.count || 0) > 0)
@@ -2194,7 +2202,7 @@ function debugGraphCurrentClientRecord(bucket) {
 function debugGraphCurrentClientCommunicationCount(bucket) {
   const record = debugGraphCurrentClientRecord(bucket);
   if (!record) return 0;
-  return ['apiCount', 'sseCount', 'latencyCount', 'bandwidthBytes', 'heartbeatCount']
+  return ['apiCount', 'sseCount', 'latencyCount', 'apiDurationCount', 'sseAgeCount', 'bandwidthBytes', 'heartbeatCount']
     .reduce((total, key) => total + Math.max(0, Number(record[key] || 0)), 0);
 }
 
@@ -4951,7 +4959,9 @@ function jsDebugCurrentBucketRecord(bucket) {
       Object.assign(service, {rss_total_bytes: value, rss_samples: 1, rss_min_bytes: value, rss_max_bytes: value});
     } else if (name === 'browser_api_per_second') record.api_count = value * duration;
     else if (name === 'browser_sse_per_second') record.sse_count = value * duration;
-    else if (name === 'browser_latency_ms') { record.latency_total_ms = value; record.latency_count = 1; }
+    else if (name === 'browser_api_duration_ms') { record.api_duration_total_ms = value; record.api_duration_count = 1; }
+    else if (name === 'browser_sse_publication_age_ms') { record.sse_age_total_ms = value; record.sse_age_count = 1; }
+    else if (name === 'browser_ping_rtt_ms') { record.latency_total_ms = value; record.latency_count = 1; }
     else if (name === 'browser_bandwidth_bytes_per_second') record.bandwidth_bytes = value * duration;
     else if (name === 'browser_disconnected_ms') record.disconnected_ms = value;
     else if (name.startsWith('agent_tokens_per_minute:')) {

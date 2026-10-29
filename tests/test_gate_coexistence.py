@@ -27,6 +27,7 @@ from pathlib import Path
 from threading import Barrier
 from threading import Event
 from threading import Lock
+from threading import Thread
 from typing import Any
 
 import pytest
@@ -42,6 +43,7 @@ from tests.isolated_dev_server import BuildPaths
 from tests.isolated_dev_server import SERVER_STOP_TIMEOUT_SECONDS
 from tests.isolated_dev_server import build_environment
 from tests.isolated_dev_server import build_paths as _build_paths
+from tests.isolated_dev_server import finish_server_output
 from tests.isolated_dev_server import signal_server_exactly
 from tests.isolated_dev_server import server_entrypoint_arguments
 from tests.isolated_dev_server import wait_until_serving
@@ -96,6 +98,7 @@ class RunningBuild:
     output: list[str] = field(default_factory=list)
     captured_services: tuple[CapturedFixtureService, ...] = ()
     stopped: bool = False
+    output_reader: Thread | None = None
     service_capture_lock: Lock = field(default_factory=Lock, repr=False)
 
     def request(self, path: str) -> tuple[int, dict[str, str], bytes]:
@@ -144,16 +147,14 @@ class RunningBuild:
             if self.process.poll() is None:
                 self.signal_server(signal.SIGINT)
             try:
-                remaining, _stderr = self.process.communicate(timeout=SERVER_STOP_TIMEOUT_SECONDS)
+                finish_server_output(self.process, self.output, self.output_reader)
             except subprocess.TimeoutExpired:
                 self.signal_server(signal.SIGTERM)
                 try:
-                    remaining, _stderr = self.process.communicate(timeout=SERVER_STOP_TIMEOUT_SECONDS)
+                    finish_server_output(self.process, self.output, self.output_reader)
                 except subprocess.TimeoutExpired:
                     self.signal_server(signal.SIGKILL)
-                    remaining, _stderr = self.process.communicate(timeout=SERVER_STOP_TIMEOUT_SECONDS)
-            if remaining:
-                self.output.extend(remaining.splitlines())
+                    finish_server_output(self.process, self.output, self.output_reader)
 
         run_fixture_cleanup_phases(
             f"{self.label} build",
@@ -643,7 +644,7 @@ def test_o1_service_capture_is_serialized_while_health_requests_converge(monkeyp
 def _wait_until_serving(build: RunningBuild) -> None:
     """Adapter only: the readiness rule itself belongs to `isolated_dev_server`."""
 
-    wait_until_serving(
+    build.output_reader = wait_until_serving(
         build.process,
         build.port,
         build.output,

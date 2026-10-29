@@ -5565,6 +5565,7 @@ async function runTabberSuite() {
       clientPerfStart() {},
       clientPerfEnd() {},
       recordClientPerfCounter() {},
+      recordTerminalMobileInputTrace() {},
       terminalDataWithMobileAccessoryModifiers(session, value) { modifierCalls += 1; return `\x1b${value}`; },
       observeTerminalTmuxPrefixWindowSwitches() { events.push('observe'); },
       acknowledgeTerminalAttentionFromTransportInput() { events.push('attention'); },
@@ -5739,7 +5740,7 @@ test('Normal Tabber shows dates for both AI and shell windows and orders by thei
   assert.ok(rows.every(row => row.date), 'both flattened Normal rows display their activity date');
 });
 
-test('Normal Tabber compares native window activity with agent transcript activity', () => {
+test('Normal Tabber compares authoritative conversation activity with transcript history', () => {
   const api = loadYomux('', ['yo7110']);
   api.setTabberModeForTest('normal');
   const now = Date.now() / 1000;
@@ -5759,6 +5760,19 @@ test('Normal Tabber compares native window activity with agent transcript activi
 
   const rows = api.tabberRenderedRowsForTest().filter(row => row.type === 'normal');
   assert.match(rows[0]?.nameHtml || '', /0:codex/, `the Codex window ranks by its newer native window activity when that exceeds transcript recency: ${JSON.stringify({rows: rows.map(row => ({nameHtml: row.nameHtml, date: row.date})), activity: api.tabberActivityPayloadForTest().activity, tree: api.buildTabberNormalRowsForTest().filter(row => row.tabber?.session === 'yo7110')?.map(row => ({name: row.name, mtime: row.mtime, agentKey: row.tabber.agentKey}))})}`);
+});
+
+test('Tabber never falls back from unavailable conversation history to a repaint timestamp', () => {
+  const api = loadYomux('', ['untouched']);
+  const now = Date.now() / 1000;
+  api.setTabberActivityForTest({activity: {'untouched:0': {active_recency_ts: 0, last_output_ts: now}}});
+  assert.equal(api.tabberRecencyForTest('untouched:0'), 0);
+  for (const state of ['idle', 'cooldown', 'blocked']) {
+    assert.equal(api.tabberWindowRecencyForTest({session: 'untouched', windowIndex: 0, isAgent: true,
+      agentStatus: {state, status_observed_at: now, working_stopped_ts: now - 3600}}, now), now - 3600);
+  }
+  api.setTabberActivityForTest({activity: {'untouched:0': {active_recency_ts: now - 10, last_user_input_ts: now - 10, last_output_ts: now}}});
+  assert.equal(api.tabberRecencyForTest('untouched:0'), now - 10, 'accepted input remains authoritative');
 });
 
 test('Normal Tabber keeps windows together by index when one window timestamp is unavailable', () => {

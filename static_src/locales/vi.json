@@ -2548,5 +2548,9 @@
   "status.tmux.windowKill.confirm": "Kết thúc {window} trong phiên tmux '{session}'?",
   "status.tmux.windowKill.pending": "Đang kết thúc {window} trong phiên tmux '{session}'",
   "status.tmux.windowKill.failed": "Không thể kết thúc {window} trong phiên tmux '{session}'",
-  "status.tmux.windowKill.success": "Đã kết thúc {window} trong phiên tmux '{session}'"
+  "status.tmux.windowKill.success": "Đã kết thúc {window} trong phiên tmux '{session}'",
+  "debug.graph.metric.apiDuration": "Thời lượng API",
+  "debug.graph.metric.apiDuration.desc": "Thời lượng yêu cầu HTTP, tách biệt với thời gian khứ hồi ping.",
+  "debug.graph.metric.sseAge": "Tuổi bản tin SSE",
+  "debug.graph.metric.sseAge.desc": "Thời gian từ lúc phát, gồm phát lại và lệch đồng hồ; không phải độ trễ truyền."
 }

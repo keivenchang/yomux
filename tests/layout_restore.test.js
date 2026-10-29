@@ -355,21 +355,25 @@ async function runLayoutRestoreSuite() {
 
   test('long-task and Event Timing observers upload only bounded exemplars', () => {
     const observers = [];
+    const pendingExemplars = [];
     class TestPerformanceObserver {
       constructor(callback) { this.callback = callback; observers.push(this); }
       observe(options) { this.options = options; }
     }
     const api = loadYomux('', ['1'], 'http:', 'Mozilla/5.0 Chrome/140.0', 'admin', {
       PerformanceObserver: TestPerformanceObserver,
+      setTimeout(callback) { if (callback.name === "flushClientPerfDurableExemplar") pendingExemplars.push(callback); return 1; },
     });
     assert.deepStrictEqual(observers.map(observer => observer.options.type || observer.options.entryTypes[0]), ['longtask', 'event']);
     const longTaskObserver = observers.find(observer => observer.options.entryTypes?.[0] === 'longtask');
     const inputObserver = observers.find(observer => observer.options.type === 'event');
     longTaskObserver.callback({getEntries: () => Array.from({length: 30}, (_, index) => ({duration: 50 + index, name: 'self'}))});
     inputObserver.callback({getEntries: () => Array.from({length: 30}, (_, index) => ({duration: 16 + index, name: 'click', interactionId: index + 1}))});
+    assert.equal(pendingExemplars.length, 2);
+    pendingExemplars.forEach(callback => callback());
     const events = api.jsDebugEventsForTest();
-    assert.equal(events.filter(event => event.type === 'long_task').length, 20);
-    assert.equal(events.filter(event => event.type === 'interaction').length, 20);
+    assert.equal(events.filter(event => event.type === 'long_task').length, 1);
+    assert.equal(events.filter(event => event.type === 'interaction').length, 1);
   });
 
   test('resource timing never borrows a retained entry for a newer request', () => {
@@ -384,7 +388,8 @@ async function runLayoutRestoreSuite() {
     const api = loadYomux();
     const status = api.testElementForId('status');
     api.showLayoutStatusForTest('blocked', 'danger');
-    assert.equal(status.getAttribute('aria-live'), 'assertive');
+    assert.equal(api.timedStatusNoticesForTest().at(-1), 'blocked', 'refusals use the existing timed notice');
+    assert.equal(status.classList.contains('layout-status-danger'), false);
     api.showLayoutStatusForTest('Saved');
     assert.equal(api.statusKindForTest(), '');
     assert.equal(status.classList.contains('layout-status-visible'), false);
@@ -3634,7 +3639,6 @@ async function runLayoutRestoreSuite() {
     assert.equal((source.match(/tabsToEvictForCap\(/g) || []).length, 1, 'product code has no direct cap-eviction callers outside the compatibility wrapper');
     assert.ok(/function paneCapacityRefusalStatus\(item, capacity, targetSlot = ''\)[\s\S]*layout\.status\.paneFullPinned[\s\S]*layout\.status\.nothingEvictable[\s\S]*pane: targetSlot[\s\S]*limit: capacity/.test(source), 'cap refusals use dedicated localized pinned/cap status keys and name the target pane plus cap');
     assert.ok(/const capacity = paneCapacityCheckForInsert\(targetSlot, \[\], session, next, \{tabs\}\);[\s\S]*if \(!capacity\.ok\)[\s\S]*showLayoutStatus\(paneCapacityRefusalStatus\(session, capacity, targetSlot\), 'danger'\)[\s\S]*return false;[\s\S]*next\[targetSlot\] = paneStateWithTabsForSlot/.test(source), 'moveSessionToSlot refuses over-cap inserts before applying a changed layout');
-    assert.ok(/function showLayoutStatus\(message, kind = ''\)[\s\S]*kind === 'danger'[\s\S]*layout-status-visible[\s\S]*`layout-status-\$\{tone\}`/.test(source), 'layout danger messages reuse #status as a visible status surface');
     assert.ok(/function dropIntentCapacityCheckForSession\(session, intent, sourceSlot = null\)[\s\S]*paneCapacityCheckForInsert\(intent\.targetSlot, \[session\], session, layoutSlots\)[\s\S]*function dropIntentCapacityAllowsSession/.test(source), 'drag preview capacity checks reuse the shared capacity owner');
     assert.ok(/function dockviewTrackRootBoundaryOverlay\(event\)[\s\S]*dropIntentCapacityRefusalStatus\(paneInfo\.item, paneInfo\.intent, paneInfo\.intent\.sourceSlot\)[\s\S]*dockviewSetInvalidTabDropPreview\(invalidTabDrop \|\| Boolean\(capacityRefusal\)\)/.test(source), 'Dockview preview paints capacity refusals through the existing invalid-drop danger state');
     assert.ok(/function dockviewDropClassification\(event, options = \{\}\)[\s\S]*dockviewDragRegionForEvent\(pointerEvent\)[\s\S]*classification\.owner/.test(source), 'Dockview routes every coordinate through one semantic drop classifier');
@@ -3655,16 +3659,15 @@ async function runLayoutRestoreSuite() {
     assert.equal(refused, false, 'moveSessionToSlot reports a refused full-pinned target');
     assert.deepStrictEqual([...afterRefusal.panes.left.tabs], ['3'], 'refused move leaves the source pane unchanged');
     assert.deepStrictEqual([...afterRefusal.panes.right.tabs], ['1', '2'], 'refused move leaves the target pane unchanged');
-    assert.ok(api.statusTextForTest().includes('tab limit 2'), 'refused move status names the active cap');
-    assert.ok(api.statusTextForTest().includes('right'), 'refused move status names the target pane');
-    assert.equal(api.statusKindForTest(), 'danger', 'refused move publishes a visible danger layout status');
-    assert.ok(api.statusClassForTest().includes('layout-status-visible'), 'refused move makes the existing status live region visible');
-    assert.ok(api.statusClassForTest().includes('layout-status-danger'), 'refused move applies danger status styling');
+    const refusalNotice = api.timedStatusNoticesForTest().at(-1);
+    assert.ok(refusalNotice.includes('tab limit 2'), 'refused move notice names the active cap');
+    assert.ok(refusalNotice.includes('right'), 'refused move notice names the target pane');
+    assert.equal(api.statusKindForTest(), '', 'refused move has no persistent danger status');
+    assert.equal(api.statusClassForTest().includes('layout-status-visible'), false, 'refused move does not create a floating status banner');
     assert.equal(api.statusTitleForTest(), '', 'layout refusal retires the older terminal-connection tooltip owner');
     api.updateStatusForTest();
-    assert.ok(api.statusTextForTest().includes('tab limit 2'), 'terminal connection refresh cannot erase an active layout refusal');
-    assert.equal(api.statusKindForTest(), 'danger', 'terminal connection refresh preserves the active layout-status owner');
-    assert.equal(api.statusTitleForTest(), '', 'terminal connection refresh cannot restore its stale tooltip over a layout refusal');
+    assert.equal(api.timedStatusNoticesForTest().at(-1), refusalNotice, 'terminal connection refresh leaves the timed refusal notice independent');
+    assert.equal(api.statusKindForTest(), '', 'terminal connection refresh has no persistent error owner');
     assert.equal(api.dropIntentAllowsSession('3', {targetSlot: 'right', zone: 'middle'}, {sourceSlot: 'left'}), false, 'drag preview refuses a cross-pane drop into a full all-pinned target');
     moveSlots.right = api.paneStateWithTabs(['1', editorItem], '1');
     api.setLayoutSlotsForTest(moveSlots);
@@ -3749,7 +3752,8 @@ async function runLayoutRestoreSuite() {
     const refusedExpand = api.serialize(api.layoutSlotsForTest());
     assert.deepStrictEqual([...refusedExpand.panes.left.tabs], [...beforeRefusedExpand.panes.left.tabs], 'expand into an all-pinned full target refuses instead of silently evicting the incoming tab');
     assert.deepStrictEqual([...refusedExpand.panes.middle.tabs], [...beforeRefusedExpand.panes.middle.tabs], 'refused expand leaves source panes unchanged');
-    assert.equal(api.statusKindForTest(), 'danger', 'refused expand reports a danger status');
+    assert.equal(api.statusKindForTest(), '', 'refused expand has no persistent danger status');
+    assert.ok(api.timedStatusNoticesForTest().at(-1).includes('tab limit 2'), 'refused expand reports its cap through a timed notice');
     api.setLayoutSlotsForTest(minimizeSlots);
     api.setPinnedTabsForTest(['1']);
     api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 2}});
@@ -3773,7 +3777,8 @@ async function runLayoutRestoreSuite() {
     assert.equal(lowerCapMove, false, 'incoming moves into a cap-lowered over-pinned pane are refused');
     assert.deepStrictEqual([...overCapAfter.panes.left.tabs], ['1', '2', '3'], 'refused incoming move keeps the over-cap pinned pane intact');
     assert.deepStrictEqual([...overCapAfter.panes.right.tabs], ['4'], 'refused incoming move keeps the source pane intact');
-    assert.equal(api.statusKindForTest(), 'danger', 'incoming move into cap-lowered over-pinned pane reports a danger status');
+    assert.equal(api.statusKindForTest(), '', 'incoming move into cap-lowered over-pinned pane has no persistent error owner');
+    assert.ok(api.timedStatusNoticesForTest().at(-1).includes('tab limit 2'), 'the refused incoming move uses a timed notice');
   });
 
   test('pull request review badges render review outcomes', () => {
@@ -3834,6 +3839,7 @@ async function runLayoutRestoreSuite() {
       setTimeout(callback, ms) { timers.push({callback, ms}); return timers.length; },
       clearTimeout() {},
     });
+    api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send() {}});
     for (const [state, queued, label] of [['needs-input', false, 'ASK'], ['blocked', false, 'BLK'], ['working', true, 'ASK']]) {
       const key = `go:attention:${state}`;
       const info = {agents: [{kind: 'codex', state, window_index: 0, pane_target: '%1', queued_followup_question: queued, attention_key: key}]};
@@ -3841,7 +3847,13 @@ async function runLayoutRestoreSuite() {
       api.setAutoApproveStateForTest('1', {agent_windows: info.agents});
       const render = () => api.tmuxPaneTabHtml('1', info, api.sessionState('1', info), false);
       assert.ok(render().includes(`>${label}</span>`), `${state} arrives without interaction`);
-      assert.equal(api.acknowledgeTerminalAttentionFromUserActionForTest('1', null, {localOnly: true, refresh: false, acknowledgeAgentWindowDelayMs: 0}), true);
+      const clicked = api.acknowledgeTerminalAttentionFromUserActionForTest('1', null, {localOnly: true, refresh: false, acknowledgeAgentWindowDelayMs: 0});
+      assert.equal(clicked, !queued, queued ? 'viewing a queued question does not mark it read' : 'viewing a blocker or untyped ask still acknowledges it');
+      if (queued) {
+        assert.equal(api.handleTerminalDataForTest('1', 'answer', {attentionOptions: {localOnly: true, refresh: false}}), true);
+        assert.equal(api.attentionAcknowledgementKeyIsRecordedForTest(key), false, 'draft text leaves the queued ASK visible');
+        assert.equal(api.handleTerminalDataForTest('1', '\r', {attentionOptions: {localOnly: true, refresh: false}}), true);
+      }
       const gray = render();
       assert.match(gray, /session-tab-(?:state-marker|queued-question)[^>]*status-indicator--acknowledged|status-indicator--acknowledged[^>]*session-tab-(?:state-marker|queued-question)/);
       if (queued) assert.match(gray, /status-indicator--working/);

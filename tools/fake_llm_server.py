@@ -116,6 +116,7 @@ class Handler(BaseHTTPRequestHandler):
         behavior = os.environ.get("FAKE_LLM_SCENARIO", scenario)
         anthropic = "anthropic" in self.path or self.headers.get("Anthropic-Version")
         responses = self.path.endswith("/responses")
+        response_text = os.environ.get("FAKE_LLM_RESPONSE_TEXT", "YOLOMUX_FAKE_OK")
         provider = "anthropic" if anthropic else "openai"
         _log_event(
             body,
@@ -148,7 +149,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = {"error": {"type": "fake_llm_error", "message": "deterministic fake provider error"}}
         elif anthropic:
             tool = behavior in {"tool", "approval"}
-            content = [{"type": "tool_use", "id": "toolu_fake_1", "name": "Bash", "input": {"command": "echo YOLOMUX_FAKE_OK"}}] if tool else [{"type": "text", "text": "YOLOMUX_FAKE_OK"}]
+            content = [{"type": "tool_use", "id": "toolu_fake_1", "name": "Bash", "input": {"command": "echo YOLOMUX_FAKE_OK"}}] if tool else [{"type": "text", "text": response_text}]
             payload = {"id": "msg_yolomux", "type": "message", "role": "assistant", "content": content, "model": ANTHROPIC_MODEL, "stop_reason": "tool_use" if tool else "end_turn", "stop_sequence": None, "usage": {"input_tokens": 12, "output_tokens": 8}}
         elif responses:
             tool = behavior in {"tool", "approval"}
@@ -157,12 +158,12 @@ class Handler(BaseHTTPRequestHandler):
                 "object": "response",
                 "status": "completed",
                 "model": OPENAI_MODEL,
-                "output": ([{"type": "function_call", "call_id": "call_fake_1", "name": "exec_command", "arguments": '{"cmd":"echo YOLOMUX_FAKE_OK"}'}] if tool else [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "YOLOMUX_FAKE_OK"}]}]),
+                "output": ([{"type": "function_call", "call_id": "call_fake_1", "name": "exec_command", "arguments": '{"cmd":"echo YOLOMUX_FAKE_OK"}'}] if tool else [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": response_text}]}]),
                 "usage": _opencode_usage(),
             }
         else:
             tool = behavior in {"tool", "approval"}
-            message = {"role": "assistant", "content": None if tool else "YOLOMUX_FAKE_OK"}
+            message = {"role": "assistant", "content": None if tool else response_text}
             if tool:
                 message["tool_calls"] = [{"id": "call_fake_1", "type": "function", "function": {"name": "Bash", "arguments": '{"command":"echo YOLOMUX_FAKE_OK"}'}}]
             payload = {"id": "chatcmpl_yolomux", "object": "chat.completion", "created": 1, "system_fingerprint": "yolomux-fake", "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if tool else "stop"}], "model": OPENAI_MODEL, "usage": _opencode_usage()}
@@ -200,14 +201,21 @@ class Handler(BaseHTTPRequestHandler):
                             ("message_stop", {"type": "message_stop"}),
                         ]
                     else:
-                        events = [("message_start", {"type": "message_start", "message": payload}), ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "YOLOMUX_FAKE_OK"}}), ("message_delta", {"type": "message_delta", "delta": {"stop_reason": payload["stop_reason"]}, "usage": {"output_tokens": 8}}), ("message_stop", {"type": "message_stop"})]
+                        events = [
+                            ("message_start", {"type": "message_start", "message": {**payload, "content": [], "stop_reason": None}}),
+                            ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+                            ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": response_text}}),
+                            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                            ("message_delta", {"type": "message_delta", "delta": {"stop_reason": payload["stop_reason"]}, "usage": {"output_tokens": 8}}),
+                            ("message_stop", {"type": "message_stop"}),
+                        ]
                     for event, value in events:
                         self.wfile.write(f"event: {event}\ndata: {json.dumps(value)}\n\n".encode())
                 elif responses:
                     if tool:
                         events = [{"type": "response.created", "response": {"id": "resp_yolomux", "object": "response", "status": "in_progress", "model": OPENAI_MODEL}}, {"type": "response.output_item.added", "output_index": 0, "item": {"id": "call_fake_1", "type": "function_call", "call_id": "call_fake_1", "name": "exec_command", "arguments": ""}}, {"type": "response.function_call_arguments.delta", "item_id": "call_fake_1", "output_index": 0, "delta": '{"cmd":"echo YOLOMUX_FAKE_OK"}'}, {"type": "response.function_call_arguments.done", "item_id": "call_fake_1", "output_index": 0, "arguments": '{"cmd":"echo YOLOMUX_FAKE_OK"}'}, {"type": "response.output_item.done", "output_index": 0, "item": payload["output"][0]}, {"type": "response.completed", "response": {**payload, "usage": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}}}]
                     else:
-                        events = [{"type": "response.created", "response": {"id": "resp_yolomux", "object": "response", "status": "in_progress", "model": OPENAI_MODEL}}, {"type": "response.output_item.added", "output_index": 0, "item": {"id": "item_yolomux", "type": "message", "role": "assistant", "status": "in_progress", "content": []}}, {"type": "response.content_part.added", "item_id": "item_yolomux", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}, {"type": "response.output_text.delta", "delta": "YOLOMUX_FAKE_OK", "item_id": "item_yolomux", "output_index": 0, "content_index": 0}, {"type": "response.output_text.done", "text": "YOLOMUX_FAKE_OK", "item_id": "item_yolomux", "output_index": 0, "content_index": 0}, {"type": "response.content_part.done", "item_id": "item_yolomux", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "YOLOMUX_FAKE_OK", "annotations": []}}, {"type": "response.output_item.done", "output_index": 0, "item": {"id": "item_yolomux", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "YOLOMUX_FAKE_OK", "annotations": []}]}}, {"type": "response.completed", "response": {**payload, "usage": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}}}]
+                        events = [{"type": "response.created", "response": {"id": "resp_yolomux", "object": "response", "status": "in_progress", "model": OPENAI_MODEL}}, {"type": "response.output_item.added", "output_index": 0, "item": {"id": "item_yolomux", "type": "message", "role": "assistant", "status": "in_progress", "content": []}}, {"type": "response.content_part.added", "item_id": "item_yolomux", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}, {"type": "response.output_text.delta", "delta": response_text, "item_id": "item_yolomux", "output_index": 0, "content_index": 0}, {"type": "response.output_text.done", "text": response_text, "item_id": "item_yolomux", "output_index": 0, "content_index": 0}, {"type": "response.content_part.done", "item_id": "item_yolomux", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": response_text, "annotations": []}}, {"type": "response.output_item.done", "output_index": 0, "item": {"id": "item_yolomux", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": response_text, "annotations": []}]}}, {"type": "response.completed", "response": {**payload, "usage": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}}}]
                     for event in events:
                         self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
                     self.wfile.write(b"data: [DONE]\n\n")
@@ -216,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
                         chunk = {"id": "chatcmpl_yolomux", "object": "chat.completion.chunk", "created": 1, "model": OPENAI_MODEL, "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [{"index": 0, "id": "call_fake_1", "type": "function", "function": {"name": "Bash", "arguments": '{"command":"echo YOLOMUX_FAKE_OK"}'}}]}, "finish_reason": "tool_calls"}]}
                         terminal = {"id": "chatcmpl_yolomux", "object": "chat.completion.chunk", "created": 1, "model": OPENAI_MODEL, "choices": [], "usage": _opencode_usage()}
                     else:
-                        chunk = {"id": "chatcmpl_yolomux", "object": "chat.completion.chunk", "created": 1, "model": OPENAI_MODEL, "choices": [{"index": 0, "delta": {"role": "assistant", "content": "YOLOMUX_FAKE_OK"}, "finish_reason": None}]}
+                        chunk = {"id": "chatcmpl_yolomux", "object": "chat.completion.chunk", "created": 1, "model": OPENAI_MODEL, "choices": [{"index": 0, "delta": {"role": "assistant", "content": response_text}, "finish_reason": None}]}
                         terminal = {"id": "chatcmpl_yolomux", "object": "chat.completion.chunk", "created": 1, "model": OPENAI_MODEL, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": _opencode_usage()}
                     self.wfile.write(f"data: {json.dumps(chunk)}\n\ndata: {json.dumps(terminal)}\n\ndata: [DONE]\n\n".encode())
                 self.wfile.flush()

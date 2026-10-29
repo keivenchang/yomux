@@ -94,8 +94,10 @@ def assert_only_expected_browser_http_error(
     return matches[0]
 
 
-def assert_only_expected_browser_network_error(driver, *, url: str, reason: str, count: int = 1) -> dict[str, Any] | tuple[dict[str, Any], ...]:
-    """Consume an exact number of deliberate external-resource failures and reject every other browser failure."""
+def assert_only_expected_browser_network_error(driver, *, url: str | Sequence[str], reason: str, count: int | None = 1) -> dict[str, Any] | tuple[dict[str, Any], ...]:
+    """Reject other failures; count=None admits cancelled navigations with nondeterministic DNS completion."""
+
+    urls = (url,) if isinstance(url, str) else tuple(url)
 
     entries = read_browser_console_log(driver)
     failure_entries = _browser_console_failures(entries)
@@ -104,16 +106,16 @@ def assert_only_expected_browser_network_error(driver, *, url: str, reason: str,
         for entry in failure_entries
         if str(entry.get("level") or "").upper() == "SEVERE"
         and str(entry.get("source") or "") == "network"
-        and str(entry.get("message") or "").startswith(f"{url} - Failed to load resource:")
+        and any(str(entry.get("message") or "").startswith(f"{target} - Failed to load resource:") for target in urls)
         and reason in str(entry.get("message") or "")
     ]
     unexpected = [entry for entry in failure_entries if entry not in matches]
-    if len(matches) != int(count) or unexpected:
+    if (count is not None and len(matches) != int(count)) or unexpected:
         raise AssertionError(
             "expected exact matching browser network error count: "
-            f"{json.dumps({'expected_count': int(count), 'matches': matches, 'unexpected': unexpected}, sort_keys=True)}"
+            f"{json.dumps({'expected_count': count, 'matches': matches, 'unexpected': unexpected}, sort_keys=True)}"
         )
-    return matches[0] if int(count) == 1 else tuple(matches)
+    return matches[0] if count == 1 else tuple(matches)
 
 
 def assert_only_expected_browser_warning(

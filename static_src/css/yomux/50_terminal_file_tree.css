@@ -870,19 +870,14 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .toast {
   position: relative;
   overflow: hidden;
-  padding: var(--space-7) var(--space-9) var(--space-9);
-  color: #14171d;
-  background: rgba(255, 244, 194, 0.58);
-  border: 1px solid var(--50-terminal-file-tree-server-update-banner-border-88);
-  border-radius: var(--radius-lg);
-  box-shadow: 0 16px 42px var(--paint-shadow-38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
-  backdrop-filter: blur(2px);
-}
-/* The update-available cue uses a solid (opaque) background instead of the translucent default, so it
-   reads clearly over busy terminal content while it sits for its 4-hour window. */
-.toast.toast-update {
-  background: #fff4c2;
+  padding: var(--space-8) var(--space-10);
+  color: var(--notification-paper-text);
+  background: var(--notification-paper-bg);
+  border: 1px solid var(--notification-paper-border);
+  border-radius: 20px;
+  box-shadow: 0 8px 28px var(--paint-shadow-38), inset 0 1px 0 color-mix(in srgb, var(--notification-paper-text) 8%, transparent);
   backdrop-filter: none;
+  font-family: var(--ui-font);
 }
 .toast-header {
   min-width: 0;
@@ -894,9 +889,9 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .toast-title {
   min-width: 0;
   flex: 1 1 auto;
-  font-weight: 800;
+  font-weight: 700;
   font-size: var(--ui-font-size-sm);
-  line-height: 1.2;
+  line-height: 1.3;
 }
 .toast-control-row {
   flex: 0 0 auto;
@@ -907,7 +902,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .toast-body {
   min-width: 0;
   overflow-wrap: anywhere;
-  font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+  font: var(--ui-font-size-sm)/1.4 var(--ui-font);
 }
 .toast-line {
   /* #258: WRAP the message instead of clipping it. An actionable toast (Keep/x) must be read in full
@@ -919,13 +914,14 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   white-space: normal;
 }
 .toast-line--attention {
-  display: block;
+  display: grid;
+  gap: var(--space-5);
 }
 .attention-toast-controls {
-  float: inline-start;
-  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  min-inline-size: 0;
   max-inline-size: 100%;
-  margin: 0 var(--space-5) var(--space-2) 0;
 }
 .attention-toast-session-tab {
   max-inline-size: 100%;
@@ -942,6 +938,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .attention-toast-reason {
   min-width: 0;
+  overflow-wrap: break-word;
 }
 .toast-line::after,
 .toast-countdown::after {
@@ -951,7 +948,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   right: 0;
   bottom: 0;
   height: 3px;
-  background: #d28b00;
+  background: var(--notification-paper-countdown);
   transform-origin: left center;
   animation: toast-countdown var(--toast-countdown-duration, 10s) linear forwards;
 }
@@ -967,12 +964,12 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   min-width: 28px;
   padding: var(--space-1) var(--space-6);
   color: inherit;
-  background: #fff3c6;
-  border-color: #b98c24;
+  background: color-mix(in srgb, var(--notification-paper-text) 8%, transparent);
+  border-color: color-mix(in srgb, var(--notification-paper-text) 20%, transparent);
 }
 .toast-close,
 .toast-keep {
-  color: #3a2b00;
+  color: var(--text);
 }
 .toast-close {
   position: static;
@@ -989,7 +986,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   min-width: 42px;
   height: 20px;
   padding: 0 var(--space-6);
-  background: rgba(255, 243, 198, 0.72);
+  background: color-mix(in srgb, var(--notification-paper-text) 8%, transparent);
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
 }
 .toast.kept .toast-line::after,
@@ -3202,17 +3199,17 @@ button.info-tree-tab-token.active:focus-visible {
 .attention-alerts {
   position: fixed;
   /* Global notices must leave pane headers usable, including when command notices expire. */
-  top: auto;
+  top: var(--notification-stack-top, calc(var(--topbar-height) + 2 * var(--pane-tab-height) + 12px));
   right: 12px;
-  bottom: max(12px, calc(100vh - var(--app-root-height, 100vh) + 12px));
+  bottom: auto;
   left: auto;
   z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
-  gap: var(--space-6);
+  gap: var(--space-8);
   width: min(360px, calc(100vw - 24px));
   max-width: calc(100vw - 24px);
-  max-height: max(0px, calc(min(100vh, var(--app-root-height, 100vh)) - var(--topbar-height) - 2 * var(--pane-tab-height) - var(--space-4) - 12px));
+  max-height: max(0px, calc(min(100vh, var(--app-root-height, 100vh)) - var(--notification-stack-top, calc(var(--topbar-height) + 2 * var(--pane-tab-height) + 12px)) - 12px));
   overflow-y: auto;
   pointer-events: none;
 }

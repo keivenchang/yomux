@@ -709,7 +709,7 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
         requestId,
       });
       recordApiDebugResponseBytes(event, response);
-      noteApiDebugHeaders(event, url, startedAt);
+      noteApiDebugHeaders(event, url, startedAt, null, response);
     }
     return response;
   }
@@ -814,7 +814,7 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
       provenance: diagnosticProvenance,
     });
     recordApiDebugResponseBytes(debugEvent, response);
-    noteApiDebugHeaders(debugEvent, url, startedAt, resourceTimingWindow);
+    noteApiDebugHeaders(debugEvent, url, startedAt, resourceTimingWindow, response);
   }
   if (response.status === 401 && internalOptions.returnUnauthorizedResponse !== true) {
     const terminalError = claimTerminalAuthentication(response);
@@ -1695,7 +1695,18 @@ function updateApiDebugResourcePhases(event, url, startedAt, timingWindow) {
   event.connectionProtocol = String(entry.nextHopProtocol || '').toLowerCase().slice(0, 24);
 }
 
-function noteApiDebugHeaders(event, url, startedAt, timingWindow) {
+function noteApiDebugHeaders(event, url, startedAt, timingWindow, response = null) {
+  if (event && response?.headers?.get) {
+    const serverRequestId = response.headers.get('X-YOmux-Request-ID');
+    if (serverRequestId) event.serverRequestId = String(serverRequestId).slice(0, 128);
+    const serverTiming = String(response.headers.get('Server-Timing') || '').slice(0, 1024);
+    const phases = {};
+    for (const match of serverTiming.matchAll(/(?:^|, )([a-z_]+);dur=([0-9.]+)/g)) {
+      const value = Number(match[2]);
+      if (Number.isFinite(value) && value >= 0) phases[match[1]] = value;
+    }
+    event.serverPhases = phases;
+  }
   updateApiDebugResourcePhases(event, url, startedAt, timingWindow);
 }
 
@@ -1893,7 +1904,7 @@ function recordApiDebugEvent(url, method, startedAt, result = {}) {
   if (typeof result.ok === 'boolean') payload.ok = result.ok;
   if (result.error) payload.error = jsDebugErrorText(result.error);
   for (const field of ['deliveryOutcome', 'reason']) if (result[field]) payload[field] = String(result[field]).slice(0, 64);
-  return recordJsDebugEvent('api', payload);
+  return recordJsDebugEvent('api', payload, {graph: payload.endpoint !== '/api/stats-observations'});
 }
 
 function recordApiDebugResponseBytes(event, response, consumedBytes = undefined) {
@@ -2146,10 +2157,7 @@ function installClientPerfLongTaskObserver() {
           clientPerfLongTaskSamples.splice(0, clientPerfLongTaskSamples.length - clientPerfLongTaskSampleLimit);
         }
         recordClientPerfCounter('longTask', durationMs);
-        if (clientPerfLongTaskDurableCount < clientPerfDurableExemplarLimit) {
-          clientPerfLongTaskDurableCount += 1;
-          recordJsDebugEvent('long_task', {journeyId: reloadClientJourneyId, durationMs: sample.durationMs});
-        }
+        queueClientPerfDurableExemplar('long_task', {journeyId: reloadClientJourneyId, durationMs: sample.durationMs});
       }
     });
     observer.observe({entryTypes: ['longtask']});
@@ -2172,6 +2180,21 @@ function clientPerfInteractionEvent(entry) {
   };
 }
 
+const clientPerfDurableWindows = new Map();
+function queueClientPerfDurableExemplar(kind, event) {
+  const previous = clientPerfDurableWindows.get(kind);
+  if (previous) {
+    if (event.durationMs > previous.durationMs) clientPerfDurableWindows.set(kind, event);
+    return;
+  }
+  clientPerfDurableWindows.set(kind, event);
+  setTimeout(function flushClientPerfDurableExemplar() {
+    const exemplar = clientPerfDurableWindows.get(kind);
+    clientPerfDurableWindows.delete(kind);
+    if (exemplar) recordJsDebugEvent(kind, exemplar);
+  }, 60000 / clientPerfDurableExemplarLimit);
+}
+
 function installClientPerfInteractionObserver() {
   if (clientPerfInteractionObserverInstalled || typeof globalThis.PerformanceObserver !== 'function') return;
   clientPerfInteractionObserverInstalled = true;
@@ -2181,14 +2204,10 @@ function installClientPerfInteractionObserver() {
         const durationMs = Number(entry?.duration || 0);
         if (
           Number(entry?.interactionId || 0) <= 0
-          || durationMs <= clientPerfInteractionMaximumMs
-          || clientPerfInteractionDurableCount >= clientPerfDurableExemplarLimit
         ) continue;
         const event = clientPerfInteractionEvent(entry);
         if (!event) continue;
-        clientPerfInteractionMaximumMs = durationMs;
-        clientPerfInteractionDurableCount += 1;
-        recordJsDebugEvent('interaction', event);
+        queueClientPerfDurableExemplar('interaction', event);
       }
     });
     observer.observe({type: 'event', buffered: true, durationThreshold: 16});
@@ -3462,8 +3481,8 @@ function resetLayoutStatusSurface() {
 }
 
 function layoutStatusSurfaceOwnsMessage() {
-  return statusEl.classList.contains('layout-status-visible')
-    && Boolean(statusEl.dataset.layoutStatusKind);
+  return (statusEl.classList.contains('layout-status-visible') && Boolean(statusEl.dataset.layoutStatusKind))
+    || (typeof commandOwnsGlobalStatus === 'function' && commandOwnsGlobalStatus());
 }
 
 function setStatusHtml(html) {
@@ -3483,20 +3502,27 @@ function statusOk(html) {
 function showLayoutStatus(message, kind = '') {
   if (!statusEl || terminalAuthenticationActive()) return;
   const tone = kind === 'danger' || kind === 'advisory' ? kind : '';
+  if (tone && String(message || '').trim()) {
+    resetLayoutStatusSurface();
+    return showTimedStatusNotice(message);
+  }
   statusEl.textContent = String(message || '');
   resetLayoutStatusSurface();
   statusEl.setAttribute('role', 'status');
-  statusEl.setAttribute('aria-live', tone === 'danger' ? 'assertive' : 'polite');
+  statusEl.setAttribute('aria-live', 'polite');
   statusEl.setAttribute('aria-atomic', 'true');
-  if (tone && statusEl.textContent.trim()) {
-    statusEl.classList.add('layout-status-visible', `layout-status-${tone}`);
-    statusEl.dataset.layoutStatusKind = tone;
-  }
 }
 
 function showTimedStatusNotice(message) {
-  if (terminalAuthenticationActive() || typeof showToast !== 'function') return null;
-  const notice = showToast('', message, {countdownMs: toastDurationMs, className: 'attention-alert toast command-notice'});
+  if (terminalAuthenticationActive() || typeof emitNotification !== 'function') return null;
+  const text = String(message || '');
+  const result = emitNotification('commandNotice', {
+    lines: text,
+    coalesceKey: `timed-status:${text}`,
+    countdownMs: toastDurationMs,
+    className: 'attention-alert toast command-notice',
+  });
+  const notice = result?.inApp || null;
   notice?.setAttribute?.('role', 'status');
   notice?.setAttribute?.('aria-live', 'polite');
   return notice;
@@ -5254,7 +5280,8 @@ const terminalFileReferencePattern = /(^|[\s([{<"'`])((?:(?:~\/|\.{1,2}\/|\/)?[A
 const terminalFileReferenceExtensions = new Set(['c', 'cc', 'cpp', 'cs', 'css', 'csv', 'go', 'h', 'hpp', 'html', 'ini', 'java', 'js', 'json', 'jsx', 'lock', 'lua', 'md', 'mjs', 'php', 'py', 'rb', 'rs', 'scss', 'sh', 'sql', 'toml', 'ts', 'tsx', 'txt', 'xml', 'yaml', 'yml']);
 const terminalFileReferenceNegativeCacheMs = 5_000;
 const terminalFileReferencePositiveCacheMs = 30_000;
-const terminalWrappedUrlMaxRows = 8;
+// Keep discovery independent of scrollback while admitting multi-kilobyte URLs in narrow panes.
+const terminalWrappedUrlMaxRows = 64;
 const terminalLinkClosePairs = [
   [')', '('],
   [']', '['],
@@ -5364,13 +5391,44 @@ function terminalFileReferenceIsHttpRequestTarget(lineText, startIndex, endIndex
     && /^(?:\?[^\s]*)?\s+HTTP\/\d(?:\.\d)?(?:[\s"']|$)/.test(after);
 }
 
+function terminalFilePathTokenAtEnd(text) {
+  const match = String(text || '').match(/(?:^|[\s([{<"'`])((?:~\/|\.{1,2}\/|\/)[^\s<>"'`]+)$/);
+  return match?.[1] || '';
+}
+
+// Codex wraps at filename separators before the right edge, and may resume prose on the final row.
+// A split marker or partial extension admits continuation; a complete or closed path stops it.
+function terminalFileReferenceExtension(path) {
+  const basename = String(path || '').split('/').pop() || '';
+  return basename.includes('.') ? basename.split('.').pop().toLowerCase() : '';
+}
+
+function terminalFilePathCanContinueAtBoundary(text, clipped = false) {
+  const token = terminalFilePathTokenAtEnd(text);
+  if (/[)\]}>,;:!?]$/.test(token)) return false;
+  if (!token) return false;
+  const extension = terminalFileReferenceExtension(token);
+  if (terminalFileReferenceExtensions.has(extension)) {
+    return clipped && Array.from(terminalFileReferenceExtensions).some(value => value.length > extension.length && value.startsWith(extension));
+  }
+  if (clipped || /[-./_~%+]$/.test(token)) return true;
+  return Boolean(extension) && Array.from(terminalFileReferenceExtensions).some(value => value.startsWith(extension));
+}
+
+function terminalFileContinuationChunk(text) {
+  const value = String(text || '');
+  if (/^(?:~\/|\.{1,2}\/|\/)/.test(value)) return '';
+  const match = value.match(/^([A-Za-z0-9._@%+=~/-]+)(?=$|[\s)\]}>,;:!?"'`])/);
+  return trimTerminalFileReferenceCandidate(match?.[1] || '');
+}
+
 // Terminal output frequently contains dotted JavaScript symbols and slash-separated status
 // labels. Only probe paths that carry an explicit path prefix or a conventional file suffix.
 function terminalTextLooksLikeFileReference(path) {
   const value = String(path || '');
   if (/^(?:~\/|\.{1,2}\/|\/)/.test(value)) return true;
   const basename = value.split('/').pop() || '';
-  const extension = basename.includes('.') ? basename.split('.').pop().toLowerCase() : '';
+  const extension = terminalFileReferenceExtension(value);
   if (!terminalFileReferenceExtensions.has(extension)) return false;
   return value.includes('/') || basename.includes('.');
 }
@@ -5441,7 +5499,7 @@ function terminalTailIsUnterminatedUrl(text) {
 
 function terminalTailHasUrlSplitBoundary(text) {
   const value = String(text || '');
-  return terminalTailIsUnterminatedUrl(value) && /[-./?&=#%]$/.test(value);
+  return terminalTailIsUnterminatedUrl(value) && /(?:[-._/?&=#]|%[0-9A-Fa-f]?)$/.test(value);
 }
 
 function terminalRowStartsNewUrlToken(text) {
@@ -5488,8 +5546,9 @@ function terminalRepeatedGutterUrlBaseContext(buffer, index, cols) {
     if (!match || !match[1]) return null;
     const indent = match[1].length;
     const text = raw.slice(indent);
-    if (!['/', '-', '.', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
-    if (!terminalRowReachesRightEdge(line, cols, 2) && !terminalTailIsUnterminatedUrl(text)) return null;
+    const next = terminalRowHangingShape(buffer, index + 1);
+    if (!terminalTailHasUrlSplitBoundary(text)
+      && !(next?.indent === indent && text.includes('?') && /[&=]/.test(next.text))) return null;
     return {indent, text};
   });
 }
@@ -5498,8 +5557,8 @@ function terminalZeroIndentUrlBaseContext(buffer, index, cols) {
   return terminalMemoizedRowShape(buffer, 'zero-base', index, () => {
     const line = buffer.getLine(index);
     const text = terminalBufferLineText(line);
-    if (!/^https?:\/\/|^file:\/\/|^www\./i.test(text) || !terminalRowReachesRightEdge(line, cols, 2)) return null;
-    if (!['/', '-', '.', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+    if (!terminalRowStartsNewUrlToken(text) || !terminalRowReachesRightEdge(line, cols, 2)) return null;
+    if (!terminalTailHasUrlSplitBoundary(text)) return null;
     return {text};
   });
 }
@@ -5511,9 +5570,9 @@ function terminalUrlContinuationTextIsStrong(baseText, continuationText, require
   if (!continuation || terminalRowStartsNewUrlToken(continuation)) return false;
   if (/\s/.test(continuation)) return false;
   if (!terminalUrlContinuationCharactersAreValid(continuation)) return false;
-  const delimiter = base.at(-1);
-  if (requireSplitDelimiter && !['/', '-', '.', '?', '&', '=', '#', '%'].includes(delimiter)) return false;
-  if (delimiter === '%' && !/^[0-9A-Fa-f]/.test(continuation)) return false;
+  if (requireSplitDelimiter && !terminalTailHasUrlSplitBoundary(base)
+    && !(base.includes('?') && /[&=]/.test(continuation))) return false;
+  if (/%[0-9A-Fa-f]?$/.test(base) && !/^[0-9A-Fa-f]/.test(continuation)) return false;
   return true;
 }
 
@@ -5521,9 +5580,17 @@ function terminalUrlContinuationCharactersAreValid(text) {
   const continuation = String(text || '');
   return Boolean(continuation)
     && !/^[>$#%]$/.test(continuation)
+    && !/^[([{]?(?:https?:\/\/|file:\/\/|www\.)/i.test(continuation)
     && !terminalRowStartsNewUrlToken(continuation)
     && !/\s/.test(continuation)
     && /^[^<>'"`\s]+$/.test(continuation);
+}
+
+function terminalBareUrlContinuationNeedsDelimiter(baseText, continuationText) {
+  const base = String(baseText || '').trimStart();
+  // Bare adjacent words are ambiguous at an explicit newline. Structured query fragments (such as
+  // OAuth scopes and redirect parameters) still carry evidence beyond a full terminal row.
+  return terminalRowStartsNewUrlToken(base) && !(base.includes('?') && /[&=%+]/.test(continuationText));
 }
 
 function terminalUrlContinuationToken(text) {
@@ -5532,7 +5599,7 @@ function terminalUrlContinuationToken(text) {
 
 function terminalUrlCanContinueAtBoundary(text) {
   const value = String(text || '');
-  return terminalTailIsUnterminatedUrl(value) && /[A-Za-z0-9/_.~%-]$/.test(value);
+  return terminalTailIsUnterminatedUrl(value) && /[A-Za-z0-9/_.~%?&=#-]$/.test(value);
 }
 
 function terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, shape) {
@@ -5575,6 +5642,7 @@ function terminalQuoteGutterUrlBaseBefore(buffer, index, cols, shape) {
 
 function terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols) {
   if (index < 1) return false;
+  if (buffer.getLine(index)?.isWrapped !== true && buffer.getLine(index - 1)?.isWrapped === true) return false;
   for (let baseIndex = index - 1; baseIndex >= Math.max(0, index - terminalWrappedUrlMaxRows + 1); baseIndex -= 1) {
     const context = terminalZeroIndentUrlBaseContext(buffer, baseIndex, cols);
     if (!context) continue;
@@ -5604,24 +5672,89 @@ function terminalRowIsRepeatedGutterUrlRow(buffer, index, shape) {
 // prose under a line that merely happens to end at a URL is not merged.
 // ALSO require the previous row to reach the terminal's right edge, proving the URL was
 // clipped/hard-wrapped. Without this, a complete URL at end-of-line falsely swallows the next row.
-function terminalRowIsHangingUrlContinuation(buffer, index, cols, depth = 0) {
-  if (depth >= terminalWrappedUrlMaxRows) return false;
+function terminalRowIsHangingUrlContinuation(buffer, index, cols, allowsRepeatedGutter = false) {
+  return terminalMemoizedRowShape(buffer, `url-continuation:${allowsRepeatedGutter}`, index, () => {
+    const initialShape = terminalRowHangingShape(buffer, index);
+    if (!initialShape) return false;
+    if (allowsRepeatedGutter && terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, initialShape)) return true;
+    if (!initialShape.indent && terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols)) return true;
+    // One bounded walk shares the origin search; recursively searching again on every preceding row
+    // expanded a 64-row allowance into a second lookbehind window on ordinary non-URL output.
+    for (let cursor = index; cursor > index - terminalWrappedUrlMaxRows; cursor -= 1) {
+      const shape = terminalRowHangingShape(buffer, cursor);
+      const prev = buffer.getLine(cursor - 1);
+      if (!shape || !prev) return false;
+      if (allowsRepeatedGutter && terminalRowIsRepeatedGutterUrlRow(buffer, cursor, shape)) return false;
+      const previous = terminalSoftWrappedRow(buffer, cursor - 1, Math.max(0, index - terminalWrappedUrlMaxRows));
+      if (!previous) return false;
+      const previousText = previous.text;
+      const continuationToken = terminalUrlContinuationToken(shape.text);
+      const closedPath = /[)\]}]$/.test(continuationToken) && /[/.]/.test(continuationToken);
+      const suffix = shape.text.slice(continuationToken.length);
+      // Codex can append the full Markdown target after a bare label continuation. Its exact
+      // repetition establishes the boundary without treating arbitrary following words as URL text.
+      const matchingPrintedTarget = terminalRowStartsNewUrlToken(previousText.trimStart())
+        && suffix.trim() === `(${previousText.trimStart()}${continuationToken})`;
+      const separateUrlFollows = matchingPrintedTarget || (/[/.?&=#%]/.test(continuationToken)
+        && /^\s+[([{]?(?:https?:\/\/|file:\/\/|www\.)/i.test(suffix));
+      if (shape.text !== continuationToken && !closedPath && !separateUrlFollows) return false;
+      const previousIndent = (previousText.match(/^\s*/) || [''])[0].length;
+      if (previousIndent && previousIndent !== shape.indent) return false;
+      if (!shape.indent && terminalBareUrlContinuationNeedsDelimiter(previousText, continuationToken) && !terminalTailHasUrlSplitBoundary(previousText)) return false;
+      if (terminalVisibleRowReachesRightEdge(prev, cols) && terminalTailIsUnterminatedUrl(previousText)
+        && terminalUrlContinuationCharactersAreValid(continuationToken)) return true;
+      if (terminalUrlContinuationTextIsStrong(previousText, continuationToken, true)) return true;
+      cursor = previous.start + 1;
+    }
+    return false;
+  });
+}
+
+function terminalSoftWrappedRow(buffer, index, minimumStart = 0) {
+  if (index < 0 || !buffer.getLine(index)) return null;
+  let start = index;
+  while (start > minimumStart && buffer.getLine(start)?.isWrapped === true && index - start < terminalWrappedUrlMaxRows - 1) start -= 1;
+  if (buffer.getLine(start)?.isWrapped === true) return null;
+  let end = start;
+  let text = terminalBufferLineText(buffer.getLine(start));
+  while (end - start < terminalWrappedUrlMaxRows - 1 && buffer.getLine(end + 1)?.isWrapped === true) {
+    end += 1;
+    text += terminalBufferLineText(buffer.getLine(end));
+  }
+  if (buffer.getLine(end + 1)?.isWrapped === true) return null;
+  return {start, end, text};
+}
+
+function terminalFileContinuationState(buffer, index, cols, depth = 0) {
+  if (depth >= terminalWrappedUrlMaxRows) return null;
   const shape = terminalRowHangingShape(buffer, index);
-  if (!shape) return false;
-  const prev = buffer.getLine(index - 1);
-  if (!prev) return false;
-  if (terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, shape)) return true;
-  if (!shape?.indent && terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols)) return true;
-  if (terminalRowIsRepeatedGutterUrlRow(buffer, index, shape) && shape.indent !== 4) return false;
-  const previousText = terminalBufferLineText(prev);
-  // The OpenCode mock uses four-space markdown output indentation and wraps at slash/word boundaries.
-  // Its short query-key fragments can end before the terminal edge, e.g. `?au` then `to=format`.
-  if (shape.indent === 4 && terminalUrlContinuationTextIsStrong(previousText, shape.text)) return true;
-  const continuationToken = terminalUrlContinuationToken(shape.text);
-  if (terminalVisibleRowReachesRightEdge(prev, cols) && terminalTailIsUnterminatedUrl(previousText)
-    && terminalUrlContinuationCharactersAreValid(continuationToken)) return true;
-  if (terminalTailHasUrlSplitBoundary(previousText) && terminalUrlContinuationCharactersAreValid(continuationToken)) return true;
-  return terminalRowIsHangingUrlContinuation(buffer, index - 1, cols, depth + 1);
+  if (!shape?.indent) return null;
+  const row = terminalSoftWrappedRow(buffer, index);
+  const previous = terminalSoftWrappedRow(buffer, index - 1);
+  if (!row || !previous) return null;
+  const text = row.text.slice(shape.indent);
+  const chunk = terminalFileContinuationChunk(text);
+  if (!chunk) return null;
+  let prefix = terminalFilePathTokenAtEnd(previous.text);
+  const previousClipped = terminalVisibleRowReachesRightEdge(buffer.getLine(previous.end), cols);
+  if (!terminalFilePathCanContinueAtBoundary(prefix, previousClipped)) {
+    const prior = terminalFileContinuationState(buffer, previous.start, cols, depth + index - previous.start);
+    if (!prior?.incomplete || prior.indent !== shape.indent) return null;
+    prefix = prior.path;
+  }
+  const path = `${prefix}${chunk}`;
+  const prefixExtension = terminalFileReferenceExtension(prefix);
+  const extension = terminalFileReferenceExtension(path);
+  if (terminalFileReferenceExtensions.has(prefixExtension)
+    && (extension.length <= prefixExtension.length || !extension.startsWith(prefixExtension))) return null;
+  const clipped = terminalVisibleRowReachesRightEdge(buffer.getLine(row.end), cols);
+  const incomplete = terminalFilePathCanContinueAtBoundary(path, clipped);
+  if (incomplete ? text !== chunk : !terminalFileReferenceExtensions.has(extension)) return null;
+  return {path, indent: shape.indent, incomplete};
+}
+
+function terminalRowIsHangingFileContinuation(buffer, index, cols) {
+  return Boolean(terminalFileContinuationState(buffer, index, cols));
 }
 
 // One discovery pass owns translated rows and parsed shapes; no cache survives a content revision.
@@ -5673,7 +5806,8 @@ function terminalWrappedLineGroup(term, y, scan = terminalReferenceScanContext(t
   const continues = index => {
     if (index < 1) return false;
     if (buffer.getLine(index)?.isWrapped === true) return true;
-    if (allowsHangingIndent && terminalRowIsHangingUrlContinuation(buffer, index, cols)) return true;
+    if (allowsHangingIndent && terminalRowIsHangingUrlContinuation(buffer, index, cols, allowsRepeatedGutter)) return true;
+    if (allowsHangingIndent && terminalRowIsHangingFileContinuation(buffer, index, cols)) return true;
     if (allowsQuoteGutter && terminalQuoteGutterUrlBaseBefore(buffer, index, cols, terminalQuoteGutterShape(buffer, index))) return true;
     return allowsRepeatedGutter && terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols);
   };
@@ -5691,7 +5825,8 @@ function terminalWrappedLineGroup(term, y, scan = terminalReferenceScanContext(t
   let headStructuralPrefixLength = 0;
   if (headIncomplete && buffer.getLine(start)?.isWrapped !== true) {
     const hangingShape = allowsHangingIndent ? terminalRowHangingShape(buffer, start) : null;
-    if (hangingShape && terminalRowIsHangingUrlContinuation(buffer, start, cols)) {
+    if (hangingShape && (terminalRowIsHangingUrlContinuation(buffer, start, cols, allowsRepeatedGutter)
+      || terminalRowIsHangingFileContinuation(buffer, start, cols))) {
       headStructuralPrefixLength = hangingShape.indent;
     } else if (allowsQuoteGutter) {
       const quoteShape = terminalQuoteGutterShape(buffer, start);
@@ -5707,7 +5842,8 @@ function terminalWrappedLineGroup(term, y, scan = terminalReferenceScanContext(t
   let offset = 0;
   let joined = '';
   let index = start;
-  const repeatedGutterGroup = allowsRepeatedGutter && Boolean(terminalRepeatedGutterUrlBaseContext(buffer, start, cols));
+  let hasSoftWraps = false;
+  const repeatedGutterGroup = allowsRepeatedGutter && terminalRepeatedGutterUrlBaseContext(buffer, start, cols);
   const zeroIndentGroup = allowsRepeatedGutter && Boolean(terminalZeroIndentUrlBaseContext(buffer, start, cols));
   let tailIncomplete = false;
   let boundaryRow = null;
@@ -5715,39 +5851,40 @@ function terminalWrappedLineGroup(term, y, scan = terminalReferenceScanContext(t
   for (;;) {
     let text;
     let indent = 0;
+    const fileContinuation = allowsHangingIndent && index > start && terminalRowIsHangingFileContinuation(buffer, index, cols);
     if (index === start) {
-      text = quoteGutterBase ? quoteGutterBase.text : terminalBufferLineText(buffer.getLine(index));
-      indent = quoteGutterBase ? quoteGutterBase.indent : 0;
+      const base = quoteGutterBase || repeatedGutterGroup;
+      text = base ? base.text : terminalBufferLineText(buffer.getLine(index));
+      indent = base ? base.indent : 0;
     } else if (buffer.getLine(index)?.isWrapped === true) {
+      hasSoftWraps = true;
       text = terminalBufferLineText(buffer.getLine(index));
-    } else if (repeatedGutterGroup || zeroIndentGroup || quoteGutterBase || terminalUrlCanContinueAtBoundary(joined)) {
+    } else if (repeatedGutterGroup || zeroIndentGroup || quoteGutterBase || terminalUrlCanContinueAtBoundary(joined)
+      || fileContinuation) {
       const shape = terminalRowHangingShape(buffer, index);
       const quoteShape = allowsQuoteGutter ? terminalQuoteGutterShape(buffer, index) : null;
       if (!shape && !quoteShape) break;
       const rowShape = quoteShape || shape;
       const continuationAllowed = terminalUrlContinuationCharactersAreValid(rowShape.text);
       const repeatedContinuation = repeatedGutterGroup
-        && rowShape.indent > 0
+        && rowShape.indent === repeatedGutterGroup.indent
         && continuationAllowed
-        && (index > start + 1 || /[-./?&=#%]$/.test(joined) || (joined.includes('?') && joined.includes('=')));
+        && (index > start + 1 || terminalUrlContinuationTextIsStrong(joined, rowShape.text, true));
       const zeroIndentContinuation = zeroIndentGroup
+        && !hasSoftWraps
         && rowShape.indent === 0
         && continuationAllowed;
       const quoteGutterReachedEdge = terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols);
-      const quoteGutterSplitBoundary = /[-./?&=#%]$/.test(joined);
+      const quoteGutterSplitBoundary = terminalTailHasUrlSplitBoundary(joined);
       const quoteGutterContinuation = Boolean(quoteGutterBase && quoteShape
         && quoteShape.prefix === quoteGutterBase.prefix
         && (quoteGutterReachedEdge || quoteGutterSplitBoundary)
         && terminalUrlContinuationTextIsStrong(joined, quoteShape.text, !quoteGutterReachedEdge));
       const genericContinuation = allowsHangingIndent && !repeatedGutterGroup
-        && (!terminalRowIsRepeatedGutterUrlRow(buffer, index, shape) || shape.indent === 4)
-        && terminalUrlContinuationTextIsStrong(
-          joined,
-          shape.indent === 4 ? shape.text : terminalUrlContinuationToken(shape?.text),
-          !(shape.indent === 4)
-            && !terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols),
-        );
-      if (!repeatedContinuation && !zeroIndentContinuation && !quoteGutterContinuation && !genericContinuation) break;
+        && !(hasSoftWraps && rowShape.indent === 0)
+        && terminalRowIsHangingUrlContinuation(buffer, index, cols, allowsRepeatedGutter)
+        && terminalUrlContinuationTextIsStrong(joined, terminalUrlContinuationToken(shape?.text));
+      if (!repeatedContinuation && !zeroIndentContinuation && !quoteGutterContinuation && !genericContinuation && !fileContinuation) break;
       indent = rowShape.indent;
       text = rowShape.text;
     } else {
@@ -6043,9 +6180,36 @@ function terminalFileReferenceViewportSignature(term, revision = 0) {
   return [term?.cols, term?.rows, term?.buffer?.active?.viewportY, term?.yomuxAgentKind, revision].join(':');
 }
 
+// Pinned xterm 6.0.0 installs its synchronous OSC-8 provider first. Keep private access here:
+// never enumerate/call application providers, and let xterm own URI filtering and buffer lifetime.
+function terminalExplicitHyperlinkReferences(term, y) {
+  const core = term?._core;
+  const provider = core?._linkProviderService?.linkProviders?.[0];
+  if (!core?._oscLinkService || provider?._oscLinkService !== core._oscLinkService
+    || provider?._bufferService !== core._bufferService
+    || provider?._optionsService !== core.optionsService
+    || typeof provider.provideLinks !== 'function') return [];
+  let references = [];
+  let synchronous = true;
+  provider.provideLinks(y, links => {
+    if (!synchronous) return;
+    references = (links || []).filter(link => link.range?.start?.y === y && link.range?.end?.y === y)
+      .map(link => ({type: 'url', text: link.text, href: link.text, range: link.range}));
+  });
+  synchronous = false;
+  return references;
+}
+
 function terminalCurrentRowReferences(term, y) {
+  const explicit = terminalExplicitHyperlinkReferences(term, y);
   const cached = terminalReferenceControllers.get(term)?.referencesForRow(y);
-  return cached || terminalWrappedLineReferences(term, y);
+  const inferred = cached || terminalWrappedLineReferences(term, y);
+  return [...explicit, ...inferred.filter(reference => !explicit.some(link => {
+    const ranges = reference.range.segments || [reference.range];
+    return ranges.some(range => range.start.y <= y && range.end.y >= y
+      && (range.start.y < y || range.start.x <= link.range.end.x)
+      && (range.end.y > y || range.end.x >= link.range.start.x));
+  }))];
 }
 
 function terminalFileReferenceKey(reference) {
@@ -7405,9 +7569,9 @@ function clearTerminalVisibleSelection(session, term, container = null, reason =
 }
 
 function withTerminalVisibleSelectionCleanup(session, term, container, reason, handler) {
-  return async () => {
+  return async (...args) => {
     try {
-      return await handler();
+      return await handler(...args);
     } finally {
       clearTerminalVisibleSelection(session, term, container, reason);
     }
@@ -7778,7 +7942,7 @@ function installTerminalOsc52Bridge(session, term) {
 
 function handleTerminalCopyShortcutKeydown(session, term, container, event) {
   if (event.type !== 'keydown') return false;
-  if (event.code !== 'KeyC' && event.key?.toLowerCase() !== 'c') return false;
+  if (!appShortcutKeyMatches(event, 'c')) return false;
   const isTmuxCopyShortcut = event.altKey
     && !event.shiftKey
     && ((isMacPlatform() && event.metaKey && !event.ctrlKey)

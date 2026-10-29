@@ -6,7 +6,7 @@ from selenium.webdriver.common.keys import Keys
 
 
 def setup_formatting_editor(browser, tmp_path):
-    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=1', sessions=['1'])
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=1&platform=pc', sessions=['1'])
     result = browser.execute_async_script("""
       const done = arguments[arguments.length - 1];
       (async () => {
@@ -32,6 +32,67 @@ def test_markdown_native_bold_second_occurrence(browser, tmp_path):
     setup_formatting_editor(browser, tmp_path)
     ActionChains(browser).key_down(Keys.CONTROL).send_keys('b').key_up(Keys.CONTROL).perform()
     assert browser.execute_script('return serializeProseMirrorSource(formattingPanel)') == 'same **same**'
+
+
+@pytest.mark.parametrize('surface', ['text-editor', 'view-editor'])
+def test_markdown_dvorak_copy_and_italic_follow_layout(browser, tmp_path, surface):
+    setup_formatting_editor(browser, tmp_path)
+    browser.execute_script("""
+      history.replaceState(null, '', location.pathname + '?platform=mac');
+      const panel = formattingPanel;
+      const view = arguments[0] === 'text-editor' ? panel._cmView : panel._pmView;
+      if (view === panel._cmView) view.dispatch({selection:{anchor:5,head:9}});
+      view.focus();
+      window.dvorakCopyEvents = [];
+      document.addEventListener('copy', () => dvorakCopyEvents.push(window.getSelection().toString()), {once:true});
+    """, surface)
+    # Dvorak C occupies the physical QWERTY I key. The character is Copy;
+    # treating its physical code as the shortcut instead applies Italic.
+    # CDP needs the native editing command on macOS; Chromium runs it only
+    # when the keydown was not canceled by the application.
+    browser.execute_cdp_cmd('Input.dispatchKeyEvent', {
+        'type': 'keyDown', 'key': 'c', 'code': 'KeyI', 'modifiers': 4,
+        'windowsVirtualKeyCode': 67, 'nativeVirtualKeyCode': 34,
+        'commands': ['copy'],
+    })
+    result = browser.execute_script("""
+      const panel = formattingPanel;
+      return {source: arguments[0] === 'text-editor' ? panel._cmView.state.doc.toString() : serializeProseMirrorSource(panel),
+        copies: dvorakCopyEvents};
+    """, surface)
+    assert result == {'source': 'same same', 'copies': ['same']}, result
+    # Dvorak I occupies QWERTY G. Formatting must follow the same logical key.
+    browser.execute_cdp_cmd('Input.dispatchKeyEvent', {
+        'type': 'keyDown', 'key': 'i', 'code': 'KeyG', 'modifiers': 4,
+        'windowsVirtualKeyCode': 73, 'nativeVirtualKeyCode': 5,
+    })
+    assert browser.execute_script("""
+      return arguments[0] === 'text-editor' ? formattingPanel._cmView.state.doc.toString() : serializeProseMirrorSource(formattingPanel);
+    """, surface) == 'same *same*'
+
+
+def test_markdown_letter_shortcuts_ignore_physical_layout(browser, tmp_path):
+    setup_formatting_editor(browser, tmp_path)
+    mismatches = browser.execute_script("""
+      const failures = [], letters = 'abcdefghijklmnopqrstuvwxyz';
+      const expected = {b:'bold',i:'italic',u:'underline'};
+      for (const mac of [true,false]) for (const key of letters) for (const physical of letters) {
+        const actual = markdownFormatShortcutCommand({key,code:`Key${physical.toUpperCase()}`,
+          metaKey:mac,ctrlKey:!mac},mac)?.id || null;
+        if (actual !== (expected[key] || null)) failures.push({mac,key,physical,actual});
+      }
+      const symbols = [
+        [{key:'Ç',code:'KeyC',metaKey:true,altKey:true,shiftKey:true},true,'pre'],
+        [{key:'&',code:'Digit7',metaKey:true,shiftKey:true},true,'number'],
+        [{key:'%',code:'Digit5',altKey:true,shiftKey:true},false,'strike'],
+      ];
+      for (const [event,mac,expected] of symbols) {
+        const actual = markdownFormatShortcutCommand(event,mac)?.id;
+        if (actual !== expected) failures.push({event,actual,expected});
+      }
+      return failures;
+    """)
+    assert mismatches == [], mismatches
 
 
 def test_markdown_source_table_and_setext_native_formatting(browser, tmp_path):

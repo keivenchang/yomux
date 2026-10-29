@@ -189,10 +189,10 @@ def test_default_check_lanes_keep_full_pytest_gate():
     assert browser_lane.default is True
     assert browser_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot", "-q"]
     assert browser_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", browser_single_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
-    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", *check.pytest_files("browser"), "-n", browser_workers, "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden", "-q"]
-    assert browser_lane.steps[1].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", browser_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(browser_workers))))
-    assert browser_lane.steps[2].args == ["python3", "-m", "pytest", *check.pytest_files("golden"), "-m", "visual_golden", "-q"]
-    assert browser_lane.steps[2].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", browser_single_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
+    assert browser_lane.steps[2].args == ["python3", "-m", "pytest", *check.pytest_files("browser"), "-n", browser_workers, "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden and not real_agent_urls", "-q"]
+    assert browser_lane.steps[2].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", browser_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(browser_workers))))
+    assert browser_lane.steps[3].args == ["python3", "-m", "pytest", *check.pytest_files("golden"), "-m", "visual_golden", "-q"]
+    assert browser_lane.steps[3].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", browser_single_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
     gate_serial_lane = next(lane for lane in lanes if lane.name == "pytest-gate-serial")
     assert gate_serial_lane.run_last is True
     assert not check.pytest_files("gate_serial")
@@ -218,6 +218,7 @@ def test_every_default_pytest_step_enforces_the_go_only_server_boundary():
         check.StepId.PYTEST_BOOT,
         check.StepId.PYTEST_BROWSER,
         check.StepId.PYTEST_BROWSER_GOLDEN,
+        check.StepId.PYTEST_REAL_AGENT_URLS,
         check.StepId.PYTEST_E2E,
     )
     steps = check.step_catalog()
@@ -325,10 +326,11 @@ def test_lane_specs_are_the_one_owner_of_names_defaults_and_shared_steps():
     ]
     browser_spec = test_plan.lane_spec("pytest-browser")
     assert browser_spec.prerequisites == ("pytest-boot",)
-    assert browser_spec.phases == ("boot", "browser", "golden")
+    assert browser_spec.phases == ("boot", "real_agent_urls", "browser", "golden")
     assert browser_spec.worker_class == "pytest-mixed"
     assert test_plan.resolved_lane_step_ids(browser_spec) == (
         "pytest-boot",
+        "pytest-real-agent-urls",
         "pytest-browser",
         "pytest-browser-golden",
     )
@@ -1383,10 +1385,10 @@ def test_serial_lanes_separates_lane_scheduling_from_pytest_workers(monkeypatch)
     serial = {lane.name: lane for lane in check.lanes(serial=True)}
 
     assert normal["pytest"].steps[0].args[normal["pytest"].steps[0].args.index("-n") + 1] == "8"
-    assert normal["pytest-browser"].steps[1].args[normal["pytest-browser"].steps[1].args.index("-n") + 1] == "5"
+    assert normal["pytest-browser"].steps[2].args[normal["pytest-browser"].steps[2].args.index("-n") + 1] == "5"
     assert normal["pytest-e2e"].steps[0].args[normal["pytest-e2e"].steps[0].args.index("-n") + 1] == "3"
     assert "-n" not in serial["pytest"].steps[0].args
-    assert "-n" not in serial["pytest-browser"].steps[1].args
+    assert "-n" not in serial["pytest-browser"].steps[2].args
     assert "-n" not in serial["pytest-e2e"].steps[0].args
 
 
@@ -4708,3 +4710,41 @@ def test_functional_evidence_is_owned_by_the_gate_and_partitioned_per_step(tmp_p
     observed = check.instrument_lane_for_evidence(lane, tmp_path)
     paths = [dict(step.env)[product_env_name("E2E_EVIDENCE_DIR")] for step in observed.steps]
     assert paths == [str(tmp_path / "browser" / "0"), str(tmp_path / "browser" / "1")]
+
+
+def test_real_agent_url_sample_has_one_required_default_gate_owner():
+    check = load_check_module()
+    lane = next(lane for lane in check.lanes() if lane.name == "pytest-browser")
+    step = check.step_catalog()[check.StepId.PYTEST_REAL_AGENT_URLS]
+    assert lane.default and lane.steps.count(step) == 1
+    assert step.args == [
+        "python3", "-m", "pytest", "tests/test_browser_real_agent_urls.py",
+        "-m", "real_agent_urls", "-q",
+    ]
+    assert dict(step.env)["YOMUX_URL_WIDTHS"] == "75"
+    assert dict(step.env)["YOMUX_URL_RANDOM"] == "0"
+    assert dict(step.env)["YOMUX_URL_NEGATIVE_CONTROL"] == "0"
+    assert dict(step.env)["YOMUX_BROWSER_BLOCK_EXTERNAL_DNS"] == "1"
+    assert "not real_agent_urls" in lane.steps[2].args[-2]
+    assert {"BROWSER_BLOCK_EXTERNAL_DNS", "URL_WIDTHS", "URL_RANDOM", "URL_NEGATIVE_CONTROL"} <= set(_certification_env_allowlist())
+
+
+@pytest.mark.parametrize("when", ["setup", "call", "teardown"])
+@pytest.mark.parametrize("required", [False, True])
+def test_required_real_client_sample_cannot_pass_by_skipping(pytestconfig, monkeypatch, when, required):
+    plugin = pytestconfig.pluginmanager.getplugin(str(REPO_ROOT / "tests/conftest.py"))
+    assert plugin is not None
+    monkeypatch.setattr(plugin, "_defect2_attribution_path", lambda: None)
+    item = SimpleNamespace(
+        nodeid="test_real_agent_url_menu[75-codex]",
+        get_closest_marker=lambda name: object() if required and name == "real_agent_urls" else None,
+        stash=pytest.Stash(),
+    )
+    report = SimpleNamespace(skipped=True, outcome="skipped", longrepr="client unavailable", when=when)
+    hook = plugin.pytest_runtest_makereport(item, None)
+    next(hook)
+    with pytest.raises(StopIteration):
+        hook.send(SimpleNamespace(get_result=lambda: report))
+    assert report.outcome == ("failed" if required else "skipped")
+    if required:
+        assert "required real-client URL sample did not run" in report.longrepr

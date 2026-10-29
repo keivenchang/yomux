@@ -2548,5 +2548,9 @@
   "status.tmux.windowKill.confirm": "tmux セッション「{session}」内の {window} を終了しますか？",
   "status.tmux.windowKill.pending": "tmux セッション「{session}」内の {window} を終了しています",
   "status.tmux.windowKill.failed": "tmux セッション「{session}」内の {window} を終了できませんでした",
-  "status.tmux.windowKill.success": "tmux セッション「{session}」内の {window} を終了しました"
+  "status.tmux.windowKill.success": "tmux セッション「{session}」内の {window} を終了しました",
+  "debug.graph.metric.apiDuration": "API 所要時間",
+  "debug.graph.metric.apiDuration.desc": "HTTP リクエストの所要時間。ping の往復時間とは別の測定です。",
+  "debug.graph.metric.sseAge": "SSE 公開後の経過時間",
+  "debug.graph.metric.sseAge.desc": "再送と時計のずれを含む公開後の時間。配信遅延ではありません。"
 }

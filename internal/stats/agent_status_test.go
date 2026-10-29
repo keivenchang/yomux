@@ -1326,6 +1326,7 @@ func TestCurrentQuestionControlsIgnoreQuotedAndStaleQuestions(t *testing.T) {
 	}{
 		{"Which implementation should I use?\n\n› Ask Codex to do anything", AgentStatusAsk},
 		{"Should I keep working?\n› Ask Codex to do anything", AgentStatusAsk},
+		{"Draft reply to lucky0 on #492:\n> Replaying the review reply and its quoted context\n\nPost this reply?\n\nThe monitor skill requires explicit post approval for new replies.\n\nWorked for 6m 36s • 12:22 PM\n\n› post", AgentStatusAsk},
 		{"Would you like to run the following command?\n  python3 working.py\n  1. Yes\nEnter to select · Esc to cancel", AgentStatusAsk},
 		{"Would you like to run the following command?\n  echo finished\n  1. Yes\nEnter to select · Esc to cancel", AgentStatusAsk},
 		{"Would you like to run the following command?\n  echo 'Error: command failed'\n  1. Yes\nEnter to select · Esc to cancel", AgentStatusAsk},
@@ -1350,6 +1351,43 @@ func TestCurrentQuestionControlsIgnoreQuotedAndStaleQuestions(t *testing.T) {
 	}
 }
 
+func TestComposerQuestionIgnoresURLQueryDelimiters(t *testing.T) {
+	for _, output := range []string{
+		"https://example.com/search?\nq=terminal%20URL%20wrapping&mode=expanded\n\nhttps://example.com/docs/releases/report.html?view=full#fragment",
+		"https://example.com/search?",
+		"http://example.com/search?",
+		"https://example.com/very-long-path/\nsearch?\nq=terminal",
+		"https://example.com/very-long-path/\npath/to/search?\nq=terminal",
+		"See https://example.com/very-long-path/\nsearch?\nq=terminal",
+		"See https://example.com/search?",
+		"www.example.com/search?",
+		"file:///workspace/report?",
+		"```js\nconst route = ready ?\n```",
+		"\"Which implementation should I use?",
+	} {
+		for _, composer := range []string{"› Ask Codex to do anything", "› research why I keep seeing ASK"} {
+			text := output + "\n\nWorked for 56s • 3:32 PM\n\n" + composer
+			got := ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "codex", PaneTarget: "%1"}, AgentStatusSources{
+				CapturePane: func(context.Context, string) (AgentStatusPane, error) {
+					return AgentStatusPane{VisibleText: text}, nil
+				},
+			})
+			if got.Status != AgentStatusTransition || got.AttentionSignature != "" || got.AttentionKind != "" {
+				t.Fatalf("URL completion %q classified as %+v", text, got)
+			}
+		}
+	}
+	for _, text := range []string{
+		"See https://example.com/search?\n\nContinue?\n› Ask Codex to do anything",
+		"https://example.com/path/\nContinue?\n› Ask Codex to do anything",
+		"Should I open https://example.com/search?q=terminal ?\n› Ask Codex to do anything",
+	} {
+		if got := classifyVisibleAgentText(text); got.Status != AgentStatusAsk {
+			t.Fatalf("genuine question %q classified as %+v", text, got)
+		}
+	}
+}
+
 func TestAgentAttentionKindSeparatesQuestionsFromApprovals(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1357,6 +1395,7 @@ func TestAgentAttentionKindSeparatesQuestionsFromApprovals(t *testing.T) {
 		want string
 	}{
 		{name: "question", text: "Which implementation should I use?\n\n› Ask Codex to do anything", want: "question"},
+		{name: "confirmation question separated from composer", text: "Draft reply to lucky0 on #492:\n> Replaying the review reply and its quoted context\n\nPost this reply?\n\nThe monitor skill requires explicit post approval for new replies.\n\nWorked for 6m 36s • 12:22 PM\n\n› post", want: "question"},
 		{name: "current question wins over stale approval text", text: "Allow this command?\n1. Yes\nEnter to select\nWhich implementation should I use?\n› Ask Codex to do anything", want: "question"},
 		{name: "approval", text: "Allow this command?\n1. Yes\n2. No\nEnter to select · Esc to cancel", want: "approval"},
 	}

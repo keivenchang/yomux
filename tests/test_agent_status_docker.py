@@ -28,17 +28,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from tests.helpers.agent_client_fixtures import TEST_MODELS, write_client_config
 from tools.product_environment import product_env
 from yomux_lib.approval import prompt_detector
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CLIENTS = ("codex", "claude", "opencode")
-TEST_MODELS = {
-    "codex": "gpt-4o-mini",
-    "claude": "claude-3-5-haiku-20241022",
-    "opencode": "yolomux-fake/gpt-4o-mini",
-}
 SAFE_PROMPT = "Reply with exactly YOLOMUX_FAKE_OK and do nothing else."
 
 
@@ -306,7 +302,7 @@ def _run_failure_recovery(client: str, failure: str, tmp_path: Path) -> dict[str
     try:
         _wait_for_stream(fake.stdout)
         failure_scenario = AgentScenario("failure", failure, f"/scenario/{failure}", SAFE_PROMPT, (), "failed", 4.0, "")
-        config = _write_client_config(client, config_dir, port, failure_scenario)
+        config = write_client_config(client, config_dir, port, failure_scenario.fake_path)
         command, client_env = _client_command(client, TEST_MODELS[client], config, failure_scenario.prompt)
         if client == "opencode":
             client_env = {**client_env, "OPENCODE_E2E_OUTPUT": str(root / "opencode-events.jsonl")}
@@ -377,7 +373,7 @@ def _run_failure_recovery(client: str, failure: str, tmp_path: Path) -> dict[str
         try:
             _wait_for_stream(restarted.stdout)
             recovery = AgentScenario("recovery", "normal", "/scenario/normal", SAFE_PROMPT, ("YOLOMUX_FAKE_OK",), "done", 8.0, "")
-            recovery_config = _write_client_config(client, config_dir / "recovery", port, recovery)
+            recovery_config = write_client_config(client, config_dir / "recovery", port, recovery.fake_path)
             recovery_command, recovery_client_env = _client_command(
                 client, TEST_MODELS[client], recovery_config, recovery.prompt
             )
@@ -454,37 +450,6 @@ def _run_failure_recovery(client: str, failure: str, tmp_path: Path) -> dict[str
         health_thread.join(timeout=5)
         if health_thread.is_alive():
             raise AssertionError("health server thread survived cleanup")
-
-
-def _write_client_config(client: str, config_root: Path, port: int, scenario: AgentScenario) -> Path:
-    endpoint = f"http://127.0.0.1:{port}{scenario.fake_path}"
-    config_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if client == "codex":
-        path = config_root / "codex-home" / "config.toml"
-        path.parent.mkdir(mode=0o700, exist_ok=True)
-        workspace = config_root / "workspace"
-        workspace.mkdir(mode=0o700, exist_ok=True)
-        path.write_text(
-            f'model = "{TEST_MODELS[client]}"\nmodel_provider = "yolomux-fake"\n\n'
-            f'[model_providers.yolomux-fake]\nname = "YOmux fake"\nwire_api = "responses"\nbase_url = "{endpoint}/v1"\nenv_key = "OPENAI_API_KEY"\n',
-            encoding="utf-8",
-        )
-        with path.open("a", encoding="utf-8") as config_file:
-            config_file.write(f'\n[projects."{workspace}"]\ntrust_level = "trusted"\n')
-    elif client == "claude":
-        path = config_root / "claude-settings" / "settings.json"
-        path.parent.mkdir(mode=0o700, exist_ok=True)
-        path.write_text(json.dumps({"model": TEST_MODELS[client], "apiKeyHelper": "printf yomux-test-only", "env": {"ANTHROPIC_BASE_URL": endpoint}}) + "\n", encoding="utf-8")
-    else:
-        path = config_root / "opencode" / "opencode.json"
-        path.parent.mkdir(mode=0o700, exist_ok=True)
-        path.write_text(json.dumps({
-            "$schema": "https://opencode.ai/config.json",
-            "model": TEST_MODELS[client],
-            "provider": {"yolomux-fake": {"npm": "@ai-sdk/openai-compatible", "name": "YOmux fake", "options": {"baseURL": f"{endpoint}/v1", "apiKey": "yomux-test-only"}, "models": {"gpt-4o-mini": {"name": "gpt-4o-mini"}}}},
-        }, indent=2) + "\n", encoding="utf-8")
-    path.chmod(0o600)
-    return path
 
 
 def _client_command(client: str, model: str, config: Path, prompt: str) -> tuple[list[str], dict[str, str]]:
@@ -971,7 +936,7 @@ def _run_scenario(client: str, scenario: AgentScenario, tmp_path: Path, *, requi
     evidence: dict[str, object] = {"client": client, "scenario": scenario.name, "expected_state": scenario.expected_state, "socket": str(socket_path)}
     try:
         port = int(_wait_for_stream(fake.stdout))
-        config = _write_client_config(client, config_dir, port, scenario)
+        config = write_client_config(client, config_dir, port, scenario.fake_path)
         command, client_env = _client_command(client, scenario.model or TEST_MODELS[client], config, scenario.prompt)
         stdout_path = tmp_path / "client.stdout"
         stderr_path = tmp_path / "client.stderr"

@@ -24,6 +24,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 from collections.abc import Callable
 from http import HTTPStatus
 from pathlib import Path
@@ -35,10 +36,31 @@ from tests.isolated_dev_server import IsolatedDevServer
 from tests.isolated_dev_server import assert_isolated_dev_server_port
 from tests.isolated_dev_server import isolated_dev_server  # noqa: F401  -- fixture
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401  -- fixture
+from tests.isolated_dev_server import finish_server_output, wait_until_serving
 from tests.isolated_dev_server import REPO_ROOT, go_test_server_binary
 
 
 pytestmark = pytest.mark.socket
+
+
+def test_server_output_drains_after_readiness_without_blocking_child():
+    program = (
+        "import sys; print('YOmux Go backend version=test addr=127.0.0.1:1234 scheme=http', flush=True); "
+        "sys.stdout.write('x'*1048576+'\\n'); sys.stdout.flush()"
+    )
+    process = subprocess.Popen([sys.executable, '-c', program], stdout=subprocess.PIPE, text=True)
+    output = []
+    reader = None
+    try:
+        reader = wait_until_serving(process, 1234, output)
+        finish_server_output(process, output, reader)
+        assert process.returncode == 0
+        assert not reader.is_alive()
+        assert len(output[-1]) == 1048576
+    finally:
+        if process.poll() is None:
+            process.kill()
+        finish_server_output(process, output, reader)
 
 # Every writable location the instance is told about, and the `BuildPaths` attribute that owns it.
 ISOLATED_ENVIRONMENT_ROOTS = (

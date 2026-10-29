@@ -25,7 +25,7 @@ func platformAgentProcess(ctx context.Context, pid int) (AgentStatusProcess, err
 		if !ok {
 			return AgentStatusProcess{}, errors.New("agent-process-unavailable")
 		}
-		return AgentStatusProcess{Command: row.Command, Executable: row.Executable, StartedIdentity: row.Identity, Alive: true}, nil
+		return AgentStatusProcess{Command: row.Command, Executable: row.Executable, StartedIdentity: row.Identity, StartedAt: row.StartedAt, Alive: true}, nil
 	}
 	commandContext, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()

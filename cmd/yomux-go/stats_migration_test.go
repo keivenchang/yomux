@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 
 	"net/http"
 	"net/http/httptest"
@@ -2527,4 +2528,56 @@ func agentStatusStatsService(path string) *stats.StatsService {
 	})
 	_ = service.RefreshAgentStatus(context.Background())
 	return service
+}
+
+func TestStatsObservationDelayedBodyPhasesAndParallelPing(t *testing.T) {
+	s := &server{}
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	request := httptest.NewRequest(http.MethodPost, "/api/stats-observations", reader)
+	request.Header.Set("X-YOmux-Request-ID", "r-held-body")
+	record := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { defer close(done); s.statsObservations(record, request) }()
+	// A completed pipe write proves the handler is reading the partial body.
+	if _, err := writer.Write([]byte(`{"observations":`)); err != nil {
+		t.Fatal(err)
+	}
+	ping := httptest.NewRecorder()
+	s.ping(ping, httptest.NewRequest(http.MethodGet, "/api/ping", nil))
+	if ping.Code != 200 {
+		t.Fatalf("parallel ping = %d", ping.Code)
+	}
+	select {
+	case <-done:
+		t.Fatal("partial body unexpectedly completed")
+	default:
+	}
+	writer.CloseWithError(io.ErrUnexpectedEOF)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("body failure did not complete")
+	}
+	if record.Code != 400 || record.Header().Get("X-YOmux-Request-ID") != "r-held-body" {
+		t.Fatalf("response = %d %v", record.Code, record.Header())
+	}
+	timing := record.Header().Get("Server-Timing")
+	for _, phase := range []string{"body;dur=", "validation;dur=", "writer_wait;dur=", "writer_commit;dur="} {
+		if !strings.Contains(timing, phase) {
+			t.Fatalf("missing %s in %s", phase, timing)
+		}
+	}
+}
+
+func TestBrowserDiagnosticPhaseAndReplayPayloads(t *testing.T) {
+	for _, payload := range []map[string]any{
+		{"kind": "sse", "latency_ms": 780000.0, "server_event_id": 7.0, "publication_time_ms": 120000.0, "clock_ahead_ms": 0.0, "replay_count": 1.0, "server_epoch": "epoch"},
+		{"kind": "api", "server_request_id": "r-upload", "server_body_ms": 17523.0, "server_validation_ms": 1.0, "server_writer_wait_ms": 0.0, "server_writer_validation_ms": 0.0, "server_writer_transaction_ms": 0.0, "server_writer_commit_ms": 0.0},
+	} {
+		if err := validateBrowserPayload(payload); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

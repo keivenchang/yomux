@@ -1264,8 +1264,8 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         "primitive": False,
         "range": True,
         "resolution": True,
-        "toggles": 11,
-        "toggleLabels": ["CPU", "System memory", "Agents", "Session tokens/min", "Model output tokens/min", "GPU utilization", "GPU memory", "Space used %", "Client latency", "Client API&SSE/sec", "Client bandwidth/sec"],
+        "toggles": 13,
+        "toggleLabels": ["CPU", "System memory", "Agents", "Session tokens/min", "Model output tokens/min", "GPU utilization", "GPU memory", "Space used %", "API duration", "SSE publication age", "Client latency", "Client API&SSE/sec", "Client bandwidth/sec"],
         "layouts": ["AUTO", "S", "M", "L", "MAX"],
         "cards": metrics["cards"],
         "closeButtons": metrics["cards"],
@@ -8455,11 +8455,11 @@ def test_in_page_notification_titles_omit_external_yolomux_context(browser, tmp_
           attentionReason: title('.toast[data-toast-kind="attention"] .attention-toast-reason'),
           attentionHasStop: Boolean(document.querySelector('.toast[data-toast-kind="attention"] .attention-toast-agent-button .status-indicator--attention')),
           attentionControlsVisible: Boolean(controlsRect && controlsRect.width > 0 && controlsRect.height > 0 && attentionTab && attentionPill),
-          attentionReasonWrapsAroundControls: Boolean(
+          attentionReasonBelowControls: Boolean(
             controlsRect
-            && reasonRects.length > 1
-            && reasonRects[0].left >= controlsRect.right - 1
-            && reasonRects.some(rect => rect.top >= controlsRect.bottom - 1 && rect.left <= controlsRect.left + 1)
+            && reasonRects.length > 0
+            && reasonRects[0].top >= controlsRect.bottom
+            && Math.abs(reasonRects[0].left - controlsRect.left) < 1
           ),
           terminalTitle: title('.toast[data-toast-kind="terminal-connection"] .toast-title'),
           testTitle: untyped.at(-1)?.textContent?.trim() || '',
@@ -8476,7 +8476,7 @@ def test_in_page_notification_titles_omit_external_yolomux_context(browser, tmp_
         "attentionReason": "Do you want to proceed with this change? Explain the expected behavior, edge cases, and verification steps before continuing with the requested operation.",
         "attentionHasStop": True,
         "attentionControlsVisible": True,
-        "attentionReasonWrapsAroundControls": True,
+        "attentionReasonBelowControls": True,
         "terminalTitle": "Term",
         "testTitle": "notifications enabled",
     }, {"metrics": metrics, "focus": browser.execute_script("return {focusedPanelItem, focusedTerminal, activePaneItems: activePaneItems(), tabberMode, tabberNormalSelections: [...(tabberNormalSelections || [])]};")}

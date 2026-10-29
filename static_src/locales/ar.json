@@ -2728,5 +2728,9 @@
   "status.tmux.windowKill.confirm": "هل تريد إنهاء {window} في جلسة tmux ‏'{session}'؟",
   "status.tmux.windowKill.pending": "جارٍ إنهاء {window} في جلسة tmux ‏'{session}'",
   "status.tmux.windowKill.failed": "تعذر إنهاء {window} في جلسة tmux ‏'{session}'",
-  "status.tmux.windowKill.success": "تم إنهاء {window} في جلسة tmux ‏'{session}'"
+  "status.tmux.windowKill.success": "تم إنهاء {window} في جلسة tmux ‏'{session}'",
+  "debug.graph.metric.apiDuration": "مدة API",
+  "debug.graph.metric.apiDuration.desc": "مدة طلب HTTP، منفصلة عن زمن ذهاب وإياب اختبار الاتصال.",
+  "debug.graph.metric.sseAge": "عمر نشر SSE",
+  "debug.graph.metric.sseAge.desc": "الوقت منذ النشر، بما في ذلك إعادة الإرسال وفرق الساعة؛ ليس تأخير التسليم."
 }

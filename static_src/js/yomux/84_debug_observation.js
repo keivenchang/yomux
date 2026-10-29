@@ -379,6 +379,8 @@ const jsDebugGraphDescriptionKeyByLabelKey = Object.freeze({
 const jsDebugGraphClientMetrics = Object.freeze([
   {key: 'api', labelKey: 'debug.graph.metric.api', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
   {key: 'sse', labelKey: 'debug.graph.metric.sse', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
+  {key: 'apiDuration', labelKey: 'debug.graph.metric.apiDuration', unit: 'ms', value: bucket => bucket.apiDurationCount ? bucket.apiDurationTotalMs / bucket.apiDurationCount : 0, hasData: bucket => Number(bucket.apiDurationCount || 0) > 0},
+  {key: 'sseAge', labelKey: 'debug.graph.metric.sseAge', unit: 'ms', value: bucket => bucket.sseAgeCount ? bucket.sseAgeTotalMs / bucket.sseAgeCount : 0, hasData: bucket => Number(bucket.sseAgeCount || 0) > 0},
   {key: 'latency', labelKey: 'common.clientLatency', unit: 'ms', value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
   {key: 'bandwidth', labelKey: 'debug.graph.metric.bandwidth', unit: 'bytesPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
 ]);
@@ -546,6 +548,8 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', descKey: 'debug.graph.chart.gpuUtil.desc', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
   {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', descKey: 'debug.graph.chart.gpuMemory.desc', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
   {key: 'systemDisk', labelKey: 'debug.graph.chart.systemDisk', descKey: 'debug.graph.chart.systemDisk.desc', series: [], unit: 'percent', fixedMax: 100, kind: 'line', hostMetric: 'diskUsage'},
+  {key: 'apiDuration', labelKey: 'debug.graph.metric.apiDuration', descKey: 'debug.graph.metric.apiDuration.desc', series: ['apiDuration'], unit: 'ms', noDataOverlay: true},
+  {key: 'sseAge', labelKey: 'debug.graph.metric.sseAge', descKey: 'debug.graph.metric.sseAge.desc', series: ['sseAge'], unit: 'ms', noDataOverlay: true},
   {key: 'latency', labelKey: 'common.clientLatency', descKey: 'debug.graph.chart.latency.desc', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', descKey: 'debug.graph.chart.clientApiSse.desc', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', descKey: 'debug.graph.chart.clientBandwidth.desc', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
@@ -1498,11 +1502,13 @@ function debugFilesystemEventSummaryText(event) {
 }
 
 function debugPhaseTimingText(event) {
-  const timings = event.phaseTimings && typeof event.phaseTimings === 'object' ? event.phaseTimings : null;
-  if (!timings) return '';
-  const rows = Object.entries(timings)
-    .filter(([_key, value]) => Number.isFinite(Number(value)))
-    .map(([key, value]) => `${key}=${Number(value).toFixed(1)}ms`);
+  const rows = [];
+  for (const [prefix, timings] of [['', event.phaseTimings], ['server_', event.serverPhases]]) {
+    if (!timings || typeof timings !== 'object') continue;
+    for (const [key, value] of Object.entries(timings)) {
+      if (Number.isFinite(Number(value))) rows.push(`${prefix}${key}=${Number(value).toFixed(1)}ms`);
+    }
+  }
   return rows.length ? `timings=${rows.join(',')}` : '';
 }
 
@@ -1511,11 +1517,15 @@ function debugEventMetaText(event) {
     debugTimeText(event.ts),
     Number.isFinite(event.durationMs) ? `${event.durationMs} ms` : '',
     Number.isFinite(event.computeMs) ? `server ${event.computeMs} ms` : '',
-    Number.isFinite(event.receiveLatencyMs) ? `age at receipt ${event.receiveLatencyMs} ms` : '',
+    Number.isFinite(event.receiveLatencyMs) ? `publication age ${event.receiveLatencyMs} ms` : '',
+    event.replayCount ? 'replayed event' : '',
+    event.clockAheadMs > 0 ? `publisher clock ahead ${event.clockAheadMs} ms` : '',
     Number.isFinite(event.frameBytes) ? `rx ${event.frameBytes} B` : '',
     Number.isFinite(event.bytes) && event.bytes !== event.frameBytes ? `data ${event.bytes} B` : '',
     Number.isFinite(event.responseBytes) ? `${event.responseBytes} B rx` : '',
     debugPhaseTimingText(event),
+    event.requestId ? `request=${event.requestId}` : '',
+    event.serverRequestId ? `server_request=${event.serverRequestId}` : '',
     debugEventStatusText(event),
     event.source ? `source: ${event.source}` : '',
     event.line ? `line ${event.line}${event.column ? `:${event.column}` : ''}` : '',
@@ -1526,12 +1536,16 @@ function debugEventLineText(event) {
   const status = debugEventStatusText(event);
   const durationMs = Number.isFinite(event.durationMs)
     ? event.durationMs
-    : (event.type === 'sse' && Number.isFinite(event.receiveLatencyMs) ? event.receiveLatencyMs : NaN);
+    : NaN;
   const duration = Number.isFinite(durationMs) ? `${durationMs}ms` : '';
   const sseMeta = event.type === 'sse'
     ? [
+      Number.isFinite(event.receiveLatencyMs) ? `publication_age_ms=${event.receiveLatencyMs}` : '',
+      event.replayCount ? 'replay=yes' : 'replay=no',
+      event.serverEpoch ? `epoch=${event.serverEpoch}` : '',
+      event.serverEventId ? `event_id=${event.serverEventId}` : '',
+      event.clockAheadMs > 0 ? `publisher_clock_ahead_ms=${event.clockAheadMs}` : '',
       Number.isFinite(event.frameBytes) ? `rx=${event.frameBytes}B` : '',
-      debugPhaseTimingText(event),
     ].filter(Boolean).join(' ')
     : '';
   const location = event.source ? `${event.source}${event.line ? `:${event.line}${event.column ? `:${event.column}` : ''}` : ''}` : '';
@@ -1541,6 +1555,9 @@ function debugEventLineText(event) {
     status.padEnd(8),
     duration.padStart(8),
     sseMeta,
+    event.requestId ? `request=${event.requestId}` : '',
+    event.serverRequestId ? `server_request=${event.serverRequestId}` : '',
+    debugPhaseTimingText(event),
     debugEventDetailText(event) || t('common.eventLabel'),
     location,
   ].filter(Boolean).join(' ');
@@ -1590,7 +1607,7 @@ function debugSseLatencySummaryRows(limit = 6) {
   const summaries = new Map();
   for (const event of jsDebugEvents) {
     if (event.type !== 'sse' || !Number.isFinite(event.receiveLatencyMs)) continue;
-    const key = String(event.eventType || 'event');
+    const key = `${String(event.eventType || 'event')} ${event.replayCount ? '(replay)' : '(live)'}`;
     const item = summaries.get(key) || {key, count: 0, total: 0, max: 0, bytes: 0};
     item.count += 1;
     item.total += event.receiveLatencyMs;
@@ -1614,6 +1631,10 @@ function debugGraphNewBucket(startMs, durationMs) {
     apiCount: 0,
     sseCount: 0,
     latencyTotalMs: 0,
+    apiDurationTotalMs: 0,
+    apiDurationCount: 0,
+    sseAgeTotalMs: 0,
+    sseAgeCount: 0,
     latencyCount: 0,
     bandwidthBytes: 0,
     heartbeatCount: 0,
@@ -1693,6 +1714,10 @@ function debugGraphNewClientBucket() {
     apiCount: 0,
     sseCount: 0,
     latencyTotalMs: 0,
+    apiDurationTotalMs: 0,
+    apiDurationCount: 0,
+    sseAgeTotalMs: 0,
+    sseAgeCount: 0,
     latencyCount: 0,
     bandwidthBytes: 0,
     heartbeatCount: 0,
@@ -1717,10 +1742,7 @@ function debugGraphEventTimeMs(event) {
 }
 
 function debugGraphLatencyMs(event) {
-  if (event.type === 'api' && Number.isFinite(event.durationMs)) return Number(event.durationMs);
-  if (event.type === 'sse' && Number.isFinite(event.receiveLatencyMs)) return Number(event.receiveLatencyMs);
-  if (event.type === 'sse' && Number.isFinite(event.computeMs)) return Number(event.computeMs);
-  return NaN;
+  return event.type === 'heartbeat' && Number.isFinite(event.durationMs) ? Number(event.durationMs) : NaN;
 }
 
 function debugGraphBucketDurationForTime(timeMs, nowMs = Date.now()) {
@@ -1947,6 +1969,10 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
   target.apiCount += (source.apiCount || 0) * scale;
   target.sseCount += (source.sseCount || 0) * scale;
   target.latencyTotalMs += (source.latencyTotalMs || 0) * scale;
+  target.apiDurationTotalMs += (source.apiDurationTotalMs || 0) * scale;
+  target.apiDurationCount += (source.apiDurationCount || 0) * scale;
+  target.sseAgeTotalMs += (source.sseAgeTotalMs || 0) * scale;
+  target.sseAgeCount += (source.sseAgeCount || 0) * scale;
   target.latencyCount += (source.latencyCount || 0) * scale;
   target.bandwidthBytes += (source.bandwidthBytes || 0) * scale;
   target.disconnectedMs += (source.disconnectedMs || 0) * scale;
@@ -2059,6 +2085,10 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
       targetClient.apiCount += Number(sourceClient.apiCount || 0) * scale;
       targetClient.sseCount += Number(sourceClient.sseCount || 0) * scale;
       targetClient.latencyTotalMs += Number(sourceClient.latencyTotalMs || 0) * scale;
+      targetClient.apiDurationTotalMs += Number(sourceClient.apiDurationTotalMs || 0) * scale;
+      targetClient.apiDurationCount += Number(sourceClient.apiDurationCount || 0) * scale;
+      targetClient.sseAgeTotalMs += Number(sourceClient.sseAgeTotalMs || 0) * scale;
+      targetClient.sseAgeCount += Number(sourceClient.sseAgeCount || 0) * scale;
       targetClient.latencyCount += Number(sourceClient.latencyCount || 0) * scale;
       targetClient.bandwidthBytes += Number(sourceClient.bandwidthBytes || 0) * scale;
       targetClient.disconnectedMs += Number(sourceClient.disconnectedMs || 0) * scale;
@@ -2589,7 +2619,7 @@ function recordJsDebugClientHealthObservation(latencyMs, bandwidthBytes, sampleT
       type: 'heartbeat',
       ts: new Date(sampleTimeMs).toISOString(),
       journeyId: reloadClientJourneyId,
-      durationMs: latencyMs,
+      durationMs: Number.isFinite(latencyMs) ? latencyMs : undefined,
       bytes: bandwidthBytes,
       uploadQueueDepth: jsDebugCurrentObservationState.queue.length,
       uploadDrops: jsDebugCurrentObservationState.drops,
@@ -2603,10 +2633,10 @@ function installJsDebugCurrentObservationLiveness() {
   const state = jsDebugCurrentObservationState;
   if (!clientCanUseUnscopedHostRequests() || state.livenessTimer !== null || typeof setInterval !== 'function') return;
   const scope = currentObservationLifecycleScope();
-  recordJsDebugClientHealthObservation(0, 0);
+  recordJsDebugClientHealthObservation(null, 0);
   const timer = setInterval(() => {
     if (!scope.current() || state.livenessTimer !== timer) return;
-    recordJsDebugClientHealthObservation(0, 0);
+    recordJsDebugClientHealthObservation(null, 0);
   }, jsDebugCurrentObservationHeartbeatMs);
   state.livenessTimer = timer;
   scope.ownTimer('liveness', timer, clearInterval);
@@ -2658,10 +2688,20 @@ function jsDebugCurrentObservationFromEvent(entry) {
     ? Number(event.requestBytes || 0) + Number(event.responseBytes || 0)
     : Number(event.type === 'heartbeat' ? event.bytes : (event.frameBytes === undefined ? event.bytes : event.frameBytes));
   if (Number.isFinite(bytes) && bytes >= 0) payload.bytes = bytes;
+  if (event.type === 'sse') {
+    for (const [source, target] of Object.entries({serverEventId: 'server_event_id', publicationTimeMs: 'publication_time_ms', clockAheadMs: 'clock_ahead_ms', replayCount: 'replay_count'})) {
+      if (Number.isFinite(event[source]) && event[source] >= 0) payload[target] = event[source];
+    }
+    if (event.serverEpoch) payload.server_epoch = String(event.serverEpoch).slice(0, 128);
+  }
   if (event.type === 'api') {
     payload.endpoint = jsDebugEndpointText(event.endpoint || event.url);
     payload.method = String(event.method || 'GET').toUpperCase().slice(0, 16);
     if (event.requestId) payload.request_id = String(event.requestId).slice(0, 128);
+    if (event.serverRequestId) payload.server_request_id = String(event.serverRequestId).slice(0, 128);
+    for (const [key, value] of Object.entries(event.serverPhases || {})) {
+      if (['body', 'validation', 'writer_wait', 'writer_validation', 'writer_transaction', 'writer_commit'].includes(key) && Number.isFinite(value) && value >= 0) payload[`server_${key}_ms`] = value;
+    }
     const connectionProtocol = jsDebugBoundedToken(event.connectionProtocol, 24);
     if (connectionProtocol) payload.connection_protocol = connectionProtocol;
     const status = Number(event.status);
@@ -2835,7 +2875,7 @@ async function flushJsDebugCurrentObservations(scope = currentObservationLifecyc
     return;
   }
   if (state.inFlight) return state.inFlight;
-  if (!state.queue.length || typeof apiFetchJsonQuiet !== 'function') return;
+  if (!state.queue.length || typeof apiFetchJson !== 'function') return;
   // Any observation still open at flush time (e.g. an API response that never reported bytes)
   // finalizes with whatever it measured, so its content is immutable before it is uploaded.
   for (const entry of state.queue) finalizeJsDebugCurrentObservation(entry);
@@ -2853,7 +2893,7 @@ async function flushJsDebugCurrentObservations(scope = currentObservationLifecyc
   const inFlight = (async () => {
     let batchRetired = false;
     try {
-      const receipt = await apiFetchJsonQuiet('/api/stats-observations', {
+      const receipt = await apiFetchJson('/api/stats-observations', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(batch),

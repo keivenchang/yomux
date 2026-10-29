@@ -2865,6 +2865,7 @@ function clearPromptAttentionForSession(session, options = {}) {
   const key = promptAttentionClearKey(session, signature, payload);
   const event = sessionPromptAttentionEvent(session, payload);
   if (!event || event.item?.acknowledged === true || event.item?.acknowledging === true) return false;
+  if (String(event.agent?.attention_kind || '').toLowerCase() === 'question' && options.questionPromptSubmitted !== true) return false;
   showAgentWindowAcknowledgementVisual(event.options.transitionKey, {...options, acknowledgementKey: key, session, visualState: event.item.state});
   return acknowledgeAttentionKeys([key], options);
 }
@@ -6071,6 +6072,7 @@ const notificationEventDefinitions = Object.freeze({
   statsResolution: Object.freeze({scope: 'global', system: false, priority: 'warning', coalesce: true}),
   startupTip: Object.freeze({scope: 'global', system: false, priority: 'tip', coalesce: true}),
   notificationTest: Object.freeze({scope: 'global', system: true, priority: 'test', coalesce: true}),
+  commandNotice: Object.freeze({scope: 'global', system: false, priority: 'operation', coalesce: true}),
   // Uploads retain their stacked file-result renderer, but that renderer is still dispatched
   // through this policy row so its pane scope cannot become a second routing decision.
   uploadResult: Object.freeze({scope: 'pane', target: 'session', system: false, priority: 'operation', deliver: ({target, payload}) => deliverUploadResultNotification(target, payload.uploadPayload, payload.inserted === true)}),
@@ -6101,10 +6103,10 @@ function notificationEventKey(type, definition, target, payload = {}) {
   return `${type}:${target || String(payload.key || '')}`;
 }
 
-function dismissCoalescedToast(key) {
+function dismissCoalescedToast(key, retainedNode = null) {
   if (!key) return;
   for (const [id, record] of toastRecords.entries()) {
-    if (record.node?.dataset?.toastCoalesceKey === key) removeAttentionAlert(id);
+    if (record.node !== retainedNode && (record.coalesceKeys?.has(key) || record.node?.dataset?.toastCoalesceKey === key)) removeAttentionAlert(id);
   }
 }
 
@@ -6121,10 +6123,11 @@ function emitNotification(type, payload = {}) {
   }
   let inApp = null;
   if (payload.inApp !== false && notificationDeliveryEnabled('inApp')) {
-    dismissCoalescedToast(key);
     inApp = showToast(payload.title || '', payload.lines || payload.body || '', {
       container: notificationEventContainer(definition, target),
       targetItem,
+      notificationTarget: target,
+      coalesceKey: key,
       onClick: payload.onClick,
       onClose: payload.onClose,
       actions: payload.actions,
@@ -6222,8 +6225,12 @@ function normalizeToastLine(item, options = {}) {
   };
 }
 
+function normalizedToastText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
 function compactToastText(text) {
-  const value = String(text || '').replace(/\s+/g, ' ').trim();
+  const value = normalizedToastText(text);
   if (value.length <= toastMaxLineChars) return value;
   return `${value.slice(0, toastMaxLineChars - 3)}...`;
 }
@@ -6288,6 +6295,43 @@ function resumeToastRemoval(id, node, reason) {
   scheduleToastRemoval(id, node, Number(node.dataset.toastRemainingMs));
 }
 
+// Measure the top row's chrome instead of assuming a single tab row. Header resize
+// observation keeps wrapped tabs and editor controls clear while a notice remains visible.
+function updateNotificationStackGeometry() {
+  if (!attentionAlerts?.children?.length) {
+    attentionAlerts?._headerResizeObserver?.disconnect();
+    if (attentionAlerts) attentionAlerts._observedHeaders = [];
+    return;
+  }
+  const stack = attentionAlerts.getBoundingClientRect();
+  const groups = Array.from(document.querySelectorAll('.dv-groupview'))
+    .filter(node => {
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    });
+  const top = Math.min(...groups.map(node => node.getBoundingClientRect().top));
+  const headers = [topbar];
+  for (const group of groups) {
+    const rect = group.getBoundingClientRect();
+    if (rect.top > top + 1 || rect.right <= stack.left || rect.left >= stack.right) continue;
+    headers.push(...group.querySelectorAll('.dv-tabs-and-actions-container, .panel-head, .pane-info-bar, .file-editor-toolbars'));
+  }
+  let bottom = topbar?.getBoundingClientRect().bottom || 0;
+  for (const header of headers) {
+    const rect = header?.getBoundingClientRect();
+    if (rect?.width > 0 && rect.height > 0) bottom = Math.max(bottom, rect.bottom);
+  }
+  attentionAlerts.style.setProperty('--notification-stack-top', `${Math.ceil(bottom) + 12}px`);
+  if (typeof ResizeObserver === 'function') {
+    const observer = attentionAlerts._headerResizeObserver ||= new ResizeObserver(updateNotificationStackGeometry);
+    const previous = attentionAlerts._observedHeaders || [];
+    const next = headers.filter(Boolean);
+    for (const header of previous) if (!next.includes(header)) observer.unobserve(header);
+    for (const header of next) if (!previous.includes(header)) observer.observe(header);
+    attentionAlerts._observedHeaders = next;
+  }
+}
+
 function showToast(title, lines, options = {}) {
   const targetItem = String(options.targetItem || '').trim();
   if (targetItem && notificationTargetIsFocused(targetItem)) {
@@ -6296,11 +6340,43 @@ function showToast(title, lines, options = {}) {
   }
   const container = options.container || attentionAlerts;
   if (!container) return null;
+  const toastLines = Array.isArray(lines) ? lines : (lines && typeof lines === 'object' ? [lines] : toastTextLines(lines));
+  // Passive notices describe the same failure even when producers use different keys or whitespace.
+  // Keep their original card, countdown, Keep choice, and focused control instead of flashing a replacement.
+  const contentKey = !options.onClick && !options.onClose && !options.actions?.length && !toastLines.some(line => typeof line?.render === 'function')
+    ? JSON.stringify([options.notificationTarget || targetItem, normalizedToastText(title),
+      summarizeToastLines(toastLines, options).map(line => line.text)])
+    : '';
+  const recentContent = contentKey
+    ? (toastRecentContentByContainer.get(container) || new Map())
+    : null;
+  if (contentKey && !toastRecentContentByContainer.has(container)) toastRecentContentByContainer.set(container, recentContent);
+  const now = Date.now();
+  if (recentContent) {
+    for (const [key, lastSeenAt] of recentContent) {
+      if (now - lastSeenAt > toastRecentContentWindowMs) recentContent.delete(key);
+    }
+  }
+  for (const record of toastRecords.values()) {
+    if (!contentKey || record.contentKey !== contentKey || record.node?.parentNode !== container) continue;
+    setLimitedMapEntry(recentContent, contentKey, now, toastRecentContentLimit);
+    if (options.coalesceKey) setLimitedMapEntry(record.coalesceKeys, options.coalesceKey, true, toastCoalesceKeyLimit);
+    record.lifecycleKeys = new Set([...notificationLifecycleKeys([...record.lifecycleKeys, ...notificationLifecycleKeys(options.lifecycleKeys)])].slice(-toastCoalesceKeyLimit));
+    dismissCoalescedToast(options.coalesceKey, record.node);
+    return record.node;
+  }
+  if (recentContent?.has(contentKey)) {
+    setLimitedMapEntry(recentContent, contentKey, now, toastRecentContentLimit);
+    return null;
+  }
+  dismissCoalescedToast(options.coalesceKey);
   const id = ++attentionAlertSequence;
   const node = document.createElement('div');
   node.className = options.className || 'attention-alert toast';
   node.dataset.alertId = String(id);
-  toastRecords.set(id, {node, timer: null, lifecycleKeys: notificationLifecycleKeys(options.lifecycleKeys)});
+  toastRecords.set(id, {node, timer: null, contentKey, coalesceKeys: new Map(options.coalesceKey ? [[options.coalesceKey, true]] : []),
+    lifecycleKeys: notificationLifecycleKeys(options.lifecycleKeys)});
+  if (contentKey) setLimitedMapEntry(recentContent, contentKey, now, toastRecentContentLimit);
   if (options.persistent === true) {
     node.dataset.toastPersistent = 'true';
     node.classList.add('kept');
@@ -6320,7 +6396,6 @@ function showToast(title, lines, options = {}) {
       removeAttentionAlert(id);
     },
   });
-  const toastLines = Array.isArray(lines) ? lines : (lines && typeof lines === 'object' ? [lines] : toastTextLines(lines));
   renderToastLines(bodyNode, toastLines, {
     countdownMs: options.persistent === true ? Infinity : (options.countdownMs || toastDurationMs),
   });
@@ -6339,6 +6414,7 @@ function showToast(title, lines, options = {}) {
     if (!node.contains(event.relatedTarget)) resumeToastRemoval(id, node, 'Focus');
   });
   container.appendChild(node);
+  if (container === attentionAlerts) updateNotificationStackGeometry();
   while (container.children.length > 5) {
     const first = Array.from(container.children).find(child => child.dataset.toastPersistent !== 'true');
     if (!first) break;
@@ -6685,6 +6761,7 @@ function removeAttentionAlert(id) {
   clearToastRemovalTimer(id);
   node?.remove();
   toastRecords.delete(id);
+  if (!attentionAlerts?.children?.length) updateNotificationStackGeometry();
 }
 
 function sendTestNotification(options = {}) {
@@ -7049,6 +7126,7 @@ function updateTopbarMetrics() {
   if (!topbar) return;
   const height = Math.ceil(topbar.getBoundingClientRect().height || 38);
   document.documentElement?.style?.setProperty('--topbar-height', `${height}px`);
+  updateNotificationStackGeometry();
   scheduleTopbarActionCapacity();
 }
 

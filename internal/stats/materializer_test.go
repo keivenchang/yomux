@@ -490,3 +490,23 @@ func seriesValue(bucket MaterializedBucket, name string) float64 {
 	}
 	return -1
 }
+
+func TestBrowserLatencyMeasurementsRemainSeparate(t *testing.T) {
+	facts := []Observation{}
+	for index, kind := range []string{"heartbeat", "api", "sse", "interaction"} {
+		facts = append(facts, Observation{EventID: kind, Family: "browser", SourceID: "browser:a", ObservedAt: float64(index + 1), EpochID: "a", Payload: map[string]any{"kind": kind, "latency_ms": []float64{12.8, 96.6, 780000, 20000}[index]}})
+	}
+	layer, err := (Materializer{}).Build(MaterializeRequest{Start: 0, End: 10, Resolution: 10}, facts, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]float64{}
+	for _, series := range layer.Buckets[0].Series {
+		values[series.Name] = series.Value
+	}
+	for name, want := range map[string]float64{"browser_ping_rtt_ms": 12.8, "browser_api_duration_ms": 96.6, "browser_sse_publication_age_ms": 780000} {
+		if values[name] != want {
+			t.Fatalf("%s = %v, want %v", name, values[name], want)
+		}
+	}
+}

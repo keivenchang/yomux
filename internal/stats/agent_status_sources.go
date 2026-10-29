@@ -112,5 +112,9 @@ func linuxAgentProcess(ctx context.Context, pid int) (AgentStatusProcess, error)
 	if err != nil {
 		return AgentStatusProcess{}, errors.New("agent-process-identity-unavailable")
 	}
-	return AgentStatusProcess{Command: strings.TrimSpace(commandText), Alive: true, Executable: executable, StartedIdentity: startedIdentity}, nil
+	startedAt, err := linuxProcessStartedAt(pid)
+	if err != nil {
+		return AgentStatusProcess{}, err
+	}
+	return AgentStatusProcess{Command: strings.TrimSpace(commandText), Alive: true, Executable: executable, StartedIdentity: startedIdentity, StartedAt: startedAt}, nil
 }

@@ -2638,5 +2638,9 @@
   "status.tmux.windowKill.confirm": "Завершить {window} в сеансе tmux '{session}'?",
   "status.tmux.windowKill.pending": "Завершение {window} в сеансе tmux '{session}'",
   "status.tmux.windowKill.failed": "Не удалось завершить {window} в сеансе tmux '{session}'",
-  "status.tmux.windowKill.success": "{window} завершен в сеансе tmux '{session}'"
+  "status.tmux.windowKill.success": "{window} завершен в сеансе tmux '{session}'",
+  "debug.graph.metric.apiDuration": "Длительность API",
+  "debug.graph.metric.apiDuration.desc": "Длительность HTTP-запроса отдельно от времени ping туда и обратно.",
+  "debug.graph.metric.sseAge": "Возраст публикации SSE",
+  "debug.graph.metric.sseAge.desc": "Время с публикации, включая повторы и сдвиг часов; это не задержка доставки."
 }

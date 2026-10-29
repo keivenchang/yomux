@@ -4347,7 +4347,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(source.includes('function attentionToastLine(session, state)'), 'attention toast status content has one shared renderer');
     assert.ok(source.includes('tmuxPaneTabTokenHtml(session, {'), 'attention toast status content reuses the shared session Tab renderer');
     assert.ok(source.includes('tmuxWindowButtonHtml({'), 'attention toast status content reuses the tmux sub-window button renderer');
-    assert.ok(source.includes("marker.className = 'attention-toast-controls'"), 'attention toast keeps its shared Tab and sub-window control in one wrap-around group');
+    assert.ok(source.includes("marker.className = 'attention-toast-controls'"), 'attention toast keeps its shared Tab and sub-window controls in one wrapping row');
     assert.ok(source.includes("classes: ['attention-toast-agent-button']"), 'attention toast status content uses the shared stop/pause-plus-agent button styling');
     assert.ok(source.includes('function pauseToastRemoval(id, node, reason)'), 'hover/focus pauses the shared toast removal timer');
     assert.ok(source.includes("node.addEventListener('pointerenter', () => pauseToastRemoval(id, node, 'Pointer'))"), 'hovering a toast pauses its countdown');
@@ -4371,7 +4371,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const definitions = notificationApi.notificationEventDefinitionsForTest();
     const expectedNotificationPolicies = {
       sessionAttention: ['global', 'session'], agentAttention: ['global', 'session'], agentDone: ['global', 'session'], terminalConnection: ['global', 'session'],
-      chatMessage: ['global', 'chat'], yoagentJob: ['global', 'session'], watchedPullRequest: ['global', undefined], update: ['global', undefined], indexCoverage: ['global', undefined], statsResolution: ['global', undefined], startupTip: ['global', undefined], notificationTest: ['global', undefined],
+      chatMessage: ['global', 'chat'], yoagentJob: ['global', 'session'], watchedPullRequest: ['global', undefined], update: ['global', undefined], indexCoverage: ['global', undefined], statsResolution: ['global', undefined], startupTip: ['global', undefined], notificationTest: ['global', undefined], commandNotice: ['global', undefined],
       uploadResult: ['pane', 'session'], fileTransfer: ['pane', 'operation'], fileOpen: ['pane', 'finder'], yoloRules: ['pane', 'preferences'], previewOpen: ['pane', 'operation'],
     };
     for (const [event, [scope, target]] of Object.entries(expectedNotificationPolicies)) {
@@ -6640,6 +6640,120 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   // an agent HARD-wraps a long URL with a HANGING INDENT — the continuation is its own logical
   // line (isWrapped === false), indented under the URL column. Stitch it onto the link so the whole URL
   // is one clickable link, underlined across both rows at their real columns.
+  await testAsync('terminal action cleanup forwards the clicked control and waits for settlement', async () => {
+    const api = loadYomux();
+    let clears = 0, release;
+    const term = {getSelection: () => 'selected', clearSelection: () => clears++};
+    const button = new TestElement('button');
+    const received = [];
+    const wrapped = api.withTerminalVisibleSelectionCleanup('1', term, null, 'copy-url', (...args) => {
+      received.push(...args);
+      return new Promise(resolve => { release = resolve; });
+    });
+    const pending = wrapped(button, 'extra context');
+    assert.equal(received[0], button, 'the shared wrapper preserves the real clicked button');
+    assert.equal(received[1], 'extra context', 'all action arguments survive cleanup');
+    assert.equal(clears, 0, 'selection remains until the action settles');
+    release('copied');
+    assert.equal(await pending, 'copied');
+    assert.equal(clears, 1, 'selection clears after successful settlement');
+    const error = new Error('copy failed');
+    const failing = api.withTerminalVisibleSelectionCleanup('1', term, null, 'copy-url', () => { throw error; });
+    await assert.rejects(failing(button), failure => failure === error);
+    assert.equal(clears, 2, 'failure also retires selection');
+  });
+
+  test('long terminal URLs survive alphanumeric hard-wrap boundaries in every registered layout', () => {
+    const api = loadYomux();
+    const expected = 'https://www.rfc-editor.org/rfc/rfc3986?case=2&encoded=%2F%20%28x%29&value=' + 'az09_~.-'.repeat(150) + '#end-done';
+    for (const cols of [40, 64, 80, 120]) {
+      for (const layout of ['soft', 'hanging', 'repeated', 'quote', 'zero']) {
+        const prefix = {soft:'', hanging:'    ', repeated:'   ', quote:'  | ', zero:''}[layout];
+        const available = cols - prefix.length;
+        const firstWidth = layout === 'repeated' || layout === 'zero'
+          ? Math.max(...[...expected.slice(0,available)].flatMap((char,index)=>'/-.?&=#%'.includes(char)?[index+1]:[]))
+          : available;
+        const parts = [expected.slice(0,firstWidth)];
+        for (let offset = firstWidth; offset < expected.length; offset += available) parts.push(expected.slice(offset, offset + available));
+        const lines = parts.map((part, index) => ({...terminalLine(prefix + part, layout === 'soft' && index > 0), length:cols}));
+        const term = {cols, yomuxAgentKind:layout === 'hanging' || layout === 'soft' ? 'codex' : 'opencode',
+          buffer:{active:{getLine:index=>lines[index] || null}}};
+        for (let row = 1; row <= parts.length; row += 1) {
+          assert.equal(api.terminalReferenceAtPosition(term,{x:prefix.length+1,y:row})?.href, expected,
+            `${layout}, ${cols} columns, row ${row}: start preserves the complete URL`);
+          assert.equal(api.terminalReferenceAtPosition(term,{x:prefix.length+parts[row-1].length,y:row})?.href, expected,
+            `${layout}, ${cols} columns, row ${row}: final cell preserves the complete URL`);
+        }
+      }
+    }
+  });
+
+  test('soft-wrapped URL endings do not absorb an independent next line', () => {
+    const api = loadYomux();
+    const base = 'https://example.test/path?value=';
+    const expected = base + 'a'.repeat(128 - base.length - 4) + 'done';
+    const lines = [terminalLine(expected.slice(0,64)), terminalLine(expected.slice(64),true), terminalLine('URL-MATRIX-DONE-32')];
+    for (const kind of ['codex','claude','opencode','unknown']) {
+      const term = {cols:64,yomuxAgentKind:kind,buffer:{active:{getLine:index=>lines[index]||null}}};
+      for (const row of [1,2]) assert.equal(api.terminalReferenceAtPosition(term,{x:1,y:row})?.href,expected,`${kind} keeps the explicit newline after a full final row`);
+      assert.equal(api.terminalReferenceAtPosition(term,{x:1,y:3}),null,`${kind} keeps following independent text outside the URL`);
+    }
+  });
+
+  test('hard URL wrapping excludes prose, independent URLs, and differing indentation', () => {
+    const api = loadYomux();
+    for (const tail of ['  unrelated words here', '    unrelated', '  https://other.test/', '  (https://other.test/)', '  unrelated) words here']) {
+      const lines = [terminalLine('  https://example.test/path/'), terminalLine(tail)];
+      const term = {cols:75, yomuxAgentKind:'codex', buffer:{active:{getLine:index=>lines[index]||null}}};
+      assert.equal(api.terminalReferenceAtPosition(term,{x:3,y:1})?.href,'https://example.test/path/');
+      assert.notEqual(api.terminalReferenceAtPosition(term,{x:5,y:2})?.href,'https://example.test/path/unrelated');
+    }
+  });
+
+  test('real Codex mixed soft and two-space hard URL wraps resolve every physical row', () => {
+    const api = loadYomux();
+    const rows = [terminalLine('  https://developer.mozilla.org/en-US/do'), terminalLine('cs/Web/JavaScript/Reference/', true), terminalLine('  Global_Objects/Array')];
+    const term = {cols:40,yomuxAgentKind:'codex',buffer:{active:{getLine:index=>rows[index]||null}}};
+    const expected = 'https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array';
+    for (const row of [1,2,3]) assert.equal(api.terminalReferenceAtPosition(term,{x:row===2?1:3,y:row})?.href,expected,`mixed row ${row}`);
+  });
+
+  test('Claude continuation label and adjacent parenthesized target remain distinct URLs', () => {
+    const api = loadYomux();
+    const expected = 'https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array';
+    const lines = [terminalLine('  https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/'), terminalLine('  Global_Objects/Array (https://other.test/)')];
+    const term = {cols:75,yomuxAgentKind:'claude',buffer:{active:{getLine:index=>lines[index]||null}}};
+    assert.equal(api.terminalReferenceAtPosition(term,{x:3,y:1})?.href,expected);
+    assert.equal(api.terminalReferenceAtPosition(term,{x:3,y:2})?.href,expected);
+    assert.equal(api.terminalReferenceAtPosition(term,{x:25,y:2})?.href,'https://other.test/');
+  });
+
+  test('Codex and Claude two-space hard wraps share continuation classification in both directions', () => {
+    const api = loadYomux();
+    const expected = 'https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array';
+    for (const kind of ['codex', 'claude']) for (const indent of [1, 2, 3, 4, 5, 8]) {
+      const prefix = ' '.repeat(indent);
+      const lines = [terminalLine(prefix + expected.slice(0, expected.indexOf('Global_Objects'))), terminalLine(prefix + 'Global_Objects/Array')];
+      const term = {cols: 75, yomuxAgentKind: kind, buffer: {active: {getLine: index => lines[index] || null}}};
+      for (const row of [1, 2]) {
+        assert.equal(api.terminalReferenceAtPosition(term, {x: indent + 1, y: row})?.href, expected, `${kind} indent ${indent} row ${row}`);
+        assert.equal(api.terminalReferenceAtPosition(term, {x: indent, y: row}), null, 'indent is not a link');
+      }
+    }
+  });
+
+  test('hanging URLs continue at every supported URL delimiter', () => {
+    const api = loadYomux();
+    for (const delimiter of ['?', '&', '=', '#', '/', '-', '_', '.', '%', '%2']) {
+      const prefix = `    https://example.test/path${delimiter}`;
+      const tail = delimiter === '%' ? '20encoded' : delimiter === '%2' ? '0encoded' : 'continuation';
+      const rows = [terminalLine(prefix),terminalLine('    '+tail)];
+      const term = {cols:prefix.length,yomuxAgentKind:'codex',buffer:{active:{getLine:index=>rows[index]||null}}};
+      const expected = prefix.trimStart()+tail;
+      for (const row of [1,2]) assert.equal(api.terminalReferenceAtPosition(term,{x:5,y:row})?.href,expected,`${delimiter} resolves the full URL from row ${row}`);
+    }
+  });
+
   test('hard-wrapped terminal URLs expose one continuous link', () => {
     const api = loadYomux();
     const lines = [
@@ -6729,10 +6843,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.terminalWrappedLineLinks(tokenTerm, 1)[0].text, 'https://example.test/complete', 'a completed quote-gutter URL does not absorb an adjacent token');
     assert.equal(api.terminalWrappedLineLinks(tokenTerm, 2).length, 0, 'an adjacent quote-gutter token is not exposed as a URL continuation');
     const completeAtEdge = [gutter + 'https://example.test/complete', gutter + 'next-part'];
-    const completeAtEdgeTerm = {cols: 34, yomuxAgentKind: 'opencode', buffer: {active: {getLine: index => terminalLine(completeAtEdge[index] || '', false)}}};
-    assert.equal(api.terminalWrappedLineLinks(completeAtEdgeTerm, 1)[0].text, 'https://example.test/complete', 'a complete same-gutter URL at the terminal edge remains independent');
-    assert.equal(api.terminalWrappedLineLinks(completeAtEdgeTerm, 1)[0].range.end.y, 1, 'a complete same-gutter URL does not underline the next row');
-    assert.equal(api.terminalWrappedLineLinks(completeAtEdgeTerm, 2).length, 0, 'the adjacent same-gutter text is not promoted into a URL');
+    for (const cols of [34, 35]) {
+      const completeAtEdgeTerm = {cols, yomuxAgentKind: 'opencode', buffer: {active: {getLine: index => terminalLine(completeAtEdge[index] || '', false)}}};
+      assert.equal(api.terminalWrappedLineLinks(completeAtEdgeTerm, 1)[0].text, 'https://example.test/complete', 'a complete same-gutter URL at the terminal edge remains independent');
+      assert.equal(api.terminalWrappedLineLinks(completeAtEdgeTerm, 1)[0].range.end.y, 1, 'a complete same-gutter URL does not underline the next row');
+      assert.equal(api.terminalWrappedLineLinks(completeAtEdgeTerm, 2).length, 0, 'the adjacent same-gutter text is not promoted into a URL');
+    }
     const punctuation = [gutter + 'https://example.test/a_(b)?x=1&y=2-', gutter + 'tail.json).'];
     const punctuationTerm = {cols: punctuation[0].length + 2, yomuxAgentKind: 'opencode', buffer: {active: {getLine: index => terminalLine(punctuation[index] || '', false)}}};
     assert.equal(api.terminalWrappedLineLinks(punctuationTerm, 2)[0].text, 'https://example.test/a_(b)?x=1&y=2-tail.json', 'URL punctuation is trimmed only at the logical URL end');
@@ -6843,6 +6959,33 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       const links = api.terminalWrappedLineLinks(term, row).filter(item => item.type === 'url');
       assert.equal(links.length, 1, `quote-gutter URL is clickable from row ${row}`);
       assert.equal(links[0].text, rows.map(value => value.slice(prefix.length)).join(''), `quote-gutter URL is complete from row ${row}`);
+    }
+  });
+
+  test('Codex bare continuation before its matching printed target remains complete', () => {
+    const api = loadYomux();
+    const base = 'https://developer.mozilla.org/en-US/docs/Web/API/Clipboard/';
+    for (const target of [base + 'writeText', 'https://unrelated.test/']) {
+      const lines = [`  ${base}`, `  writeText (${target})`].map(row => terminalLine(row, false));
+      const term = {cols: 120, yomuxAgentKind: 'codex', buffer: {active: {getLine: index => lines[index] || null}}};
+      const matches = target === base + 'writeText';
+      assert.equal(api.terminalReferenceAtPosition(term, {x: 3, y: 1})?.href, matches ? target : base);
+      assert.equal(api.terminalReferenceAtPosition(term, {x: 3, y: 2})?.href || null, matches ? target : null);
+      assert.equal(api.terminalReferenceAtPosition(term, {x: 12, y: 2}), null);
+      assert.equal(api.terminalReferenceAtPosition(term, {x: 14, y: 2})?.href, target);
+    }
+  });
+
+  test('quote gutters share underscore and partial percent split boundaries', () => {
+    const api = loadYomux();
+    for (const [head, tail] of [['path_', 'next'], ['path%2', '0next']]) {
+      const rows = [`  | https://example.test/${head}`, `  | ${tail}`];
+      const lines = rows.map(row => terminalLine(row, false));
+      const term = {cols: 75, yomuxAgentKind: 'opencode', buffer: {active: {getLine: index => lines[index] || null}}};
+      for (const y of [1, 2]) {
+        assert.equal(api.terminalReferenceAtPosition(term, {x: 5, y})?.href, `https://example.test/${head}${tail}`);
+        assert.equal(api.terminalReferenceAtPosition(term, {x: 4, y}), null);
+      }
     }
   });
 
@@ -7447,6 +7590,88 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
   });
 
+  test('Codex word-wrapped file links retain the full path from every painted row', () => {
+    const api = loadYomux();
+    const path = '/tmp/ssc-resident-cintas-schedule-2026-10-26.md';
+    const examples = [
+      ['• Updated the resident notice (/tmp/ssc-resident-', '  cintas-schedule-2026-10-26.md) to require all units', '  to be available for access because of the random', '  sampling of 64 heads.'],
+      ['• Updated the notice (/tmp/ssc-resident-cintas-', '  schedule-2026-10-26.md): Wednesday A+B, Thursday C+D,', '  Friday makeup. All units must provide access on their', '  building’s scheduled day.'],
+      ['• Created (/tmp/ssc-resident-', '  cintas-schedule-2026-', '  10-26.md). More prose follows.'],
+      ['See /tmp/ssc-resident-cintas-schedule-2026-10-26.m', '  d) prose'],
+      ['See /tmp/ssc-resident-', '  cintas-schedule-2026-10-26.md:27) prose'],
+    ];
+    for (const rows of examples) {
+      const lines = rows.map(text => terminalLine(text, false));
+      for (const cols of [55, 80, 120]) {
+        const term = {cols, rows: rows.length, yomuxAgentKind: 'codex', buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
+        const lastPathRow = rows.findIndex((row, index) => index > 0 && /[.)]/.test(row)) + 1;
+        for (let y = 1; y <= lastPathRow; y += 1) {
+          const refs = api.terminalWrappedLineReferences(term, y).filter(ref => ref.type === 'file');
+          assert.deepStrictEqual(canonical(refs.map(ref => ref.path)), [path], `width ${cols}, row ${y} resolves the complete reported path`);
+          const segment = refs[0].range.segments.find(segment => segment.start.y === y);
+          for (const x of [segment.start.x, segment.end.x]) {
+            assert.equal(api.terminalReferenceAtPosition(term, {x, y})?.path, path, 'both ends of each painted segment target the complete file');
+          }
+        }
+        assert.equal(api.terminalReferenceAtPosition(term, {x: 1, y: 2}), null, 'continuation indentation is outside the link');
+        const lastSegment = api.terminalWrappedLineReferences(term, lastPathRow).find(ref => ref.path === path).range.segments.at(-1);
+        assert.equal(api.terminalReferenceAtPosition(term, {x: lastSegment.end.x + 2, y: lastPathRow}), null, 'following prose is outside the link');
+      }
+    }
+  });
+
+  test('Codex file-link continuation stops at blank rows, complete filenames, and unrelated prose', () => {
+    const api = loadYomux();
+    for (const rows of [
+      ['See /tmp/notice-', '', '  next.md'],
+      ['See /tmp/notice.md', '  next.md'],
+      ['See /tmp/notice-', '  ordinary prose follows.'],
+      ['See /tmp/notice-)', '  next.md'],
+      ['See /tmp/notice-', '  /tmp/next.md'],
+      ['See /tmp/options.js', '  next.md'],
+      ['See /tmp/style.c', '  notes.md'],
+    ]) {
+      const lines = rows.map(text => terminalLine(text, false));
+      for (const cols of [80, rows[0].length]) {
+        const term = {cols, rows: rows.length, yomuxAgentKind: 'codex', buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
+        const ref = api.terminalWrappedLineReferences(term, 1).find(ref => ref.type === 'file');
+        const expected = rows[0].slice(4).replace(/\)$/, '');
+        // A token clipped at the right edge can remain unlinked until its end is known.
+        if (cols === 80) assert.equal(ref?.path, expected, JSON.stringify(rows));
+        if (ref) {
+          assert.equal(ref.path, expected, 'an independent next row never becomes part of the path');
+          assert.equal(ref.range.end.y, 1, 'the link stops on its own row');
+        }
+        assert.equal(api.terminalWrappedLineReferences(term, 2).some(candidate => candidate.type === 'file'
+          && candidate.path.startsWith(expected)), false, 'an unrelated row never targets the previous path');
+      }
+    }
+  });
+
+  test('file paths survive every terminal soft-wrap and clipped basename split', () => {
+    const api = loadYomux();
+    const paths = ['/tmp/ssc-resident-cintas-schedule-2026-10-26.md', '/tmp/options.json', '/tmp/style.css', '/tmp/App.tsx'];
+    for (const path of paths) {
+      for (let split = path.lastIndexOf('/') + 2; split < path.length; split += 1) {
+        for (const soft of [false, true]) {
+          const prefix = `See ${path.slice(0, split)}`;
+          const lines = [terminalLine(prefix, false), terminalLine(`${soft ? '' : '  '}${path.slice(split)}) prose`, soft)];
+          const term = {cols: prefix.length, rows: lines.length, yomuxAgentKind: 'codex', buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
+          for (const y of [1, 2]) assert.equal(api.terminalWrappedLineReferences(term, y).find(ref => ref.type === 'file')?.path, path, `${path}, split ${split}, soft ${soft}, row ${y}`);
+        }
+      }
+    }
+    const path = paths[0];
+    for (const rows of [
+      [['See /tmp/ssc-', false], ['resident-', true], ['  cintas-schedule-2026-10-26.md) prose', false]],
+      [['See /tmp/ssc-', false], ['  resident-cintas-', false], ['schedule-', true], ['  2026-10-26.md) prose', false]],
+    ]) {
+      const lines = rows.map(([text, wrapped]) => terminalLine(text, wrapped));
+      const term = {cols: 80, rows: lines.length, yomuxAgentKind: 'codex', buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
+      for (let y = 1; y <= rows.length; y += 1) assert.equal(api.terminalWrappedLineReferences(term, y).find(ref => ref.type === 'file')?.path, path, `mixed wrap row ${y}`);
+    }
+  });
+
   test('terminal file references resolve against the active cwd', () => {
     const api = loadYomux();
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/yolomux.dev3'}});
@@ -7535,17 +7760,18 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
           counts.push({reads, translations});
           controller.dispose();
           assert.ok(reads <= 120, `${kind} ${text}: ${reads} reads for a 24-row viewport`);
-          assert.ok(translations <= 80, `${kind} ${text}: only visible rows plus a continuation boundary are translated (${translations})`);
+          assert.ok(translations <= 24 + api.terminalWrappedUrlMaxRows + 2, `${kind} ${text}: only visible rows plus one bounded continuation window are translated (${translations})`);
         }
         assert.deepStrictEqual(counts[0], counts[1], `${kind} ${text}: 10x history costs the same`);
       }
     }
   });
 
-  test('terminal continuation cap preserves complete eight-row links and rejects nine-row fragments', () => {
+  test('terminal continuation cap preserves complete links and rejects fragments beyond its bound', () => {
     const api = loadYomux();
+    const limit = api.terminalWrappedUrlMaxRows;
     for (const layout of ['repeated', 'quote', 'zero', 'hanging', 'soft']) {
-      for (const count of [7, 8, 9]) {
+      for (const count of [7, 8, 9, limit - 1, limit, limit + 1]) {
         const parts = ['https://example.com/', ...Array(count - 2).fill('part/'), 'end.html'];
         const prefix = layout === 'quote' ? '│ ' : layout === 'repeated' ? '  ' : layout === 'hanging' ? '    ' : '';
         const lines = parts.map((part, index) => terminalLine(prefix + part, layout === 'soft' && index > 0));
@@ -7553,22 +7779,22 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         const term = {cols: layout === 'zero' ? parts[0].length : 80, yomuxAgentKind: 'opencode', buffer: {active: {getLine: index => lines[index] || null}}};
         for (let row = 1; row <= count; row += 1) {
           const refs = api.terminalWrappedLineReferences(term, row).filter(ref => ref.type === 'url');
-          assert.equal(refs.length, count > 8 ? 0 : 1, `${layout} ${count} rows, queried row ${row}`);
+          assert.equal(refs.length, count > limit ? 0 : 1, `${layout} ${count} rows, queried row ${row}`);
           if (refs.length) assert.equal(refs[0].text, parts.join(''), `${layout} full token from row ${row}`);
         }
       }
     }
-    const lines = [terminalLine('https://ok.test/a file.js https://long.test/'), ...Array.from({length: 8}, () => terminalLine('part/', true))];
+    const lines = [terminalLine('https://ok.test/a file.js https://long.test/'), ...Array.from({length: limit}, () => terminalLine('part/', true))];
     const refs = api.terminalWrappedLineReferences({cols: 80, buffer: {active: {getLine: index => lines[index] || null}}}, 1);
     assert.deepStrictEqual(Array.from(refs, ref => ref.text), ['https://ok.test/a', 'file.js'], 'independently complete references survive an incomplete tail');
 
     const headBoundaryLines = [
       terminalLine('https://example.com/', false),
-      ...Array.from({length: 7}, () => terminalLine('part/', true)),
+      ...Array.from({length: limit - 1}, () => terminalLine('part/', true)),
       terminalLine('(src/file.js),https://separate.test/path', true),
     ];
     const headBoundaryTerm = {cols: 80, buffer: {active: {getLine: index => headBoundaryLines[index] || null}}};
-    for (let row = 2; row <= 9; row += 1) {
+    for (let row = 2; row <= limit + 1; row += 1) {
       const parenthesizedFile = api.terminalWrappedLineReferences(headBoundaryTerm, row).filter(ref => ref.type === 'file');
       assert.deepStrictEqual(Array.from(parenthesizedFile, ref => ref.text), ['src/file.js'], `a lexer-delimited file reference survives an incomplete wrapped head from row ${row}`);
       const separateUrl = api.terminalWrappedLineReferences(headBoundaryTerm, row).filter(ref => ref.type === 'url');
@@ -7577,44 +7803,44 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 
     const embeddedHeadBoundaryLines = [
       terminalLine('https://example.com/', false),
-      ...Array.from({length: 7}, () => terminalLine('part/', true)),
+      ...Array.from({length: limit - 1}, () => terminalLine('part/', true)),
       terminalLine('prefixhttps://embedded.test/path', true),
     ];
     const embeddedHeadBoundaryTerm = {cols: 80, buffer: {active: {getLine: index => embeddedHeadBoundaryLines[index] || null}}};
-    for (let row = 2; row <= 9; row += 1) {
+    for (let row = 2; row <= limit + 1; row += 1) {
       const embeddedUrl = api.terminalWrappedLineReferences(embeddedHeadBoundaryTerm, row).filter(ref => ref.type === 'url');
       assert.deepStrictEqual(Array.from(embeddedUrl, ref => ref.text), [], `an embedded scheme in a truncated token is suppressed from row ${row}`);
     }
 
     const hangingFileSuffixLines = [
       terminalLine('https://example.com/', false),
-      ...Array.from({length: 7}, () => terminalLine('    part/', false)),
+      ...Array.from({length: limit - 1}, () => terminalLine('    part/', false)),
       terminalLine('    assets/module.js', false),
     ];
     const hangingFileSuffixTerm = {cols: 80, yomuxAgentKind: 'claude', buffer: {active: {getLine: index => hangingFileSuffixLines[index] || null}}};
-    const hangingFileSuffixRefs = api.terminalWrappedLineReferences(hangingFileSuffixTerm, 9);
-    assert.deepStrictEqual(Array.from(hangingFileSuffixRefs, ref => ref.text), [], 'an incomplete hanging-indent URL cannot expose its final file-looking suffix from row 9');
+    const hangingFileSuffixRefs = api.terminalWrappedLineReferences(hangingFileSuffixTerm, limit + 1);
+    assert.deepStrictEqual(Array.from(hangingFileSuffixRefs, ref => ref.text), [], 'an incomplete hanging-indent URL cannot expose its final file-looking suffix');
 
     const spaceBoundaryLines = [
       terminalLine('https://example.com/', false),
-      ...Array.from({length: 6}, () => terminalLine('part/', true)),
+      ...Array.from({length: limit - 2}, () => terminalLine('part/', true)),
       terminalLine('ordinary ', true),
       terminalLine('https://space-boundary.test/path', true),
     ];
     const spaceBoundaryTerm = {cols: 80, buffer: {active: {getLine: index => spaceBoundaryLines[index] || null}}};
-    for (let row = 2; row <= 9; row += 1) {
+    for (let row = 2; row <= limit + 1; row += 1) {
       const separateUrl = api.terminalWrappedLineReferences(spaceBoundaryTerm, row).filter(ref => ref.type === 'url');
       assert.deepStrictEqual(Array.from(separateUrl, ref => ref.text), ['https://space-boundary.test/path'], `a trailing physical-row space remains a separator from row ${row}`);
     }
 
     const tailBoundaryLines = [
       terminalLine('prefix/', false),
-      ...Array.from({length: 6}, () => terminalLine('part/', true)),
+      ...Array.from({length: limit - 2}, () => terminalLine('part/', true)),
       terminalLine('https://ok.test/path) tail', true),
       terminalLine('continued', true),
     ];
     const tailBoundaryTerm = {cols: 80, buffer: {active: {getLine: index => tailBoundaryLines[index] || null}}};
-    for (let row = 1; row <= 8; row += 1) {
+    for (let row = 1; row <= limit; row += 1) {
       const punctuatedUrl = api.terminalWrappedLineReferences(tailBoundaryTerm, row).filter(ref => ref.type === 'url');
       assert.deepStrictEqual(Array.from(punctuatedUrl, ref => ref.text), ['https://ok.test/path'], `a URL trimmed at unmatched closing punctuation survives an incomplete wrapped tail from row ${row}`);
     }

@@ -1164,7 +1164,8 @@ func main() {
 	if productenv.Value("STATS_SYNTHETIC_INVENTORY") == "1" {
 		statusSources = stats.SyntheticAgentStatusSources(opencodeDatabase)
 	}
-	s.agentProcessSnapshot = stats.CurrentPlatformAgentStatusProcess
+	statusSources.CodexTurn = stats.CodexTurnStateReader(transcriptRoot("codex"))
+	s.agentProcessSnapshot = statusSources.Process
 	s.agentStatusClassifier = func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
 		return stats.ClassifyAgentStatus(ctx, request, statusSources)
 	}
@@ -4730,6 +4731,9 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
+		activityErrors = append(activityErrors, err.Error())
+	}
+	if err := s.mergeAgentConversationActivity(r.Context(), activity, metadataSessionsForTopology(published, publishedGeneration, topology)); err != nil {
 		activityErrors = append(activityErrors, err.Error())
 	}
 	s.mergeTerminalInputActivity(activity, sessions)

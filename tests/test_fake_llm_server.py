@@ -58,7 +58,8 @@ def test_request_log_preserves_timestamp_scenario_model_and_provider_usage(tmp_p
         server.server_close()
 
 
-def test_anthropic_stream_has_usage_events():
+def test_anthropic_stream_has_usage_events(monkeypatch):
+    monkeypatch.setenv("FAKE_LLM_RESPONSE_TEXT", "https://example.test/exact?x=1#part")
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -72,6 +73,11 @@ def test_anthropic_stream_has_usage_events():
             body = response.read().decode()
         assert '"model": "claude-3-5-haiku-20241022"' in body
         assert '"input_tokens": 12' in body
+        assert 'event: content_block_start' in body
+        assert 'event: content_block_stop' in body
+        events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')]
+        assert events[0]['message']['content'] == []
+        assert [event['delta']['text'] for event in events if event['type'] == 'content_block_delta'] == ['https://example.test/exact?x=1#part']
         assert 'event: message_delta' in body
         assert 'event: message_stop' in body
     finally:

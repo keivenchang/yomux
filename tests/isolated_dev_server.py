@@ -17,6 +17,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from collections.abc import Iterable
@@ -251,6 +252,30 @@ def assert_isolated_dev_server_port(port: int) -> int:
     return port
 
 
+def capture_server_output(process: subprocess.Popen[str], output: list[str]) -> threading.Thread:
+    def drain():
+        assert process.stdout is not None
+        with process.stdout as stream:
+            for line in stream:
+                output.append(line.rstrip("\r\n"))
+
+    reader = threading.Thread(target=drain, name=f"server-output-{process.pid}", daemon=True)
+    reader.start()
+    return reader
+
+
+def finish_server_output(process: subprocess.Popen[str], output: list[str], reader: threading.Thread | None) -> None:
+    if reader is None:
+        remaining, _stderr = process.communicate(timeout=SERVER_STOP_TIMEOUT_SECONDS)
+        if remaining:
+            output.extend(remaining.splitlines())
+        return
+    process.wait(timeout=SERVER_STOP_TIMEOUT_SECONDS)
+    reader.join(timeout=SERVER_STOP_TIMEOUT_SECONDS)
+    if reader.is_alive():
+        raise AssertionError(f"server output reader for {process.pid} did not finish")
+
+
 def wait_until_serving(
     process: subprocess.Popen[str],
     port: int,
@@ -260,7 +285,7 @@ def wait_until_serving(
     product_name: str = "YOmux",
     timeout_seconds: float = SERVER_READY_TIMEOUT_SECONDS,
     scheme: str = "http",
-) -> None:
+) -> threading.Thread:
     """Block until the server prints its own serving line, or fail with what it printed instead.
 
     Readiness is the product's own statement that it is bound and serving. Polling the port would
@@ -301,7 +326,9 @@ def wait_until_serving(
                 and f"addr=127.0.0.1:{port}" in line
                 and f"scheme={scheme}" in line.split()
             ):
-                return
+                # Keep the pipe owned after readiness. Repeated status requests
+                # otherwise fill stdout and block the server inside its logger.
+                return capture_server_output(process, output)
 
 
 def signal_server_exactly(
@@ -365,6 +392,7 @@ class IsolatedDevServer:
     env_overrides: dict[str, str] | None = None
     output: list[str] = field(default_factory=list)
     stopped: bool = False
+    output_reader: threading.Thread | None = None
 
     @property
     def base_url(self) -> str:
@@ -401,16 +429,12 @@ class IsolatedDevServer:
                 signal_server_exactly(self.process, self.server_start_identity, signal.SIGINT, label=self.label)
             for escalation in (signal.SIGTERM, signal.SIGKILL):
                 try:
-                    remaining, _stderr = self.process.communicate(timeout=SERVER_STOP_TIMEOUT_SECONDS)
+                    finish_server_output(self.process, self.output, self.output_reader)
                 except subprocess.TimeoutExpired:
                     signal_server_exactly(self.process, self.server_start_identity, escalation, label=self.label)
                     continue
-                if remaining:
-                    self.output.extend(remaining.splitlines())
                 return
-            remaining, _stderr = self.process.communicate(timeout=SERVER_STOP_TIMEOUT_SECONDS)
-            if remaining:
-                self.output.extend(remaining.splitlines())
+            finish_server_output(self.process, self.output, self.output_reader)
 
         run_fixture_cleanup_phases(f"{self.label} isolated dev server", (("stop-server", stop_server),))
         self.stopped = True
@@ -465,7 +489,9 @@ class IsolatedDevServer:
         # must be the one it signals.
         self.process = replacement.process
         self.server_start_identity = replacement.server_start_identity
-        self.output.extend(replacement.output)
+        replacement.output[:0] = self.output
+        self.output = replacement.output
+        self.output_reader = replacement.output_reader
         self.stopped = False
 
 
@@ -562,7 +588,7 @@ def start_isolated_dev_server(
         )
         if not server_start_identity:
             raise AssertionError(f"{label} server process has no stable start identity")
-        wait_until_serving(process, port, server.output, label=label, scheme="https" if tls else "http")
+        server.output_reader = wait_until_serving(process, port, server.output, label=label, scheme="https" if tls else "http")
         return server
     except BaseException as start_error:
         cleanup_error: BaseException | None = None

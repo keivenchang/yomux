@@ -7213,7 +7213,7 @@ def test_finder_sync_context_expansion_and_rejected_watch_recovery(browser, tmp_
         try {
           await syncServerWatchRootsNow({force:true,user:true});
           if (serverWatchRootsState.registered) throw new Error('rejected registration accepted');
-          const error = document.getElementById('status').textContent;
+          const error = [...document.querySelectorAll('.attention-alerts .command-notice')].at(-1)?.textContent || '';
           if (!error.includes('128 entries')) throw new Error('missing concrete error: ' + error);
           await syncServerWatchRootsNow({force:true});
           if (watchCalls !== 1) throw new Error('invalid descriptor resubmitted');

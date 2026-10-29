@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/keivenchang/yomux/internal/stats"
 )
 
 func TestTerminalInputActivityClassification(t *testing.T) {
@@ -47,6 +49,97 @@ func TestTerminalInputActivityClassification(t *testing.T) {
 		if !terminalInputIsActivity([]byte(data)) {
 			t.Errorf("keyboard/paste not counted: %q", data)
 		}
+	}
+}
+
+func TestAgentConversationActivityIgnoresTmuxRedraw(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "conversation.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"response_item","timestamp":"2023-11-14T22:13:20Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]}}`+"\n"+`{"type":"session_meta","timestamp":"2023-11-15T22:13:20Z"}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	modified := time.Unix(1700001000, 0)
+	if err := os.Chtimes(path, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+	conversationTS := agentConversationActivityTS(map[string]any{"kind": "codex", "transcript": path})
+	if conversationTS != 1700000000 {
+		t.Fatalf("conversation timestamp included file touch or metadata: %v", conversationTS)
+	}
+	for _, role := range []string{"system", "developer"} {
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, writeErr := file.WriteString(`{"type":"response_item","timestamp":"2023-11-15T22:13:20Z","payload":{"type":"message","role":"` + role + `","content":[{"type":"input_text","text":"Instructions"}]}}` + "\n")
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			t.Fatal(writeErr, closeErr)
+		}
+		if got := agentConversationActivityTS(map[string]any{"kind": "codex", "transcript": path}); got != conversationTS {
+			t.Fatalf("%s instructions refreshed conversation age: %v", role, got)
+		}
+	}
+	alive := true
+	index := "0"
+	panePID := "123"
+	inventoryFails := false
+	s := &server{tmuxCommandContextFn: func(context.Context, ...string) *exec.Cmd {
+		if inventoryFails {
+			return exec.Command("false")
+		}
+		return exec.Command("printf", "fixture\t%%1\t"+index+"\t"+panePID+"\nfixture\t%%2\t1\t123\n")
+	}, agentProcessSnapshot: func(context.Context, int) (stats.AgentStatusProcess, error) {
+		return stats.AgentStatusProcess{Alive: alive, StartedIdentity: "fixture"}, nil
+	}, processEntriesFn: func() ([]procEntry, error) {
+		return []procEntry{{PID: 123, PPID: 1}}, nil
+	}}
+	identity := stats.AgentStatusProcessInstanceID(stats.AgentRecord{PID: 123, StartedIdentity: "fixture"})
+	sessions := map[string]any{"fixture": map[string]any{"agents": []map[string]any{
+		{"kind": "codex", "pid": 123, "process_instance_id": identity, "pane_target": "%1", "window_index": 0, "last_used_ts": conversationTS},
+		{"kind": "claude", "pid": 123, "process_instance_id": identity, "pane_target": "%2", "window_index": 1, "last_used_ts": float64(0)},
+	}}}
+	for _, redraw := range []float64{1700000100, 1700000200} {
+		activity := map[string]any{}
+		for _, key := range []string{"fixture:0", "fixture:1", "fixture:2"} {
+			activity[key] = map[string]any{"active_recency_ts": redraw, "last_output_ts": redraw}
+		}
+		s.mergeAgentConversationActivity(context.Background(), activity, sessions)
+		if got := activity["fixture:0"].(map[string]any)["active_recency_ts"]; got != conversationTS {
+			t.Fatalf("redraw replaced conversation age: %v", got)
+		}
+		if got := activity["fixture:1"].(map[string]any)["active_recency_ts"]; got != float64(0) {
+			t.Fatalf("missing conversation invented activity: %v", got)
+		}
+		if got := activity["fixture:2"].(map[string]any)["active_recency_ts"]; got != redraw {
+			t.Fatalf("shell output clock changed: %v", got)
+		}
+	}
+	index = "3"
+	activity := map[string]any{"fixture:0": map[string]any{"active_recency_ts": float64(77)}}
+	s.mergeAgentConversationActivity(context.Background(), activity, sessions)
+	if activity["fixture:0"].(map[string]any)["active_recency_ts"] != float64(77) || activity["fixture:3"].(map[string]any)["active_recency_ts"] != conversationTS {
+		t.Fatalf("renumbered window inherited stale ordinal: %#v", activity)
+	}
+	alive = false
+	activity = map[string]any{}
+	s.mergeAgentConversationActivity(context.Background(), activity, sessions)
+	if len(activity) != 0 {
+		t.Fatalf("retired process assigned activity to replacement: %#v", activity)
+	}
+	alive = true
+	panePID = "999"
+	activity = map[string]any{"fixture:3": map[string]any{"active_recency_ts": float64(77)}}
+	s.mergeAgentConversationActivity(context.Background(), activity, sessions)
+	if activity["fixture:3"].(map[string]any)["active_recency_ts"] != float64(77) {
+		t.Fatal("detached surviving process assigned history to respawned pane")
+	}
+	inventoryFails = true
+	activity = map[string]any{"fixture:0": map[string]any{"active_recency_ts": float64(77), "last_output_ts": float64(77)}}
+	if err := s.mergeAgentConversationActivity(context.Background(), activity, sessions); err == nil {
+		t.Fatal("pane inventory failure was hidden")
+	}
+	if activity["fixture:0"].(map[string]any)["active_recency_ts"] != float64(0) {
+		t.Fatal("pane inventory failure exposed redraw age")
 	}
 }
 

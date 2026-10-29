@@ -928,6 +928,10 @@ func addObservation(b *MaterializedBucket, o Observation) bool {
 		}
 		if v, ok := num("latency_ms"); ok {
 			add("browser_latency_ms", "average_sources", v)
+			// Retain the legacy mixed series for historical readers. New charts use typed measurements.
+			if name := map[string]string{"heartbeat": "browser_ping_rtt_ms", "api": "browser_api_duration_ms", "sse": "browser_sse_publication_age_ms"}[kind]; name != "" && (kind != "heartbeat" || v > 0) {
+				add(name, "average_sources", v)
+			}
 			m := map[string]string{"finder_usable": "browser_finder_usable_ms", "interaction": "browser_input_latency_ms", "operation_wait": "browser_operation_wait_ms", "long_task": "browser_long_task_ms"}
 			if n := m[kind]; n != "" {
 				add(n, "average_sources", v)

@@ -2593,5 +2593,9 @@
   "status.tmux.windowKill.confirm": "Terminare {window} nella sessione tmux '{session}'?",
   "status.tmux.windowKill.pending": "Chiusura di {window} nella sessione tmux '{session}'",
   "status.tmux.windowKill.failed": "Impossibile terminare {window} nella sessione tmux '{session}'",
-  "status.tmux.windowKill.success": "{window} terminato nella sessione tmux '{session}'"
+  "status.tmux.windowKill.success": "{window} terminato nella sessione tmux '{session}'",
+  "debug.graph.metric.apiDuration": "Durata API",
+  "debug.graph.metric.apiDuration.desc": "Durata della richiesta HTTP, distinta dal tempo di andata e ritorno del ping.",
+  "debug.graph.metric.sseAge": "Età di pubblicazione SSE",
+  "debug.graph.metric.sseAge.desc": "Tempo dalla pubblicazione, inclusi replay e differenze di orologio; non è latenza di consegna."
 }

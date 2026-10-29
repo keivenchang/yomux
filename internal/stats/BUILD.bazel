@@ -19,6 +19,7 @@ go_library(
         "//internal/atomicfile:atomicfile_lib",
         "//internal/mutablefs:mutablefs_lib",
         "//internal/productenv:productenv_lib",
+        "//internal/tailfile:tailfile_lib",
         "//internal/tmuxcmd:tmuxcmd_lib",
         SQLITE,
         "@org_golang_x_sys//unix",
@@ -43,6 +44,7 @@ go_test_pair(
     deps = [
         SQLITE,
         "//internal/testsupport:testsupport_lib",
+        "@in_gopkg_yaml_v3//:go_default_library",
     ],
 )
 

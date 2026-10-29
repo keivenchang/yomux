@@ -121,6 +121,10 @@
   --brand-chat-blue: #2f5bea;
   --about-brand-red: #ef4444;
   --accent-gold: #f5c542;
+  --notification-paper-bg: #f2d56b;
+  --notification-paper-text: #29220b;
+  --notification-paper-border: #ba9b38;
+  --notification-paper-countdown: #806000;
   --agent-status-working-rgb: 82 210 115;
   --agent-status-attention-ring-rgb: 255 51 71;
   --agent-status-cooldown: #ffd633;
@@ -879,7 +883,6 @@
   --50-terminal-file-tree-modal-bg-85: var(--panel);
   --50-terminal-file-tree-server-update-banner-bg-86: var(--panel2);
   --50-terminal-file-tree-server-update-banner-fg-87: var(--text);
-  --50-terminal-file-tree-server-update-banner-border-88: var(--line);
   --50-terminal-file-tree-server-update-banner-shadow-89: none;
   --50-terminal-file-tree-server-update-banner-dismiss-fg-90: var(--pr-status-closed);
   --50-terminal-file-tree-file-tree-row-fg-91: #ffb454;
@@ -1091,6 +1094,10 @@ body.theme-light {
   --brand-green: #5f9800;
   --brand-green-dark: #3d6900;
   --accent-gold: #b7791f;
+  --notification-paper-bg: #fff176;
+  --notification-paper-text: #29220b;
+  --notification-paper-border: #d1b62a;
+  --notification-paper-countdown: #725400;
   /* Thin pause glyphs need an amber with enough contrast on light pane backgrounds. */
   --agent-status-cooldown: #c28a00;
   --agent-status-cooldown-rgb: 194 138 0;
@@ -1401,7 +1408,6 @@ body.theme-light {
   --50-terminal-file-tree-modal-bg-85: var(--paint-white);
   --50-terminal-file-tree-server-update-banner-bg-86: var(--paint-white);
   --50-terminal-file-tree-server-update-banner-fg-87: var(--pc-control-fg);
-  --50-terminal-file-tree-server-update-banner-border-88: #d68c1e;
   --50-terminal-file-tree-server-update-banner-shadow-89: 0 6px 20px var(--paint-overlay-slate-18);
   --50-terminal-file-tree-server-update-banner-dismiss-fg-90: var(--lt-muted);
   --50-terminal-file-tree-file-tree-row-fg-91: #b06a00;
