@@ -379,9 +379,9 @@ const jsDebugGraphDescriptionKeyByLabelKey = Object.freeze({
 const jsDebugGraphClientMetrics = Object.freeze([
   {key: 'api', labelKey: 'debug.graph.metric.api', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
   {key: 'sse', labelKey: 'debug.graph.metric.sse', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
-  {key: 'apiDuration', labelKey: 'debug.graph.metric.apiDuration', unit: 'ms', value: bucket => bucket.apiDurationCount ? bucket.apiDurationTotalMs / bucket.apiDurationCount : 0, hasData: bucket => Number(bucket.apiDurationCount || 0) > 0},
-  {key: 'sseAge', labelKey: 'debug.graph.metric.sseAge', unit: 'ms', value: bucket => bucket.sseAgeCount ? bucket.sseAgeTotalMs / bucket.sseAgeCount : 0, hasData: bucket => Number(bucket.sseAgeCount || 0) > 0},
-  {key: 'latency', labelKey: 'common.clientLatency', unit: 'ms', value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
+  {key: 'apiDuration', color: 'var(--link-soft)', labelKey: 'debug.graph.metric.apiDuration', unit: 'ms', value: bucket => bucket.apiDurationCount ? bucket.apiDurationTotalMs / bucket.apiDurationCount : 0, hasData: bucket => Number(bucket.apiDurationCount || 0) > 0},
+  {key: 'sseAge', color: 'var(--good)', labelKey: 'debug.graph.metric.sseAge', unit: 'seconds', value: bucket => bucket.sseAgeCount ? bucket.sseAgeTotalMs / bucket.sseAgeCount / 1000 : 0, hasData: bucket => Number(bucket.sseAgeCount || 0) > 0},
+  {key: 'latency', color: 'var(--accent-gold)', labelKey: 'common.clientLatency', unit: 'ms', value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
   {key: 'bandwidth', labelKey: 'debug.graph.metric.bandwidth', unit: 'bytesPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
 ]);
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
@@ -548,9 +548,7 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', descKey: 'debug.graph.chart.gpuUtil.desc', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
   {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', descKey: 'debug.graph.chart.gpuMemory.desc', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
   {key: 'systemDisk', labelKey: 'debug.graph.chart.systemDisk', descKey: 'debug.graph.chart.systemDisk.desc', series: [], unit: 'percent', fixedMax: 100, kind: 'line', hostMetric: 'diskUsage'},
-  {key: 'apiDuration', labelKey: 'debug.graph.metric.apiDuration', descKey: 'debug.graph.metric.apiDuration.desc', series: ['apiDuration'], unit: 'ms', noDataOverlay: true},
-  {key: 'sseAge', labelKey: 'debug.graph.metric.sseAge', descKey: 'debug.graph.metric.sseAge.desc', series: ['sseAge'], unit: 'ms', noDataOverlay: true},
-  {key: 'latency', labelKey: 'common.clientLatency', descKey: 'debug.graph.chart.latency.desc', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'latency', labelKey: 'debug.graph.chart.clientTimings', descKey: 'debug.graph.chart.latency.desc', series: ['latency', 'apiDuration', 'sseAge'], unit: 'milliseconds', secondaryUnit: 'seconds', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', descKey: 'debug.graph.chart.clientApiSse.desc', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', descKey: 'debug.graph.chart.clientBandwidth.desc', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
 ]);

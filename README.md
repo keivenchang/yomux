@@ -74,7 +74,7 @@ Runtime JSON lives in `assets/runtime/`; built-in agent skill/context files rema
 
 ## First launch
 
-On first run YOmux creates `~/.config/yomux/auth.yaml` with every account commented out. No login works until you uncomment one:
+On first run YOmux creates `~/.config/yomux/auth.yaml` with every account commented out. An existing empty file is recovered into the same starter configuration with mode `0600`; populated regular files, including read-only configurations, are preserved. Symlinks and non-regular files are rejected. No login works until you uncomment one:
 
 ```bash
 # edit the file — nano, vim, whatever you prefer

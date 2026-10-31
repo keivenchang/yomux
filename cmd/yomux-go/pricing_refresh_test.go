@@ -205,6 +205,51 @@ func TestPricingStartupRetriesRestoredInvalidationOffline(t *testing.T) {
 	}
 }
 
+func TestPricingStartupSettlesNewerSeedWithoutProviderAccess(t *testing.T) {
+	s, seed := pricingLifecycleFixture(t)
+	cache := filepath.Join(filepath.Dir(seed), "pricing-refresh.json")
+	if err := s.pricing.AcknowledgePricingInvalidation(); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"schema_version":1,"catalog_revision":6,"models":[]}`
+	if err := os.WriteFile(cache, []byte(old), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pricing.RestoreRefreshCache(); err != nil {
+		t.Fatal(err)
+	}
+	if !s.pricing.PricingInvalidationPending() {
+		t.Fatal("old cache did not schedule new-seed invalidation")
+	}
+	t.Setenv("YOMUX_TEST_DISABLE_PRICING_REFRESH", "1")
+	s.pricingRefreshRun = func(context.Context) error { t.Error("offline seed upgrade fetched provider"); return nil }
+	settled := make(chan struct{}, 1)
+	s.pricingInvalidate = func(ctx context.Context) error {
+		_, err := s.statsWriter.InvalidatePricingCatalog(ctx, float64(time.Now().Unix()))
+		settled <- struct{}{}
+		return err
+	}
+	s.startPricingLifecycle()
+	select {
+	case <-settled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("new-seed invalidation did not reach writer")
+	}
+	s.serverCancel()
+	s.stopBackgroundWork()
+	reopened, err := stats.LoadPricingCatalog(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.SetRefreshCachePath(cache)
+	if err := reopened.RestoreRefreshCache(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Revision() != 7 || reopened.PricingInvalidationPending() {
+		t.Fatal("new-seed acknowledgement was not persisted")
+	}
+}
+
 func TestPricingFailureScheduleBackoffAndCancellation(t *testing.T) {
 	s, _ := pricingLifecycleFixture(t)
 	installPricingFixtureTransport(t, nil)

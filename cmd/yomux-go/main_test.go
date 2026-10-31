@@ -9057,6 +9057,63 @@ func TestStarterAuthConfigIsCommentedAndCreatedOnce(t *testing.T) {
 	if string(preserved) != existing {
 		t.Fatal("first-run initialization replaced an existing auth config")
 	}
+	if err := os.Chmod(existingPath, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeStarterAuthConfig(existingPath); err != nil {
+		t.Fatalf("read-only populated auth config was not preserved: %v", err)
+	}
+	if info, err := os.Stat(existingPath); err != nil || info.Mode().Perm() != 0o400 {
+		t.Fatalf("read-only auth config permissions changed: info=%v err=%v", info, err)
+	}
+	emptyPath := filepath.Join(t.TempDir(), "auth.yaml")
+	if err := os.WriteFile(emptyPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeStarterAuthConfig(emptyPath); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := os.ReadFile(emptyPath)
+	if err != nil || !strings.HasPrefix(string(recovered), starterAuthConfigHeader) || len(parseAuthYAML(string(recovered))) != 0 {
+		t.Fatal("empty auth config was not recovered into a commented starter")
+	}
+	if info, err := os.Stat(emptyPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("recovered auth config permissions = %v, err=%v", info, err)
+	}
+	fifoPath := filepath.Join(t.TempDir(), "auth.yaml")
+	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rejected := make(chan error, 1)
+	go func() { rejected <- initializeStarterAuthConfig(fifoPath) }()
+	select {
+	case err := <-rejected:
+		if err == nil {
+			t.Fatal("starter auth initialization accepted a FIFO")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("starter auth initialization blocked opening a FIFO")
+	}
+	target := filepath.Join(t.TempDir(), "unrelated-empty-file")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(t.TempDir(), "config", "auth.yaml")
+	if err := os.MkdirAll(filepath.Dir(symlinkPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, symlinkPath); err != nil {
+		t.Skipf("file symlinks unavailable: %v", err)
+	}
+	if err := initializeStarterAuthConfig(symlinkPath); err == nil {
+		t.Fatal("starter auth initialization followed an existing symlink")
+	}
+	if contents, err := os.ReadFile(target); err != nil || len(contents) != 0 {
+		t.Fatalf("symlink target contents = %q, err = %v; want untouched empty file", contents, err)
+	}
+	if info, err := os.Lstat(symlinkPath); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("auth config path info = %v, err = %v; want symlink preserved", info, err)
+	}
 }
 
 func TestAttentionProtectedAcknowledgementsSurvivePruningUntilSettlement(t *testing.T) {

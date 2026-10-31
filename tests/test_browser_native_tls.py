@@ -5,9 +5,53 @@
 import socket
 import ssl
 
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+
+from tests.browser_helpers.browser_console import acknowledge_browser_diagnostic_receipts
+from tests.browser_helpers.browser_console import retire_browser_after_strict_diagnostic_gate
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.browser_helpers.browser_layout import browser_auth_yaml
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
+
+
+def test_empty_auth_recovery_and_read_only_config_preserve_browser_login(browser, isolated_dev_server_factory):
+    server = isolated_dev_server_factory("auth-recovery", tls=True, auth_bypass=False)
+    auth_path = server.paths.auth_config_path
+    try:
+        server.restart(after_stop=lambda: auth_path.write_bytes(b""))
+        assert auth_path.stat().st_mode & 0o777 == 0o600
+        assert auth_path.read_text().startswith("# YOmux authentication is disabled")
+        browser.get(server.base_url + "/login")
+        WebDriverWait(browser, 10).until(lambda driver: driver.find_elements(By.ID, "setupStatus"))
+        auth_path.write_text(browser_auth_yaml(), encoding="utf-8")
+        username = WebDriverWait(browser, 10).until(lambda driver: driver.find_element(By.NAME, "username"))
+        username.send_keys("keivenc")
+        browser.find_element(By.NAME, "password").send_keys("random-password")
+        browser.find_element(By.CSS_SELECTOR, 'form[action="/login"] button[type="submit"]').click()
+        WebDriverWait(browser, 15).until(lambda driver: driver.find_elements(By.ID, "grid"))
+        before = auth_path.read_bytes()
+        acknowledge_browser_diagnostic_receipts(browser)
+        retire_browser_after_strict_diagnostic_gate(browser)
+        server.restart(after_stop=lambda: auth_path.chmod(0o400))
+        browser.get(server.base_url + "/")
+        WebDriverWait(browser, 15).until(lambda driver: driver.find_elements(By.ID, "grid"))
+        assert auth_path.read_bytes() == before
+        assert auth_path.stat().st_mode & 0o777 == 0o400
+        assert browser.execute_async_script("""
+          const done=arguments[arguments.length-1];
+          (async () => {
+            try { const response = await fetch('/api/ping'); done(response.status); }
+            catch { done(0); }
+          })();
+        """) == 200
+    finally:
+        try:
+            if browser.find_elements(By.ID, "grid"):
+                acknowledge_browser_diagnostic_receipts(browser)
+            retire_browser_after_strict_diagnostic_gate(browser, require_js_debug_store=False)
+        finally:
+            server.stop()
 
 
 def test_native_tls_multiplexes_authenticated_streams_and_keeps_websocket(browser, isolated_dev_server_factory):

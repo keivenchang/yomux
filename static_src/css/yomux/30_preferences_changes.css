@@ -3713,3 +3713,17 @@ body .file-explorer-changes-panel {
 [data-stats-refill-wait] {
   padding: 1rem;
 }
+
+.js-debug-chart-body--dual-axis {
+  grid-template-columns: minmax(58px, auto) minmax(0, 1fr) minmax(44px, auto);
+}
+.js-debug-y-axis.js-debug-y-axis-right {
+  grid-column: 3;
+  color: var(--js-debug-series-color, var(--muted));
+  text-align: start;
+}
+
+.js-debug-value-critical {
+  color: var(--bad);
+  font-weight: 700;
+}
