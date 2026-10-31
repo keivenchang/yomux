@@ -747,7 +747,7 @@ function debugGraphOtherClientMetricBuckets(bucket, metric) {
   const thisClientId = jsDebugStatsClientIdForRequest();
   return [...bucket.clients.entries()]
     .filter(([clientId, clientBucket]) => clientId !== thisClientId
-      && (metric.unit !== 'ms' || metric.hasData(clientBucket)))
+      && (!['ms', 'seconds'].includes(metric.unit) || metric.hasData(clientBucket)))
     .map(([, clientBucket]) => clientBucket);
 }
 
@@ -763,7 +763,7 @@ function debugGraphClientSeriesDef(metric, {key = metric.key, labelKey, clientId
     ...metric, key, labelKey, metricLabelKey: metric.labelKey, cssKey: metric.key, clientMetric: true, metricKey: metric.key, clientId, clientAggregate, clientLinePattern,
     ...(color ? {color} : {}),
     value: bucket => otherClients ? debugGraphOtherClientMetricAverage(bucket, metric) : (() => { const clientBucket = debugGraphThisClientMetricBucket(bucket, metric); return clientBucket ? metric.value(clientBucket) : 0; })(),
-    hasData: bucket => otherClients ? debugGraphOtherClientMetricBuckets(bucket, metric).length > 0 : (() => { const clientBucket = debugGraphThisClientMetricBucket(bucket, metric); return Boolean(clientBucket && (metric.unit !== 'ms' || metric.hasData(clientBucket))); })(),
+    hasData: bucket => otherClients ? debugGraphOtherClientMetricBuckets(bucket, metric).length > 0 : (() => { const clientBucket = debugGraphThisClientMetricBucket(bucket, metric); return Boolean(clientBucket && (!['ms', 'seconds'].includes(metric.unit) || metric.hasData(clientBucket))); })(),
   };
 }
 
@@ -877,7 +877,7 @@ function debugGraphNiceBytesPerSecondAxisMax(value) {
 function debugGraphNiceAxisMax(value, unit) {
   if (unit === 'count') return Math.max(1, Math.ceil(debugGraphNiceCeil(value)));
   if (unit === 'countPerSecond') return debugGraphNiceCountPerSecondAxisMax(value);
-  if (unit === 'ms') return debugGraphNiceCeil(value);
+  if (['ms', 'milliseconds', 'seconds'].includes(unit)) return debugGraphNiceCeil(value);
   if (unit === 'bytesPerSecond') return debugGraphNiceBytesPerSecondAxisMax(value);
   if (unit === 'tokens') return Math.max(1, debugGraphNiceCeil(value));
   if (unit === 'tokensPerMinute') return Math.max(1, debugGraphNiceCeil(value));
@@ -913,6 +913,8 @@ function debugGraphValueText(value, unit) {
   if (!Number.isFinite(number)) return '0';
   if (unit === 'count') return Number.isInteger(number) ? String(number) : number.toFixed(number >= 10 ? 1 : 2);
   if (unit === 'countPerSecond') return `${Number.isInteger(number) ? String(number) : number.toFixed(number >= 10 ? 1 : 2)}/s`;
+  if (unit === 'seconds') return `${Number(number.toFixed(3))} s`;
+  if (unit === 'milliseconds') return `${Number(number.toFixed(1))} ms`;
   if (unit === 'ms' && number >= 1000) return `${number >= 10000 ? (number / 1000).toFixed(0) : (number / 1000).toFixed(1)} s`;
   if (unit === 'ms') return `${number >= 100 ? number.toFixed(0) : number.toFixed(1)} ms`;
   if (unit === 'bytes') {
@@ -964,6 +966,8 @@ function debugGraphAxisValueText(value, unit) {
     return '0';
   }
   if (unit === 'countPerSecond') return Number.isInteger(number) ? String(number) : number.toFixed(number >= 10 ? 1 : 2);
+  if (unit === 'seconds') return `${Number(number.toFixed(3))}s`;
+  if (unit === 'milliseconds') return `${Number(number.toFixed(1))}ms`;
   if (unit === 'ms') return debugGraphTerseTimeText(number);
   if (unit === 'bytes' || unit === 'bytesPerSecond') return debugGraphTerseBytesText(number);
   if (unit === 'tokens') return debugGraphTokenNumberText(number);
@@ -1340,7 +1344,7 @@ function debugGraphClientMetricSeriesDefs(buckets) {
       clientId: jsDebugGraphOtherClientsAverageId,
       clientAggregate: jsDebugGraphOtherClientsAverageAggregate,
       clientLinePattern: jsDebugGraphOtherClientsAverageLinePattern,
-      color: 'var(--bad)',
+      color: metric.color || 'var(--bad)',
     }));
   const apiMetric = jsDebugGraphClientMetrics.find(metric => metric.key === 'api');
   const sseMetric = jsDebugGraphClientMetrics.find(metric => metric.key === 'sse');
@@ -2684,11 +2688,15 @@ function debugGraphInteractionOverlayHtml() {
   return `<rect class="js-debug-selection-rect" data-js-debug-selection-rect x="0" y="${esc(jsDebugGraphGeometry.plotTop)}" width="0" height="${esc(jsDebugGraphGeometry.plotHeight)}"></rect><line class="js-debug-hover-line" data-js-debug-hover-line x1="0" y1="${esc(jsDebugGraphGeometry.plotTop)}" x2="0" y2="${esc(jsDebugGraphGeometry.hoverBottom)}" vector-effect="non-scaling-stroke"></line>`;
 }
 
-function debugGraphLegendHtml(seriesItems, {kind = ''} = {}) {
+function debugGraphSeriesNeedsAttention(series, value = series?.current) {
+  return series?.hostMetric === 'diskUsage' && Number.isFinite(Number(value)) && Number(value) > 90;
+}
+
+function debugGraphLegendHtml(seriesItems, {kind = '', timingUnits = false} = {}) {
   return `<div class="js-debug-legend" aria-label="${esc(t('debug.summary'))}">
     ${seriesItems.map(series => {
       const descKey = series.descKey || jsDebugGraphDescriptionKeyByLabelKey[series.labelKey] || jsDebugGraphDescriptionKeyByLabelKey[series.metricLabelKey];
-      return `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series, kind)}<span${debugGraphExplainAttrs(series.fullLabel || series.label, descKey, {attribute: 'data-js-debug-legend-label-desc', desc: debugGraphLocalizedDescription({...series, descKey})})}>${esc(series.label)}</span></div>`;
+      return `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series, kind)}<span${debugGraphSeriesNeedsAttention(series) ? ' class="js-debug-value-critical"' : ''}${debugGraphExplainAttrs(series.fullLabel || series.label, descKey, {attribute: 'data-js-debug-legend-label-desc', desc: debugGraphLocalizedDescription({...series, descKey})})}>${esc(series.label)}${timingUnits ? ` (${series.unit === 'seconds' ? 's' : 'ms'})` : ''}</span></div>`;
     }).join('')}
   </div>`;
 }
@@ -2816,7 +2824,7 @@ function debugGraphAxisHtml(group, max) {
       <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, scale)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
     </div>`;
   }
-  return `<div class="js-debug-y-axis" data-js-debug-axis="${esc(group.key)}">
+  return `<div class="js-debug-y-axis${group.axisSide === 'right' ? ' js-debug-y-axis-right' : ''}" data-js-debug-axis="${esc(group.key)}"${group.color ? debugGraphSeriesStyleAttr(group) : ''}>
     <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax, scale)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
     <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(scale === true ? Math.expm1(Math.log1p(positionMax) / 2) : positionMax / 2, positionMax, scale)}>${esc(debugGraphAxisValueText(scale === true ? Math.expm1(Math.log1p(axisMax) / 2) : axisMax / 2, group.unit))}</span>
     <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, scale)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
@@ -3112,13 +3120,14 @@ function debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, groupKey) {
       ? Math.max(0, Math.min(1, (Number(timestamp) - startTime) / (nextTime - startTime)))
       : 0;
     const renderedValue = startValue + ((nextValue - startValue) * fraction);
-    const renderedY = debugGraphPlotYForValue(renderedValue, axisMax, scale);
+    const seriesAxis = debugGraphSeriesAxis(data.group, series, axisMax, Number(chart?.dataset?.jsDebugChartSecondaryMax) || 0, scale);
+    const renderedY = debugGraphPlotYForValue(renderedValue, seriesAxis.max, seriesAxis.scale);
     let distance = Math.abs(renderedY - pointerY);
     if (Array.isArray(series.stackBaseValues)) {
       const startBase = Math.max(0, Number(series.stackBaseValues[index]) || 0);
       const nextBase = Math.max(0, Number(series.stackBaseValues[nextIndex]) || 0);
       const renderedBase = startBase + ((nextBase - startBase) * fraction);
-      const baseY = debugGraphPlotYForValue(renderedBase, axisMax, scale);
+      const baseY = debugGraphPlotYForValue(renderedBase, seriesAxis.max, seriesAxis.scale);
       const minimumY = Math.min(renderedY, baseY);
       const maximumY = Math.max(renderedY, baseY);
       distance = pointerY >= minimumY && pointerY <= maximumY
@@ -3145,12 +3154,13 @@ function debugGraphHoverDetailAtTime(chart, timestamp, event) {
       seriesKey: series.key,
     };
   }
-  if (data?.group?.key === 'cpu') {
+  if (data?.group?.key === 'cpu' || data?.group?.secondaryUnit || data?.group?.hostMetric === 'diskUsage') {
     const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
-    const series = debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, 'cpu');
+    const series = debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, data.group.key);
     if (index >= 0 && series && (!Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true)) {
       return {
-        text: `${series.label}: ${debugGraphValueText(series.values?.[index], 'percent')}`,
+        text: `${series.label}: ${debugGraphValueText(series.values?.[index], data.group.secondaryUnit ? (series.unit === data.group.secondaryUnit ? series.unit : data.group.unit) : 'percent')}`,
+        ...(data.group.hostMetric === 'diskUsage' ? {critical: debugGraphSeriesNeedsAttention(series, series.values?.[index])} : {}),
         seriesKey: series.key,
       };
     }
@@ -3169,6 +3179,10 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
     : data.group.key === 'activity'
     ? data.groupSeries.filter(item => item.key !== 'idleAgents')
     : data.groupSeries;
+  if (data.group.secondaryUnit) return series
+    .filter(item => !Array.isArray(item.hasDataValues) || item.hasDataValues[index] === true)
+    .map(item => `${item.label}: ${debugGraphValueText(item.values?.[index], item.unit === data.group.secondaryUnit ? item.unit : data.group.unit)}`)
+    .join(' · ') || debugGraphValueText(0, data.group.unit);
   const values = series
     .filter(item => !Array.isArray(item.hasDataValues) || item.hasDataValues[index] === true)
     .map(item => Math.max(0, Number(item.values?.[index]) || 0));
@@ -3469,6 +3483,12 @@ function refreshDebugAgentWindowLiveDetails() {
   }
 }
 
+// Plotting and pointer hit-testing must use the same scale for each measurement.
+function debugGraphSeriesAxis(group, series, primaryMax, secondaryMax, primaryScale = false) {
+  const secondary = Boolean(group.secondaryUnit && series.unit === group.secondaryUnit);
+  return {max: Math.max(secondary ? secondaryMax : primaryMax, 1), scale: secondary ? false : primaryScale};
+}
+
 function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null, options = {}) {
   group = debugGraphResolvedChartGroup(group, buckets);
   const groupLabel = debugGraphChartLabel(group, buckets);
@@ -3504,7 +3524,11 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
     : (group.key === 'serversLoad' ? debugGraphServiceLoadAxisDescriptor(group, plotSeries, lineSeries) : null);
   const plotScale = spikeAxis?.scale || debugGraphUsesLogScale(group, plotSeries);
   const movingAverageSeries = groupSeries.filter(series => Number(series.movingAverageSamples || 0) > 0);
-  const rawMax = Math.max(0, ...plotSeries.map(series => Number(series.plotMax ?? series.max) || 0), ...lineSeries.map(series => Number(series.max) || 0), debugGraphChartCapacityMax(group, buckets));
+  const primaryPlotSeries = group.secondaryUnit ? plotSeries.filter(series => series.unit !== group.secondaryUnit) : plotSeries;
+  const primaryLineSeries = group.secondaryUnit ? lineSeries.filter(series => series.unit !== group.secondaryUnit) : lineSeries;
+  const secondaryMax = group.secondaryUnit ? Math.max(1, debugGraphChartAxisMax({unit: group.secondaryUnit}, Math.max(0, ...plotSeries.filter(series => series.unit === group.secondaryUnit).map(series => Number(series.plotMax ?? series.max) || 0)))) : 0;
+  const seriesAxis = series => debugGraphSeriesAxis(group, series, axisMax, secondaryMax, plotScale);
+  const rawMax = Math.max(0, ...primaryPlotSeries.map(series => Number(series.plotMax ?? series.max) || 0), ...primaryLineSeries.map(series => Number(series.max) || 0), debugGraphChartCapacityMax(group, buckets));
   const max = spikeAxis ? spikeAxis.axisMax : debugGraphChartAxisMax(group, rawMax);
   const axisMax = max > 0 ? max : 0;
   const chartClasses = ['js-debug-chart'];
@@ -3543,7 +3567,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const chartUnavailableText = gpuUnavailableText || memoryUnavailableText || tokenUnavailableText;
   const scaleAttr = plotScale?.mode === 'broken-linear' ? 'broken-linear' : (plotScale === true ? 'log' : 'linear');
   const breakAttr = plotScale?.mode === 'broken-linear' ? ` data-js-debug-chart-axis-break="${esc(plotScale.threshold)}"` : '';
-  return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${spikeAxis && (group.key === 'agentTokens' || group.key === 'modelTokens') ? ' data-js-debug-token-axis="shared"' : ''}${breakAttr}${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''} data-js-debug-chart-scale="${esc(scaleAttr)}">
+  return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${group.secondaryUnit ? ` data-js-debug-chart-secondary-unit="${esc(group.secondaryUnit)}" data-js-debug-chart-secondary-max="${esc(secondaryMax)}"` : ''}${spikeAxis && (group.key === 'agentTokens' || group.key === 'modelTokens') ? ' data-js-debug-token-axis="shared"' : ''}${breakAttr}${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''} data-js-debug-chart-scale="${esc(scaleAttr)}">
       <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title"${groupTitleAttrs}>${esc(groupLabel)}</span>
@@ -3551,10 +3575,10 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
         ${options.closable === false ? '' : `<button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>`}
       </div>
       ${group.key === 'activity' ? debugGraphLiveAgentWindowDetailHtml(group.key) : ''}
-      ${chartUnavailable ? '' : debugGraphLegendHtml(renderedLegendSeries, {kind: group.kind})}
+      ${chartUnavailable ? '' : debugGraphLegendHtml(renderedLegendSeries, {kind: group.kind, timingUnits: Boolean(group.secondaryUnit)})}
       ${group.macMemoryCard === true ? debugGraphMacMemoryDetailsHtml(buckets) : ''}
     </div>
-    ${chartUnavailable ? `<div class="js-debug-chart-unavailable"${gpuUnavailable ? ` data-js-debug-gpu-unavailable="${esc(group.key)}"` : ' data-js-debug-agent-billable-unavailable'}>${esc(chartUnavailableText)}</div>` : `<div class="js-debug-chart-body">
+    ${chartUnavailable ? `<div class="js-debug-chart-unavailable"${gpuUnavailable ? ` data-js-debug-gpu-unavailable="${esc(group.key)}"` : ' data-js-debug-agent-billable-unavailable'}>${esc(chartUnavailableText)}</div>` : `<div class="js-debug-chart-body${group.secondaryUnit ? ' js-debug-chart-body--dual-axis' : ''}">
       ${debugGraphAxisHtml({...group, scale: plotScale}, axisMax)}
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
@@ -3567,15 +3591,16 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
           ${group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRectsHtml(overlayBuckets, domain) : ''}
            ${debugGraphHistoryCoverageGapRectsHtml(group, domain, group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [], groupSeries)}
-          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
-          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphSingletonLineMarkersHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
-          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
+          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, seriesAxis(series).max, domain, seriesAxis(series).scale, genuineNoDataRanges)).join('')}
+          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphSingletonLineMarkersHtml(series, seriesAxis(series).max, domain, seriesAxis(series).scale, genuineNoDataRanges)).join('')}
+          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, seriesAxis(series).max, domain, seriesAxis(series).scale, genuineNoDataRanges)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${debugGraphLivePulseHtml(groupSeries, buckets, domain)}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain, disconnectedRanges) : ''}
           ${debugGraphInteractionOverlayHtml()}
         </svg>
       </div>
+      ${group.secondaryUnit ? debugGraphAxisHtml({key: `${group.key}-right`, unit: group.secondaryUnit, axisSide: 'right', color: groupSeries.find(series => series.unit === group.secondaryUnit)?.color}, secondaryMax) : ''}
       ${debugGraphXAxisHtml(domain, options.renderedResolutionSeconds)}
     </div>`}
     ${chartUnavailable ? '' : '<div class="js-debug-hover-tooltip" data-js-debug-hover-tooltip hidden><span data-js-debug-hover-max></span><span aria-hidden="true"> · </span><time data-js-debug-hover-time></time><span data-js-debug-hover-source-separator aria-hidden="true" hidden> · </span><span data-js-debug-hover-source hidden></span></div>'}
@@ -3588,6 +3613,7 @@ function debugGraphUsesLogScale(group, seriesItems) {
   if (!values.length) return false;
   const max = Math.max(...values);
   if (group?.key === 'serversLoad') return false;
+  if (group?.secondaryUnit) return false;
   if (group?.key === 'latency') return max > 1000;
   return false;
 }
@@ -8374,6 +8400,7 @@ function debugGraphSetHoverTooltip(panel, event, ratio) {
   const timestamp = Number(domain.startMs) + (Math.max(0, Math.min(1, Number(ratio))) * spanMs);
   const tokenDetail = debugGraphTokenHoverDetailAtTime(chart, timestamp);
   const hoverDetail = tokenDetail ? null : debugGraphHoverDetailAtTime(chart, timestamp, event);
+  tooltip.querySelector('[data-js-debug-hover-max]').classList.toggle('js-debug-value-critical', hoverDetail?.critical === true);
   tooltip.querySelector('[data-js-debug-hover-max]').textContent = tokenDetail?.span || hoverDetail?.text || debugGraphHoverValueAtTime(chart, timestamp);
   tooltip.querySelector('[data-js-debug-hover-time]').textContent = tokenDetail?.detail || debugGraphExactTimeLabel(timestamp);
   tooltip.toggleAttribute('data-js-debug-hover-no-data', tokenDetail?.noData === true);

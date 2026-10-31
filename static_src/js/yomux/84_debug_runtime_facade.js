@@ -82,6 +82,15 @@ function loadJsDebugStatsUiPreferences() {
   const visible = new Set(Array.isArray(saved.visibleCharts) ? saved.visibleCharts.map(value => String(value || '')) : []);
   for (const key of visible) hidden.delete(key);
   for (const key of Array.isArray(saved.hiddenCharts) ? saved.hiddenCharts : []) hidden.add(String(key || ''));
+  const migrateClientTimings = saved.clientTimingsCombined !== true;
+  if (migrateClientTimings) {
+    const timingKeys = ['latency', 'apiDuration', 'sseAge'];
+    if (!timingKeys.every(key => hidden.has(key))) hidden.delete('latency');
+    for (const key of ['apiDuration', 'sseAge']) {
+      hidden.delete(key);
+      visible.delete(key);
+    }
+  }
   debugRuntimeState.graphHiddenCharts = hidden;
   debugRuntimeState.graphVisibleCharts = visible;
   // Respect a previously-persisted level selection (including an intentionally
@@ -91,7 +100,7 @@ function loadJsDebugStatsUiPreferences() {
     : null;
   jsDebugLogsState.levels = new Set(storedLogLevels || jsDebugLogDefaultLevels);
   syncDebugGraphResolutionOverride(Date.now(), {persist: true});
-  if (legacyYoCostMigrationRequested) saveJsDebugStatsUiPreferences();
+  if (legacyYoCostMigrationRequested || migrateClientTimings) saveJsDebugStatsUiPreferences();
 }
 
 function saveJsDebugStatsUiPreferences() {
@@ -103,6 +112,7 @@ function saveJsDebugStatsUiPreferences() {
       resolutionOverrideSeconds: debugRuntimeState.graphResolutionOverrideSeconds,
       chartLayout: debugRuntimeState.graphChartLayout,
       serviceLoadMode: debugRuntimeState.serviceLoadMode,
+      clientTimingsCombined: true,
       hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
       visibleCharts: [...(debugRuntimeState.graphVisibleCharts instanceof Set ? debugRuntimeState.graphVisibleCharts : [])].sort(),
       logLevels: [...jsDebugLogsState.levels].sort(),

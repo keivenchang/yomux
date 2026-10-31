@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 const starterAuthConfigHeader = "# YOmux authentication is disabled until an account entry is uncommented.\n"
@@ -35,24 +36,71 @@ func initializeStarterAuthConfig(path string) error {
 	password := base64.RawURLEncoding.EncodeToString(passwordBytes)
 	content := starterAuthConfigHeader + fmt.Sprintf("# Uncomment the admin account below, save the file, then refresh the browser.\n# Keep admin credentials private. Add readonly accounts explicitly only when needed.\n#\nusers:\n#  - username: %q\n#    password: %q\n#    role: \"admin\"\n", username, password)
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	created := err == nil
 	if errors.Is(err, os.ErrExist) {
-		return nil
+		// Populated configurations need only read access. Nonblocking inspection
+		// also rejects special files without waiting for a FIFO writer.
+		file, err = os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			return err
+		}
+		info, statErr := file.Stat()
+		if statErr != nil {
+			_ = file.Close()
+			return statErr
+		}
+		if !info.Mode().IsRegular() {
+			_ = file.Close()
+			return fmt.Errorf("auth config must be a regular file")
+		}
+		if info.Size() != 0 {
+			return file.Close()
+		}
+		if err := file.Chmod(0o600); err != nil {
+			_ = file.Close()
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
+		file, err = os.OpenFile(path, os.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			return err
+		}
+		current, statErr := file.Stat()
+		if statErr != nil || !os.SameFile(info, current) {
+			_ = file.Close()
+			return errors.Join(fmt.Errorf("auth config changed during recovery"), statErr)
+		}
+		if current.Size() != 0 {
+			return file.Close()
+		}
 	}
 	if err != nil {
 		return err
 	}
-	if _, err := file.WriteString(content); err != nil {
+	cleanup := func() {
 		_ = file.Close()
-		_ = os.Remove(path)
+		if created {
+			_ = os.Remove(path)
+		} else {
+			_ = os.Truncate(path, 0)
+		}
+	}
+	if _, err := file.WriteString(content); err != nil {
+		cleanup()
 		return err
 	}
 	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		_ = os.Remove(path)
+		cleanup()
 		return err
 	}
 	if err := file.Close(); err != nil {
-		_ = os.Remove(path)
+		if created {
+			_ = os.Remove(path)
+		} else {
+			_ = os.Truncate(path, 0)
+		}
 		return err
 	}
 	directory, err := os.Open(filepath.Dir(path))

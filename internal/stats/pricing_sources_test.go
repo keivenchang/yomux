@@ -282,6 +282,9 @@ func TestPricingRefreshCacheOlderThanCurrentSeedIsIgnored(t *testing.T) {
 	if err := catalog.RestoreRefreshCache(); err != nil {
 		t.Fatal(err)
 	}
+	if !catalog.PricingInvalidationPending() {
+		t.Fatal("newer seed did not invalidate materialized prices from the old catalog")
+	}
 	if catalog.Resolve("openai", "new-seed", "input", "text", "none", "tokens", "", "", "9999-12-31T23:59:59Z") == nil || catalog.Resolve("openai", "old-refresh", "input", "text", "none", "tokens", "", "", "9999-12-31T23:59:59Z") != nil {
 		t.Fatalf("stale refresh cache replaced newer seed: %+v", catalog.PublicPayload())
 	}

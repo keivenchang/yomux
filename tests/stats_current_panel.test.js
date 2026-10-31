@@ -53,6 +53,48 @@ let passed = 0;
 let failed = 0;
 const pending = [];
 
+test('client timings share one chart with a separate seconds axis for SSE age', () => {
+  const start = source.indexOf('const jsDebugGraphChartGroups =');
+  const end = source.indexOf('const jsDebugGraphChartControlItems', start);
+  const context = {jsDebugStatsFamilyManifest: {agent_status: {cadenceSeconds: 1}},
+    jsDebugAgentStatusSeriesKeys: [], jsDebugAgentStatusLegendSeriesKeys: [], jsDebugGraphAgentTokenBucketSeconds: 60};
+  vm.runInNewContext(`${source.slice(start, end)}; result = jsDebugGraphChartGroups.filter(group =>
+    group.series.some(key => ['latency', 'apiDuration', 'sseAge'].includes(key)));`, context);
+  assert.equal(context.result.length, 1);
+  assert.deepEqual([...context.result[0].series].sort(), ['apiDuration', 'latency', 'sseAge']);
+  assert.equal(context.result[0].secondaryUnit, 'seconds');
+});
+
+test('timing axes never borrow the millisecond scale', () => {
+  const context = {};
+  vm.runInNewContext(`${sourceFunction('debugGraphSeriesAxis', 'debugGraphChartHtml')}
+    result = debugGraphSeriesAxis({secondaryUnit:'seconds'}, {unit:'seconds'}, 5000, 2, true);`, context);
+  assert.equal(context.result.max, 2);
+  assert.equal(context.result.scale, false);
+});
+
+test('combined timing visibility migrates legacy cards once and preserves later choices', () => {
+  const start=debugRuntimeSource.indexOf('function loadJsDebugStatsUiPreferences(');
+  const end=debugRuntimeSource.indexOf('function saveJsDebugStatsUiPreferences(',start);
+  for (const [saved,hidden] of [
+    [{hiddenCharts:['latency']},false],
+    [{hiddenCharts:['latency','apiDuration','sseAge']},true],
+    [{hiddenCharts:['apiDuration','sseAge']},false],
+    [{clientTimingsCombined:true,hiddenCharts:['latency']},true],
+  ]) {
+    const context={debugRuntimeState:{},legacyYoCostMigrationRequested:false,
+      safeJsonParse:JSON.parse,storageGet:()=>JSON.stringify(saved),jsDebugStatsUiPreferencesStorageKey:'stats',
+      normalizedJsDebugSubTab:()=> 'graph',normalizedJsDebugGraphRange:()=>900,
+      normalizedDebugGraphServiceLoadPreference:()=> 'max',jsDebugGraphDefaultHiddenChartKeys:[],
+      jsDebugLogLevels:[],jsDebugLogDefaultLevels:[],jsDebugLogsState:{},
+      syncDebugGraphResolutionOverride:()=>{},saveJsDebugStatsUiPreferences:()=>{}};
+    vm.runInNewContext(`${debugRuntimeSource.slice(start,end)}; loadJsDebugStatsUiPreferences();`,context);
+    assert.equal(context.debugRuntimeState.graphHiddenCharts.has('latency'),hidden);
+    assert.equal(context.debugRuntimeState.graphHiddenCharts.has('apiDuration'),false);
+    assert.equal(context.debugRuntimeState.graphHiddenCharts.has('sseAge'),false);
+  }
+});
+
 test('primary latency excludes API duration and replay publication age', () => {
   const start = source.indexOf('function debugGraphLatencyMs(');
   const end = source.indexOf('\nfunction ', start + 1);
@@ -1266,7 +1308,7 @@ test('chart legends distinguish filled area keys from thin line keys', () => {
   assert.match(context.result[0], /<span class="js-debug-legend-area"/);
   assert.doesNotMatch(context.result[0], /<svg/);
   assert.match(context.result[1], /<svg class="js-debug-legend-line"/);
-  assert.match(sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale'), /debugGraphLegendHtml\(renderedLegendSeries, \{kind: group\.kind\}\)/);
+  assert.match(sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale'), /debugGraphLegendHtml\(renderedLegendSeries, \{kind: group\.kind, timingUnits: Boolean\(group\.secondaryUnit\)\}\)/);
   assert.match(css, /\.js-debug-legend-area\s*\{[^}]*width:\s*18px[^}]*height:\s*6px/);
 });
 
@@ -1548,6 +1590,16 @@ test('Space used labels only the latest df inventory, annotates high use, and re
   assert.deepEqual([...context.result.labels], ['/ (94%)', '/boot', '/mnt/unavailable', '/nfs/keivenc']);
   assert.equal(context.result.rootHistory, 70);
   assert.equal(context.result.unavailableHasData, false);
+});
+
+test('only disk percentages strictly above ninety receive warning text', () => {
+  const context = {};
+  vm.runInNewContext(`${sourceFunction('debugGraphSeriesNeedsAttention', 'debugGraphLegendHtml')}
+    result = [89.9,90,90.1,100,NaN,Infinity].map(current =>
+      debugGraphSeriesNeedsAttention({hostMetric:'diskUsage', current}));
+    other = debugGraphSeriesNeedsAttention({hostMetric:'cpu',current:99});`, context);
+  assert.deepEqual([...context.result], [false,false,true,true,false,false]);
+  assert.equal(context.other,false);
 });
 
 test('materialized disk metrics reach separate mountpoint-labeled Graphs series', () => {
@@ -2061,6 +2113,7 @@ test('CPU hover chooses binary, System, yolomux, and nearest grid series without
     directEvent,
   };
   vm.runInNewContext(`
+    ${sourceFunction('debugGraphSeriesAxis', 'debugGraphChartHtml')}
     ${hoverSource}
     const chart = {
       dataset: {jsDebugChart: 'cpu', jsDebugChartAxisMax: '100', jsDebugChartScale: 'linear'},
@@ -5685,7 +5738,7 @@ test('YO!stats owns Cost between Graphs and API/SSE with persistence, activation
   assert.match(tabs, /debugSubTabButtonHtml\('graph',[\s\S]*debugSubTabButtonHtml\('cost',[\s\S]*debugSubTabButtonHtml\('events',[\s\S]*debugSubTabButtonHtml\('system',[\s\S]*debugSubTabButtonHtml\('logs'/);
   assert.match(debugRuntimeSource, /function normalizedJsDebugSubTab\(value\) \{[\s\S]*value === 'cost'/);
   assert.match(debugRuntimeSource, /legacyYoCostMigrationRequested \? 'cost' : normalizedJsDebugSubTab\(saved\.subTab\)/);
-  assert.match(debugRuntimeSource, /if \(legacyYoCostMigrationRequested\) saveJsDebugStatsUiPreferences\(\)/);
+  assert.match(debugRuntimeSource, /if \(legacyYoCostMigrationRequested \|\| migrateClientTimings\) saveJsDebugStatsUiPreferences\(\)/);
   assert.match(debugRuntimeSource, /subTab: debugRuntimeState\.subTab/);
   assert.match(sourceFunction('debugPanelSubviewDescriptors', 'syncDebugSubviewActivation'), /return DEBUG_SUBVIEWS;/);
   assert.match(sourceFunction('scheduleDebugCostPricingStatusRefresh', 'disposeDebugPricingRefreshLifecycle'), /if \(!jsDebugCostSubviewVisible\(\)\) return false;/);

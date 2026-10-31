@@ -32,6 +32,73 @@ func TestPricingCatalogLoadsPythonFixtureAndResolvesCacheDimensions(t *testing.T
 	}
 }
 
+func TestReviewedCurrentPricingCatalogSeparatesModelsAndCacheRates(t *testing.T) {
+	catalog, err := LoadRepositoryPricingCatalog(testsupport.RepoRoot(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The deployed refresh cache reached revision 8 before this catalog review.
+	cachePath := filepath.Join(t.TempDir(), "pricing-refresh.json")
+	if err := writePricingCache(cachePath, &PricingCatalog{SchemaVersion: 1, CatalogRevision: 8, Models: clonePricingModels(catalog.Models)}, nil, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	catalog.SetRefreshCachePath(cachePath)
+	if err := catalog.RestoreRefreshCache(); err != nil {
+		t.Fatal(err)
+	}
+	if catalog.Revision() <= 8 {
+		t.Fatal("previously deployed refresh cache hid the reviewed catalog")
+	}
+	for _, test := range []struct {
+		provider, model, input, read, output string
+	}{
+		{"openai", "gpt-6.1-sol", "2", "0.1", "10"},
+		{"openai", "gpt-6.1-terra", "1", "0.05", "5"},
+		{"openai", "gpt-6-luna", "0.1", "0.01", "0.5"},
+		{"openai", "gpt-6-astra", "10", "1", "50"},
+		{"anthropic", "claude-sonnet-5", "2", "0.2", "10"},
+		{"anthropic", "claude-sonnet-4-6", "3", "0.3", "15"},
+		{"anthropic", "claude-sonnet-5-5", "2", "0.1", "10"},
+		{"anthropic", "claude-opus-5-5", "4", "0.2", "20"},
+	} {
+		t.Run(test.model, func(t *testing.T) {
+			for _, dimension := range []struct{ direction, cache, want string }{
+				{"input", "none", test.input}, {"input", "read", test.read}, {"output", "none", test.output},
+			} {
+				rate := catalog.Resolve(test.provider, test.model, dimension.direction, "text", dimension.cache, "tokens", "", "", "2026-10-29T23:59:59Z")
+				if rate == nil {
+					t.Fatalf("unpriced %s/%s", dimension.direction, dimension.cache)
+				}
+				got, ok := normalizePricingDecimal(rate.Rate.USD)
+				if !ok || got != dimension.want || rate.Model != test.model {
+					t.Fatalf("rate = %+v; want %s for exact model %s", rate, dimension.want, test.model)
+				}
+				if rate.Source.CheckedAt < "2026-10-29" {
+					t.Fatalf("source was not rechecked: %+v", rate.Source)
+				}
+			}
+		})
+	}
+	for _, test := range []struct{ model, timestamp, want string }{
+		{"gpt-5.6-sol", "2026-10-28T23:59:59Z", "30"},
+		{"gpt-5.6-sol", "2026-10-29T00:00:00Z", "20"},
+		{"claude-sonnet-5", "2026-09-01T00:00:00Z", "10"},
+	} {
+		provider := "openai"
+		if test.model == "claude-sonnet-5" {
+			provider = "anthropic"
+		}
+		rate := catalog.Resolve(provider, test.model, "output", "text", "none", "tokens", "", "", test.timestamp)
+		if rate == nil {
+			t.Fatalf("historical rate missing: %+v", test)
+		}
+		got, ok := normalizePricingDecimal(rate.Rate.USD)
+		if !ok || got != test.want {
+			t.Fatalf("historical rate = %+v; want %+v", rate, test)
+		}
+	}
+}
+
 func TestPricingMicroUSDEnforcesPythonJSONSafeIntegerBoundary(t *testing.T) {
 	const maxSafe = maxSafeJSONInteger
 

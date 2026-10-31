@@ -143,11 +143,11 @@ func (c *PricingCatalog) RestoreRefreshCache() error {
 	seedRevision, currentRevision := c.seedRevision, c.CatalogRevision
 	c.mu.RUnlock()
 	if next.CatalogRevision < currentRevision {
-		if next.pricingInvalidationPending {
-			c.mu.Lock()
-			c.pricingInvalidationPending = true
-			c.mu.Unlock()
-		}
+		// Materialized costs may still use the rejected catalog even if its last
+		// refresh was acknowledged. Settle the seed upgrade through the writer.
+		c.mu.Lock()
+		c.pricingInvalidationPending = true
+		c.mu.Unlock()
 		return nil
 	}
 	for index := range next.Models {

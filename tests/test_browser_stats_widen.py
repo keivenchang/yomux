@@ -453,6 +453,108 @@ def _assert_native_stats_range_journey(browser, terminal_session):
         browser.execute_script("setDebugGraphRange(arguments[0].range); setDebugGraphResolutionOverride(arguments[0].resolution); jsDebugGraphZoomDomain = arguments[0].zoom; refreshDebugGraphSurfaces();", original)
 
 
+def test_client_timings_share_plot_with_independent_milliseconds_and_seconds_axes(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug&layout=left&tabs=left:__debug__")
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script("return typeof debugGraphChartHtml === 'function' && typeof debugGraphSeriesData === 'function'"))
+    try:
+        result = browser.execute_script("""
+          const groups=jsDebugGraphChartGroups.filter(group=>group.series.some(key=>['latency','apiDuration','sseAge'].includes(key)));
+          if(groups.length!==1) return {groupCount:groups.length};
+          const now=Date.now(), buckets=[0,1].map(index=>{
+            const bucket=debugGraphNewBucket(now-120000+index*60000,60000);
+            const client=debugGraphNewClientBucket();
+            Object.assign(client,{latencyCount:1,latencyTotalMs:10+index*10,
+              apiDurationCount:1,apiDurationTotalMs:50+index*50,sseAgeCount:1,sseAgeTotalMs:60000+index*60000,heartbeatCount:1});
+            bucket.clients.set(jsDebugStatsClientIdForRequest(),client);
+            return bucket;
+          });
+          window.__timingPreviousHover=jsDebugGraphHoverChartData.get('latency');
+          const host=document.createElement('div');host.id='timing-axis-fixture';host.style.cssText='width:700px;height:350px';
+          host.innerHTML=debugGraphChartHtml({...groups[0],noDataOverlay:false,disconnectedOverlay:false},debugGraphSeriesData(buckets),{startMs:now-120000,endMs:now},buckets);
+          document.body.append(host);
+          const chart=host.querySelector('[data-js-debug-chart]'), svg=chart.querySelector('svg.js-debug-line-chart');
+          const axes=[...chart.querySelectorAll('.js-debug-y-axis')];
+          const rect=node=>{const r=node.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom}};
+          const series=jsDebugGraphHoverChartData.get('latency').groupSeries;
+          const sse=series.find(row=>row.metricKey==='sseAge'),api=series.find(row=>row.metricKey==='apiDuration');
+          const sseLine=chart.querySelector(`[data-js-debug-series="${sse.key}"]`);
+          const point=sseLine.points.getItem(sseLine.points.numberOfItems-1), box=svg.getBoundingClientRect();
+          const nearest=debugGraphHoverDetailAtTime(chart,buckets[1].startMs,{clientY:box.top+point.y/jsDebugGraphGeometry.height*box.height}).text;
+          const hover=row=>debugGraphHoverDetailAtTime(chart,buckets[1].startMs,{target:{closest:()=>({dataset:{jsDebugSeries:row.key}})}}).text;
+          return {groupCount:groups.length,left:axes[0].textContent,right:axes[1]?.textContent,
+            leftRect:rect(axes[0]),rightRect:rect(axes[1]),plot:rect(svg),
+            primaryMax:Number(chart.dataset.jsDebugChartAxisMax),secondaryMax:Number(chart.dataset.jsDebugChartSecondaryMax),
+            sseValue:sse.values[1],nearest,sseHover:hover(sse),apiHover:hover(api),
+            axisColor:getComputedStyle(axes[1]).color,sseColor:getComputedStyle(sseLine).stroke,
+            legend:[...chart.querySelectorAll('[data-js-debug-legend] > span')].map(node=>node.textContent),
+            colors:[...chart.querySelectorAll('polyline')].map(node=>getComputedStyle(node).stroke),
+            lineCount:chart.querySelectorAll('polyline').length};
+        """)
+        assert result["axisColor"] == result["sseColor"], result
+        assert len(result["legend"]) == 3 and sum(label.endswith(" (ms)") for label in result["legend"]) == 2 and sum(label.endswith(" (s)") for label in result["legend"]) == 1, result
+        assert result["groupCount"] == 1, result
+        assert "ms" in result["left"] and "s" in result["right"] and "ms" not in result["right"], result
+        assert result["leftRect"]["right"] <= result["plot"]["left"] and result["rightRect"]["left"] >= result["plot"]["right"], result
+        assert result["primaryMax"] == 100 and result["secondaryMax"] == 200, result
+        assert result["sseValue"] == 120 and "120 s" in result["sseHover"] and "100 ms" in result["apiHover"], result
+        assert "120 s" in result["nearest"], result
+        assert result["lineCount"] == 3 and len(set(result["colors"])) == 3, result
+    finally:
+        browser.execute_script("""
+          document.getElementById('timing-axis-fixture')?.remove();
+          if(window.__timingPreviousHover) jsDebugGraphHoverChartData.set('latency',window.__timingPreviousHover);
+          else jsDebugGraphHoverChartData.delete('latency');
+          delete window.__timingPreviousHover;
+        """)
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+@pytest.mark.parametrize("used_percent", [90, 90.1])
+def test_disk_usage_over_ninety_has_bold_red_text(browser, tmp_path, theme, used_percent):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script("return typeof debugGraphChartHtml === 'function' && typeof debugGraphSetHoverTooltip === 'function'"))
+    previous_theme = browser.execute_script("return document.body.classList.contains('theme-light') ? 'light' : 'dark'")
+    try:
+        set_browser_visual_profile(browser, theme=theme)
+        result = browser.execute_script("""
+          const now=Date.now(),domain={startMs:now-2000,endMs:now};
+          const buckets=[40,arguments[0]].map((usage,index)=>{
+            const bucket=debugGraphNewBucket(now-2000+index*1000,1000);
+            bucket.hostMetrics.diskMounts.set('/',{label:'/',usedPercent:usage,samples:1,inventory:true});
+            return bucket;
+          });
+          window.__diskWarningPreviousHover=jsDebugGraphHoverChartData.get('systemDisk');
+          const group=jsDebugGraphChartGroups.find(row=>row.key==='systemDisk');
+          const mount=document.createElement('div');mount.id='disk-warning-fixture';mount.dataset.jsDebugGraph='';
+          mount.className='js-debug-graph-view';mount.style.width='600px';
+          mount.innerHTML=debugGraphChartShellHtml(debugGraphChartHtml(group,debugGraphSeriesData(buckets),domain,buckets,buckets,[],{}),domain);
+          document.body.append(mount);
+          const chart=mount.querySelector('[data-js-debug-chart=systemDisk]'),svg=chart.querySelector('svg.js-debug-line-chart');
+          const label=chart.querySelector('[data-js-debug-legend] > span'),value=chart.querySelector('[data-js-debug-hover-max]');
+          const red=document.createElement('span');red.style.color='var(--bad)';mount.append(red);
+          const inspect=node=>({warning:node.classList.contains('js-debug-value-critical'),color:getComputedStyle(node).color,weight:Number(getComputedStyle(node).fontWeight)});
+          const box=svg.getBoundingClientRect();
+          const hover=ratio=>debugGraphSetHoverTooltip(mount,{target:svg,clientX:box.left+box.width*ratio,clientY:box.top+box.height*.5},ratio);
+          hover(.75);const high=inspect(value);
+          hover(.25);const low=inspect(value);
+          return {legend:inspect(label),high,low,red:getComputedStyle(red).color};
+        """, used_percent)
+        expected = used_percent > 90
+        for surface in ("legend", "high"):
+            assert result[surface]["warning"] is expected, result
+            if expected:
+                assert result[surface]["color"] == result["red"] and result[surface]["weight"] >= 700, result
+        assert result["low"]["warning"] is False, result
+    finally:
+        browser.execute_script("""
+          document.getElementById('disk-warning-fixture')?.remove();
+          if(window.__diskWarningPreviousHover) jsDebugGraphHoverChartData.set('systemDisk',window.__diskWarningPreviousHover);
+          else jsDebugGraphHoverChartData.delete('systemDisk');
+          delete window.__diskWarningPreviousHover;
+        """)
+        set_browser_visual_profile(browser, theme=previous_theme)
+
+
 def test_stats_area_legend_key_is_a_thick_block(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug&layout=left&tabs=left:__debug__")
     WebDriverWait(browser, 8).until(

@@ -1264,8 +1264,8 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         "primitive": False,
         "range": True,
         "resolution": True,
-        "toggles": 13,
-        "toggleLabels": ["CPU", "System memory", "Agents", "Session tokens/min", "Model output tokens/min", "GPU utilization", "GPU memory", "Space used %", "API duration", "SSE publication age", "Client latency", "Client API&SSE/sec", "Client bandwidth/sec"],
+        "toggles": 11,
+        "toggleLabels": ["CPU", "System memory", "Agents", "Session tokens/min", "Model output tokens/min", "GPU utilization", "GPU memory", "Space used %", "Client timings", "Client API&SSE/sec", "Client bandwidth/sec"],
         "layouts": ["AUTO", "S", "M", "L", "MAX"],
         "cards": metrics["cards"],
         "closeButtons": metrics["cards"],
@@ -2706,20 +2706,28 @@ def test_current_stats_touch_charts_distinguish_scroll_wiggle_and_deliberate_zoo
     assert result["wiggle"] == {"down": False, "move": False, "up": False, "zoomed": False}, result
     assert result["vertical"] == {"down": False, "move": False, "up": False, "zoomed": False}, result
     assert result["horizontal"] == {"down": False, "move": False, "up": False, "zoomed": False}, result
+    assert result["heldZoomed"] is True, result
     points = browser.execute_script(
         """
         clearDebugGraphZoom();
         const panel = document.querySelector('.js-debug-panel');
         const graph = panel.querySelector('[data-js-debug-graph]');
         const svg = panel.querySelector('.js-debug-line-chart');
+        // Chart count and legend wrapping change the plot height and viewport intersection.
+        svg.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'});
         const rect = svg.getBoundingClientRect();
         graph.dataset.jsDebugGraphRenderedAt = '1';
         return {
+          visible: document.elementFromPoint(rect.left+rect.width*.2,rect.top+rect.height*.5)?.closest('.js-debug-line-chart')===svg,
+          rect:{left:rect.left,top:rect.top,width:rect.width,height:rect.height},
+          viewport:{width:innerWidth,height:innerHeight},
           start: {x: rect.left + rect.width * 0.2, y: rect.top + rect.height * 0.5},
           end: {x: rect.left + rect.width * 0.8, y: rect.top + rect.height * 0.5},
         };
         """
     )
+
+    assert points["visible"], points
 
     def touch_point(x, y):
         return {"x": x, "y": y, "radiusX": 1, "radiusY": 1, "force": 1, "id": 1}
