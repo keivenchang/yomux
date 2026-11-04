@@ -217,9 +217,7 @@ function* renderChangesGroupsSteps(groupsEl, files, options = {}) {
   const renderOptions = view === 'differ' && options.deferPreparation === true
     ? {...options, loading: sessionFilesPanelIsLoading(payload, visibleFileCount ? [true] : [])}
     : options;
-  // Repository chunks retain stream insertion order while earlier trees finish.
-  const orderedGroups = options.changedRepo ? Array.from(groups)
-    : Array.from(groups).sort(([left], [right]) => compare(firstFiles.get(left), firstFiles.get(right)));
+  const orderedGroups = Array.from(groups).sort(([left], [right]) => compare(firstFiles.get(left), firstFiles.get(right)));
   groups.clear();
   for (const [repo, repoFiles] of orderedGroups) groups.set(repo, repoFiles);
   if (options.includeEmptyRepoSections === true) {
@@ -265,12 +263,12 @@ function* renderChangesGroupsSteps(groupsEl, files, options = {}) {
       : 0);
     const summary = groupsEl.parentElement?.querySelector?.('.changes-comparison-summary');
     if (summary && typeof changesSummaryHtml === 'function') {
-      summary.innerHTML = changesSummaryHtml(payload, null, payload?.session || '', renderOptions.loading === true, payload?.loaded === true, {
+      setInnerHtmlIfChanged(summary, changesSummaryHtml(payload, null, payload?.session || '', renderOptions.loading === true, payload?.loaded === true, {
         fileCount: visibleFileCount,
         repoCount,
-      });
+      }));
     }
-    if (!renderOptions.loading && visibleFileCount === 0 && groups.size === 0) {
+    if (!renderOptions.loading && payload?.preparation?.partial !== true && visibleFileCount === 0 && groups.size === 0) {
       groupsEl.innerHTML = `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>`;
     }
   }
@@ -499,7 +497,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   const warningHtml = (payload.warnings || []).map(warning => `<div class="changes-warning">${esc(messageDescriptorText(warning, String(warning || '')))}</div>`).join('');
   const full = options.full === true || view === 'differ';
   const showEmptyRepoSections = full && !loading && !files.length && payloadHasRenderableRepoSections(payload);
-  const empty = options.deferPreparation !== true && !loading && loaded && !files.length && !showEmptyRepoSections
+  const empty = options.deferPreparation !== true && payload?.preparation?.partial !== true && !loading && loaded && !files.length && !showEmptyRepoSections
     ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
   if (full) {
     return `
@@ -655,7 +653,7 @@ function renderChangesRoot(root, staticHtml, files, groupOptions = {}, options =
   const staticChanged = root.__changesStaticHtml !== staticHtml;
   const editingControl = activeChangesControl(root);
   // Stream chunks can change summary HTML while a user is editing FROM/TO; keep that input node alive.
-  if (options.force === true || groupsMissing || (staticChanged && !editingControl)) {
+  if (groupsMissing || (staticChanged && (options.force === true || !editingControl))) {
     replaceChangesStaticHtml(root, staticHtml, options);
   }
   const groups = root.querySelector?.('.changes-groups');

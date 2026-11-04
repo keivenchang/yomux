@@ -576,3 +576,50 @@ func (d *TranscriptPathDiscovery) Next(ctx context.Context, root string, limit i
 	}
 	return paths, err
 }
+
+// SharedTranscriptDiscovery is the server's single directory enumeration owner.
+// Consumers retain independent positions; cached pages coalesce overlapping
+// periodic and visible-session discovery without sharing mutable cursors.
+type SharedTranscriptDiscovery struct {
+	mu      sync.Mutex
+	cursors *transcriptDiscoveryCursorStore
+	pages   map[string]sharedTranscriptDirectory
+}
+type sharedTranscriptDirectory struct {
+	at         time.Time
+	candidates []transcriptCandidate
+	err        error
+}
+
+func (d *SharedTranscriptDiscovery) candidates(ctx context.Context, root string, bounds transcriptDiscoveryBounds) ([]transcriptCandidate, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.cursors == nil {
+		d.cursors = newTranscriptDiscoveryCursorStore()
+		d.pages = make(map[string]sharedTranscriptDirectory)
+	}
+	if page, ok := d.pages[root]; ok && time.Since(page.at) < 5*time.Second {
+		return append([]transcriptCandidate(nil), page.candidates...), page.err
+	}
+	candidates, err := recentTranscriptCandidatesWithCursor(ctx, root, bounds, d.cursors)
+	if len(d.pages) >= maxTranscriptDiscoveryFrontierRoots {
+		for key := range d.pages {
+			delete(d.pages, key)
+			break
+		}
+	}
+	d.pages[root] = sharedTranscriptDirectory{time.Now(), append([]transcriptCandidate(nil), candidates...), err}
+	return candidates, err
+}
+func (d *SharedTranscriptDiscovery) Paths(ctx context.Context, root string) ([]string, error) {
+	candidates, err := d.candidates(ctx, root, transcriptDiscoveryBounds{maxFiles: defaultTranscriptDiscoveryFiles, maxDirs: defaultTranscriptDiscoveryDirs, maxBytes: defaultTranscriptDiscoveryBytes})
+	paths := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		paths = append(paths, candidate.path)
+	}
+	return paths, err
+}
+
+func TranscriptDiscoveryPending(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errTranscriptDiscoveryFileBudgetExhausted) || errors.Is(err, errTranscriptDiscoveryDirectoryBudgetExhausted) || errors.Is(err, errTranscriptDiscoveryEntryBudgetExhausted) || err != nil && err.Error() == "transcript-discovery-byte-budget-exhausted"
+}

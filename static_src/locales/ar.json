@@ -58,6 +58,8 @@
   "changes.refresh.title": "تحديث Differ",
   "changes.repoCount.few": "{count} مستودعات",
   "changes.repoCount.many": "{count} مستودعًا",
+  "changes.indexingHistory": "جارٍ فهرسة السجل",
+  "changes.savedResults": "نتائج محفوظة؛ جارٍ التحديث",
   "changes.repoCount.one": "{count} مستودع",
   "changes.repoCount.other": "{count} مستودعات",
   "changes.repoCount.two": "{count} مستودعان",

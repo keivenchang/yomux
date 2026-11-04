@@ -64,6 +64,8 @@ Contributors should use `make dev`. Its `dev` extra installs `mypy`, `pillow`, `
 
 Go uses Linux native filesystem events and bounded reconciliation; other platforms use polling. The old watchfiles shim and Python daemon topology are retired.
 
+Differ prepares file attribution in a private SQLite index under the instance state directory. Requests use prepared history and enqueue background catch-up instead of scanning transcript archives. Saved results remain visible during refresh, and incomplete preparation displays “Indexing history.” The index stores normalized file operations and progress, without transcript bodies or shell commands. Stats and attribution retain independent durable positions through the shared in-process transcript reader.
+
 ## Runtime architecture
 
 The [Go backend](#go-backend) owns product requests and background work. Finder may start a private native index worker.

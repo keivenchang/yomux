@@ -128,6 +128,65 @@ test('Differ static summaries retain the mounted tree without moving its rows', 
   assert.equal(groups.children.length, 300);
 });
 
+test('forced Differ freshness does not replace an unchanged mounted header', () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+  const groups = {}, root = {__changesStaticHtml: 'same shell', querySelector: () => groups};
+  let replacements = 0, renders = 0;
+  const context = vm.createContext({
+    activeChangesControl: () => null,
+    replaceChangesStaticHtml: () => { replacements++; },
+    renderChangesGroups: () => { renders++; },
+  });
+  const start = source.indexOf('function renderChangesRoot(');
+  vm.runInContext(source.slice(start, source.indexOf('\nfunction ', start + 1)), context);
+  for (let i = 0; i < 3; i++) context.renderChangesRoot(root, 'same shell', [], {}, {force: true});
+  assert.equal(replacements, 0, 'fresh server data must not detach an unchanged summary or toolbar');
+  assert.equal(renders, 3, 'freshness still reconciles repository data');
+  context.renderChangesRoot(root, 'changed shell', [], {}, {force: true});
+  assert.equal(replacements, 1, 'actual shell changes remain eligible');
+});
+
+test('history catch-up owns one fenced timer per destination and stops on completion', () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_10_session_files.js', 'utf8');
+  const states = new Map(['finder', 'differ'].map(destination => [destination, {preparationTimer: null}]));
+  const timers = new Map(), requests = [];
+  let sequence = 0;
+  const context = vm.createContext({
+    sessionFilesStateForDestination: destination => states.get(destination),
+    setTimeout: callback => { timers.set(++sequence, callback); return sequence; },
+    clearTimeout: id => timers.delete(id),
+    sessionFilesSurfaceDescriptor: () => ({visible: true, session: '1'}),
+    sessionFilesRequestIsActiveForDestination: () => false,
+    fetchSessionFiles: options => { requests.push(options); return Promise.resolve(); },
+    statusErr: message => { throw new Error(message); },
+  });
+  const start = source.indexOf('function scheduleSessionFilesPreparationRefresh(');
+  vm.runInContext(source.slice(start, source.indexOf('\nfunction ', start + 1)), context);
+  const stale = [];
+  for (const [destination, state] of states) {
+    state.payload = {session: '1', loaded: true, preparation: {partial: true}};
+    context.scheduleSessionFilesPreparationRefresh(destination, state.payload);
+    stale.push(timers.get(state.preparationTimer));
+    context.scheduleSessionFilesPreparationRefresh(destination, state.payload);
+  }
+  assert.equal(timers.size, 2, 'repeated publications keep one timer for each independent consumer');
+  stale.forEach(callback => callback());
+  assert.equal(requests.length, 0, 'retired callbacks cannot request duplicate work');
+  for (const [destination, state] of states) {
+    const callback = timers.get(state.preparationTimer);
+    timers.delete(state.preparationTimer);
+    callback();
+    assert.equal(requests.at(-1).destination, destination);
+    assert.equal(requests.at(-1).force, undefined, 'catch-up uses shared cache admission and coalescing');
+    assert.equal(requests.at(-1).freshGit, undefined, 'index catch-up does not force a fresh Git generation');
+    state.payload = {...state.payload, preparation: {partial: false}};
+    context.scheduleSessionFilesPreparationRefresh(destination, state.payload);
+    assert.equal(state.preparationTimer, null);
+  }
+  assert.equal(timers.size, 0);
+  assert.equal(requests.length, 2);
+});
+
 test('Differ preparation yields before publication and preserves repository order without sorting every file', () => {
   const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
   const sortSource = fs.readFileSync('static_src/js/yomux/86_changes_10_session_files.js', 'utf8');
@@ -147,7 +206,8 @@ test('Differ preparation yields before publication and preserves repository orde
     + source.slice(source.indexOf('function* renderChangesGroupsSteps('), source.indexOf('function renderChangedChangesRepo(')), context);
   const files = Array.from({length: 10000}, (_, index) => ({path: `${10000 - index}.js`, repo: index % 2 ? '/b' : '/a'}));
   files.push({path: '0.js', repo: '/b'});
-  const steps = context.renderChangesGroupsSteps(new TestElement(), files, {isCurrent: () => true});
+  const groups = new TestElement();
+  const steps = context.renderChangesGroupsSteps(groups, files, {isCurrent: () => true});
   for (let index = 0; index < files.length; index += 1) {
     assert.equal(steps.next().done, false);
     assert.equal(rendered.length, 0, 'input can interrupt grouping before any rows publish');
@@ -155,6 +215,17 @@ test('Differ preparation yields before publication and preserves repository orde
   let step = steps.next();
   while (!step.done) step = steps.next();
   assert.deepEqual(rendered, [['/b', 5001], ['/a', 5000]], 'minimum file representatives retain the old global-sort repository order');
+  let moves = 0;
+  const insertBefore = groups.insertBefore.bind(groups);
+  groups.insertBefore = (...args) => { moves++; return insertBefore(...args); };
+  for (const changedRepo of [{repo: '/a'}, undefined]) {
+    rendered.length = 0;
+    const refresh = context.renderChangesGroupsSteps(groups, files, {isCurrent: () => true, changedRepo});
+    let next = refresh.next();
+    while (!next.done) next = refresh.next();
+    assert.deepEqual(rendered, [['/b', 5001], ['/a', 5000]], 'interrupted repository fallback and completion use the same ordering');
+    assert.equal(moves, 0, 'unchanged repository sections must not move during fallback or completion');
+  }
 });
 
 test('visible Differ filtering yields and stops reading files after its render owner is retired', () => {
@@ -1658,8 +1729,8 @@ await testAsync('Differ preserves earlier repository publications at held row an
     const second = context.renderChangesGroups(groups, [], {payload, yieldToInput: true, changedRepo: {repo: '/second', files: [secondFile], repos: payload.repos}});
     await completeRenderFrames(second, frames);
     await first;
-    assert.deepEqual(groups.children.map(node => node.dataset.changesRepo), ['/first', '/second'], hold);
-    assert.equal(groups.children[0], section, hold);
+    assert.deepEqual(groups.children.map(node => node.dataset.changesRepo), hold === 'last-row' ? ['/second', '/first'] : ['/first', '/second'], hold);
+    assert.ok(groups.children.includes(section), `${hold}: the earlier repository publication retains its mounted node`);
     assert.equal(writes, 0, `${hold}: unrelated chunk cannot rewrite earlier repository chrome or leaf publication`);
   }
 });
@@ -3556,8 +3627,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         if (route === 'repository' || route === 'superseded') {
           stream.push(sseFrame('repo', {...fresh, loaded: false}));
           await flushAsyncWork();
-          assert.deepEqual([...state().payload.files.map(file => file.abs_path)], ['/repo/app/new.txt'], 'the first authoritative repository starts a fresh stream without cached duplicates');
-          assert.deepEqual([...state().payload.repos.map(repo => repo.repo)], ['/repo/app'], 'repositories missing from the new stream do not survive its initialization');
+          assert.deepEqual([...state().payload.files.map(file => file.abs_path)].sort(), route === 'superseded' ? ['/repo/app/new.txt'] : ['/repo/app/new.txt', '/repo/removed/old.txt'], `a refreshed repository replaces its saved rows while other saved repositories remain visible: ${destination}/${route} ${JSON.stringify(state().payload.files.map(file => file.abs_path))}`);
+          assert.deepEqual([...state().payload.repos.map(repo => repo.repo)].sort(), route === 'superseded' ? ['/repo/app'] : ['/repo/app', '/repo/removed'], 'saved sections remain visible until the completed stream establishes its final inventory');
           if (route === 'superseded') assert.equal(state().payload.session, '2', 'the retired callback cannot initialize over the newer target');
         }
       } finally {
@@ -3570,7 +3641,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       }
       const expectedFinalPaths = route === 'empty' ? cached.files.map(file => file.abs_path)
         : route === 'cold' ? [] : ['/repo/app/new.txt'];
-      assert.deepEqual([...state().payload.files.map(file => file.abs_path)], expectedFinalPaths, `${destination}/${route} finalizes through the existing background preservation policy`);
+      assert.deepEqual([...state().payload.files.map(file => file.abs_path)], expectedFinalPaths, `${destination}/${route} finalizes through the existing background preservation policy: ${JSON.stringify(state().payload.files.map(file => file.abs_path))}`);
       assert.equal(state().payload.loaded, true, 'a completed cold or cached stream has a terminal payload');
       if (route === 'superseded') assert.equal(state().payload.session, '2', 'the stale done event cannot replace the newer target');
     }
@@ -3608,6 +3679,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
 
     let supersededError;
     const second = api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: false, force: true});
+    assert.deepStrictEqual([...api.fileExplorerSessionFilesStateForTest().payload.files.map(file => file.abs_path)], ['/repos/project/partial.txt'], 'refresh preserves usable rows even before the previous stream completes');
     second.catch(error => { supersededError = error; });
     await flushAsyncWork();
     assert.deepStrictEqual(calls, ['/api/session-files-stream', '/api/session-files-stream'], 'the replacement reaches its stream request');

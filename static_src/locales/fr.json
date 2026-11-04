@@ -48,6 +48,8 @@
   "changes.outsideRepo": "Hors du dépôt",
   "changes.refresh.title": "Actualiser Differ",
   "changes.repoCount.many": "{count} dépôts",
+  "changes.indexingHistory": "Indexation de l’historique",
+  "changes.savedResults": "Résultats enregistrés ; actualisation",
   "changes.repoCount.one": "{count} dépôt",
   "changes.repoCount.other": "{count} dépôts",
   "changes.show": "Afficher Differ",

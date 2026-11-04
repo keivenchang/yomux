@@ -44,6 +44,8 @@
   "changes.inSession": "（'{session}' 内）",
   "changes.outsideRepo": "リポジトリ外",
   "changes.refresh.title": "Differを更新",
+  "changes.indexingHistory": "履歴をインデックス作成中",
+  "changes.savedResults": "保存済みの結果・更新中",
   "changes.repoCount.one": "{count} 件のリポジトリ",
   "changes.repoCount.other": "{count} 件のリポジトリ",
   "changes.show": "Differを表示",

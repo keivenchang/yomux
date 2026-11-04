@@ -44,6 +44,8 @@
   "changes.inSession": " in Sitzung '{session}'",
   "changes.outsideRepo": "Außerhalb des Repositorys",
   "changes.refresh.title": "Differ aktualisieren",
+  "changes.indexingHistory": "Verlauf wird indexiert",
+  "changes.savedResults": "Gespeicherte Ergebnisse; Aktualisierung läuft",
   "changes.repoCount.one": "{count} Repo",
   "changes.repoCount.other": "{count} Repos",
   "changes.show": "Differ anzeigen",

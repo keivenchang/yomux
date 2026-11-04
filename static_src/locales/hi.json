@@ -44,6 +44,8 @@
   "changes.inSession": " '{session}' में",
   "changes.outsideRepo": "रिपॉज़िटरी के बाहर",
   "changes.refresh.title": "Differ रिफ्रेश करें",
+  "changes.indexingHistory": "इतिहास की अनुक्रमणिका बन रही है",
+  "changes.savedResults": "सहेजे गए परिणाम; अपडेट हो रहा है",
   "changes.repoCount.one": "{count} रिपॉज़",
   "changes.repoCount.other": "{count} रिपॉज़",
   "changes.show": "Differ दिखाएं",

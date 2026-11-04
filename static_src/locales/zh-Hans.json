@@ -44,6 +44,8 @@
   "changes.inSession": "（{session}）",
   "changes.outsideRepo": "仓库外",
   "changes.refresh.title": "刷新Differ",
+  "changes.indexingHistory": "正在索引历史记录",
+  "changes.savedResults": "已保存的结果；正在刷新",
   "changes.repoCount.one": "{count} 个仓库",
   "changes.repoCount.other": "{count} 个仓库",
   "changes.show": "显示Differ",

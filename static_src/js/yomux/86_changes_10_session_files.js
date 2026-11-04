@@ -72,6 +72,8 @@ function normalizedSessionFilesPayload(payload = {}, defaults = {}) {
     errors: Array.isArray(payload.errors) ? payload.errors : [],
     warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
     cache: payload.cache && typeof payload.cache === 'object' ? {...payload.cache} : {},
+    preparation: payload.preparation && typeof payload.preparation === 'object' ? {...payload.preparation} : {},
+    request_key: String(payload.request_key || ''),
     from_ref: payload.from_ref || defaults.from_ref || diffRefFrom,
     to_ref: payload.to_ref || defaults.to_ref || diffRefTo,
     refreshing: payload.refreshing === true,
@@ -103,7 +105,7 @@ function sessionFilesPayloadIsRootlessEmpty(payload) {
 }
 
 function sessionFilesPayloadHasVisibleDifferResult(payload, files = null) {
-  if (!payload || payload.loaded !== true) return false;
+  if (!payload || (payload.loaded !== true && payload.streaming !== true)) return false;
   const visibleFiles = Array.isArray(files) ? files : (Array.isArray(payload.files) ? payload.files : []);
   if (visibleFiles.length) return true;
   if ((Array.isArray(payload.errors) ? payload.errors : []).length) return true;
@@ -219,6 +221,27 @@ const sessionFilesProducerDeadlineMs = 5000;
 // of genuinely newer completions; it replaces a separate unbounded acknowledgement cache.
 const sessionFilesCompletionRevalidations = new Map();
 
+function scheduleSessionFilesPreparationRefresh(destination, payload) {
+  const state = sessionFilesStateForDestination(destination);
+  if (state.preparationTimer !== null) clearTimeout(state.preparationTimer);
+  state.preparationTimer = null;
+  if (payload?.loaded !== true || payload.preparation?.partial !== true) return;
+  const timer = setTimeout(() => {
+    if (state.preparationTimer !== timer) return;
+    state.preparationTimer = null;
+    if (state.payload !== payload) return;
+    const surface = sessionFilesSurfaceDescriptor(destination);
+    if (!surface.visible || surface.session !== payload.session) return;
+    if (sessionFilesRequestIsActiveForDestination(destination)) {
+      scheduleSessionFilesPreparationRefresh(destination, payload);
+      return;
+    }
+    fetchSessionFiles({destination, session: payload.session, background: true, silent: true})
+      .catch(error => statusErr(String(error)));
+  }, 3001);
+  state.preparationTimer = timer;
+}
+
 function scheduleSessionFilesProducerDeadline(destination, payload) {
   if (!sessionFilesPayloadIsRefreshing(payload)) return;
   if (payload?.pending_operation_id) return;
@@ -244,6 +267,8 @@ function scheduleSessionFilesProducerDeadline(destination, payload) {
 
 function retireSessionFilesResponseOwner(destination = 'differ') {
   const state = sessionFilesStateForDestination(destination);
+  if (state.preparationTimer !== null) clearTimeout(state.preparationTimer);
+  state.preparationTimer = null;
   state.guard.invalidate();
   clearSessionFilesStreamState(state);
   const controller = state.abortController;
@@ -254,6 +279,7 @@ function retireSessionFilesResponseOwner(destination = 'differ') {
 function clearSessionFilesStreamState(state) {
   state.streamRepos = null;
   state.streamSession = '';
+  state.streamRetainedRepos = null;
 }
 
 function retireSessionFilesRequest(destination = 'differ', reason = 'session-files request superseded') {
@@ -274,6 +300,7 @@ function setSessionFilesPayloadForDestination(destination, payload, options = {}
   if (options.invalidateRequest !== false) retireSessionFilesRequest(destination, options.retirementReason);
   state.payload = payload;
   scheduleSessionFilesProducerDeadline(destination, payload);
+  scheduleSessionFilesPreparationRefresh(destination, payload);
   if (destination === 'finder') {
     scheduleFileTreeMetadataRefresh({highlightsOnly: true});
   }
@@ -299,6 +326,7 @@ function sessionFilesPayloadSignatureForPayload(payload) {
     errors: Array.isArray(payload?.errors) ? payload.errors : [],
     warnings: Array.isArray(payload?.warnings) ? payload.warnings : [],
     cache_request_descriptor: String(payload?.cache?.request_descriptor || ''),
+    preparation: payload?.preparation || {},
     pending_key: String(payload?.pending_key || ''),
     pending_epoch: payload?.pending_epoch ?? null,
     pending_operation_id: String(payload?.pending_operation_id || ''),
@@ -375,7 +403,7 @@ function scheduleFinderSessionFilesBackfillAfterFastPaint(session, generation) {
 }
 
 function sessionFilesRenderOptions(options = {}) {
-  return options.force === true || options.silent !== true ? {force: true} : {};
+  return options.silent !== true ? {force: true} : {};
 }
 
 function sessionFilesPerfDetails(payload = {}, extra = {}) {
@@ -399,6 +427,20 @@ function mergeSessionFilesStreamChunk(destination, session, chunk, requestIsCurr
   const chunkRepos = sessionFilesStreamRows(chunk, 'repos');
   const chunkRepoPaths = new Set(chunkRepos.map(row => String(row.repo || '')).filter(Boolean));
   const chunkFiles = sessionFilesStreamRows(chunk, 'files');
+  if (!chunkRepos.length && !chunkFiles.length && chunk.preparation) {
+    const nextPayload = {...current, preparation: chunk.preparation};
+    setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
+    setSessionFilesSignatureForDestination(destination, sessionFilesPayloadSignatureForPayload(nextPayload));
+    renderSessionFilesDestination(destination);
+    return true;
+  }
+  if (destination === 'differ' && chunkRepoPaths.size === 1) {
+    const repo = [...chunkRepoPaths][0];
+    // Early Git-only/enrichment chunks cannot retract saved transcript attribution.
+    // A final repository snapshot still replaces it, including authoritative removals.
+    if (chunk.attribution_complete === false && state.streamRetainedRepos?.has(repo)) return true;
+    if (chunk.attribution_complete === true) state.streamRetainedRepos?.delete(repo);
+  }
   let nextFiles;
   let nextRepos;
   let refsByRepo;
@@ -468,6 +510,7 @@ function mergeSessionFilesStreamChunk(destination, session, chunk, requestIsCurr
     session,
     streamRevision: (Number(current.streamRevision) || 0) + 1,
     hours: chunk.hours ?? current.hours,
+    preparation: chunk.preparation || current.preparation,
     files: destination === 'differ' && state.streamRepos instanceof Map ? [] : nextFiles,
     repos: nextRepos,
     refs_by_repo: refsByRepo,
@@ -504,16 +547,25 @@ function mergeSessionFilesStreamChunk(destination, session, chunk, requestIsCurr
 
 function finalizeSessionFilesStreamPayload(state, payload = {}, requestIsCurrent = () => true) {
   if (!requestIsCurrent()) return null;
-  if (!(state.streamRepos instanceof Map)) return {...state.payload, ...payload};
+  if (!(state.streamRepos instanceof Map)) {
+    const result = {...state.payload, ...payload};
+    if (Array.isArray(payload.repo_paths) && payload.preparation?.partial !== true) {
+      const paths = new Set(payload.repo_paths);
+      result.files = sessionFilesStreamRows(result, 'files').filter(file => paths.has(file.repo));
+      result.repos = sessionFilesStreamRows(result, 'repos').filter(repo => paths.has(repo.repo));
+    }
+    return result;
+  }
   const streamRepos = state.streamRepos;
-  const records = [...streamRepos.values()];
+  const finalPaths = Array.isArray(payload.repo_paths) && payload.preparation?.partial !== true ? new Set(payload.repo_paths) : null;
+  const records = [...streamRepos.values()].filter(record => !finalPaths || finalPaths.has(record.repo.repo));
   const result = {};
   for (const key of Object.keys(state.payload || {})) {
     if (key !== 'files') result[key] = state.payload[key];
   }
   Object.assign(result, payload);
   result.files = records.flatMap(record => record.files);
-  result.repos = sessionFilesStreamRows(state.payload, 'repos').slice();
+  result.repos = sessionFilesStreamRows(state.payload, 'repos').filter(repo => !finalPaths || finalPaths.has(repo.repo));
   result.refs_by_repo = {...(state.payload?.refs_by_repo || {})};
     clearSessionFilesStreamState(state);
   return result;
@@ -541,7 +593,8 @@ async function fetchSessionFilesStream(url, state, requestIsCurrent, onRepo) {
   let streamError = null;
   let donePayload = {};
   const parser = createFileQuickOpenSseParser((event, payload) => {
-    if (event === 'repo') onRepo(payload);
+    if (event === 'start' && payload?.preparation) onRepo({...payload, repos: [], files: []});
+    else if (event === 'repo') onRepo(payload);
     else if (event === 'done') donePayload = payload || {};
     else if (event === 'error') {
       streamError = new Error(String(payload?.message || payload?.error || 'Finder session-files stream failed'));
@@ -573,6 +626,15 @@ function renderSessionFilesDestination(destination, options = {}) {
   }
 }
 
+function sessionFilesPayloadMatchesRequest(payload, request, session) {
+  if (String(payload?.session || '') !== String(session)) return false;
+  if (payload.loaded !== true && payload.streaming !== true) return false;
+  if (payload.request_key) return payload.request_key === sessionFilesRequestKey(request, session);
+  return Object.keys(request.repo_refs || {}).length === 0
+    && (payload.from_ref || request.from_ref) === request.from_ref
+    && (payload.to_ref || request.to_ref) === request.to_ref;
+}
+
 async function fetchSessionFiles(options = {}) {
   const surface = sessionFilesSurfaceDescriptor(options.destination, options);
   const destination = surface.destination;
@@ -599,6 +661,12 @@ async function fetchSessionFiles(options = {}) {
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(emptyPayload));
     if (shouldRender) renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
     return;
+  }
+  const currentRequest = sessionFilesRequestForDestination(destination, session);
+  if (!cacheOnly && sessionFilesPayloadIsLoadedForSession(state.payload, session) && !sessionFilesPayloadMatchesRequest(state.payload, currentRequest, session)) {
+    setSessionFilesPayloadForDestination(destination, emptySessionFilesPayload(session, false, destination));
+  } else if (!cacheOnly && sessionFilesPayloadMatchesRequest(state.payload, currentRequest, session)) {
+    setSessionFilesPayloadForDestination(destination, {...state.payload, cache: {...state.payload.cache, stale: true}}, {invalidateRequest: false});
   }
   retireSessionFilesRequest(destination, 'session-files request replaced');
   const requestIsCurrent = state.guard.begin();
@@ -628,9 +696,12 @@ async function fetchSessionFiles(options = {}) {
     try {
       if (streamMode) {
         if (destination === 'finder') fileExplorerFinderSessionFilesState.partialBackfillPainted = false;
-        const retainedPayload = backgroundRefresh && sessionFilesPayloadIsLoadedForSession(state.payload, session) ? state.payload : null;
+        const refreshedRepos = new Set();
+        const retainedPayload = sessionFilesPayloadMatchesRequest(state.payload, request, session) ? state.payload : null;
+        state.streamRetainedRepos = new Set(sessionFilesStreamRows(retainedPayload, 'repos').map(repo => String(repo.repo || '')));
         const initializeStreamPayload = () => {
-          const partialPayload = {...emptySessionFilesPayload(session, false, destination), streaming: true};
+          const partialPayload = {...emptySessionFilesPayload(session, false, destination), streaming: true,
+            request_key: sessionFilesRequestKey(request, session)};
           setSessionFilesPayloadForDestination(destination, partialPayload, {invalidateRequest: false});
           setSessionFilesSignatureForDestination(destination, sessionFilesPayloadSignatureForPayload(partialPayload));
         };
@@ -642,14 +713,15 @@ async function fetchSessionFiles(options = {}) {
             requestIsCurrent,
             chunk => {
               if (!requestIsCurrent()) return false;
-              // The first repository starts a fresh aggregate; cached files must not be appended twice.
-              if (state.payload === retainedPayload) initializeStreamPayload();
-              return mergeSessionFilesStreamChunk(destination, session, chunk, requestIsCurrent);
+              // Replace each repository without dropping saved siblings during preparation.
+              for (const repo of sessionFilesStreamRows(chunk, 'repos')) refreshedRepos.add(repo.repo);
+              return mergeSessionFilesStreamChunk(destination, session, {...chunk, replace_repo: true}, requestIsCurrent);
             },
           );
           if (!requestIsCurrent()) return;
           payload = finalizeSessionFilesStreamPayload(state, {
             ...donePayload,
+            repo_paths: donePayload.repo_paths || (refreshedRepos.size ? [...refreshedRepos] : undefined),
             session,
             loaded: true,
             streaming: false,
@@ -860,6 +932,7 @@ async function refreshSessionFilesCompletionSurfaces(completion = {}) {
 
 function applySessionFilesPayloadToDestination(destination, payload, request, session, options = {}) {
   const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
+  nextPayload.request_key = sessionFilesRequestKey(request, session);
   if (sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return false;
   const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
   const wasLoading = sessionFilesLoadingForDestination(destination);
@@ -873,6 +946,8 @@ function applySessionFilesPayloadToDestination(destination, payload, request, se
   if (shouldApply) {
     setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
+  } else {
+    scheduleSessionFilesPreparationRefresh(destination, sessionFilesPayloadForDestination(destination));
   }
   sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
   if (shouldApply && options.recordPerf !== false) recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
@@ -1346,14 +1421,19 @@ function changesRepoCount(payload, files) {
 }
 
 function changesSummaryHtml(payload, files, session, loading, loaded, counts = null) {
-  if (loading) return changesLoadingHtml(session);
-  if (!loaded) return t('state.notLoaded');
+  const preparation = payload?.preparation;
+  if (preparation?.partial === true && (!files || files.length === 0) && !sessionFilesRepoRoots(payload).length) {
+    return `<span class="changes-loading" aria-live="polite" aria-busy="true">${esc(t('changes.indexingHistory'))}${preparation.error ? `: ${esc(preparation.error)}` : ''}</span>`;
+  }
+  if (loading && !sessionFilesPayloadHasVisibleDifferResult(payload, files)) return changesLoadingHtml(session);
+  if (!loaded && !sessionFilesPayloadHasVisibleDifferResult(payload, files)) return t('state.notLoaded');
   const fileCount = Number.isInteger(counts?.fileCount) ? counts.fileCount : Array.isArray(files) ? files.length : 0;
   const repoCount = Number.isInteger(counts?.repoCount) ? counts.repoCount : changesRepoCount(payload, files);
   const repos = tPlural('changes.repoCount', repoCount);
   const count = tPlural('changes.fileCount', fileCount);
   const scope = session ? t('changes.inSession', {session: sessionLabel(session)}) : '';
-  return `<span class="changes-summary-label">${esc(repos)}, ${esc(count)}${esc(scope)}</span>`;
+  const freshness = preparation?.partial === true ? t('changes.indexingHistory') : payload?.cache?.stale === true ? t('changes.savedResults') : '';
+  return `<span class="changes-summary-label">${esc(repos)}, ${esc(count)}${esc(scope)}${freshness ? ` · ${esc(freshness)}` : ''}${preparation?.error ? `: ${esc(preparation.error)}` : ''}</span>`;
 }
 
 function changesLoadingHtml(session = '') {
@@ -1403,7 +1483,10 @@ function payloadHasRenderableRepoSections(payload) {
 function changesComparisonHeaderHtml(payload, files, options = {}) {
   const loaded = payload?.loaded === true;
   const loading = options.loading === true;
-  if (loading && options.inlineLoading === true) return '';
+  const preparation = payload?.preparation;
+  const preparationText = preparation?.partial === true ? t('changes.indexingHistory') : payload?.cache?.stale === true ? t('changes.savedResults') : '';
+  if (preparationText && options.deferSummary !== true) return `<section class="changes-comparison-head"><span class="changes-comparison-summary" role="status" aria-live="polite">${esc(preparationText)}${preparation?.error ? `: ${esc(preparation.error)}` : ''}</span></section>`;
+  if (loading && options.inlineLoading === true && options.deferSummary !== true) return '';
   if (options.compact) {
     if (loading) return `<section class="changes-comparison-head compact">${changesLoadingHtml(payload?.session || '')}</section>`;
     if (!loaded) return `<section class="changes-comparison-head compact">${esc(t('state.notLoaded'))}</section>`;
@@ -1411,7 +1494,7 @@ function changesComparisonHeaderHtml(payload, files, options = {}) {
   }
   const summary = options.deferSummary === true ? '' : changesSummaryHtml(payload, files, payload?.session || '', loading, loaded);
   return `<section class="changes-comparison-head">
-    <div class="changes-comparison-summary">${summary}</div>
+    <div class="changes-comparison-summary" role="status" aria-live="polite">${summary}</div>
   </section>`;
 }
 

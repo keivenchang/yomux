@@ -138,16 +138,19 @@ type Service struct {
 	stop                       chan struct{}
 	done                       chan struct{}
 	stopOnce                   sync.Once
-	lastChangeAt               time.Time
-	lastChangePaths            []string
-	gitProductMu               sync.Mutex
-	gitHistoryCache            *cache.LRU[string, map[string]any]
-	gitCommitCache             *cache.LRU[string, map[string]any]
-	gitReachabilityCache       *cache.LRU[string, struct{}]
-	gitHistoryStatsCache       *cache.LRU[string, gitHistoryStatsInfo]
-	gitObjectLayouts           gitObjectLayoutCache
-	gitSnapshots               *darwinGitSnapshotCache
-	searchIndex                *SearchIndexWorkerClient
+
+	attributionIndex       *AttributionIndex
+	attributionUnavailable error
+	lastChangeAt           time.Time
+	lastChangePaths        []string
+	gitProductMu           sync.Mutex
+	gitHistoryCache        *cache.LRU[string, map[string]any]
+	gitCommitCache         *cache.LRU[string, map[string]any]
+	gitReachabilityCache   *cache.LRU[string, struct{}]
+	gitHistoryStatsCache   *cache.LRU[string, gitHistoryStatsInfo]
+	gitObjectLayouts       gitObjectLayoutCache
+	gitSnapshots           *darwinGitSnapshotCache
+	searchIndex            *SearchIndexWorkerClient
 }
 
 type watchRecord struct {

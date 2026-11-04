@@ -44,6 +44,8 @@
   "changes.inSession": "（{session}）",
   "changes.outsideRepo": "儲存庫外",
   "changes.refresh.title": "重新整理Differ",
+  "changes.indexingHistory": "正在索引歷史記錄",
+  "changes.savedResults": "已儲存的結果；正在重新整理",
   "changes.repoCount.one": "{count} 個儲存庫",
   "changes.repoCount.other": "{count} 個儲存庫",
   "changes.show": "顯示Differ",

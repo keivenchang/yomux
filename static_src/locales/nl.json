@@ -44,6 +44,8 @@
   "changes.inSession": "In '{session}'",
   "changes.outsideRepo": "Buiten repository",
   "changes.refresh.title": "Differ vernieuwen",
+  "changes.indexingHistory": "Geschiedenis indexeren",
+  "changes.savedResults": "Opgeslagen resultaten; vernieuwen",
   "changes.repoCount.one": "{count} repository",
   "changes.repoCount.other": "{count} repo's",
   "changes.show": "Differ tonen",

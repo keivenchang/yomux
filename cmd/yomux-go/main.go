@@ -45,6 +45,7 @@ import (
 	"github.com/keivenchang/yomux/internal/finder"
 	"github.com/keivenchang/yomux/internal/productenv"
 	"github.com/keivenchang/yomux/internal/stats"
+	"github.com/keivenchang/yomux/internal/tailfile"
 	"github.com/keivenchang/yomux/internal/tmuxcmd"
 	"github.com/keivenchang/yomux/internal/work"
 	"github.com/keivenchang/yomux/internal/yoagent"
@@ -59,6 +60,7 @@ func goRuntimeLabel() string {
 }
 
 type server struct {
+	producerContext        context.Context
 	runtimeMemory          runtimeMemoryState
 	cpuCaptureMu           sync.Mutex
 	cpuCapture             finder.CPUCapture
@@ -1033,6 +1035,7 @@ func main() {
 	go s.runUpdateChecker(shutdownContext)
 	defer stopSignals()
 	s.serverCancel = stopSignals
+	s.producerContext = shutdownContext
 	if s.chat != nil {
 		s.capabilities.Set("pane.chat.v1", capabilities.Entry{Available: true})
 	}
@@ -1169,6 +1172,45 @@ func main() {
 	s.agentStatusClassifier = func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
 		return stats.ClassifyAgentStatus(ctx, request, statusSources)
 	}
+
+	ingestion := &tailfile.Ingestion{}
+	ingestion.Start(shutdownContext)
+	directoryDiscovery := &stats.SharedTranscriptDiscovery{}
+	var attributionIndex *finder.AttributionIndex
+	var attributionErr error
+	if directory := s.sessionFilesCacheDirectory(); directory != "" {
+		attributionIndex, attributionErr = finder.OpenAttributionIndex(filepath.Join(directory, "attribution"), ingestion)
+	} else {
+		attributionErr = errors.New("instance state directory unavailable")
+	}
+	if attributionErr != nil {
+		slog.Error("Differ attribution index unavailable", "error", attributionErr)
+		s.finder.SetAttributionUnavailable(attributionErr)
+	}
+	if attributionIndex != nil {
+		defer attributionIndex.Close()
+		s.finder.SetAttributionIndex(attributionIndex)
+		s.startBackgroundWork(func() {
+			attributionIndex.Run(shutdownContext, func(ctx context.Context) ([]finder.AttributionSource, error) {
+				archiveRoot, rootErr := finder.HistoricalAttributionRoot()
+				if rootErr != nil {
+					return nil, rootErr
+				}
+				paths, err := directoryDiscovery.Paths(ctx, archiveRoot)
+				sources := make([]finder.AttributionSource, 0, len(paths))
+				for _, path := range paths {
+					if !strings.HasPrefix(filepath.Base(path), "rollout-") {
+						continue
+					}
+					sources = append(sources, finder.AttributionSource{Path: path, Kind: "codex", Historical: true})
+				}
+				if stats.TranscriptDiscoveryPending(err) {
+					err = finder.ErrAttributionDiscoveryPending
+				}
+				return sources, err
+			})
+		})
+	}
 	if !collectorsDisabled {
 		agentInventorySources := stats.CurrentPlatformAgentInventorySources()
 		if productenv.Value("STATS_SYNTHETIC_INVENTORY") == "1" {
@@ -1219,6 +1261,12 @@ func main() {
 		s.agentStatusCollector = statusCollector
 		defer statusCollector.Stop()
 		tokenCollector := stats.NewAgentTokenCollector(statsWriter, nil, stats.AgentTokenCollectorConfig{
+			Ingestion: ingestion, DirectoryDiscovery: directoryDiscovery,
+			TranscriptSourceDiscovered: func(source stats.TranscriptSource) {
+				if attributionIndex != nil {
+					attributionIndex.Enqueue(finder.AttributionSource{Path: source.Path, Kind: source.Provider}, source.LiveCandidate)
+				}
+			},
 			Inventory: agentInventory, OpenCodeInventory: openCodeInventory,
 			ClaudeTranscriptRoot: claudeTranscriptRoot, CodexTranscriptRoot: codexTranscriptRoot,
 			OpenCodeDatabase: opencodeDatabase, CursorPath: filepath.Join(*configDir, "opencode-token-cursors.json"),

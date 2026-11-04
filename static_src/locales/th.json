@@ -44,6 +44,8 @@
   "changes.inSession": " ใน '{session}'",
   "changes.outsideRepo": "อยู่นอกที่เก็บ",
   "changes.refresh.title": "รีเฟรช Differ",
+  "changes.indexingHistory": "กำลังสร้างดัชนีประวัติ",
+  "changes.savedResults": "ผลลัพธ์ที่บันทึกไว้ กำลังรีเฟรช",
   "changes.repoCount.one": "{count} repo เซสชั่น",
   "changes.repoCount.other": "{count} repo",
   "changes.show": "แสดง Differ",

@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/keivenchang/yomux/internal/tailfile"
 )
 
 const (
@@ -65,18 +67,21 @@ type AgentTokenInventory func(context.Context) ([]AgentRecord, []error)
 type AgentTokenSources func(context.Context, []AgentRecord) ([]TranscriptSource, error)
 
 type AgentTokenCollectorConfig struct {
-	ActiveCadence        time.Duration
-	IdleCadence          time.Duration
-	Inventory            AgentTokenInventory
-	OpenCodeInventory    AgentTokenInventory
-	TranscriptSources    AgentTokenSources
-	UsagePricingProfile  func(UsageAtom) string
-	ClaudeTranscriptRoot string
-	CodexTranscriptRoot  string
-	OpenCodeDatabase     string
-	CursorPath           string
-	TranscriptCursorPath string
-	SkipTranscriptScan   bool
+	TranscriptSourceDiscovered func(TranscriptSource)
+	Ingestion                  *tailfile.Ingestion
+	DirectoryDiscovery         *SharedTranscriptDiscovery
+	ActiveCadence              time.Duration
+	IdleCadence                time.Duration
+	Inventory                  AgentTokenInventory
+	OpenCodeInventory          AgentTokenInventory
+	TranscriptSources          AgentTokenSources
+	UsagePricingProfile        func(UsageAtom) string
+	ClaudeTranscriptRoot       string
+	CodexTranscriptRoot        string
+	OpenCodeDatabase           string
+	CursorPath                 string
+	TranscriptCursorPath       string
+	SkipTranscriptScan         bool
 	// RequireTmuxPane limits production attribution to agents visible in the
 	// machine-wide tmux roster. Fixture collectors leave this false so they can
 	// scan synthetic transcript records without creating a tmux server.
@@ -155,11 +160,11 @@ func (c AgentTokenCollectorConfig) withDefaults() AgentTokenCollectorConfig {
 	if c.TranscriptSources == nil {
 		discoveryCursors := newTranscriptDiscoveryCursorStore()
 		c.TranscriptSources = func(ctx context.Context, records []AgentRecord) ([]TranscriptSource, error) {
-			return defaultAgentTokenSourcesBoundedWithCursor(ctx, records, transcriptDiscoveryBounds{
+			return defaultAgentTokenSourcesShared(ctx, records, transcriptDiscoveryBounds{
 				maxFiles: c.TranscriptDiscoveryMaxFiles,
 				maxDirs:  c.TranscriptDiscoveryMaxDirs,
 				maxBytes: c.TranscriptDiscoveryMaxBytes,
-			}, discoveryCursors, c.ClaudeTranscriptRoot, c.CodexTranscriptRoot)
+			}, discoveryCursors, c.DirectoryDiscovery, c.ClaudeTranscriptRoot, c.CodexTranscriptRoot)
 		}
 	}
 	return c
@@ -725,10 +730,22 @@ func openCodeWALIdentity(path string) (uint64, uint64, error) {
 func (c *AgentTokenCollector) loop(ctx context.Context) {
 	runWithStatsProfileLabels(ctx, "agent_token_collector", "", func(ctx context.Context) {
 		defer func() { c.mu.Lock(); c.run = false; close(c.done); c.mu.Unlock() }()
+		var ticks <-chan time.Time
+		if c.config.Ingestion != nil && c.config.ActiveCadence == AgentTokenActiveCadence && c.config.IdleCadence == AgentTokenIdleCadence {
+			ch, unsubscribe := c.config.Ingestion.Subscribe()
+			defer unsubscribe()
+			ticks = ch
+		}
 		first := true
 		for {
 			if !first {
-				if !waitCollectorCadence(ctx, c.clock, c.config.ActiveCadence, c.config.IdleCadence, c.config.ActiveFunc) {
+				if ticks != nil {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticks:
+					}
+				} else if !waitCollectorCadence(ctx, c.clock, c.config.ActiveCadence, c.config.IdleCadence, c.config.ActiveFunc) {
 					return
 				}
 			}
@@ -1267,6 +1284,13 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 	discoveryCtx, discoveryCancel := context.WithTimeout(parent, c.config.TranscriptDiscoveryTimeout)
 	sources, err := c.config.TranscriptSources(discoveryCtx, records)
 	discoveryCancel()
+	if c.config.TranscriptSourceDiscovered != nil {
+		for _, source := range sources {
+			if !source.CodexForkRepairOnly {
+				c.config.TranscriptSourceDiscovered(source)
+			}
+		}
+	}
 	completeTranscriptDiscovery := err == nil && len(inventoryErrors) == 0
 	if err != nil {
 		// Discovery budgets describe deferred backlog, not an outage. Keep the
@@ -1586,7 +1610,7 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 				c.counters.checkpointOversized.Add(1)
 			}
 		}
-		result, scanErr := ScanTranscript(source, state, TranscriptScanOptions{Context: parent, MaxBytes: remainingBytes, MaxRecords: remainingRecords, ForceReset: verification.SourceChanged})
+		result, scanErr := ScanTranscript(source, state, TranscriptScanOptions{Ingestion: c.config.Ingestion, Context: parent, MaxBytes: remainingBytes, MaxRecords: remainingRecords, ForceReset: verification.SourceChanged})
 		if scanErr != nil {
 			reason := scanErr.Error()
 			if errors.Is(scanErr, context.Canceled) || errors.Is(scanErr, context.DeadlineExceeded) {
@@ -3322,6 +3346,16 @@ func defaultAgentTokenSourcesBounded(ctx context.Context, records []AgentRecord,
 }
 
 func defaultAgentTokenSourcesBoundedWithCursor(ctx context.Context, records []AgentRecord, bounds transcriptDiscoveryBounds, cursors *transcriptDiscoveryCursorStore, configuredRoots ...string) ([]TranscriptSource, error) {
+	return defaultAgentTokenSourcesShared(ctx, records, bounds, cursors, nil, configuredRoots...)
+}
+func defaultAgentTokenSourcesShared(ctx context.Context, records []AgentRecord, bounds transcriptDiscoveryBounds, cursors *transcriptDiscoveryCursorStore, shared *SharedTranscriptDiscovery, configuredRoots ...string) ([]TranscriptSource, error) {
+	discover := func(ctx context.Context, root string, bounds transcriptDiscoveryBounds, cursors *transcriptDiscoveryCursorStore) ([]transcriptCandidate, error) {
+		if shared != nil {
+			return shared.candidates(ctx, root, bounds)
+		}
+		return recentTranscriptCandidatesWithCursor(ctx, root, bounds, cursors)
+	}
+
 	if cursors == nil {
 		cursors = newTranscriptDiscoveryCursorStore()
 	}
@@ -3336,7 +3370,7 @@ func defaultAgentTokenSourcesBoundedWithCursor(ctx context.Context, records []Ag
 		if claudeCandidateCached[root] {
 			return claudeCandidateCache[root], claudeCandidateErrors[root]
 		}
-		candidates, err := recentTranscriptCandidatesWithCursor(ctx, root, bounds, cursors)
+		candidates, err := discover(ctx, root, bounds, cursors)
 		claudeCandidateCache[root] = candidates
 		claudeCandidateErrors[root] = err
 		claudeCandidateCached[root] = true
@@ -3406,7 +3440,7 @@ func defaultAgentTokenSourcesBoundedWithCursor(ctx context.Context, records []Ag
 		if record.Kind == "claude" {
 			candidates, err = claudeCandidates(root)
 		} else {
-			candidates, err = recentTranscriptCandidatesWithCursor(ctx, root, bounds, cursors)
+			candidates, err = discover(ctx, root, bounds, cursors)
 		}
 		for priority, candidate := range candidates {
 			if len(out) >= maxAgentTokenSources {

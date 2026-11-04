@@ -44,6 +44,8 @@
   "changes.inSession": " '{session}'에서",
   "changes.outsideRepo": "저장소 외부",
   "changes.refresh.title": "Differ 새로고침",
+  "changes.indexingHistory": "기록 색인 생성 중",
+  "changes.savedResults": "저장된 결과, 새로 고치는 중",
   "changes.repoCount.one": "저장소 {count}개",
   "changes.repoCount.other": "저장소 {count}개",
   "changes.show": "Differ 표시",

@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+
+	"github.com/keivenchang/yomux/internal/tailfile"
 )
 
 const (
@@ -107,6 +109,7 @@ type TranscriptScannerState struct {
 }
 
 type TranscriptScanOptions struct {
+	Ingestion           *tailfile.Ingestion
 	Context             context.Context
 	MaxBytes            int64
 	MaxRecords          int
@@ -521,6 +524,16 @@ func ScanTranscript(source TranscriptSource, state *TranscriptScannerState, opti
 		return TranscriptScanResult{}, err
 	}
 	defer file.Close()
+	var physical io.ReaderAt = file
+	var ingestionSnapshot *tailfile.Snapshot
+	if options.Ingestion != nil {
+		snapshot, snapshotErr := options.Ingestion.Snapshot(file)
+		if snapshotErr != nil {
+			return TranscriptScanResult{}, snapshotErr
+		}
+		physical = snapshot
+		ingestionSnapshot = snapshot
+	}
 
 	before := cloneTranscriptState(*state)
 	after := cloneTranscriptState(*state)
@@ -553,7 +566,7 @@ func ScanTranscript(source TranscriptSource, state *TranscriptScannerState, opti
 			return nil, false, nil
 		}
 		data := make([]byte, size)
-		n, readErr := file.ReadAt(data, offset)
+		n, readErr := physical.ReadAt(data, offset)
 		result.BytesRead += int64(n)
 		remaining -= int64(n)
 		if readErr != nil && readErr != io.EOF {
@@ -660,7 +673,7 @@ func ScanTranscript(source TranscriptSource, state *TranscriptScannerState, opti
 		}
 	}
 	if source.Provider == "claude" && claudeMessageOrderNeedsRebuild(&after) {
-		complete, rebuildErr := rebuildLegacyClaudeMessageOrder(file, &after, options, &remaining, &result)
+		complete, rebuildErr := rebuildLegacyClaudeMessageOrder(physical, &after, options, &remaining, &result)
 		if rebuildErr != nil {
 			return TranscriptScanResult{}, rebuildErr
 		}
@@ -701,7 +714,7 @@ func ScanTranscript(source TranscriptSource, state *TranscriptScannerState, opti
 		snapshotContentLimit = 0
 	}
 	contentLimit := min(remaining, snapshotContentLimit)
-	contentSource := &transcriptCountingReader{reader: io.NewSectionReader(file, contentStart, contentLimit)}
+	contentSource := &transcriptCountingReader{reader: io.NewSectionReader(physical, contentStart, contentLimit)}
 	reader := bufio.NewReader(io.LimitReader(contentSource, contentLimit))
 	contentConsumed := int64(0)
 	for result.RecordsParsed < options.MaxRecords {
@@ -716,7 +729,16 @@ func ScanTranscript(source TranscriptSource, state *TranscriptScannerState, opti
 				break
 			}
 		}
-		line, lineBytes, complete, budgetCut, readErr := readTranscriptLine(options.Context, reader, contentRemaining)
+		var line []byte
+		var lineBytes int64
+		var complete, budgetCut bool
+		var readErr error
+		if ingestionSnapshot != nil {
+			line, lineBytes, complete, budgetCut, readErr = options.Ingestion.ReadFrame(options.Context, ingestionSnapshot, contentStart+contentConsumed, contentRemaining)
+			contentSource.read += lineBytes
+		} else {
+			line, lineBytes, complete, budgetCut, readErr = readTranscriptLine(options.Context, reader, contentRemaining)
+		}
 		if readErr != nil {
 			return TranscriptScanResult{}, readErr
 		}
@@ -885,34 +907,7 @@ func (r *transcriptCountingReader) Read(buffer []byte) (int, error) {
 // its end on the next cycle; read-ahead beyond the returned prefix is still
 // charged through the wrapped reader and may be reread later.
 func readTranscriptLine(ctx context.Context, reader *bufio.Reader, maxBytes int64) ([]byte, int64, bool, bool, error) {
-	var line []byte
-	var total int64
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, total, false, false, err
-		}
-		fragment, err := reader.ReadSlice('\n')
-		available := maxBytes - total
-		if int64(len(fragment)) > available {
-			if available > 0 {
-				line = append(line, fragment[:available]...)
-				total += available
-			}
-			return line, total, false, true, nil
-		}
-		line = append(line, fragment...)
-		total += int64(len(fragment))
-		if err == nil {
-			return line, total, true, false, nil
-		}
-		if err == bufio.ErrBufferFull {
-			continue
-		}
-		if err == io.EOF {
-			return line, total, false, false, nil
-		}
-		return nil, total, false, false, err
-	}
+	return tailfile.ReadRecord(ctx, reader, maxBytes)
 }
 
 // transcriptLineMayContainUsage is a cheap lexical gate for the JSONL hot
@@ -1321,7 +1316,7 @@ func validateClaudeMessageOrderRebuildState(state TranscriptScannerState) error 
 // Go cursor sidecars. It scans only through the already-committed byte offset,
 // in the same byte/record budget as ordinary collection, and persists bounded
 // progress so large transcripts do not turn an upgrade into one unbounded read.
-func rebuildLegacyClaudeMessageOrder(file *os.File, state *TranscriptScannerState, options TranscriptScanOptions, remaining *int64, result *TranscriptScanResult) (bool, error) {
+func rebuildLegacyClaudeMessageOrder(file io.ReaderAt, state *TranscriptScannerState, options TranscriptScanOptions, remaining *int64, result *TranscriptScanResult) (bool, error) {
 	if !state.ClaudeMessageOrderRebuildActive {
 		state.ClaudeMessageOrderRebuildActive = true
 		state.ClaudeMessageOrderRebuildOffset = 0

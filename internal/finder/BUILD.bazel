@@ -18,7 +18,9 @@ go_library(
     importpath = "github.com/keivenchang/yomux/internal/finder",
     deps = [
         "//internal/cache:cache_lib",
+        "//internal/mutablefs:mutablefs_lib",
         "//internal/productenv:productenv_lib",
+        "//internal/tailfile:tailfile_lib",
         "//internal/work:work_lib",
         "@com_github_go_git_gcfg//:go_default_library",
         "@com_github_go_git_go_billy_v5//:go_default_library",

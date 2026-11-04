@@ -47,6 +47,8 @@
   "changes.inSession": " ב-'{session}'",
   "changes.outsideRepo": "מחוץ למאגר",
   "changes.refresh.title": "רענן Differ",
+  "changes.indexingHistory": "מכין אינדקס היסטוריה",
+  "changes.savedResults": "תוצאות שמורות; מתעדכן",
   "changes.repoCount.one": "רפו {count}",
   "changes.repoCount.other": "{count} מאגרים",
   "changes.repoCount.two": "{count} מאגרים",

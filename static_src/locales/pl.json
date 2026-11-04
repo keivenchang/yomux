@@ -52,6 +52,8 @@
   "changes.refresh.title": "Odśwież Differ",
   "changes.repoCount.few": "{count} repozytoria",
   "changes.repoCount.many": "{count} repozytoriów",
+  "changes.indexingHistory": "Indeksowanie historii",
+  "changes.savedResults": "Zapisane wyniki; odświeżanie",
   "changes.repoCount.one": "{count} repozytorium",
   "changes.repoCount.other": "{count} repo",
   "changes.show": "Pokaż Differ",

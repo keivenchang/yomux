@@ -48,6 +48,8 @@
   "changes.outsideRepo": "Fuori dal repository",
   "changes.refresh.title": "Aggiorna Differ",
   "changes.repoCount.many": "{count} repo",
+  "changes.indexingHistory": "Indicizzazione della cronologia",
+  "changes.savedResults": "Risultati salvati; aggiornamento in corso",
   "changes.repoCount.one": "{count} repository",
   "changes.repoCount.other": "{count} repo",
   "changes.show": "Mostra Differ",

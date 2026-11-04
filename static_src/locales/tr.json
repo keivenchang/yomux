@@ -44,6 +44,8 @@
   "changes.inSession": " '{session}' içinde",
   "changes.outsideRepo": "Depo dışında",
   "changes.refresh.title": "Differ yenile",
+  "changes.indexingHistory": "Geçmiş dizine ekleniyor",
+  "changes.savedResults": "Kaydedilmiş sonuçlar; yenileniyor",
   "changes.repoCount.one": "{count} depo",
   "changes.repoCount.other": "{count} repo",
   "changes.show": "Differ göster",
