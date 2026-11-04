@@ -2220,6 +2220,15 @@ func TestFastFinderListBypassesBusyFinderWorkers(t *testing.T) {
 	}
 }
 
+func TestWriteRejectsEmptyExpectedFileIdentity(t *testing.T) {
+	s := &server{}
+	response := httptest.NewRecorder()
+	s.fsWrite(response, httptest.NewRequest(http.MethodPost, "/api/fs/write", strings.NewReader(`{"path":"/missing","content":"text","expected_file_id":""}`)))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("empty identity status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestPhase45ExpectedMtimeAsyncWriteCompletes(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "note.go")
@@ -7579,6 +7588,10 @@ func TestEventBrokerPendingUpdatesPreserveIncrementalPayloads(t *testing.T) {
 		path     []string
 		payloads []map[string]any
 	}{
+		{"file relocations", "file_relocated", []string{"tracking_id"}, []map[string]any{
+			{"tracking_id": "first", "revision": 2, "old_path": "/old-one", "new_path": "/new-one", "file_id": "1"},
+			{"tracking_id": "second", "revision": 2, "old_path": "/old-two", "new_path": "/new-two", "file_id": "2"},
+		}},
 		{"native filesystem invalidations", "fs_changed", []string{"paths"}, []map[string]any{
 			{"paths": []string{"first"}, "reason": "filesystem-change", "token": "t1", "revision": 1},
 			{"paths": []string{"second"}, "reason": "filesystem-change", "token": "t2", "revision": 2},

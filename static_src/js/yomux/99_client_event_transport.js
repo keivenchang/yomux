@@ -89,7 +89,7 @@ function clientEventRepairChannels(resources = []) {
   const channels = new Set();
   for (const rawResource of resources) {
     const resource = String(rawResource || '');
-    if (/^(?:files_changed|fs_changed|roots_changed|session_files_ready)/.test(resource)) channels.add('files');
+    if (/^(?:files_changed|file_relocated|fs_changed|roots_changed|session_files_ready)/.test(resource)) channels.add('files');
     else if (/^(?:auto_approve_changed|attention_acks_changed|tmux_signals_changed)/.test(resource)) channels.add('status');
     else if (/^event_log_changed/.test(resource)) channels.add('events');
     else if (/^(?:transcripts_changed|context_changed|context_items_ready)/.test(resource)) channels.add('transcripts');
@@ -453,7 +453,7 @@ const clientServerPushEventTypes = Object.freeze([
   'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
   'backend_health_changed', 'stats_collector_health',
   'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
-  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed', 'tmux_roster_changed',
+  'watched_prs_changed', 'files_changed', 'file_relocated', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed', 'tmux_roster_changed',
   'operation_terminal',
   'context_changed', 'context_items_ready', 'activity_summary_ready', 'event_log_changed', 'update_available',
   'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta',
@@ -464,7 +464,7 @@ const clientPushEventTypes = Object.freeze([...clientServerPushEventTypes, ...cl
 
 const clientPushEventQueueLimit = 256;
 const clientPushOrderedEventTypes = new Set([
-  'files_changed', 'fs_changed', 'attention_acks_changed', 'event_log_changed', 'stats_sample', 'yoagent_stream_delta',
+  'files_changed', 'file_relocated', 'fs_changed', 'attention_acks_changed', 'event_log_changed', 'stats_sample', 'yoagent_stream_delta',
 ]);
 
 function clientPushEventRequiresOrder(type, payload = {}) {
@@ -745,6 +745,10 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
     if (typeof refreshOpenFilesFromPush === 'function') {
       refreshOpenFilesFromPush(payload).catch(error => console.warn('client file push refresh failed', error));
     }
+    return;
+  }
+  if (type === 'file_relocated') {
+    applyOpenFileRelocation(payload);
     return;
   }
   if (type === 'fs_changed') {

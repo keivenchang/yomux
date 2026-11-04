@@ -2582,7 +2582,7 @@ async function runLayoutRestoreSuite() {
     // #73: the item-keyed editor maps are cleaned up on close + migrated on rename (no unbounded growth),
     // and the per-pane LRU timestamp survives a session rename.
     assert.ok(/function removeFilePanelOwner[\s\S]*?fileEditorViewState\.delete\(item\)[\s\S]*?tabLastActivatedAt\.delete\(item\)/.test(source), '#73: editor view-state + LRU timestamp are dropped on tab close');
-    assert.ok(/function renameOpenFilePath[\s\S]*?fileEditorViewState\.set\(newKey[\s\S]*?tabLastActivatedAt\.set\(newKey/.test(source), '#73: editor view-state + LRU timestamp are migrated on rename');
+    assert.ok(/function renameOpenFilePath[\s\S]*?for \(const map of \[state\.viewMode, state\.previewZoom, fileEditorViewState, fileEditorDiffExpandOverrides, tabLastActivatedAt\]\)[\s\S]*?map\.set\(newKey, map\.get\(oldKey\)\)/.test(source), '#73: editor view-state + LRU timestamp are migrated on rename');
     assert.ok(/function replaceSessionMetadata[\s\S]*?tabLastActivatedAt,\s*\n\s*\]\)/.test(source), '#73: the LRU timestamp is rekeyed across a session rename');
     const infoCss = fs.readFileSync('static/yomux.css', 'utf8');
     assert.equal(/\.info-subview\s*\{/.test(infoCss), false, 'old merged sub-view CSS is removed');
@@ -2697,7 +2697,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(refreshStart > 0 && refreshEnd > refreshStart, 'could not locate refreshOpenFilesIfChanged body');
     const refreshBody = source.slice(refreshStart, refreshEnd);
     assert.ok(refreshBody.includes('const fetched = await fetchFileEntryStatus(path);'), 'open-file refresh uses a structured file lookup');
-    assert.ok(refreshBody.includes('refreshOpenFileFromFetchedStatus(path, state, fetched)'), 'open-file polling routes structured status through the shared refresh helper');
+    assert.ok(refreshBody.includes('refreshOpenFileFromFetchedStatus(path, state, fetched, relocationRevision)'), 'open-file polling routes structured status and its relocation fence through the shared refresh helper');
     const statusRefreshStart = source.indexOf('async function refreshOpenFileFromFetchedStatus(');
     const statusRefreshEnd = source.indexOf('async function refreshOpenFilesIfChanged(', statusRefreshStart);
     assert.ok(statusRefreshStart > 0 && statusRefreshEnd > statusRefreshStart, 'could not locate refreshOpenFileFromFetchedStatus body');

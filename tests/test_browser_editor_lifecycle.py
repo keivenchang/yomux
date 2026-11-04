@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Late save and watcher callbacks must respect reopened editor ownership."""
 
+from urllib.parse import quote
+
 import pytest
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
@@ -9,7 +11,338 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
+from tests.browser_helpers.browser_layout import BROWSER_WAIT_HELPER_SOURCE
+from tests.browser_helpers.browser_console import assert_only_expected_browser_network_error
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
+
+
+def _open_relocation_editor(browser, server, path):
+    session = server.tmux.sessions[0]
+    browser.get(server.base_url + f'/?sessions={session}&layout=left&tabs=left:{session}')
+    browser.execute_script(BROWSER_WAIT_HELPER_SOURCE)
+    browser.execute_script('window.__relocationServerBinary=arguments[0]', server.process.args[0])
+    result = browser.execute_async_script("""
+      const path = arguments[0], done = arguments[arguments.length - 1];
+      (async () => {
+        await window.__yomuxTestWaitFor(() => typeof openFileInEditor === 'function', {timeoutMs:10000});
+        setTabberMode('advanced');
+        await saveSettingsPatch(settingPatch('editor.autosave',false));
+        await window.__yomuxTestWaitFor(() => boolSetting('editor.autosave',true) === false
+          && fileEditorAutosaveEnabled === false,{timeoutMs:5000});
+        window.__relocationActivityTouches=[];
+        window.__relocationRegistrations=[];
+        window.__relocationEvents=[];
+        const originalFetch=window.fetch;
+        window.fetch=(url,options) => {
+          if (String(url) === '/api/activity/touch') window.__relocationActivityTouches.push(JSON.parse(options.body));
+          const response=originalFetch(url,options);
+          if (String(url) !== '/api/watch/roots') return response;
+          return response.then(async result => {
+            const sent=JSON.parse(options.body), body=await result.clone().json();
+            window.__relocationRegistrations.push({request:{client_id:sent.client_id,roots:sent.roots,
+              search_roots:sent.search_roots,root_surfaces:sent.root_surfaces,background_files:sent.background_files,
+              open_files:sent.open_files,files:sent.files},status:result.status,
+              response:{request_id:body.request?.id,roots:body.roots,open_files:body.open_files,
+                revision:body.revision,error_path:body.error?.details?.path}});
+            return result;
+          });
+        };
+        const originalHandle=handleClientPushEvent;
+        handleClientPushEvent=(type,payload,envelope) => {
+          if (['file_relocated','fs_changed','files_changed'].includes(type)) window.__relocationEvents.push({type,payload});
+          return originalHandle(type,payload,envelope);
+        };
+        await openFileExplorerPane();
+        await openFileExplorerManualRoot(dirnameOf(path));
+        const item = await openFileInEditor(path, basenameOf(path), {viewMode:'edit',userInitiated:true});
+        await openFileEditorPane(path, {item});
+        await window.__yomuxTestWaitFor(() => panelNodes.get(item)?._cmView?.contentDOM.getBoundingClientRect().height > 0,
+          {timeoutMs:10000});
+        await syncServerWatchRoots({immediate:true});
+        await window.__yomuxTestWaitFor(() => clientEventTransportState.connected && serverWatchRootsState.registered,
+          {timeoutMs:10000});
+        return {item};
+      })().then(done, error => done({error:String(error.stack || error),
+        registrations:window.__relocationRegistrations,events:window.__relocationEvents}));
+    """, str(path))
+    assert 'error' not in result, result
+    return result['item']
+
+
+def _type_relocation_text(browser, item, text):
+    editor = browser.execute_script('return panelNodes.get(arguments[0])._cmView.contentDOM', item)
+    editor.click()
+    editor.send_keys(Keys.CONTROL, 'a')
+    for character in text:
+        editor.send_keys(character)
+
+
+def _assert_expected_relocation_absence(browser, server, request, old_path):
+    assert not old_path.exists()
+    urls = tuple(server.base_url + endpoint + '?path=' + quote(str(old_path), safe='')
+                 for endpoint in ['/api/fs/read', '/api/fs/info'])
+    consumed = assert_only_expected_browser_network_error(browser, url=urls, reason='status of 404', count=None)
+    request.node.user_properties.append(('expected_old_path_missing', consumed))
+
+
+def _wait_relocation_state(browser, old_path, new_path):
+    result = browser.execute_async_script("""
+      const oldPath = arguments[0], path = arguments[1], done = arguments[arguments.length - 1];
+      (async () => {
+        await window.__yomuxTestWaitFor(() => !fileState.has(oldPath) && fileState.has(path), {timeoutMs:15000});
+        const state = fileState.get(path), items = fileEditorTabItemsForPath(path);
+        return {content:state.content, original:state.original, dirty:state.dirty,activityTouches:window.__relocationActivityTouches,
+          items:items.map(item => ({path:fileItemPath(item), slot:slotForItem(item),
+            index:slotForItem(item) ? paneTabs(slotForItem(item)).indexOf(item) : -1,
+            mode:editorViewModeFor(path,item),document:panelNodes.get(item)?._cmView?.state.doc.toString()}))};
+      })().then(done, error => done({error:String(error.stack || error),
+        serverBinary:window.__relocationServerBinary,
+        registrations:window.__relocationRegistrations,events:window.__relocationEvents,
+        states:[oldPath,path].map(key => ({path:key,content:fileState.get(key)?.content,
+          fileId:fileState.get(key)?.fileId,trackingId:fileState.get(key)?.trackingId,
+          trackingRevision:fileState.get(key)?.trackingRevision,missing:fileState.get(key)?.externalMissing}))}));
+    """, str(old_path), str(new_path))
+    assert 'error' not in result, result
+    return result
+
+
+@pytest.mark.parametrize('rename_kind', ['same-directory', 'watched-directory', 'parent-directory'])
+def test_external_rename_preserves_two_clients_native_dirty_text(browser, isolated_dev_server_factory, request, rename_kind):
+    server = isolated_dev_server_factory('external-rename-two-clients')
+    original_window = browser.current_window_handle
+    windows = []
+    extra_windows = []
+
+    def restore_windows():
+        for window in extra_windows:
+            if window in browser.window_handles:
+                browser.switch_to.window(window)
+                browser.close()
+        browser.switch_to.window(original_window)
+        browser.get('about:blank')
+
+    request.addfinalizer(restore_windows)
+    source_dir = server.paths.home_dir / 'source'
+    source_dir.mkdir()
+    target_dir = server.paths.home_dir / 'target'
+    target_dir.mkdir()
+    path = source_dir / 'note.md'
+    path.write_text('base\n', encoding='utf-8')
+    for text in ['client alpha', 'client beta']:
+        if windows:
+            browser.switch_to.new_window('tab')
+            extra_windows.append(browser.current_window_handle)
+        item = _open_relocation_editor(browser, server, path)
+        if not windows:
+            copied = browser.execute_async_script("""
+              const path=arguments[0], item=arguments[1], done=arguments[arguments.length - 1];
+              (async () => {
+                const copy = await openFileInAdditionalEditorTab(path,basenameOf(path),{viewMode:'preview'});
+                await openFileEditorPane(path,{item});
+                return {copy,count:fileEditorTabItemsForPath(path).length};
+              })().then(done,error => done({error:String(error.stack || error)}));
+            """, str(path), item)
+            assert 'error' not in copied and copied['count'] == 2, copied
+        # Register both parent scopes before moving between them.
+        registered = browser.execute_async_script("""
+          const root = arguments[0], path=arguments[1], item=arguments[2], done = arguments[arguments.length - 1];
+          (async () => {
+            const registrationStart=window.__relocationRegistrations.length;
+            await openFileExplorerPane();
+            await openFileExplorerManualRoot(root);
+            applyLayoutSlots({[layoutTreeKey]:splitNode('row',leafNode('left'),leafNode('right'),30),
+              left:paneStateWithTabs([finderItemId],finderItemId),
+              right:paneStateWithTabs(fileEditorTabItemsForPath(path),item)});
+            await window.__yomuxTestWaitFor(() => fileExplorerTreePaneIsVisible()
+              && panelNodes.get(item)?._cmView?.contentDOM.getBoundingClientRect().height > 0,{timeoutMs:5000});
+            await syncServerWatchRoots({immediate:true,force:true});
+            await window.__yomuxTestWaitFor(() => !serverWatchRootsState.inFlight && serverWatchRootsState.registered
+              && window.__relocationRegistrations.slice(registrationStart).some(entry =>
+                entry.status === 200 && entry.request.roots.includes(root)),{timeoutMs:10000});
+            return {roots:clientServerWatchState().roots};
+          })().then(done,error => done({error:String(error)}));
+        """, str(server.paths.home_dir), str(path), item)
+        assert 'error' not in registered and str(server.paths.home_dir) in registered['roots'], registered
+        _type_relocation_text(browser, item, text)
+        before = browser.execute_script("""
+          const path=arguments[0];
+          return fileEditorTabItemsForPath(path).map(item => ({slot:slotForItem(item),mode:editorViewModeFor(path,item),
+            index:slotForItem(item) ? paneTabs(slotForItem(item)).indexOf(item) : -1}));
+        """, str(path))
+        assert any(entry['slot'] for entry in before), before
+        windows.append((browser.current_window_handle, text, before))
+    if rename_kind == 'same-directory':
+        destination = source_dir / 'renamed.md'
+        path.rename(destination)
+    elif rename_kind == 'watched-directory':
+        destination = target_dir / path.name
+        path.rename(destination)
+    else:
+        renamed_dir = server.paths.home_dir / 'renamed-parent'
+        source_dir.rename(renamed_dir)
+        destination = renamed_dir / path.name
+    for window, text, before in windows:
+        browser.switch_to.window(window)
+        try:
+            result = _wait_relocation_state(browser, path, destination)
+        except AssertionError as error:
+            peers = []
+            for peer_window, _peer_text, _peer_before in windows:
+                browser.switch_to.window(peer_window)
+                peers.append(browser.execute_script("""
+                  return {client_id:browserClientId,registrations:window.__relocationRegistrations,
+                    events:window.__relocationEvents};
+                """))
+            raise AssertionError({'failure':error.args[0],'clients':peers}) from error
+        assert result['dirty'] is True and result['content'].rstrip('\n') == text, result
+        assert result['original'] == 'base\n', result
+        assert result['items'] and all(item['path'] == str(destination) for item in result['items']), result
+        assert [{key:item[key] for key in ['slot','mode','index']} for item in result['items']] == before, {'before':before,'after':result}
+        assert any((item.get('document') or '').rstrip('\n') == text for item in result['items']), result
+        if window == original_window:
+            assert len(result['items']) == 2 and {item['mode'] for item in result['items']} == {'edit', 'preview'}, result
+        _assert_expected_relocation_absence(browser, server, request, path)
+    assert not path.exists() and destination.read_text(encoding='utf-8') == 'base\n'
+    browser.close()
+    browser.switch_to.window(original_window)
+
+
+def test_external_rename_fences_delayed_write_and_preserves_native_input(browser, isolated_dev_server_factory, request):
+    server = isolated_dev_server_factory('external-rename-delayed-write')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    path = server.paths.home_dir / 'queued.md'
+    destination = path.with_name('relocated.md')
+    path.write_text('base\n', encoding='utf-8')
+    item = _open_relocation_editor(browser, server, path)
+    _type_relocation_text(browser, item, 'first')
+    held = browser.execute_async_script("""
+      const path=arguments[0], item=arguments[1], done=arguments[arguments.length - 1];
+      (async () => {
+        window.__relocationFetch = window.fetch;
+        window.fetch = (url, options) => String(url) === '/api/fs/write'
+          ? new Promise((resolve,reject) => {
+            window.__relocationWriteBody = JSON.parse(options.body);
+            window.__releaseRelocationWrite = () => window.__relocationFetch(url,options).then(resolve,reject);
+          }) : window.__relocationFetch(url,options);
+        window.__relocationSave = saveFileEditor(path,panelNodes.get(item));
+        await window.__yomuxTestWaitFor(() => Boolean(window.__releaseRelocationWrite), {timeoutMs:5000});
+        return window.__relocationWriteBody;
+      })().then(done,error => done({error:String(error.stack || error)}));
+    """, str(path), item)
+    assert held.get('expected_file_id'), held
+    _type_relocation_text(browser, item, 'new native text')
+    path.rename(destination)
+    result = _wait_relocation_state(browser, path, destination)
+    assert result['content'].rstrip('\n') == 'new native text' and result['dirty'] is True, result
+    finished = browser.execute_async_script("""
+      const path=arguments[0], done=arguments[arguments.length - 1];
+      (async () => {
+        window.fetch = window.__relocationFetch;
+        window.__releaseRelocationWrite();
+        const saved = await window.__relocationSave;
+        return {saved,content:fileState.get(path).content,dirty:fileState.get(path).dirty};
+      })().then(done,error => done({error:String(error.stack || error)}));
+    """, str(destination))
+    assert 'error' not in finished and finished['saved'] is False, finished
+    assert finished['dirty'] is True and finished['content'].rstrip('\n') == 'new native text', finished
+    assert not path.exists() and destination.read_text(encoding='utf-8') == 'base\n'
+    _assert_expected_relocation_absence(browser, server, request, path)
+
+
+def test_external_rename_registration_snapshot_recovers_missed_event_after_atomic_save(browser, isolated_dev_server_factory, request):
+    server = isolated_dev_server_factory('external-rename-snapshot')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    path = server.paths.home_dir / 'snapshot.md'
+    destination = path.with_name('snapshot-renamed.md')
+    path.write_text('base\n', encoding='utf-8')
+    item = _open_relocation_editor(browser, server, path)
+    _type_relocation_text(browser, item, 'saved before rename')
+    saved = browser.execute_async_script("""
+      const path=arguments[0], item=arguments[1], done=arguments[arguments.length - 1];
+      (async () => {
+        await syncServerWatchRoots({immediate:true,force:true});
+        const trackingId = fileState.get(path).trackingId, oldId = fileState.get(path).fileId;
+        const saved = await saveFileEditor(path,panelNodes.get(item));
+        window.__relocationOriginalHandle = handleClientPushEvent;
+        window.__relocationMissed = [];
+        handleClientPushEvent = (type,payload,envelope) => {
+          if (type === 'file_relocated') { window.__relocationMissed.push(payload); return true; }
+          return window.__relocationOriginalHandle(type,payload,envelope);
+        };
+        return {saved,trackingId,afterTrackingId:fileState.get(path).trackingId,
+          oldId,fileId:fileState.get(path).fileId};
+      })().then(done,error => done({error:String(error.stack || error)}));
+    """, str(path), item)
+    assert 'error' not in saved and saved['saved'] is True and saved['trackingId'], saved
+    assert saved['afterTrackingId'] == saved['trackingId'] and saved['oldId'] != saved['fileId'], saved
+    path.rename(destination)
+    snapshot = browser.execute_async_script("""
+      const oldPath=arguments[0], path=arguments[1], done=arguments[arguments.length - 1];
+      (async () => {
+        await window.__yomuxTestWaitFor(() => window.__relocationMissed.length > 0, {timeoutMs:15000});
+        const missed=window.__relocationMissed[0];
+        handleClientPushEvent = window.__relocationOriginalHandle;
+        await syncServerWatchRoots({immediate:true,force:true});
+        await window.__yomuxTestWaitFor(() => !fileState.has(oldPath) && fileState.has(path), {timeoutMs:10000});
+        return {missed,trackingId:fileState.get(path).trackingId,content:fileState.get(path).content,
+          dirty:fileState.get(path).dirty,original:fileState.get(path).original};
+      })().then(done,error => done({error:String(error.stack || error)}));
+    """, str(path), str(destination))
+    assert 'error' not in snapshot and snapshot['trackingId'] == saved['trackingId'], snapshot
+    assert snapshot['missed']['tracking_id'] == saved['trackingId'], snapshot
+    assert snapshot['content'].rstrip('\n') == 'saved before rename' and snapshot['dirty'] is False, snapshot
+    assert snapshot['original'] == snapshot['content'], snapshot
+    assert not path.exists() and destination.read_text(encoding='utf-8') == snapshot['content']
+    _assert_expected_relocation_absence(browser, server, request, path)
+
+
+def test_external_rename_keeps_both_conflicting_dirty_buffers(browser, isolated_dev_server_factory, request):
+    server = isolated_dev_server_factory('external-rename-dirty-destination')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    path = server.paths.home_dir / 'source.md'
+    destination = path.with_name('destination.md')
+    path.write_text('source base\n', encoding='utf-8')
+    destination.write_text('destination base\n', encoding='utf-8')
+    source_item = _open_relocation_editor(browser, server, path)
+    _type_relocation_text(browser, source_item, 'source unsaved')
+    opened = browser.execute_async_script("""
+      const path=arguments[0], done=arguments[arguments.length - 1];
+      (async () => {
+        const item=await openFileInEditor(path,basenameOf(path),{viewMode:'edit',userInitiated:true});
+        await openFileEditorPane(path,{item});
+        await window.__yomuxTestWaitFor(() => panelNodes.get(item)?._cmView?.contentDOM.getBoundingClientRect().height > 0,
+          {timeoutMs:10000});
+        await syncServerWatchRoots({immediate:true,force:true});
+        window.__relocationConflictHandle=handleClientPushEvent;
+        window.__relocationConflictEvents=[];
+        handleClientPushEvent=(type,payload,envelope) => {
+          if (type === 'file_relocated') window.__relocationConflictEvents.push(payload);
+          return window.__relocationConflictHandle(type,payload,envelope);
+        };
+        return {item};
+      })().then(done,error => done({error:String(error.stack || error)}));
+    """, str(destination))
+    assert 'error' not in opened, opened
+    _type_relocation_text(browser, opened['item'], 'destination unsaved')
+    path.replace(destination)
+    preserved = browser.execute_async_script("""
+      const oldPath=arguments[0], path=arguments[1], done=arguments[arguments.length - 1];
+      (async () => {
+        await window.__yomuxTestWaitFor(() => window.__relocationConflictEvents.some(event => event.old_path === oldPath),
+          {timeoutMs:15000});
+        flushQueuedClientPushEvents();
+        await window.__yomuxTestWaitFor(() => Boolean(fileState.get(oldPath)?.externalError), {timeoutMs:5000});
+        handleClientPushEvent=window.__relocationConflictHandle;
+        return [oldPath,path].map(key => ({path:key,content:fileState.get(key)?.content,dirty:fileState.get(key)?.dirty,
+          document:panelNodes.get(primaryEditorItemForPath(key))?._cmView?.state.doc.toString()}));
+      })().then(done,error => done({error:String(error.stack || error)}));
+    """, str(path), str(destination))
+    assert isinstance(preserved, list) and len(preserved) == 2, preserved
+    for result, text in zip(preserved, ['source unsaved', 'destination unsaved'], strict=True):
+        assert result['dirty'] is True and result['content'].rstrip('\n') == text, preserved
+        assert result['document'].rstrip('\n') == text, preserved
+    assert not path.exists() and destination.read_text(encoding='utf-8') == 'source base\n'
+    _assert_expected_relocation_absence(browser, server, request, path)
 
 
 def test_native_settings_save_preserves_later_finder_file_open(browser, isolated_dev_server_factory, request):

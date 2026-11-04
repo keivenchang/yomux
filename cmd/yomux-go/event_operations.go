@@ -191,7 +191,7 @@ var eventTypeChannels = map[string][]string{
 	"background_refresh_requested": {"core"}, "chat_messages_changed": {"chat"},
 	"chat_typing_changed": {"chat"}, "context_changed": {"transcripts"},
 	"context_items_ready": {"transcripts"}, "event_log_changed": {"events"},
-	"files_changed": {"files"}, "fs_changed": {"files"}, "operation_terminal": {"core", "files"},
+	"file_relocated": {"files"}, "files_changed": {"files"}, "fs_changed": {"files"}, "operation_terminal": {"core", "files"},
 	"pricing_catalog_changed": {"core"}, "roots_changed": {"files"}, "search_progress": {"core"},
 	"session_files_ready": {"files"}, "settings_changed": {"core"}, "stats_sample": {"stats"}, "stats_collector_health": {"core"},
 	"transcripts_changed": {"transcripts"}, "tmux_roster_changed": {"core"}, "tmux_signals_changed": {"status", "attention"},
@@ -1088,7 +1088,7 @@ func (s *server) cancelOperation(id string) error {
 }
 func orderedClientEvent(event clientEvent) bool {
 	switch event.Type {
-	case "files_changed", "fs_changed", "attention_acks_changed", "stats_sample", "yoagent_stream_delta":
+	case "file_relocated", "files_changed", "fs_changed", "attention_acks_changed", "stats_sample", "yoagent_stream_delta":
 		return true
 	case "yoagent_jobs_changed":
 		return event.Payload["notification"] != nil

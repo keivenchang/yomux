@@ -1850,6 +1850,11 @@ function pinnedTabIconHtml(item) {
   return `<span class="pane-tab-pin-icon" title="${esc(label)}" aria-label="${esc(label)}"></span>`;
 }
 
+function setPinnedTabItems(items) {
+  pinnedTabItems = items;
+  writeStoredPinnedTabs();
+}
+
 function setTabPinned(item, pinned) {
   const resolved = resolveLayoutItem(item);
   if (!isPinnableTab(resolved)) {
@@ -1858,8 +1863,7 @@ function setTabPinned(item, pinned) {
   }
   const nextPinned = pinnedTabItems.filter(tab => tab !== resolved);
   if (pinned) nextPinned.push(resolved);
-  pinnedTabItems = normalizePinnedTabItems(nextPinned);
-  writeStoredPinnedTabs();
+  setPinnedTabItems(normalizePinnedTabItems(nextPinned));
   const next = cloneLayoutSlots(layoutSlots);
   for (const slot of layoutSlotKeys(next)) {
     next[slot] = paneStateWithTabsForSlot(slot, paneTabs(slot, next), activeItemForSide(slot, next), next);

@@ -3178,6 +3178,13 @@ function setFileState(path, state) {
     if (!Object.prototype.hasOwnProperty.call(state, 'realpath')) state.realpath = previous.realpath;
     if (!Object.prototype.hasOwnProperty.call(state, 'fileId')) state.fileId = previous.fileId;
     if (!Object.prototype.hasOwnProperty.call(state, 'fileIdentity')) state.fileIdentity = previous.fileIdentity;
+    if (state.fileId && previous.fileId && state.fileId !== previous.fileId) {
+      state.trackingId = '';
+      state.trackingRevision = 0;
+    }
+    if (!Object.prototype.hasOwnProperty.call(state, 'trackingId')) state.trackingId = previous.trackingId;
+    if (!Object.prototype.hasOwnProperty.call(state, 'trackingRevision')) state.trackingRevision = previous.trackingRevision;
+    if (!Object.prototype.hasOwnProperty.call(state, 'relocationRevision')) state.relocationRevision = previous.relocationRevision;
     if (!Object.prototype.hasOwnProperty.call(state, 'openPromise')) state.openPromise = previous.openPromise;
   }
   const normalized = normalizeFileStateRecord(state);

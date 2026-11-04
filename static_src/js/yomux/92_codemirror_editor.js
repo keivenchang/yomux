@@ -2513,6 +2513,7 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
   applyFileEditorSaveHygiene(path);
   if (!state.dirty && options.force !== true) return true;
   const savedContent = state.content;
+  const relocationRevision = Number(state.relocationRevision || 0);
   setFileEditorPanelStatus(contentPanel, t(options.autosave ? 'editor.autoSaving' : 'editor.saving'), '');
   let selfWrite = null;
   const clearSelfWrite = () => {
@@ -2525,6 +2526,7 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
       path,
       content: savedContent,
     };
+    if (state.fileId) body.expected_file_id = state.fileId;
     if (options.force !== true) body.expected_mtime = state.mtime;
     // write_file truncates in place before writing the replacement bytes. Register the expected
     // self-write before admission so watchd's zero-byte observation cannot be mistaken for an
@@ -2547,7 +2549,7 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
       clearSelfWrite();
       return true;
     }
-    applyFileIdentityMetadata(state, payload);
+    if (Number(state.relocationRevision || 0) === relocationRevision) applyFileIdentityMetadata(state, payload);
     state.mtime = filePayloadMtime(payload);
     state.size = payload.size;
     clearSelfWrite();
@@ -2580,6 +2582,8 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
   } catch (err) {
     clearSelfWrite();
     if (!fileStateIsCurrent(options.statePath || statePath, state)) return false;
+    // A failed write admitted for the old pathname cannot decide conflicts for the relocated document.
+    if (Number(state.relocationRevision || 0) !== relocationRevision) return false;
     if (err?.status === 409) {
       setFileEditorPanelStatus(panel, t('dialog.conflictTitle'), 'warn');
       return {conflict: true, message: userMessageText(err, err.message)};

@@ -2336,16 +2336,21 @@ func (s *server) fsWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Path          string `json:"path"`
-		Content       string `json:"content"`
-		ExpectedMtime *int64 `json:"expected_mtime"`
+		Path           string  `json:"path"`
+		Content        string  `json:"content"`
+		ExpectedMtime  *int64  `json:"expected_mtime"`
+		ExpectedFileID *string `json:"expected_file_id"`
 	}
-	if err := decodeJSONBody(r.Body, finder.MaxWriteBytes+4096, &body); err != nil || body.Path == "" {
+	if err := decodeJSONBody(r.Body, finder.MaxWriteBytes+4096, &body); err != nil || body.Path == "" || (body.ExpectedFileID != nil && *body.ExpectedFileID == "") {
 		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalid", Message: "invalid write request"})
 		return
 	}
+	expectedFileID := ""
+	if body.ExpectedFileID != nil {
+		expectedFileID = *body.ExpectedFileID
+	}
 	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "write", body.Path, func(ctx context.Context) (map[string]any, *finder.Error) {
-		return s.finder.Write(ctx, body.Path, body.Content, body.ExpectedMtime)
+		return s.finder.Write(ctx, body.Path, body.Content, body.ExpectedMtime, expectedFileID)
 	})
 }
 
@@ -3058,7 +3063,7 @@ func (s *server) clientEvents(w http.ResponseWriter, r *http.Request) {
 				if s.finder != nil {
 					// Keep reconnect admission serialized with lease release. Otherwise a
 					// new stream can renew this client between the count reaching zero
-					// and this old stream removing that renewed lease.
+					// and this old stream releasing that renewed producer demand.
 					s.finder.ReleaseWatchClient(clientID)
 				}
 			} else {
@@ -4822,7 +4827,7 @@ func (s *server) activityTouch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item := strings.TrimSpace(body.Item)
-	validPrefix := strings.HasPrefix(item, "file:") || strings.HasPrefix(item, "gitdiff:")
+	validPrefix := strings.HasPrefix(item, "file:") || strings.HasPrefix(item, "filecopy:") || strings.HasPrefix(item, "filediff:") || strings.HasPrefix(item, "filehistory:") || strings.HasPrefix(item, "gitdiff:")
 	if !validPrefix || len(item) <= strings.IndexByte(item, ':')+1 || len(item) > 4096 || strings.IndexFunc(item, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid activity item"})
 		return

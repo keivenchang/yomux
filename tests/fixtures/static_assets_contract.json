@@ -2,9 +2,9 @@
   "baseline": {
     "builder_blob": "6aebc01e0cd0a8a93dd3c3794cb8e887bc35e3a3",
     "builder_path": "tools/static_build.py",
-    "source_commit": "86773076f635266331df9dc2b4989c37c2d4bb42",
-    "source_state": "Differ history preparation and stable refresh on stats retention and collector health base; independent Python and native outputs match byte for byte",
-    "reviewed_source_diff_sha256": "c1c857b2ae7bdbb20336d05ecbe0e177bb446d5a6026a17abec92e4dc0fadef8"
+    "source_commit": "5d5cd42427c566f4687d85fe8ba923eaaed426cb",
+    "source_state": "Open-file relocation following; independent Python and native outputs match byte for byte",
+    "reviewed_source_diff_sha256": "d0c249f319cf84ea3738e5e38ccc20e6734c5d26d1df93496ddd4d528d84cc7f"
   },
   "reviewed_text_changes": {},
   "sha256": {
@@ -30,6 +30,6 @@
     "locales/zh-Hans.json": "da944a99ece0e48667a748c79aa980c3f986ef39579d5f280f6c8ea673ace585",
     "locales/zh-Hant.json": "95558104264896984a87261090bf7d32802d115ee593ee9da13b5fe638e5feae",
     "yomux.css": "f660c9cc0c2554352c75b9c1b092b8f30aff1c01eb8018cbce8514591093f485",
-    "yomux.js": "a3bcdc66429cf0b27cce7398e01a4a154e2fedd997097090a4394438a2eb6fdb"
+    "yomux.js": "65cff887a742b65ff95525cdb8481bdfc7a45bcf59f21d28d6d268df89b9add8"
   }
 }

@@ -198,8 +198,20 @@ func (s *Service) ReleaseWatchClient(clientID string) {
 		return
 	}
 	s.mu.Lock()
-	_, exists := s.watches[clientID]
-	delete(s.watches, clientID)
+	record, exists := s.watches[clientID]
+	if exists && len(record.OpenFiles) > 0 {
+		// Transport retirement releases producer demand immediately, but open
+		// documents retain their original lease deadline across disconnection.
+		// Advance generation to fence baseline work from the retired demand.
+		s.watchGeneration++
+		s.watches[clientID] = watchRecord{
+			OpenFiles: record.OpenFiles, UpdatedAt: record.UpdatedAt,
+			ExpiresAt: record.ExpiresAt, Generation: s.watchGeneration,
+		}
+	} else {
+		delete(s.watches, clientID)
+	}
+	s.releaseUnusedOpenFilesLocked()
 	s.mu.Unlock()
 	if exists {
 		_ = s.reconfigureNative(context.Background(), false)

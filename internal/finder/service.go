@@ -118,6 +118,9 @@ type Service struct {
 	mu                 sync.Mutex
 	nativeMu           work.ContextMutex
 	watches            map[string]watchRecord
+	openFiles          map[string]*openFileRecord
+	openFileSequence   uint64
+	openFileMutationMu sync.Mutex
 	watchGeneration    uint64
 	epoch              string
 	revision           uint64
@@ -154,6 +157,7 @@ type Service struct {
 }
 
 type watchRecord struct {
+	OpenFiles           map[string]string
 	Roots               []string
 	SearchRoots         []string
 	SignaturePaths      []string
@@ -304,7 +308,7 @@ func newService(root string, publish EventPublisher, native nativeWatchControlle
 	watchContext, watchCancel := context.WithCancel(context.Background())
 	s := &Service{
 		watchContext: watchContext, watchCancel: watchCancel,
-		root: root, uploadLimits: uploadLimits, publish: publish, watches: make(map[string]watchRecord),
+		root: root, uploadLimits: uploadLimits, publish: publish, watches: make(map[string]watchRecord), openFiles: make(map[string]*openFileRecord),
 		native: native, nativeStatus: nativeStatus, epoch: fmt.Sprintf("finder-%d", time.Now().UnixNano()),
 		demandChanged: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{}),
 		gitHistoryCache:      cache.NewLRU[string, map[string]any](maxGitProductCacheEntries),
@@ -329,6 +333,12 @@ func (s *Service) Close() {
 		}
 	})
 	<-s.done
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, entry := range s.openFiles {
+		entry.file.Close()
+		delete(s.openFiles, id)
+	}
 }
 
 func (s *Service) Root() string { return s.root }
@@ -1056,21 +1066,31 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 	if err != nil {
 		return nil, invalid("", err.Error())
 	}
-	for index, raw := range searchRoots {
+	normalizedSearchRoots := make([]string, 0, len(searchRoots))
+	for _, raw := range searchRoots {
 		requested, _, authErr := s.authorize(raw, false)
 		if authErr != nil {
+			if authErr.Status == http.StatusNotFound && s.retainedOpenFileWatchPath(clientID, raw, true) {
+				continue
+			}
 			return nil, authErr
 		}
-		searchRoots[index] = requested
+		normalizedSearchRoots = append(normalizedSearchRoots, requested)
 	}
+	searchRoots = normalizedSearchRoots
 	files, err := stringList(payload["files"], MaxWatchFiles)
 	if err != nil {
 		return nil, invalid("", err.Error())
 	}
 	normalized := make([]string, 0, len(roots))
+	omittedRoots := map[string]bool{}
 	for _, raw := range roots {
 		requested, _, authErr := s.authorize(raw, false)
 		if authErr != nil {
+			if authErr.Status == http.StatusNotFound && s.retainedOpenFileWatchPath(clientID, raw, true) {
+				omittedRoots[filepath.Clean(raw)] = true
+				continue
+			}
 			return nil, authErr
 		}
 		normalized = append(normalized, requested)
@@ -1079,12 +1099,17 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 	for _, raw := range files {
 		requested, _, authErr := s.authorize(raw, true)
 		if authErr != nil {
+			// Parent relocation can remove hot paths while retained documents
+			// still need their lease and reconnect snapshot.
+			if authErr.Status == http.StatusNotFound && s.retainedOpenFileWatchPath(clientID, raw, false) {
+				continue
+			}
 			return nil, authErr
 		}
 		normalizedFiles = append(normalizedFiles, requested)
 	}
 	files = normalizedFiles
-	watchPayload, payloadErr := s.normalizeWatchPayload(payload, normalized, files)
+	watchPayload, payloadErr := s.normalizeWatchPayload(payload, normalized, files, omittedRoots)
 	if payloadErr != nil {
 		return nil, payloadErr
 	}
@@ -1130,7 +1155,7 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 	s.watchGeneration++
 	generation := s.watchGeneration
 	s.watches[clientID] = watchRecord{
-		Roots: normalized, SearchRoots: searchRoots, SignaturePaths: signaturePaths, Files: files, BackgroundFiles: watchPayload.BackgroundFiles,
+		OpenFiles: previous.OpenFiles, Roots: normalized, SearchRoots: searchRoots, SignaturePaths: signaturePaths, Files: files, BackgroundFiles: watchPayload.BackgroundFiles,
 		RootSurfacesVersion: watchPayload.RootSurfacesVersion, RootSurfaces: watchPayload.RootSurfaces, ContextItems: watchPayload.ContextItems,
 		SessionFiles: watchPayload.SessionFiles, ActivitySummary: watchPayload.ActivitySummary,
 		Signatures: signatures, UpdatedAt: now, ExpiresAt: now.Add(watchLeaseDuration), Generation: generation,
@@ -1176,6 +1201,23 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 			"client_id": clientID, "reason": "watch-roots-replaced", "token": s.watchTokenLocked(), "revision": s.revision,
 		}
 	}
+	if ownsGeneration {
+		refs, openErr := s.registerOpenFilesLocked(payload["open_files"])
+		if openErr != nil {
+			if hadPrevious {
+				s.watches[clientID] = previous
+			} else {
+				delete(s.watches, clientID)
+			}
+			s.releaseUnusedOpenFilesLocked()
+			s.mu.Unlock()
+			_ = s.reconfigureNative(context.Background(), true)
+			return nil, openErr
+		}
+		current.OpenFiles = refs
+		s.watches[clientID] = current
+		s.releaseUnusedOpenFilesLocked()
+	}
 	// Respond with the surviving registration even when this request was superseded.
 	result := map[string]any{
 		"ok": true, "roots": append([]string{}, current.Roots...), "files": append([]string{}, current.Files...),
@@ -1183,6 +1225,7 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 		"root_surfaces_version": current.RootSurfacesVersion, "root_surfaces": append([]map[string]any{}, current.RootSurfaces...),
 		"context_items": append([]map[string]any{}, current.ContextItems...), "session_files": append([]map[string]any{}, current.SessionFiles...),
 		"activity_summary": map[string]any{},
+		"open_files":       s.openFileSnapshotLocked(current.OpenFiles),
 	}
 	result["mode"] = s.watchModeLocked()
 	result["ttl_seconds"] = int(watchLeaseDuration / time.Second)
@@ -1438,6 +1481,7 @@ func (s *Service) watchLoop() {
 	defer ticker.Stop()
 	var nativeEvents <-chan nativeWatchEvent
 	var lastFallbackPoll time.Time
+	var lastOpenFilePoll time.Time
 	if s.native != nil {
 		nativeEvents = s.native.Events()
 	}
@@ -1448,6 +1492,10 @@ func (s *Service) watchLoop() {
 		case <-ticker.C:
 			now := time.Now()
 			s.pruneExpiredWatches(now)
+			if lastOpenFilePoll.IsZero() || now.Sub(lastOpenFilePoll) >= time.Second {
+				s.reconcileOpenFiles()
+				lastOpenFilePoll = now
+			}
 			mode := s.pollingFallbackMode()
 			if mode.interval > 0 && (lastFallbackPoll.IsZero() || now.Sub(lastFallbackPoll) >= mode.interval) {
 				if mode.uncoveredOnly {
@@ -1669,6 +1717,7 @@ func (s *Service) pruneExpiredWatches(now time.Time) {
 			removed = true
 		}
 	}
+	s.releaseUnusedOpenFilesLocked()
 	s.mu.Unlock()
 	if removed {
 		s.notifyDemandChanged()

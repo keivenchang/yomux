@@ -29,7 +29,7 @@ type normalizedWatchPayload struct {
 	ActivitySummary     map[string]any
 }
 
-func (s *Service) normalizeWatchPayload(payload map[string]any, roots, files []string) (normalizedWatchPayload, *Error) {
+func (s *Service) normalizeWatchPayload(payload map[string]any, roots, files []string, omittedRoots map[string]bool) (normalizedWatchPayload, *Error) {
 	background := make([]string, 0)
 	activeFiles := make(map[string]bool, len(files))
 	for _, path := range files {
@@ -49,9 +49,23 @@ func (s *Service) normalizeWatchPayload(payload map[string]any, roots, files []s
 	for _, root := range roots {
 		accepted[root] = true
 	}
+	// Validate the complete supplied descriptor contract before dropping only
+	// roots already identified as missing retained document parents.
+	for path := range omittedRoots {
+		accepted[path] = true
+	}
 	rootSurfacesVersion, rootSurfaces, err := normalizeWatchRootSurfaces(payload, accepted)
 	if err != nil {
 		return normalizedWatchPayload{}, err
+	}
+	if len(omittedRoots) > 0 {
+		kept := rootSurfaces[:0]
+		for _, row := range rootSurfaces {
+			if !omittedRoots[row["path"].(string)] {
+				kept = append(kept, row)
+			}
+		}
+		rootSurfaces = kept
 	}
 	return normalizedWatchPayload{
 		BackgroundFiles:     background,

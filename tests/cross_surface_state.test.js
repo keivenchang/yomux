@@ -2329,8 +2329,14 @@ async function runCrossSurfaceStateSuite() {
   assert.deepStrictEqual([...watchApi.backgroundFileEditorWatchFilesForTest()], [], 'the previously visible clean editor does not move to the slower watch list');
   watchApi.setDocumentVisibilityForTest('hidden');
   assert.deepStrictEqual(canonical(watchApi.clientServerWatchStateForTest()), {
-    client_id: watchApi.clientServerWatchStateForTest().client_id, roots: [], search_roots: [], root_surfaces_version: 1, root_surfaces: [], files: [], background_files: [], context_items: [], activity_summary: {visible: false}, session_files: [],
-  }, 'hidden documents unregister every pane watch and producer request');
+    client_id: watchApi.clientServerWatchStateForTest().client_id, roots: [], search_roots: [], root_surfaces_version: 1, root_surfaces: [], files: [], open_files: [], background_files: [], context_items: [], activity_summary: {visible: false}, session_files: [],
+  }, 'hidden documents unregister pane polling and producer requests before file identities are loaded');
+  watchApi.setOpenFileStateForTest(visiblePath, {dirty: false, fileId: '1:1'});
+  watchApi.setOpenFileStateForTest(backgroundPath, {dirty: false, fileId: '1:2'});
+  assert.deepStrictEqual(canonical(watchApi.clientServerWatchStateForTest().open_files), [
+    {path: backgroundPath, file_id: '1:2', tracking_id: '', revision: 0},
+    {path: visiblePath, file_id: '1:1', tracking_id: '', revision: 0},
+  ], 'hidden documents retain clean foreground and background files for relocation');
 
   const transcriptWatchApi = loadYomux('', ['1', '2']);
   const transcriptWatchSlots = transcriptWatchApi.emptyLayoutSlots();

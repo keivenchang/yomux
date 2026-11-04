@@ -388,12 +388,21 @@ func (s *Service) Mkdir(ctx context.Context, raw string) (map[string]any, *Error
 	return map[string]any{"ok": true, "path": requested, "created": true, "kind": "dir", "operation_id": operationID()}, nil
 }
 
-func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime *int64) (map[string]any, *Error) {
+func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime *int64, expectedFileIDs ...string) (map[string]any, *Error) {
+	s.openFileMutationMu.Lock()
+	defer s.openFileMutationMu.Unlock()
 	if len([]byte(content)) > MaxWriteBytes {
 		return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "content_too_large", MessageKey: "fs.error.contentTooLarge", Path: raw, Message: fmt.Sprintf("content is too large (max %d bytes)", MaxWriteBytes)}
 	}
+	expectedFileID := ""
+	if len(expectedFileIDs) > 0 {
+		expectedFileID = expectedFileIDs[0]
+	}
 	parent, finderErr := s.openMutationParent(raw)
 	if finderErr != nil {
+		if expectedFileID != "" && finderErr.Status == http.StatusNotFound {
+			return nil, changed(raw)
+		}
 		return nil, finderErr
 	}
 	defer parent.Close()
@@ -404,6 +413,9 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 	existing, finderErr := s.requireMutationTarget(parent, true)
 	if finderErr != nil {
 		return nil, finderErr
+	}
+	if expectedFileID != "" && (existing == nil || fileID(existing) != expectedFileID) {
+		return nil, changed(requested)
 	}
 	if existing != nil && existing.IsDir() {
 		return nil, invalid(requested, "path is a directory")
@@ -449,6 +461,9 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 		}
 		current, currentErr := s.requireMutationTarget(parent, false)
 		if currentErr != nil {
+			if expectedFileID != "" && currentErr.Status == http.StatusNotFound {
+				return nil, changed(requested)
+			}
 			return nil, currentErr
 		}
 		if expectedMtime != nil && !mtimeMatches(*expectedMtime, current.ModTime().UnixNano(), current.ModTime().Unix()) {
@@ -465,6 +480,9 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 	} else {
 		quarantine, quarantineErr := s.quarantineMutationTarget(parent)
 		if quarantineErr != nil {
+			if expectedFileID != "" && quarantineErr.Status == http.StatusNotFound {
+				return nil, changed(requested)
+			}
 			return nil, quarantineErr
 		}
 		// Re-read the quarantined name after the namespace move. The initial mtime check can race
@@ -503,6 +521,9 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 		return nil, filesystemError(requested, err)
 	}
 	result := map[string]any{"path": requested, "size": stat.Size(), "mtime": stat.ModTime().Unix(), "mtime_ns": stat.ModTime().UnixNano(), "file_id": fileID(stat), "file_identity": "id:" + fileID(stat)}
+	if rotationErr := s.rotateOpenFileDescriptors(requested, existing, file); rotationErr != nil {
+		return nil, filesystemError(requested, rotationErr)
+	}
 	s.noteChange([]string{requested}, "write")
 	return result, nil
 }

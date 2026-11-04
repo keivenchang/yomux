@@ -5732,7 +5732,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(await first, true);
     await flushAsyncWork();
     assert.equal(receipts.length, 2, `the newest dirty buffer starts one trailing save; got ${receipts.length} requests`);
-    assert.deepStrictEqual(writes[1], {path, content: 'second\n', expected_mtime: 11});
+    assert.deepStrictEqual(writes[1], {path, content: 'second\n', expected_mtime: 11, expected_file_id: 'dev:1:ino:2'});
     assert.equal(api.currentFileStateForTest(path).original, 'first\n', 'the first completion records only the content it sent');
     assert.equal(api.currentFileStateForTest(path).dirty, true, 'newer content stays dirty until its own write completes');
 
@@ -5770,6 +5770,264 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     release();
     assert.equal(await save, true);
     assert.equal(api.currentFileStateForTest(path).dirty, false);
+  });
+
+  await testAsync('open file tracking follows clean background copies and preserves conflicting dirty buffers', async () => {
+    const api = loadYomux('', ['1']);
+    const oldPath = '/repo/background.md';
+    const newPath = '/repo/renamed.md';
+    api.setOpenFileStateForTest(oldPath, {kind: 'text', fileId: 'dev:1:ino:9', mtime: 10,
+      original: 'disk\n', content: 'local\n', dirty: true});
+    api.registerFileEditorLayoutItemForTest(oldPath);
+    const copy = api.fileEditorCopyItemFor(oldPath);
+    api.registerFileEditorLayoutItemForTest(oldPath, {item: copy});
+    api.currentFileStateForTest(oldPath).viewMode.set(copy, 'preview');
+    api.setPinnedTabsForTest([api.fileEditorItemFor(oldPath), copy]);
+    const registered = api.clientServerWatchStateForTest().open_files;
+    assert.equal(registered.find(file => file.path === oldPath).file_id, 'dev:1:ino:9');
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: oldPath, new_path: newPath,
+      tracking_id: 'tracked', revision: 1, file_id: 'dev:1:ino:9'}), true);
+    const moved = api.currentFileStateForTest(newPath);
+    assert.equal(moved.content, 'local\n');
+    assert.equal(moved.original, 'disk\n');
+    assert.equal(moved.dirty, true);
+    const movedCopy = copy.slice(0, -oldPath.length) + newPath;
+    assert.ok(moved.editorTabItems.has(movedCopy), 'copied tabs follow the same document');
+    assert.equal(moved.viewMode.get(movedCopy), 'preview');
+    assert.deepEqual([...api.pinnedTabsForTest()], [api.fileEditorItemFor(newPath), movedCopy], 'pins follow primary and copied tabs');
+    assert.equal(moved.relocationRevision, 1);
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: newPath, new_path: oldPath,
+      tracking_id: 'tracked', revision: 1, file_id: 'dev:1:ino:9'}), false, 'stale relocation cannot move the file backwards');
+    api.setOpenFileStateForTest(oldPath, {kind: 'text', original: 'other', content: 'other dirty', dirty: true});
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: newPath, new_path: oldPath,
+      tracking_id: 'tracked', revision: 2, file_id: 'dev:1:ino:9'}), false);
+    assert.equal(api.currentFileStateForTest(newPath).content, 'local\n');
+    assert.equal(api.currentFileStateForTest(oldPath).content, 'other dirty');
+  });
+
+  await testAsync('relocation retains the registered image viewer and its zoom', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/image.png', movedPath = '/repo/renamed-image.png';
+    api.setOpenFileStateForTest(path, {kind: 'image', fileId: 'image-inode', original: '', content: '', dirty: false});
+    const item = api.registerImageViewerLayoutItem(path);
+    api.currentFileStateForTest(path).previewZoom.set(item, 1.5);
+    const slots = api.emptyLayoutSlots();
+    slots.left = api.paneStateWithTabs([item], item);
+    api.setLayoutSlotsForTest(slots);
+    api.renameOpenFilePathForTest(path, movedPath);
+    const movedItem = item.slice(0, -path.length) + movedPath;
+    assert.equal(api.paneTabs('left')[0], movedItem);
+    assert.equal(api.currentFileStateForTest(movedPath).kind, 'image');
+    assert.equal(api.currentFileStateForTest(movedPath).previewZoom.get(movedItem), 1.5);
+    assert.equal(api.currentFileStateForTest(path), undefined);
+  });
+
+  await testAsync('relocation retains real pane membership for editor and preview copies', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/panes.md';
+    api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'dev:1:ino:3',
+      original: 'disk', content: 'dirty', dirty: true});
+    const editor = api.registerFileEditorLayoutItemForTest(path);
+    const copy = api.fileEditorCopyItemFor(path);
+    api.registerFileEditorLayoutItemForTest(path, {item: copy});
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([editor], editor);
+    slots.right = api.paneStateWithTabs([copy], copy);
+    api.setLayoutSlotsForTest(slots);
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({})));
+    api.renameOpenFilePathForTest(path, '/repo/moved.md');
+    assert.equal(api.paneTabs('left')[0], api.fileEditorItemFor('/repo/moved.md'));
+    assert.equal(api.paneTabs('right')[0], copy.slice(0, -path.length) + '/repo/moved.md');
+  });
+
+  await testAsync('authoritative replacement reload detaches old tracking and rejects its late snapshot', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/replacement.md';
+    api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'old-inode', trackingId: 'old-track',
+      trackingRevision: 1, mtime: 1, original: 'old', content: 'old', dirty: false});
+    api.registerFileEditorLayoutItemForTest(path);
+    api.setFetchForTest(url => Promise.resolve(jsonResponse(String(url).startsWith('/api/fs/read')
+      ? {path, content: 'replacement', size: 11, mtime_ns: 2, file_id: 'new-inode'}
+      : {path, kind: 'file', size: 11, mtime_ns: 2, file_id: 'new-inode'})));
+    assert.equal(await api.reloadOpenFileFromDiskForTest(path, {force: true}), true);
+    const state = api.currentFileStateForTest(path);
+    assert.equal(state.fileId, 'new-inode');
+    assert.equal(state.trackingId, '');
+    assert.equal(state.trackingRevision, 0);
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: path, path, tracking_id: 'old-track',
+      revision: 1, file_id: 'old-inode'}, true), false);
+    assert.equal(api.currentFileStateForTest(path).fileId, 'new-inode');
+  });
+
+  await testAsync('an old path status response cannot mark a relocated dirty document changed', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/status.md';
+    api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'original-inode', mtime: 1,
+      size: 4, original: 'base', content: 'edit', dirty: true});
+    api.registerFileEditorLayoutItemForTest(path);
+    let release;
+    api.setFetchForTest(() => new Promise(resolve => {release = () => resolve(jsonResponse({path,
+      kind: 'file', size: 11, mtime_ns: 2, file_id: 'replacement-inode'}));}));
+    const pending = api.refreshOpenFilesIfChangedForTest({paths: [path]});
+    await flushAsyncWork();
+    api.renameOpenFilePathForTest(path, '/repo/moved-status.md');
+    release();
+    await pending;
+    assert.equal(api.currentFileStateForTest('/repo/moved-status.md').externalChanged, undefined);
+  });
+
+  await testAsync('restart snapshots reanchor only the same physical file under a new tracking ID', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/restarted.md';
+    api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'same-inode', trackingId: 'prior-server',
+      trackingRevision: 9, original: 'disk', content: 'dirty', dirty: true});
+    api.registerFileEditorLayoutItemForTest(path);
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: path, path, tracking_id: 'new-server',
+      revision: 1, file_id: 'wrong-inode'}, true), false);
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: path, path, tracking_id: 'new-server',
+      revision: 1, file_id: 'same-inode'}), false, 'live events cannot adopt another tracking ID');
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: path, path, tracking_id: 'new-server',
+      revision: 1, file_id: 'same-inode'}, true), true);
+    assert.equal(api.currentFileStateForTest(path).trackingId, 'new-server');
+    assert.equal(api.currentFileStateForTest(path).trackingRevision, 1);
+    assert.equal(api.currentFileStateForTest(path).content, 'dirty');
+  });
+
+  await testAsync('an equal-revision registration snapshot cannot roll a local Finder rename backwards', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/finder-a.md';
+    const moved = '/repo/finder-b.md';
+    api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'same-inode', trackingId: 'tracking',
+      trackingRevision: 1, original: 'disk', content: 'dirty', dirty: true});
+    api.registerFileEditorLayoutItemForTest(path);
+    api.renameOpenFilePathForTest(path, moved);
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: moved, path, tracking_id: 'tracking',
+      revision: 1, file_id: 'same-inode'}, true), false);
+    assert.equal(api.currentFileStateForTest(path), null);
+    assert.equal(api.currentFileStateForTest(moved).content, 'dirty');
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: moved, path: moved, tracking_id: 'tracking',
+      revision: 1, file_id: 'rotated-inode'}, true), true, 'same-path snapshots still report atomic-save identity rotation');
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: moved, path: '/repo/finder-c.md', tracking_id: 'tracking',
+      revision: 2, file_id: 'rotated-inode'}, true), true, 'a newer snapshot still converges a missed relocation');
+  });
+
+  await testAsync('a queued old-path save conflict settles without reading the relocated document from its old path', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/queued.md';
+    const moved = '/repo/moved-queued.md';
+    api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'same-inode', mtime: 1,
+      original: 'disk', content: 'dirty', dirty: true});
+    let release;
+    const requests = [];
+    api.setFetchForTest((url, options) => {
+      requests.push(String(url));
+      assert.equal(String(url), '/api/fs/write');
+      assert.equal(JSON.parse(options.body).expected_file_id, 'same-inode');
+      return new Promise(resolve => {release = () => resolve(jsonResponse({error: 'missing write target'}, 409));});
+    });
+    const save = api.saveFileEditorForTest(path, null);
+    await flushAsyncWork();
+    api.renameOpenFilePathForTest(path, moved);
+    release();
+    assert.equal(await save, false);
+    assert.deepStrictEqual(requests, ['/api/fs/write']);
+    assert.equal(api.currentFileStateForTest(moved).content, 'dirty');
+    assert.equal(api.currentFileStateForTest(moved).original, 'disk');
+    assert.equal(api.currentFileStateForTest(moved).dirty, true);
+  });
+
+  await testAsync('a missing clean loaded document retains its buffer and baseline through relocation or deletion', async () => {
+    for (const relocated of [false, true]) {
+      const api = loadYomux('', ['1']);
+      const path = '/repo/clean-missing.md';
+      api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'same-inode',
+        original: 'retained disk bytes', content: 'retained disk bytes', dirty: false});
+      api.registerFileEditorLayoutItemForTest(path);
+      api.markOpenFileMissingForTest(path);
+      assert.equal(api.currentFileStateForTest(path).content, 'retained disk bytes');
+      assert.equal(api.currentFileStateForTest(path).original, 'retained disk bytes');
+      assert.equal(api.currentFileStateForTest(path).externalMissing, true);
+      assert.equal(api.currentFileStateForTest(path).kind, 'text');
+      if (relocated) {
+        api.applyOpenFileRelocationForTest({old_path: path, new_path: '/repo/found.md',
+          tracking_id: 'found', revision: 1, file_id: 'same-inode'});
+        assert.equal(api.currentFileStateForTest('/repo/found.md').content, 'retained disk bytes');
+        assert.equal(api.currentFileStateForTest('/repo/found.md').original, 'retained disk bytes');
+        assert.equal(api.currentFileStateForTest('/repo/found.md').dirty, false);
+        assert.equal(api.currentFileStateForTest('/repo/found.md').externalMissing, undefined);
+      }
+    }
+  });
+
+  await testAsync('missed relocation resources use the existing filesystem snapshot repair channel', async () => {
+    const api = loadYomux('', ['1']);
+    assert.deepStrictEqual([...api.clientEventRepairChannelsForTest(['file_relocated'])], ['files']);
+    assert.deepStrictEqual([...api.clientEventRepairChannelsForTest(['file_relocated:tracked-document'])], ['files']);
+  });
+
+  await testAsync('relocation delayed autofocus preserves an unrelated typing surface and follows its own focused copy', async () => {
+    for (const focusedSource of [false, true]) {
+      const timers = [];
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        setTimeout: (fn, ms) => {timers.push({fn, ms}); return timers.length;},
+      });
+      api.setAutoFocusEnabledForTest(true);
+      for (const path of ['/repo/focus-a.md', '/repo/unrelated.md']) {
+        api.setOpenFileStateForTest(path, {kind: 'text', fileId: path, mtime: 1,
+          original: 'base', content: 'base', dirty: false});
+        api.registerFileEditorLayoutItemForTest(path);
+      }
+      const oldItem = api.fileEditorItemFor('/repo/focus-a.md');
+      const unrelated = api.fileEditorItemFor('/repo/unrelated.md');
+      const slots = api.emptyLayoutSlots();
+      slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+      slots.left = api.paneStateWithTabs([oldItem], oldItem);
+      slots.right = api.paneStateWithTabs([unrelated], unrelated);
+      api.setLayoutSlotsForTest(slots);
+      api.setFocusedPanelItemValueForTest(focusedSource ? oldItem : unrelated);
+      api.setFetchForTest(() => Promise.resolve(jsonResponse({})));
+      timers.length = 0;
+      api.renameOpenFilePathForTest('/repo/focus-a.md', '/repo/focus-b.md');
+      for (const timer of timers.filter(timer => timer.ms === 80)) timer.fn();
+      assert.equal(api.focusedPanelItemForTest(), focusedSource ? api.fileEditorItemFor('/repo/focus-b.md') : unrelated);
+    }
+  });
+
+  await testAsync('rapid Finder renames cannot consume a later server relocation revision', async () => {
+    const api = loadYomux('', ['1']);
+    const original = '/repo/a.md';
+    api.setOpenFileStateForTest(original, {kind: 'text', fileId: 'dev:1:ino:7',
+      original: 'disk', content: 'local', dirty: true});
+    api.registerFileEditorLayoutItemForTest(original);
+    api.applyOpenFileRelocationForTest({old_path: original, path: original,
+      tracking_id: 'rapid-renames', revision: 1, file_id: 'dev:1:ino:7'}, true);
+    api.renameOpenFilePathForTest(original, '/repo/b.md');
+    api.renameOpenFilePathForTest('/repo/b.md', '/repo/c.md');
+    // The server's once-per-second pass coalesces A -> B -> C into revision 2.
+    api.applyOpenFileRelocationForTest({old_path: original, new_path: '/repo/c.md',
+      tracking_id: 'rapid-renames', revision: 2, file_id: 'dev:1:ino:7'});
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: '/repo/c.md', new_path: '/repo/d.md',
+      tracking_id: 'rapid-renames', revision: 3, file_id: 'dev:1:ino:7'}), true);
+    const state = api.currentFileStateForTest('/repo/d.md');
+    assert.equal(state.content, 'local');
+    assert.equal(state.original, 'disk');
+    assert.equal(state.trackingRevision, 3);
+    assert.equal(api.clientServerWatchStateForTest().open_files[0].revision, 3);
+  });
+
+  await testAsync('existing file saves carry physical identity even for explicit overwrite', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/guarded.md';
+    api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'dev:1:ino:42', mtime: 1,
+      original: 'old', content: 'new', dirty: true});
+    let write;
+    api.setFetchForTest((url, options) => {
+      write = JSON.parse(options.body);
+      return Promise.resolve(jsonResponse({path, size: 3, mtime_ns: 2, file_id: 'dev:1:ino:43'}));
+    });
+    assert.equal(await api.saveFileEditorForTest(path, null, {force: true}), true);
+    assert.equal(write.expected_file_id, 'dev:1:ino:42');
   });
 
   await testAsync('editor moves pending saves to a renamed path without changing the active request', async () => {
