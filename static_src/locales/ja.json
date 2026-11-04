@@ -2553,5 +2553,7 @@
   "debug.graph.metric.apiDuration": "API 所要時間",
   "debug.graph.metric.apiDuration.desc": "HTTP リクエストの所要時間。ping の往復時間とは別の測定です。",
   "debug.graph.metric.sseAge": "SSE 公開後の経過時間",
-  "debug.graph.metric.sseAge.desc": "再送と時計のずれを含む公開後の時間。配信遅延ではありません。"
+  "debug.graph.metric.sseAge.desc": "再送と時計のずれを含む公開後の時間。配信遅延ではありません。",
+  "statsRecording.failed": "記録に失敗しました",
+  "statsRecording.last": "最後に記録に成功した時刻: {details}"
 }

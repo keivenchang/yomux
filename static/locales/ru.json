@@ -1739,6 +1739,8 @@
   "state.workingFor": "Работает {duration}",
   "state.yolo-approval": "YOLO ожидает подтверждения",
   "stats.error.unavailable": "Служба статистики недоступна: {error}",
+  "statsRecording.failed": "Ошибка записи",
+  "statsRecording.last": "Последняя успешная запись: {details}",
   "status.activitySummaryFailed": "Сводка активности не удалась: {error}",
   "status.browserBlockedLink": "ссылка заблокирована браузером: {link}",
   "status.changedFilesFailed": "изменить файлы не удалось: {error}",

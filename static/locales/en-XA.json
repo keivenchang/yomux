@@ -1683,6 +1683,8 @@
   "state.workingFor": "⟦Ŵóřķíñǧ ƒóř {duration}·····⟧",
   "state.yolo-approval": "⟦ÝÓŁÓ ƥéñđíñǧ áƥƥřóṽáł········⟧",
   "stats.error.unavailable": "⟦Šťáťš šéřṽíçé úñáṽáíłáƀłé: {error}···········⟧",
+  "statsRecording.failed": "⟦Řéçóřđíñǧ ƒáíłéđ······⟧",
+  "statsRecording.last": "⟦Łášť šúççéššƒúł řéçóřđíñǧ: {details}···········⟧",
   "status.activitySummaryFailed": "⟦áçťíṽíťý šúɱɱářý ƒáíłéđ: {error}··········⟧",
   "status.browserBlockedLink": "⟦ƀřóŵšéř ƀłóçķéđ łíñķ: {link}·········⟧",
   "status.changedFilesFailed": "⟦çĥáñǧéđ ƒíłéš ƒáíłéđ: {error}·········⟧",

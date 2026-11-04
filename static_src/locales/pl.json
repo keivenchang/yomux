@@ -2643,5 +2643,7 @@
   "debug.graph.metric.apiDuration": "Czas API",
   "debug.graph.metric.apiDuration.desc": "Czas żądania HTTP, oddzielny od czasu ping w obie strony.",
   "debug.graph.metric.sseAge": "Wiek publikacji SSE",
-  "debug.graph.metric.sseAge.desc": "Czas od publikacji, w tym powtórzenia i różnica zegarów; nie opóźnienie dostarczenia."
+  "debug.graph.metric.sseAge.desc": "Czas od publikacji, w tym powtórzenia i różnica zegarów; nie opóźnienie dostarczenia.",
+  "statsRecording.failed": "Błąd zapisu",
+  "statsRecording.last": "Ostatni udany zapis: {details}"
 }

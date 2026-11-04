@@ -1683,6 +1683,8 @@
   "state.workingFor": "Arbeitet seit {duration}",
   "state.yolo-approval": "YOLO-Bestätigung ausstehend",
   "stats.error.unavailable": "Statistikdienst nicht verfügbar: {error}",
+  "statsRecording.failed": "Aufzeichnung fehlgeschlagen",
+  "statsRecording.last": "Letzte erfolgreiche Aufzeichnung: {details}",
   "status.activitySummaryFailed": "Aktivitätszusammenfassung fehlgeschlagen: {error}",
   "status.browserBlockedLink": "Browser blockierter Link: {link}",
   "status.changedFilesFailed": "Geänderte Dateien fehlgeschlagen: {error}",

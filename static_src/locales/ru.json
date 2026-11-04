@@ -2643,5 +2643,7 @@
   "debug.graph.metric.apiDuration": "Длительность API",
   "debug.graph.metric.apiDuration.desc": "Длительность HTTP-запроса отдельно от времени ping туда и обратно.",
   "debug.graph.metric.sseAge": "Возраст публикации SSE",
-  "debug.graph.metric.sseAge.desc": "Время с публикации, включая повторы и сдвиг часов; это не задержка доставки."
+  "debug.graph.metric.sseAge.desc": "Время с публикации, включая повторы и сдвиг часов; это не задержка доставки.",
+  "statsRecording.failed": "Ошибка записи",
+  "statsRecording.last": "Последняя успешная запись: {details}"
 }

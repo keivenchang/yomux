@@ -1683,6 +1683,8 @@
   "state.workingFor": "{duration} 동안 작업 중",
   "state.yolo-approval": "YOLO 승인 대기 중",
   "stats.error.unavailable": "통계 서비스를 사용할 수 없습니다: {error}",
+  "statsRecording.failed": "기록 실패",
+  "statsRecording.last": "마지막으로 기록에 성공한 시간: {details}",
   "status.activitySummaryFailed": "활동 요약 실패: {error}",
   "status.browserBlockedLink": "브라우저 차단 링크: {link}",
   "status.changedFilesFailed": "변경된 파일 실패: {error}",

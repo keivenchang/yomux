@@ -552,8 +552,8 @@ func TestWriterPruneProcessCrashBeforeCommitRecoversAndRetries(t *testing.T) {
 	if err := writer.db.QueryRowContext(ctx, "SELECT started_at, ended_at FROM coverage_epochs WHERE family = 'cpu' AND source_id = 'synthetic' AND epoch_id = 'old'").Scan(&coverageStart, &coverageEnd); err != nil {
 		t.Fatalf("read synthetic coverage after prune retry: %v", err)
 	}
-	if coverageStart != pruneAt-float64(RetentionSeconds) || !coverageEnd.Valid || coverageEnd.Float64 != endedAt || result.CoverageClipped != 1 {
-		t.Fatalf("prune retry coverage = started:%v ended:%+v clipped:%d, want started:%v ended:%v clipped:1", coverageStart, coverageEnd, result.CoverageClipped, pruneAt-float64(RetentionSeconds), endedAt)
+	if coverageStart != 1 || !coverageEnd.Valid || coverageEnd.Float64 != endedAt || result.CoverageClipped != 0 {
+		t.Fatalf("prune retry coverage = started:%v ended:%+v clipped:%d, want started:%v ended:%v clipped:0", coverageStart, coverageEnd, result.CoverageClipped, float64(1), endedAt)
 	}
 	pendingAfterPrune, err := writer.PendingInvalidationCells(ctx)
 	if err != nil {

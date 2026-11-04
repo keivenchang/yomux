@@ -2553,5 +2553,7 @@
   "debug.graph.metric.apiDuration": "API 耗时",
   "debug.graph.metric.apiDuration.desc": "HTTP 请求耗时，与 ping 往返时间分开统计。",
   "debug.graph.metric.sseAge": "SSE 发布年龄",
-  "debug.graph.metric.sseAge.desc": "从发布到接收的时间，包含重放和时钟偏差；不是传输延迟。"
+  "debug.graph.metric.sseAge.desc": "从发布到接收的时间，包含重放和时钟偏差；不是传输延迟。",
+  "statsRecording.failed": "记录失败",
+  "statsRecording.last": "上次成功记录：{details}"
 }

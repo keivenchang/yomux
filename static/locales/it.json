@@ -1711,6 +1711,8 @@
   "state.workingFor": "In esecuzione da {duration}",
   "state.yolo-approval": "YOLO in attesa di approvazione",
   "stats.error.unavailable": "Servizio statistiche non disponibile: {error}",
+  "statsRecording.failed": "Registrazione non riuscita",
+  "statsRecording.last": "Ultima registrazione riuscita: {details}",
   "status.activitySummaryFailed": "riepilogo dell'attività fallito: {error}",
   "status.browserBlockedLink": "link bloccato dal browser: {link}",
   "status.changedFilesFailed": "file modificati non funzionavano: {error}",

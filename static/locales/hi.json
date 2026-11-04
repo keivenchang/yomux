@@ -1683,6 +1683,8 @@
   "state.workingFor": "{duration} से काम हो रहा है",
   "state.yolo-approval": "YOLO अनुमोदन प्रतीक्षित",
   "stats.error.unavailable": "आँकड़ा सेवा उपलब्ध नहीं है: {error}",
+  "statsRecording.failed": "रिकॉर्डिंग विफल",
+  "statsRecording.last": "अंतिम सफल रिकॉर्डिंग: {details}",
   "status.activitySummaryFailed": "गतिविधि सारांश विफल: {error}",
   "status.browserBlockedLink": "ब्राउज़र अवरुद्ध लिंक: {link}",
   "status.changedFilesFailed": "परिवर्तित फ़ाइलें विफल: {error}",

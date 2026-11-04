@@ -1047,6 +1047,7 @@ func (c *agentStatusCounters) snapshot() AgentStatusCollectorCounters {
 // AgentStatusCollector owns one collection goroutine. RunOnce is intended for
 // deterministic callers and must not overlap Start.
 type AgentStatusCollector struct {
+	health        CollectorHealthTracker
 	inventory     AgentStatusInventory
 	classifier    AgentStatusClassifier
 	writer        BatchWriter
@@ -1241,8 +1242,10 @@ func (c *AgentStatusCollector) runOnce(parent context.Context) {
 	} else if len(batch.Observations) > 0 {
 		nextHadSuccess = true
 	}
+	c.health.Attempt("agent_status", started)
 	appendSucceeded := false
 	if c.writer == nil {
+		c.health.Record("agent_status", c.clock.Now(), errors.New("writer unavailable"), 0, 0)
 		c.counters.errors.Add(1)
 	} else {
 		var result AppendResult
@@ -1250,6 +1253,7 @@ func (c *AgentStatusCollector) runOnce(parent context.Context) {
 		runWithStatsProfilePhase(ctx, "agent_status_collector", "agent_status", "append", func(phaseCtx context.Context) {
 			result, appendErr = c.writer.AppendBatch(phaseCtx, batch)
 		})
+		c.health.Record("agent_status", c.clock.Now(), appendErr, 0, 0)
 		if appendErr != nil {
 			c.counters.errors.Add(1)
 		} else {
@@ -1651,3 +1655,5 @@ func BuildAgentStatusFacts(states map[string]any, sessionStates map[string]Agent
 func agentStatusEventID(fact HostFactContext) string {
 	return hostEventID("agent_status", fact.SourceID, fact.EpochID, fact.ObservedAt, "sample")
 }
+
+func (c *AgentStatusCollector) Health() map[string]CollectorHealth { return c.health.Snapshot() }

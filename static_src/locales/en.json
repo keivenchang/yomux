@@ -2553,5 +2553,7 @@
   "debug.graph.metric.apiDuration": "API duration",
   "debug.graph.metric.apiDuration.desc": "HTTP request duration. Includes upload, server work and response delivery; separate from ping RTT.",
   "debug.graph.metric.sseAge": "SSE publication age",
-  "debug.graph.metric.sseAge.desc": "Time since publication at receipt, including replay and clock offset. This is not delivery latency."
+  "debug.graph.metric.sseAge.desc": "Time since publication at receipt, including replay and clock offset. This is not delivery latency.",
+  "statsRecording.failed": "Recording failed",
+  "statsRecording.last": "Last successful recording: {details}"
 }

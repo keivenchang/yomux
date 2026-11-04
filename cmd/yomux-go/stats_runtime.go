@@ -547,6 +547,7 @@ func (s *server) statsRuntimeDiagnostics() map[string]any {
 		}
 	}
 	payload["collectors"] = collectors
+	payload["collector_health"] = s.statsCollectorHealth()
 	if s.statsRuntimeRecorder != nil {
 		payload["runtime_recorder"] = s.statsRuntimeRecorder.diagnostics()
 	}

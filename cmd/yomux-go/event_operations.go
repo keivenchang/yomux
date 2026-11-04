@@ -193,7 +193,7 @@ var eventTypeChannels = map[string][]string{
 	"context_items_ready": {"transcripts"}, "event_log_changed": {"events"},
 	"files_changed": {"files"}, "fs_changed": {"files"}, "operation_terminal": {"core", "files"},
 	"pricing_catalog_changed": {"core"}, "roots_changed": {"files"}, "search_progress": {"core"},
-	"session_files_ready": {"files"}, "settings_changed": {"core"}, "stats_sample": {"stats"},
+	"session_files_ready": {"files"}, "settings_changed": {"core"}, "stats_sample": {"stats"}, "stats_collector_health": {"core"},
 	"transcripts_changed": {"transcripts"}, "tmux_roster_changed": {"core"}, "tmux_signals_changed": {"status", "attention"},
 	"update_available": {"core"}, "watched_prs_changed": {"core", "attention"},
 	"yoagent_conversation_changed": {"yoagent"}, "yoagent_jobs_changed": {"yoagent", "attention"},
@@ -202,7 +202,7 @@ var eventTypeChannels = map[string][]string{
 
 var eventChannels = []string{"activity", "attention", "chat", "core", "events", "files", "status", "stats", "transcripts", "yoagent"}
 
-var retainedEventTypes = map[string]bool{"backend_health_changed": true, "search_progress": true}
+var retainedEventTypes = map[string]bool{"backend_health_changed": true, "stats_collector_health": true, "search_progress": true}
 
 func retainedClientEvent(event clientEvent) bool {
 	if retainedEventTypes[event.Type] {

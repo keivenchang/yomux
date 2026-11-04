@@ -2553,5 +2553,7 @@
   "debug.graph.metric.apiDuration": "API-duur",
   "debug.graph.metric.apiDuration.desc": "Duur van het HTTP-verzoek, apart van de ping-rondreistijd.",
   "debug.graph.metric.sseAge": "Leeftijd SSE-publicatie",
-  "debug.graph.metric.sseAge.desc": "Tijd sinds publicatie, inclusief herhaling en klokverschil; geen bezorgvertraging."
+  "debug.graph.metric.sseAge.desc": "Tijd sinds publicatie, inclusief herhaling en klokverschil; geen bezorgvertraging.",
+  "statsRecording.failed": "Opslaan mislukt",
+  "statsRecording.last": "Laatst geslaagd opgeslagen: {details}"
 }

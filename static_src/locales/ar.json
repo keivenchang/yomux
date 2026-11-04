@@ -2733,5 +2733,7 @@
   "debug.graph.metric.apiDuration": "مدة API",
   "debug.graph.metric.apiDuration.desc": "مدة طلب HTTP، منفصلة عن زمن ذهاب وإياب اختبار الاتصال.",
   "debug.graph.metric.sseAge": "عمر نشر SSE",
-  "debug.graph.metric.sseAge.desc": "الوقت منذ النشر، بما في ذلك إعادة الإرسال وفرق الساعة؛ ليس تأخير التسليم."
+  "debug.graph.metric.sseAge.desc": "الوقت منذ النشر، بما في ذلك إعادة الإرسال وفرق الساعة؛ ليس تأخير التسليم.",
+  "statsRecording.failed": "فشل التسجيل",
+  "statsRecording.last": "آخر تسجيل ناجح: {details}"
 }

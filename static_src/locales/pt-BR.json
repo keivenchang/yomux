@@ -2598,5 +2598,7 @@
   "debug.graph.metric.apiDuration": "Duração da API",
   "debug.graph.metric.apiDuration.desc": "Duração da solicitação HTTP, separada do tempo de ida e volta do ping.",
   "debug.graph.metric.sseAge": "Idade da publicação SSE",
-  "debug.graph.metric.sseAge.desc": "Tempo desde a publicação, incluindo repetições e diferença de relógio; não é latência de entrega."
+  "debug.graph.metric.sseAge.desc": "Tempo desde a publicação, incluindo repetições e diferença de relógio; não é latência de entrega.",
+  "statsRecording.failed": "Falha na gravação",
+  "statsRecording.last": "Última gravação bem-sucedida: {details}"
 }

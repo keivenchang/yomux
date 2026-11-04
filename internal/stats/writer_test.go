@@ -337,7 +337,7 @@ func TestAppendUsageChunkBoundariesPreserveReplayRepairAndRollback(t *testing.T)
 			conflict.Payload["quantity"] = 99.0
 			checkpoint := Checkpoint{Key: "chunk-test", Kind: "transcript", Version: 1}
 			_, err = writer.AppendWithCheckpoints(ctx, AppendBatch{UsageAtoms: append(fresh, conflict)}, []Checkpoint{checkpoint})
-			if err == nil || err.Error() != "usage atom identity conflicts with stored data" {
+			if err == nil || requireAppendError(t, err).Unwrap().Error() != "usage atom identity conflicts with stored data" {
 				t.Fatalf("chunk conflict = %v", err)
 			}
 			after, err := writer.refillBaseline(ctx, 0, 100)
@@ -355,7 +355,7 @@ func TestAppendUsageChunkBoundariesPreserveReplayRepairAndRollback(t *testing.T)
 					want = "append_batch.identity: conflicting duplicate idempotency key"
 				}
 				_, err := writer.AppendBatch(ctx, AppendBatch{UsageAtoms: append(append([]UsageAtom{}, atoms...), duplicate)})
-				if err == nil || err.Error() != want {
+				if err == nil || requireAppendError(t, err).Unwrap().Error() != want {
 					t.Fatalf("chunk duplicate = %v, want %q", err, want)
 				}
 			}
@@ -510,7 +510,7 @@ func TestAppendBatchRollsBackWhenRingInvalidationWriteFails(t *testing.T) {
 		CoverageEpochs:   []CoverageEpoch{{Family: "cpu", SourceID: "host", EpochID: "epoch-2", StartedAt: 30, EndedAt: &end, NativeCadenceSeconds: 1, OwnerGeneration: 2}},
 		UnavailableSpans: []UnavailableSpan{{Family: "gpu", SourceID: "device-0", EpochID: "epoch-2", StartedAt: 30, EndedAt: 40, NativeCadenceSeconds: 1, Reason: "synthetic outage", OwnerGeneration: 2}},
 	}
-	if _, err := writer.AppendBatch(ctx, batch); err == nil || !strings.Contains(err.Error(), "synthetic ring invalidation failure") {
+	if _, err := writer.AppendBatch(ctx, batch); err == nil || !strings.Contains(requireAppendError(t, err).Unwrap().Error(), "synthetic ring invalidation failure") {
 		t.Fatalf("append with failing synthetic invalidation trigger error = %v", err)
 	}
 	if got := writer.SourceGeneration(); got != beforeGeneration {
@@ -789,7 +789,7 @@ func TestWriterPruneDeletesAndClipsFactsAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Generation != 2 || result.Observations != 1 || result.UsageAtoms != 1 || result.CoverageClipped != 1 || result.UnavailableClipped != 1 {
+	if result.Generation != 2 || result.Observations != 1 || result.UsageAtoms != 1 || result.CoverageClipped != 0 || result.UnavailableClipped != 1 {
 		t.Fatalf("prune result = %+v", result)
 	}
 	var count int
@@ -800,8 +800,8 @@ func TestWriterPruneDeletesAndClipsFactsAtomically(t *testing.T) {
 		t.Fatalf("old usage atoms = %d, err=%v", count, err)
 	}
 	var started float64
-	if err = writer.db.QueryRow("SELECT started_at FROM coverage_epochs WHERE epoch_id='epoch'").Scan(&started); err != nil || started != 100 {
-		t.Fatalf("clipped coverage start = %v, err=%v", started, err)
+	if err = writer.db.QueryRow("SELECT started_at FROM coverage_epochs WHERE epoch_id='epoch'").Scan(&started); err != nil || started != 0 {
+		t.Fatalf("immutable coverage start = %v, err=%v", started, err)
 	}
 	pending, err := writer.PendingInvalidationCells(ctx)
 	if err != nil || len(pending) == 0 {
@@ -1429,5 +1429,33 @@ func TestAppendTimingsSeparateWriterContentionAndCommit(t *testing.T) {
 	}
 	if timings.Wait <= 0 || timings.Validation <= 0 || timings.Transaction <= 0 || timings.Commit <= 0 || timings.Commit > timings.Transaction {
 		t.Fatalf("phase measurements = %+v", timings)
+	}
+}
+
+func TestWriterContinuesEpochAfterRetention(t *testing.T) {
+	ctx := context.Background()
+	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "retention.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	batch := writerBatch()
+	end := float64(RetentionSeconds + 200)
+	batch.CoverageEpochs[0].EndedAt = &end
+	if _, err := writer.AppendBatch(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	for _, cutoff := range []float64{100, 110, 120} {
+		if _, err := writer.Prune(ctx, float64(RetentionSeconds)+cutoff); err != nil {
+			t.Fatal(err)
+		}
+		end++
+		batch.Observations[0].EventID = fmt.Sprintf("after-prune-%g", cutoff)
+		batch.Observations[0].ObservedAt = end - 1
+		batch.UsageAtoms[0].EventID = fmt.Sprintf("tokens-after-prune-%g", cutoff)
+		batch.UsageAtoms[0].ObservedAt = end - 1
+		if _, err := writer.AppendBatch(ctx, batch); err != nil {
+			t.Fatalf("append after cutoff %g: %v", cutoff, err)
+		}
 	}
 }

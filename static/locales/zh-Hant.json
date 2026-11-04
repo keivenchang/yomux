@@ -1683,6 +1683,8 @@
   "state.workingFor": "已執行 {duration}",
   "state.yolo-approval": "優樂待核准",
   "stats.error.unavailable": "統計服務無法使用：{error}",
+  "statsRecording.failed": "記錄失敗",
+  "statsRecording.last": "上次成功記錄：{details}",
   "status.activitySummaryFailed": "活動摘要失敗：{error}",
   "status.browserBlockedLink": "瀏覽器已封鎖連結：{link}",
   "status.changedFilesFailed": "變更檔案載入失敗：{error}",

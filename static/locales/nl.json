@@ -1683,6 +1683,8 @@
   "state.workingFor": "{duration} actief",
   "state.yolo-approval": "YOLO in afwachting van goedkeuring",
   "stats.error.unavailable": "Statistiekservice niet beschikbaar: {error}",
+  "statsRecording.failed": "Opslaan mislukt",
+  "statsRecording.last": "Laatst geslaagd opgeslagen: {details}",
   "status.activitySummaryFailed": "activiteitensamenvatting mislukt: {error}",
   "status.browserBlockedLink": "browser geblokkeerde link: {link}",
   "status.changedFilesFailed": "gewijzigde bestanden mislukten: {error}",

@@ -1683,6 +1683,8 @@
   "state.workingFor": "Working for {duration}",
   "state.yolo-approval": "YOLO pending approval",
   "stats.error.unavailable": "Stats service unavailable: {error}",
+  "statsRecording.failed": "Recording failed",
+  "statsRecording.last": "Last successful recording: {details}",
   "status.activitySummaryFailed": "activity summary failed: {error}",
   "status.browserBlockedLink": "browser blocked link: {link}",
   "status.changedFilesFailed": "changed files failed: {error}",

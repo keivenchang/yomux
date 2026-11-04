@@ -2553,5 +2553,7 @@
   "debug.graph.metric.apiDuration": "API 소요 시간",
   "debug.graph.metric.apiDuration.desc": "ping 왕복 시간과 별도로 측정한 HTTP 요청 소요 시간입니다.",
   "debug.graph.metric.sseAge": "SSE 게시 후 경과 시간",
-  "debug.graph.metric.sseAge.desc": "재전송과 시계 차이를 포함한 게시 후 시간이며 전송 지연이 아닙니다."
+  "debug.graph.metric.sseAge.desc": "재전송과 시계 차이를 포함한 게시 후 시간이며 전송 지연이 아닙니다.",
+  "statsRecording.failed": "기록 실패",
+  "statsRecording.last": "마지막으로 기록에 성공한 시간: {details}"
 }

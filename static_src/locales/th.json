@@ -2553,5 +2553,7 @@
   "debug.graph.metric.apiDuration": "ระยะเวลา API",
   "debug.graph.metric.apiDuration.desc": "ระยะเวลาคำขอ HTTP แยกจากเวลาไปกลับของ ping",
   "debug.graph.metric.sseAge": "อายุการเผยแพร่ SSE",
-  "debug.graph.metric.sseAge.desc": "เวลาตั้งแต่เผยแพร่ รวมการส่งซ้ำและความต่างของนาฬิกา ไม่ใช่ความหน่วงในการส่ง"
+  "debug.graph.metric.sseAge.desc": "เวลาตั้งแต่เผยแพร่ รวมการส่งซ้ำและความต่างของนาฬิกา ไม่ใช่ความหน่วงในการส่ง",
+  "statsRecording.failed": "บันทึกไม่สำเร็จ",
+  "statsRecording.last": "การบันทึกสำเร็จล่าสุด: {details}"
 }

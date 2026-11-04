@@ -2553,5 +2553,7 @@
   "debug.graph.metric.apiDuration": "Thời lượng API",
   "debug.graph.metric.apiDuration.desc": "Thời lượng yêu cầu HTTP, tách biệt với thời gian khứ hồi ping.",
   "debug.graph.metric.sseAge": "Tuổi bản tin SSE",
-  "debug.graph.metric.sseAge.desc": "Thời gian từ lúc phát, gồm phát lại và lệch đồng hồ; không phải độ trễ truyền."
+  "debug.graph.metric.sseAge.desc": "Thời gian từ lúc phát, gồm phát lại và lệch đồng hồ; không phải độ trễ truyền.",
+  "statsRecording.failed": "Ghi dữ liệu thất bại",
+  "statsRecording.last": "Lần ghi thành công gần nhất: {details}"
 }

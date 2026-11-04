@@ -336,6 +336,8 @@ type agentTokenDiagnostics struct {
 // AgentTokenCollector owns one bounded collection goroutine. RunOnce is safe
 // for deterministic callers and is the transaction boundary used by tests.
 type AgentTokenCollector struct {
+	health                     CollectorHealthTracker
+	healthCommitted            bool
 	writer                     BatchWriter
 	clock                      HostCollectorClock
 	config                     AgentTokenCollectorConfig
@@ -445,6 +447,8 @@ func (c *AgentTokenCollector) Snapshot() AgentTokenCollectionSnapshot {
 }
 
 func (c *AgentTokenCollector) setAttempt(at time.Time) {
+	c.healthCommitted = false
+	c.health.Attempt("agent_tokens", at)
 	c.diagnosticMu.Lock()
 	c.diagnostics.lastAttemptAt = at
 	c.diagnostics.lastReason = ""
@@ -452,6 +456,9 @@ func (c *AgentTokenCollector) setAttempt(at time.Time) {
 }
 
 func (c *AgentTokenCollector) setSuccess(at time.Time) {
+	if c.healthCommitted {
+		c.health.Record("agent_tokens", c.clock.Now(), nil, 0, 0)
+	}
 	c.diagnosticMu.Lock()
 	c.diagnostics.lastSuccessAt = at
 	if c.diagnostics.lastReason == "" {
@@ -555,11 +562,13 @@ func (c *AgentTokenCollector) recordBatch(batch AppendBatch) {
 }
 
 func (c *AgentTokenCollector) recordCollectionError(err error) {
+	c.health.Record("agent_tokens", c.clock.Now(), err, 0, 0)
 	c.counters.errors.Add(1)
 	c.setReason(err.Error())
 }
 
 func (c *AgentTokenCollector) recordAppendError(err error, metadata bool) {
+	c.health.Record("agent_tokens", c.clock.Now(), err, 0, 0)
 	message := "append failed"
 	if err != nil {
 		message = err.Error()
@@ -971,6 +980,7 @@ func (c *AgentTokenCollector) appendOpenCodeCollected(ctx context.Context, batch
 		if err != nil {
 			return false, false, err
 		}
+		c.healthCommitted = true
 		c.counters.usage.Add(uint64(result.UsageAccepted))
 		c.counters.usageDuplicates.Add(uint64(result.UsageDuplicate))
 	}
@@ -1078,6 +1088,10 @@ func retryCodexForkRepairBlockedFiles(catalog *codexForkRepairCatalog) {
 func isUnavailableIntervalConflict(err error) bool {
 	if err == nil {
 		return false
+	}
+	var detail *AppendError
+	if errors.As(err, &detail) {
+		err = detail.Unwrap()
 	}
 	message := err.Error()
 	return strings.Contains(message, "unavailable spans overlap") ||
@@ -3538,3 +3552,5 @@ func openCodeRevision(part OpenCodeStepFinishPart) string {
 
 var _ = openCodeRevision
 var _ = strings.TrimSpace
+
+func (c *AgentTokenCollector) Health() map[string]CollectorHealth { return c.health.Snapshot() }

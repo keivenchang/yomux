@@ -262,7 +262,50 @@ function applyBackendHealthRosterState({epoch, revision, rows, observedIds}) {
 // `ready` returns a model like every other state. It used to return null, which routed healthy into
 // the same branch as "no report yet" and painted it as an empty transparent slot -- so an all-green
 // Daemons roster could not produce a green triangle even in principle.
+let statsCollectorHealthWarning = '';
+let statsCollectorHealthToast = null;
+const statsCollectorHealthFailures = new Map();
+
+function applyStatsCollectorHealth(payload = {}) {
+  const labels = {cpu: 'debug.graph.chart.cpu', system_memory: 'debug.graph.chart.memory',
+    system_disk: 'debug.graph.chart.systemDisk', gpu: 'debug.graph.chart.gpuUtil',
+    agent_status: 'debug.graph.chart.agentStatus', agent_tokens: 'debug.graph.chart.agentTokens', service_load: 'debug.tab.services'};
+  for (const [name, state] of Object.entries(payload.collectors || {})) {
+    if (state.consecutive_failures > 0) statsCollectorHealthFailures.set(name, state);
+    else if (state.last_successful_commit > 0
+        && state.last_successful_commit >= (statsCollectorHealthFailures.get(name)?.last_attempt || 0)) {
+      statsCollectorHealthFailures.delete(name);
+    }
+  }
+  // A missing collector or an initial attempt after restart proves no commit.
+  const failing = [...statsCollectorHealthFailures.entries()];
+  const wasDegraded = !!statsCollectorHealthWarning;
+  statsCollectorHealthWarning = failing.map(([name, state]) => {
+    const label = t(labels[name.replace(/^host:/, '')] || 'debug.tab.services');
+    const last = state.last_successful_commit > 0
+      ? new Date(state.last_successful_commit * 1000).toLocaleString() : t('debug.system.roster.state.neverStarted');
+    return `${label}: ${last}`;
+  }).join('; ');
+  if (statsCollectorHealthWarning && !wasDegraded) {
+    statsCollectorHealthToast = showToast(t('statsRecording.failed'), [t('statsRecording.last', {details: statsCollectorHealthWarning})],
+      {className: 'attention-alert toast stats-collector-warning', coalesceKey: 'stats-collector-recording'});
+  }
+  if (statsCollectorHealthWarning && wasDegraded && statsCollectorHealthToast?.isConnected) {
+    renderToastLines(statsCollectorHealthToast.querySelector('.toast-body'),
+      [t('statsRecording.last', {details: statsCollectorHealthWarning})]);
+  }
+  if (!statsCollectorHealthWarning) {
+    dismissCoalescedToast('stats-collector-recording');
+    statsCollectorHealthToast = null;
+  }
+  syncBackendHealthIndicator();
+}
+
 function backendHealthIndicatorModel() {
+  if (statsCollectorHealthWarning && !['down', 'unresponsive'].includes(backendHealthState.serviceSeverity)
+      && backendHealthState.consecutiveFailures < backendHealthFailureThreshold) {
+    return {severity: 'degraded', text: `${t('statsRecording.failed')}. ${t('statsRecording.last', {details: statsCollectorHealthWarning})}`, reasonCode: 'collector_recording_failed'};
+  }
   if (backendHealthState.consecutiveFailures >= backendHealthFailureThreshold) {
     return {
       severity: 'unresponsive',

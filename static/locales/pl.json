@@ -1739,6 +1739,8 @@
   "state.workingFor": "Pracuje przez {duration}",
   "state.yolo-approval": "YOLO w oczekiwaniu na zatwierdzenie",
   "stats.error.unavailable": "Usługa statystyk jest niedostępna: {error}",
+  "statsRecording.failed": "Błąd zapisu",
+  "statsRecording.last": "Ostatni udany zapis: {details}",
   "status.activitySummaryFailed": "podsumowanie aktywności nie powiodło: {error}",
   "status.browserBlockedLink": "zablokowany link do przeglądarki: {link}",
   "status.changedFilesFailed": "zmienione pliki nie powiodły: {error}",

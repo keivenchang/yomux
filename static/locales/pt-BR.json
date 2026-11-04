@@ -1711,6 +1711,8 @@
   "state.workingFor": "Trabalhando há {duration}",
   "state.yolo-approval": "YOLO aguardando aprovação",
   "stats.error.unavailable": "Serviço de estatísticas indisponível: {error}",
+  "statsRecording.failed": "Falha na gravação",
+  "statsRecording.last": "Última gravação bem-sucedida: {details}",
   "status.activitySummaryFailed": "falha no resumo da atividade: {error}",
   "status.browserBlockedLink": "link bloqueado do navegador: {link}",
   "status.changedFilesFailed": "falha nos arquivos alterados: {error}",

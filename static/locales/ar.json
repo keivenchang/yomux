@@ -1795,6 +1795,8 @@
   "state.workingFor": "يعمل منذ {duration}",
   "state.yolo-approval": "YOLO في انتظار الموافقة",
   "stats.error.unavailable": "خدمة الإحصاءات غير متاحة: {error}",
+  "statsRecording.failed": "فشل التسجيل",
+  "statsRecording.last": "آخر تسجيل ناجح: {details}",
   "status.activitySummaryFailed": "فشل ملخص النشاط: {error}",
   "status.browserBlockedLink": "الرابط المحظور للمتصفح: {link}",
   "status.changedFilesFailed": "فشل تغيير الملفات: {error}",

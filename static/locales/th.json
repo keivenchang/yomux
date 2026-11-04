@@ -1683,6 +1683,8 @@
   "state.workingFor": "ทำงานมา {duration}",
   "state.yolo-approval": "YOLO รอการอนุมัติ สรุปกิจกรรม",
   "stats.error.unavailable": "บริการสถิติไม่พร้อมใช้งาน: {error}",
+  "statsRecording.failed": "บันทึกไม่สำเร็จ",
+  "statsRecording.last": "การบันทึกสำเร็จล่าสุด: {details}",
   "status.activitySummaryFailed": "ล้มเหลว: {error}",
   "status.browserBlockedLink": "ลิงก์ที่ถูกบล็อกเบราว์เซอร์: {link}",
   "status.changedFilesFailed": "ไฟล์ที่เปลี่ยนแปลงล้มเหลว: {error}",

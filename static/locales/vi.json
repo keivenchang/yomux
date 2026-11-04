@@ -1683,6 +1683,8 @@
   "state.workingFor": "Đang chạy trong {duration}",
   "state.yolo-approval": "YOLO đang chờ phê duyệt",
   "stats.error.unavailable": "Dịch vụ thống kê không khả dụng: {error}",
+  "statsRecording.failed": "Ghi dữ liệu thất bại",
+  "statsRecording.last": "Lần ghi thành công gần nhất: {details}",
   "status.activitySummaryFailed": "tóm tắt hoạt động không thành công: {error}",
   "status.browserBlockedLink": "trình duyệt bị chặn: {link}",
   "status.changedFilesFailed": "tệp đã thay đổi không thành công: {error}",

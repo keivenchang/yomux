@@ -1711,6 +1711,8 @@
   "state.workingFor": "עובד במשך {duration}",
   "state.yolo-approval": "YOLO ממתין לאישור",
   "stats.error.unavailable": "שירות הסטטיסטיקה אינו זמין: {error}",
+  "statsRecording.failed": "ההקלטה נכשלה",
+  "statsRecording.last": "ההקלטה המוצלחת האחרונה: {details}",
   "status.activitySummaryFailed": "סיכום פעילות נכשל: {error}",
   "status.browserBlockedLink": "קישור חסום בדפדפן: {link}",
   "status.changedFilesFailed": "קבצים שהשתנו נכשלו: {error}",

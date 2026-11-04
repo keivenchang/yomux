@@ -1274,6 +1274,9 @@ func main() {
 			}
 		}()
 	}
+	if !s.startBackgroundWork(func() { s.publishStatsCollectorHealth(shutdownContext) }) {
+		slog.Error("collector health publisher was not admitted")
+	}
 	if s.yoagent != nil && !s.startBackgroundWork(func() { s.runNativeYOAgentJobs(shutdownContext) }) {
 		slog.Error("native YO!agent job loop was not admitted")
 	}

@@ -451,7 +451,7 @@ function clientPushEventSessionKey(payload = {}) {
 // so they cannot be mistaken for an EventSource type with no server producer.
 const clientServerPushEventTypes = Object.freeze([
   'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
-  'backend_health_changed',
+  'backend_health_changed', 'stats_collector_health',
   'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
   'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed', 'tmux_roster_changed',
   'operation_terminal',
@@ -617,6 +617,10 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
   }
   if (type === 'attention_acks_changed') {
     applyAttentionAcknowledgementResponse(payload);
+    return;
+  }
+  if (type === 'stats_collector_health') {
+    applyStatsCollectorHealth(payload);
     return;
   }
   if (type === 'backend_health_changed') {

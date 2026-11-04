@@ -2598,5 +2598,7 @@
   "debug.graph.metric.apiDuration": "משך API",
   "debug.graph.metric.apiDuration.desc": "משך בקשת HTTP, בנפרד מזמן הלוך ושוב של פינג.",
   "debug.graph.metric.sseAge": "גיל פרסום SSE",
-  "debug.graph.metric.sseAge.desc": "זמן מאז הפרסום, כולל שידור חוזר והפרש שעון; אינו זמן מסירה."
+  "debug.graph.metric.sseAge.desc": "זמן מאז הפרסום, כולל שידור חוזר והפרש שעון; אינו זמן מסירה.",
+  "statsRecording.failed": "ההקלטה נכשלה",
+  "statsRecording.last": "ההקלטה המוצלחת האחרונה: {details}"
 }

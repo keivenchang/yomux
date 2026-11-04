@@ -2553,5 +2553,7 @@
   "debug.graph.metric.apiDuration": "API-Dauer",
   "debug.graph.metric.apiDuration.desc": "Dauer der HTTP-Anfrage, getrennt von der Ping-Rundlaufzeit.",
   "debug.graph.metric.sseAge": "SSE-Veröffentlichungsalter",
-  "debug.graph.metric.sseAge.desc": "Zeit seit Veröffentlichung, einschließlich Wiederholung und Uhrabweichung; keine Zustelllatenz."
+  "debug.graph.metric.sseAge.desc": "Zeit seit Veröffentlichung, einschließlich Wiederholung und Uhrabweichung; keine Zustelllatenz.",
+  "statsRecording.failed": "Aufzeichnung fehlgeschlagen",
+  "statsRecording.last": "Letzte erfolgreiche Aufzeichnung: {details}"
 }

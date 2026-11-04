@@ -1683,6 +1683,8 @@
   "state.workingFor": "{duration} 作業中",
   "state.yolo-approval": "YOLO 承認待ち",
   "stats.error.unavailable": "統計サービスを利用できません: {error}",
+  "statsRecording.failed": "記録に失敗しました",
+  "statsRecording.last": "最後に記録に成功した時刻: {details}",
   "status.activitySummaryFailed": "アクティビティの概要が失敗しました: {error}",
   "status.browserBlockedLink": "ブラウザでブロックされたリンク: {link}",
   "status.changedFilesFailed": "ファイルの変更に失敗しました: {error}",
