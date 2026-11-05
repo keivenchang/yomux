@@ -69,12 +69,21 @@ def _open_relocation_editor(browser, server, path):
     return result['item']
 
 
-def _type_relocation_text(browser, item, text):
-    editor = browser.execute_script('return panelNodes.get(arguments[0])._cmView.contentDOM', item)
+def _type_relocation_text(browser, item, text, surface='text-editor'):
+    editor = browser.execute_script("""
+      const panel=panelNodes.get(arguments[0]);
+      return arguments[1] === 'text-editor' ? panel._cmView.contentDOM : panel._pmView.dom;
+    """, item, surface)
     editor.click()
-    editor.send_keys(Keys.CONTROL, 'a')
-    for character in text:
+    modifier = Keys.COMMAND if browser.capabilities['platformName'].lower() in {'mac', 'macos', 'darwin'} else Keys.CONTROL
+    editor.send_keys(modifier, 'a')
+    for index, character in enumerate(text, 1):
         editor.send_keys(character)
+        actual = browser.execute_script("""
+          const panel=panelNodes.get(arguments[0]);
+          return arguments[1] === 'text-editor' ? panel._cmView.state.doc.toString() : panel._pmView.state.doc.textContent;
+        """, item, surface)
+        assert actual == text[:index]
 
 
 def _assert_expected_relocation_absence(browser, server, request, old_path):
@@ -205,6 +214,64 @@ def test_external_rename_preserves_two_clients_native_dirty_text(browser, isolat
     assert not path.exists() and destination.read_text(encoding='utf-8') == 'base\n'
     browser.close()
     browser.switch_to.window(original_window)
+
+
+@pytest.mark.parametrize('copied', [False, True], ids=['original-editor', 'copied-editor'])
+@pytest.mark.parametrize('disappearance', ['delete', 'outside-scope'])
+@pytest.mark.parametrize('surface', ['text-editor', 'view-editor'])
+def test_external_disappearance_keeps_pending_native_text(browser, isolated_dev_server_factory, request, copied, disappearance, surface):
+    server = isolated_dev_server_factory('external-disappearance-native-input')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    path = server.paths.home_dir / 'pending.md'
+    path.write_text('base\n', encoding='utf-8')
+    item = _open_relocation_editor(browser, server, path)
+    if copied:
+        item = browser.execute_async_script("""
+          const path=arguments[0], done=arguments[arguments.length-1];
+          (async () => {
+            const item=await openFileInAdditionalEditorTab(path,basenameOf(path),{viewMode:arguments[1]});
+            await window.__yomuxTestWaitFor(()=>panelNodes.get(item)?._cmView?.contentDOM.getBoundingClientRect().height > 0,
+              {timeoutMs:5000});
+            return item;
+          })().then(done,error=>done({error:String(error.stack || error)}));
+        """, str(path), 'split' if surface == 'view-editor' else 'edit')
+        assert isinstance(item, str), item
+    if surface == 'view-editor':
+        ready = browser.execute_async_script("""
+          const path=arguments[0], item=arguments[1], done=arguments[arguments.length-1];
+          (async () => {
+            setFileEditorViewMode(path,'split',item); renderFileEditorPanel(panelNodes.get(item),item);
+            await window.__yomuxTestWaitFor(()=>panelNodes.get(item)?._pmView?.dom.getBoundingClientRect().height > 0,
+              {timeoutMs:5000});
+            return true;
+          })().then(done,error=>done({error:String(error.stack || error)}));
+        """, str(path), item)
+        assert ready is True, ready
+    text = 'unsaved just before disappearance'
+    _type_relocation_text(browser, item, text, surface)
+    assert browser.execute_script("""
+      const panel=panelNodes.get(arguments[0]);
+      return Boolean(arguments[1] === 'text-editor' ? panel._cmSerializeTimer : panel._pmSerializeTimer);
+    """, item, surface), 'native input must still be pending when the file disappears'
+    if disappearance == 'delete':
+        path.unlink()
+    else:
+        path.rename(server.paths.root / 'outside.md')
+    result = browser.execute_async_script("""
+      const path=arguments[0], item=arguments[1], done=arguments[arguments.length-1];
+      (async () => {
+        const diff=await fetchFilesystemWatchDiff({full:true});
+        await refreshOpenFilesFromPush(diff);
+        const state=fileState.get(path);
+        const panel=panelNodes.get(item);
+        return {content:state.content,original:state.original,dirty:state.dirty,missing:state.externalMissing,
+          document:arguments[2] === 'text-editor' ? panel?._cmView?.state.doc.toString() : panel?._pmView?.state.doc.textContent};
+      })().then(done,error=>done({error:String(error.stack || error)}));
+    """, str(path), item, surface)
+    assert result.get('missing') is True and result.get('dirty') is True, result
+    assert result['content'].rstrip('\n') == text and result['document'].rstrip('\n') == text, result
+    assert result['original'] == 'base\n', result
+    _assert_expected_relocation_absence(browser, server, request, path)
 
 
 def test_external_rename_fences_delayed_write_and_preserves_native_input(browser, isolated_dev_server_factory, request):
@@ -631,10 +698,7 @@ def test_native_save_close_keeps_native_input_typed_during_write(browser, isolat
         selected:activeItemForSide(slotForItem(item)),ancestors};
     """, setup['item'], str(path))
     WebDriverWait(browser, 5).until(lambda _driver: editor.is_displayed(), message=str(visibility))
-    editor.click()
-    editor.send_keys(Keys.CONTROL, 'a')
-    for character in 'first edit':
-        editor.send_keys(character)
+    _type_relocation_text(browser, setup['item'], 'first edit')
     browser.execute_script('fileEditorAutosaveEnabled = arguments[1]; window.__closeTypingPromise = closeFileTab(arguments[0]);', str(path), autosave)
     if not autosave:
         WebDriverWait(browser, 5).until(lambda driver: driver.find_element(By.CSS_SELECTOR, '.file-editor-close-dialog').is_displayed())

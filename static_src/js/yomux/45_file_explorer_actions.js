@@ -1776,13 +1776,16 @@ function syncOpenFileContentFromPanel(path, panel) {
 }
 
 function syncOpenFileContentFromPanels(path, preferredPanel = null) {
-  if (preferredPanel?._pmView) flushProseMirrorSource(preferredPanel, path);
-  for (const panel of fileEditorPanelsForPath(path)) {
-    if (panel !== preferredPanel && panel?._pmView) flushProseMirrorSource(panel, path);
+  const panels = fileEditorPanelsForPath(path);
+  // A copied editor can own native input that has not reached canonical state yet.
+  const contentPanel = panels.find(panel => panel._cmSerializeTimer || panel._pmSerializeTimer) || preferredPanel;
+  if (contentPanel?._pmView) flushProseMirrorSource(contentPanel, path);
+  for (const panel of panels) {
+    if (panel !== contentPanel && panel?._pmView) flushProseMirrorSource(panel, path);
   }
-  if (syncOpenFileContentFromPanel(path, preferredPanel)) return true;
-  for (const panel of fileEditorPanelsForPath(path)) {
-    if (panel === preferredPanel) continue;
+  if (syncOpenFileContentFromPanel(path, contentPanel)) return true;
+  for (const panel of panels) {
+    if (panel === contentPanel) continue;
     if (syncOpenFileContentFromPanel(path, panel)) return true;
   }
   updateOpenFileDirtyFlag(path);
@@ -2714,6 +2717,7 @@ async function openFileStateFromDisk(path, entry = null, options = {}) {
 }
 
 function markOpenFileMissing(path) {
+  syncOpenFileContentFromPanels(path);
   let state = fileState.get(path);
   clearFileAutosaveTimer(path);
   if (!state) state = setFileState(path, missingFileState());

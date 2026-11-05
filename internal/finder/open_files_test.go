@@ -5,6 +5,7 @@ package finder
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -131,14 +132,150 @@ func TestOpenFilesAliasAndScope(t *testing.T) {
 	if err := os.Rename(original, outside); err != nil {
 		t.Fatal(err)
 	}
+	// Darwin's vnode path cache can now name the surviving hardlink instead.
+	other, err := os.Open(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
 	s.reconcileOpenFiles()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.openFiles[one["tracking_id"].(string)].path != original {
-		t.Fatal("followed outside open-parent scope")
+		t.Fatalf("followed outside open-parent scope: original=%s actual=%s outside=%s", original, s.openFiles[one["tracking_id"].(string)].path, outside)
 	}
 	if s.openFiles[two["tracking_id"].(string)].path != alias {
 		t.Fatal("surviving alias followed another hardlink")
+	}
+}
+
+func TestOpenFilesHardlinkAmbiguitySurvivesAliasRemoval(t *testing.T) {
+	for _, registered := range []bool{false, true} {
+		for _, late := range []bool{false, true} {
+			for _, unlinkOriginal := range []bool{false, true} {
+				t.Run(fmt.Sprintf("registered=%t/late=%t/unlink=%t", registered, late, unlinkOriginal), func(t *testing.T) {
+					s, root := newTestService(t, nil)
+					original := filepath.Join(root, "note.md")
+					alias := filepath.Join(root, "alias.md")
+					link := func() {
+						if err := os.Link(original, alias); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if !late {
+						link()
+					}
+					info, err := os.Stat(original)
+					if err != nil {
+						t.Fatal(err)
+					}
+					row := registerTestOpenFile(t, s, "one", original, fileID(info), "", nil)
+					if late {
+						link()
+					}
+					if registered {
+						registerTestOpenFile(t, s, "two", alias, fileID(info), "", nil)
+					}
+					// Observe multiple names before one is removed; confidence must not
+					// return merely because the remaining link count becomes one.
+					s.reconcileOpenFiles()
+					if unlinkOriginal {
+						if err := os.Remove(original); err != nil {
+							t.Fatal(err)
+						}
+					} else if err := os.Rename(original, filepath.Join(t.TempDir(), "outside.md")); err != nil {
+						t.Fatal(err)
+					}
+					other, err := os.Open(alias)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer other.Close()
+					s.reconcileOpenFiles()
+					s.mu.Lock()
+					got := s.openFiles[row["tracking_id"].(string)].path
+					s.mu.Unlock()
+					if got != original {
+						t.Fatalf("hardlink alias replaced document path: %s -> %s", original, got)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestOpenFilesHardlinkRegistrationPropagatesAmbiguity(t *testing.T) {
+	for _, registration := range []string{"alias", "same-path", "retained-id"} {
+		t.Run(registration, func(t *testing.T) {
+			s, root := newTestService(t, nil)
+			original := filepath.Join(root, "note.md")
+			alias := filepath.Join(root, "alias.md")
+			info, err := os.Stat(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			row := registerTestOpenFile(t, s, "one", original, fileID(info), "", nil)
+			if err := os.Link(original, alias); err != nil {
+				t.Fatal(err)
+			}
+			path, id := original, ""
+			if registration == "alias" {
+				path = alias
+			} else if registration == "retained-id" {
+				id = row["tracking_id"].(string)
+			}
+			registerTestOpenFile(t, s, "two", path, fileID(info), id, nil)
+			if err := os.Remove(original); err != nil {
+				t.Fatal(err)
+			}
+			other, err := os.Open(alias)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer other.Close()
+			s.reconcileOpenFiles()
+			s.mu.Lock()
+			got := s.openFiles[row["tracking_id"].(string)].path
+			s.mu.Unlock()
+			if got != original {
+				t.Fatalf("registration lost observed hardlink ambiguity: %s -> %s", original, got)
+			}
+		})
+	}
+}
+
+func TestOpenFilesAtomicSaveRestoresUnambiguousRename(t *testing.T) {
+	s, root := newTestService(t, nil)
+	original := filepath.Join(root, "note.md")
+	alias := filepath.Join(root, "alias.md")
+	if err := os.Link(original, alias); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := registerTestOpenFile(t, s, "one", original, fileID(info), "", []any{root})
+	other := registerTestOpenFile(t, s, "two", alias, fileID(info), "", []any{root})
+	if _, writeErr := s.Write(context.Background(), original, "saved", nil, fileID(info)); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	s.mu.Lock()
+	unchanged := s.openFiles[other["tracking_id"].(string)].fileID == fileID(info)
+	s.mu.Unlock()
+	if !unchanged {
+		t.Fatal("atomic save rotated a distinct hardlink")
+	}
+	next := filepath.Join(root, "saved.md")
+	if err := os.Rename(original, next); err != nil {
+		t.Fatal(err)
+	}
+	s.reconcileOpenFiles()
+	s.mu.Lock()
+	got := s.openFiles[row["tracking_id"].(string)].path
+	s.mu.Unlock()
+	if got != next {
+		t.Fatalf("atomic save did not restore rename following: %s", got)
 	}
 }
 
@@ -455,5 +592,114 @@ func TestOpenFilesDisconnectReleasesOnlyProducerDemand(t *testing.T) {
 	s.mu.Unlock()
 	if exists {
 		t.Fatal("client without opened documents retained")
+	}
+}
+
+func TestOpenFilesDirectoryAliasesPreserveEachDocumentNamespace(t *testing.T) {
+	for _, saveBeforeMove := range []bool{false, true} {
+		t.Run(fmt.Sprintf("atomic-save=%t", saveBeforeMove), func(t *testing.T) {
+			s, root := newTestService(t, nil)
+			resolved, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			aliases := []string{filepath.Join(t.TempDir(), "first"), filepath.Join(t.TempDir(), "second")}
+			for _, alias := range aliases {
+				if err := os.Symlink(resolved, alias); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Mkdir(filepath.Join(root, "target"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(filepath.Join(root, "note.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids := make([]string, len(aliases))
+			for i, alias := range aliases {
+				row := registerTestOpenFile(t, s, fmt.Sprint(i), filepath.Join(alias, "note.md"), fileID(info), "", []any{alias})
+				ids[i] = row["tracking_id"].(string)
+			}
+			if ids[0] == ids[1] {
+				t.Fatal("directory aliases merged document identities")
+			}
+			if saveBeforeMove {
+				if _, writeErr := s.Write(context.Background(), filepath.Join(aliases[0], "note.md"), "saved", nil, fileID(info)); writeErr != nil {
+					t.Fatal(writeErr)
+				}
+			}
+			if err := os.Rename(filepath.Join(root, "note.md"), filepath.Join(root, "target", "moved.md")); err != nil {
+				t.Fatal(err)
+			}
+			s.reconcileOpenFiles()
+			for i, alias := range aliases {
+				row := registerTestOpenFile(t, s, fmt.Sprint(i), filepath.Join(alias, "note.md"), fileID(info), ids[i], []any{alias})
+				if row["path"] != filepath.Join(alias, "target", "moved.md") || row["revision"] != uint64(2) {
+					t.Fatalf("alias namespace changed: %v", row)
+				}
+			}
+		})
+	}
+}
+
+func TestOpenFilesRetargetedAliasCannotReanchorDocument(t *testing.T) {
+	s, root := newTestService(t, nil)
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(alias, "note.md")
+	info, err := os.Stat(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := registerTestOpenFile(t, s, "one", old, fileID(info), "", []any{alias})
+	if err := os.Rename(filepath.Join(root, "note.md"), filepath.Join(root, "src", "moved.md")); err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	if err := os.Mkdir(filepath.Join(other, "src"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "src", "moved.md"), []byte("different document"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, alias); err != nil {
+		t.Fatal(err)
+	}
+	s.reconcileOpenFiles()
+	s.mu.Lock()
+	entry := s.openFiles[row["tracking_id"].(string)]
+	got, revision := entry.path, entry.revision
+	s.mu.Unlock()
+	if got != old || revision != 1 {
+		t.Fatalf("retargeted alias followed: path=%s revision=%d", got, revision)
+	}
+}
+
+func TestOpenFilesShutdownClosesSharedDescriptors(t *testing.T) {
+	s, root := newTestService(t, nil)
+	path := filepath.Join(root, "note.md")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := registerTestOpenFile(t, s, "one", path, fileID(info), "", []any{root})
+	registerTestOpenFile(t, s, "two", path, fileID(info), "", []any{root})
+	s.mu.Lock()
+	file := s.openFiles[first["tracking_id"].(string)].file
+	s.mu.Unlock()
+	s.Close()
+	if _, err := file.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("shutdown descriptor error=%v", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.openFiles) != 0 {
+		t.Fatalf("shutdown retained %d registrations", len(s.openFiles))
 	}
 }

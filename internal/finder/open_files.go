@@ -9,19 +9,26 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
+
+type openFileScope struct {
+	path     string
+	resolved string
+}
 
 // The watch service owns these descriptors independently of hot content polling.
 // Entries are keyed by tracking ID, so two distinct aliases never merge by inode.
 type openFileRecord struct {
-	id       string
-	path     string
-	origin   string
-	scope    string
-	fileID   string
-	revision uint64
-	file     *os.File
+	id            string
+	path          string
+	origin        string
+	scope         openFileScope
+	fileID        string
+	revision      uint64
+	file          *os.File
+	pathAmbiguous bool
 }
 
 func (s *Service) registerOpenFilesLocked(value any) (map[string]string, *Error) {
@@ -98,9 +105,15 @@ func (s *Service) registerOpenFilesLocked(value any) (map[string]string, *Error)
 				return nil, &Error{Status: http.StatusTooManyRequests, Code: "watch_capacity_exceeded", MessageKey: "fs.error.watchCapacity", Retryable: true, Message: "open file capacity exceeded"}
 			}
 			s.openFileSequence++
-			entry = &openFileRecord{id: fmt.Sprintf("%s-open-%d", s.epoch, s.openFileSequence), path: requested, origin: requested, scope: filepath.Dir(resolved), fileID: expected, revision: 1, file: file}
+			entry = &openFileRecord{id: fmt.Sprintf("%s-open-%d", s.epoch, s.openFileSequence), path: requested, origin: requested,
+				scope: openFileScope{path: filepath.Dir(requested), resolved: filepath.Dir(resolved)}, fileID: expected, revision: 1, file: file}
 			staged[entry.id] = entry
 		}
+		info, statErr := entry.file.Stat()
+		if statErr != nil {
+			return nil, filesystemError(path, statErr)
+		}
+		s.observeOpenFileIdentityLocked(info, staged)
 		refs[entry.id] = path
 	}
 	for id, entry := range staged {
@@ -108,6 +121,21 @@ func (s *Service) registerOpenFilesLocked(value any) (map[string]string, *Error)
 	}
 	success = true
 	return refs, nil
+}
+
+func (s *Service) observeOpenFileIdentityLocked(info os.FileInfo, staged map[string]*openFileRecord) {
+	if !descriptorPathMayAlias(info) {
+		return
+	}
+	identity := fileID(info)
+	// Path ambiguity belongs to the inode, including aliases admitted in this batch.
+	for _, records := range []map[string]*openFileRecord{s.openFiles, staged} {
+		for _, entry := range records {
+			if entry.fileID == identity {
+				entry.pathAmbiguous = true
+			}
+		}
+	}
 }
 
 func (s *Service) openFileRegisteredPathLocked(id, path string) bool {
@@ -133,7 +161,7 @@ func (s *Service) retainedOpenFileWatchPath(clientID, raw string, directory bool
 		if !directory && registered == path {
 			return true
 		}
-		if directory && (entry.scope == path || filepath.Dir(registered) == path || filepath.Dir(entry.origin) == path) {
+		if directory && (entry.scope.path == path || entry.scope.resolved == path || filepath.Dir(registered) == path || filepath.Dir(entry.origin) == path) {
 			return true
 		}
 	}
@@ -169,9 +197,9 @@ func (s *Service) reconcileOpenFiles() {
 	s.openFileMutationMu.Lock()
 	defer s.openFileMutationMu.Unlock()
 	s.mu.Lock()
-	scopes := make([]string, 0)
+	scopes := make([]openFileScope, 0)
 	for _, record := range s.watches {
-		scopes = append(scopes, record.Roots...)
+		scopes = append(scopes, record.RootScopes...)
 	}
 	for _, entry := range s.openFiles {
 		scopes = append(scopes, entry.scope)
@@ -184,27 +212,41 @@ func (s *Service) reconcileOpenFiles() {
 			info, err := current.Stat()
 			current.Close()
 			if err == nil && fileID(info) == entry.fileID {
+				s.observeOpenFileIdentityLocked(info, nil)
 				continue
 			}
 		}
-		destination, err := resolvedDescriptorPath(entry.file)
-		if err != nil || destination == entry.path || strings.HasPrefix(filepath.Base(destination), ".yolomux-mutation-") || !filepath.IsAbs(destination) || !openFilePathInScopes(destination, scopes) {
+		descriptorInfo, statErr := entry.file.Stat()
+		if statErr != nil {
 			continue
 		}
-		target, requested, _, openErr := s.openAny(destination)
+		// Link-count drops cannot prove which name an ambiguous descriptor opened.
+		s.observeOpenFileIdentityLocked(descriptorInfo, nil)
+		if entry.pathAmbiguous {
+			continue
+		}
+		destination, err := resolvedDescriptorPath(entry.file)
+		if err != nil || destination == entry.path || strings.HasPrefix(filepath.Base(destination), ".yolomux-mutation-") || !filepath.IsAbs(destination) {
+			continue
+		}
+		mapped := openFileRelocationPath(entry, destination, scopes)
+		if mapped == "" || mapped == entry.path {
+			continue
+		}
+		target, requested, resolved, openErr := s.openAny(mapped)
 		if openErr != nil {
 			continue
 		}
 		info, err := target.Stat()
 		target.Close()
-		if err != nil || fileID(info) != entry.fileID {
+		if err != nil || !s.verifiedOpenFileRelocationLocked(entry, destination, resolved, info) {
 			continue
 		}
 		old := entry.path
 		entry.path = requested
 		// The verified destination becomes this open document's parent scope,
 		// independently of whether Finder remains visible afterward.
-		entry.scope = filepath.Dir(requested)
+		entry.scope = openFileScope{path: filepath.Dir(requested), resolved: filepath.Dir(resolved)}
 		entry.revision++
 		events = append(events, map[string]any{"tracking_id": entry.id, "revision": entry.revision, "old_path": old, "new_path": requested, "file_id": entry.fileID})
 	}
@@ -218,18 +260,45 @@ func (s *Service) reconcileOpenFiles() {
 	}
 }
 
-func openFilePathInScopes(path string, scopes []string) bool {
-	for _, scope := range scopes {
-		if path == scope || strings.HasPrefix(path, strings.TrimRight(scope, string(os.PathSeparator))+string(os.PathSeparator)) {
-			return true
+func (s *Service) verifiedOpenFileRelocationLocked(entry *openFileRecord, destination, resolved string, info os.FileInfo) bool {
+	if resolved != destination || fileID(info) != entry.fileID {
+		return false
+	}
+	s.observeOpenFileIdentityLocked(info, nil)
+	return !entry.pathAmbiguous
+}
+
+func openFileRelocationPath(entry *openFileRecord, destination string, scopes []openFileScope) string {
+	candidates := append([]openFileScope{entry.scope}, scopes...)
+	// Prefer the document's requested namespace over another client's alias of the
+	// same directory. Reopening the mapped path below rejects a retargeted alias.
+	sort.Slice(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		leftOwns := indexRootWithin(left.path, entry.path)
+		rightOwns := indexRootWithin(right.path, entry.path)
+		if leftOwns != rightOwns {
+			return leftOwns
+		}
+		if len(left.path) != len(right.path) {
+			return len(left.path) > len(right.path)
+		}
+		return left.path < right.path
+	})
+	for _, scope := range candidates {
+		if scope.path == "" || scope.resolved == "" || !indexRootWithin(scope.resolved, destination) {
+			continue
+		}
+		relative, err := filepath.Rel(scope.resolved, destination)
+		if err == nil {
+			return filepath.Join(scope.path, relative)
 		}
 	}
-	return false
+	return ""
 }
 
 // Rotate from the newly written descriptor before publishing content changes. The
 // old inode can already be unlinked, so reopening by pathname would introduce a race.
-func (s *Service) rotateOpenFileDescriptors(path string, previous os.FileInfo, written *os.File) error {
+func (s *Service) rotateOpenFileDescriptors(path, resolved string, previous os.FileInfo, written *os.File) error {
 	if previous == nil {
 		return nil
 	}
@@ -240,8 +309,19 @@ func (s *Service) rotateOpenFileDescriptors(path string, previous os.FileInfo, w
 		return err
 	}
 	for _, entry := range s.openFiles {
-		if entry.path != path || entry.fileID != fileID(previous) {
+		if entry.fileID != fileID(previous) {
 			continue
+		}
+		if entry.path != path {
+			alias, _, aliasResolved, aliasErr := s.openAny(entry.path)
+			if aliasErr != nil {
+				continue
+			}
+			aliasInfo, statErr := alias.Stat()
+			alias.Close()
+			if statErr != nil || aliasResolved != resolved || fileID(aliasInfo) != fileID(info) {
+				continue
+			}
 		}
 		replacement, err := copyDescriptor(written)
 		if err != nil {
@@ -250,6 +330,8 @@ func (s *Service) rotateOpenFileDescriptors(path string, previous os.FileInfo, w
 		entry.file.Close()
 		entry.file = replacement
 		entry.fileID = fileID(info)
+		entry.pathAmbiguous = false
 	}
+	s.observeOpenFileIdentityLocked(info, nil)
 	return nil
 }

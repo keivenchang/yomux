@@ -159,6 +159,7 @@ type Service struct {
 type watchRecord struct {
 	OpenFiles           map[string]string
 	Roots               []string
+	RootScopes          []openFileScope
 	SearchRoots         []string
 	SignaturePaths      []string
 	Files               []string
@@ -1083,9 +1084,10 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 		return nil, invalid("", err.Error())
 	}
 	normalized := make([]string, 0, len(roots))
+	rootScopes := make([]openFileScope, 0, len(roots))
 	omittedRoots := map[string]bool{}
 	for _, raw := range roots {
-		requested, _, authErr := s.authorize(raw, false)
+		requested, resolved, authErr := s.authorize(raw, false)
 		if authErr != nil {
 			if authErr.Status == http.StatusNotFound && s.retainedOpenFileWatchPath(clientID, raw, true) {
 				omittedRoots[filepath.Clean(raw)] = true
@@ -1094,6 +1096,7 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 			return nil, authErr
 		}
 		normalized = append(normalized, requested)
+		rootScopes = append(rootScopes, openFileScope{path: requested, resolved: resolved})
 	}
 	normalizedFiles := make([]string, 0, len(files))
 	for _, raw := range files {
@@ -1155,7 +1158,7 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 	s.watchGeneration++
 	generation := s.watchGeneration
 	s.watches[clientID] = watchRecord{
-		OpenFiles: previous.OpenFiles, Roots: normalized, SearchRoots: searchRoots, SignaturePaths: signaturePaths, Files: files, BackgroundFiles: watchPayload.BackgroundFiles,
+		OpenFiles: previous.OpenFiles, Roots: normalized, RootScopes: rootScopes, SearchRoots: searchRoots, SignaturePaths: signaturePaths, Files: files, BackgroundFiles: watchPayload.BackgroundFiles,
 		RootSurfacesVersion: watchPayload.RootSurfacesVersion, RootSurfaces: watchPayload.RootSurfaces, ContextItems: watchPayload.ContextItems,
 		SessionFiles: watchPayload.SessionFiles, ActivitySummary: watchPayload.ActivitySummary,
 		Signatures: signatures, UpdatedAt: now, ExpiresAt: now.Add(watchLeaseDuration), Generation: generation,
@@ -1424,7 +1427,12 @@ func (s *Service) WatchDiff(ctx context.Context, since string, forceFull bool) (
 	}
 	removed := make([]string, 0)
 	for _, path := range changed {
-		if s.signature(ctx, path) == "missing" {
+		// Absence needs the exact descriptor open, not a recursive content
+		// signature of every watched directory from every client.
+		file, _, _, finderErr := s.openAny(path)
+		if finderErr == nil {
+			file.Close()
+		} else if finderErr.Status == http.StatusNotFound {
 			removed = append(removed, path)
 		}
 	}

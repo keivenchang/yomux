@@ -51,6 +51,9 @@ func readlinkAt(dir *os.File, name string) (string, error) {
 func resolvedDescriptorPath(file *os.File) (string, error) {
 	return filepath.EvalSymlinks(platformDescriptorPath(file))
 }
+
+func descriptorPathMayAlias(os.FileInfo) bool { return false }
+
 func resolvedChildPath(dir *os.File, name string) (string, error) {
 	return filepath.EvalSymlinks(descriptorChildPath(dir, name))
 }

@@ -5,12 +5,56 @@ package finder
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type watchDiffProbeContext struct {
+	context.Context
+	checks atomic.Int64
+}
+
+func (c *watchDiffProbeContext) Done() <-chan struct{} {
+	c.checks.Add(1)
+	return c.Context.Done()
+}
+
+func TestWatchDiffDoesNotTraverseUnsubscribedDescendants(t *testing.T) {
+	s, root := newTestService(t, nil)
+	nested := filepath.Join(root, "src", "nested")
+	if err := os.Mkdir(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.WatchRoots(context.Background(), map[string]any{
+		"client_id": "finder", "roots": []any{root}, "root_surfaces_version": 1,
+		"root_surfaces": []any{map[string]any{"path": root, "surfaces": []any{"finder"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	probe := func() int64 {
+		ctx := &watchDiffProbeContext{Context: context.Background()}
+		if _, err := s.WatchDiff(ctx, "", true); err != nil {
+			t.Fatal(err)
+		}
+		return ctx.checks.Load()
+	}
+	before := probe()
+	for i := 0; i < 64; i++ {
+		if err := os.WriteFile(filepath.Join(nested, fmt.Sprintf("%d.data", i)), []byte("nested"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if after := probe(); after != before {
+		t.Fatalf("full baseline work grew with unsubscribed descendants: %d -> %d context checks", before, after)
+	}
+}
 
 type shutdownNativeWatcher struct {
 	events  chan nativeWatchEvent

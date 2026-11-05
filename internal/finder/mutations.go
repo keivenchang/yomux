@@ -521,7 +521,7 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 		return nil, filesystemError(requested, err)
 	}
 	result := map[string]any{"path": requested, "size": stat.Size(), "mtime": stat.ModTime().Unix(), "mtime_ns": stat.ModTime().UnixNano(), "file_id": fileID(stat), "file_identity": "id:" + fileID(stat)}
-	if rotationErr := s.rotateOpenFileDescriptors(requested, existing, file); rotationErr != nil {
+	if rotationErr := s.rotateOpenFileDescriptors(requested, filepath.Join(parent.resolvedParent, parent.name), existing, file); rotationErr != nil {
 		return nil, filesystemError(requested, rotationErr)
 	}
 	s.noteChange([]string{requested}, "write")

@@ -2,9 +2,9 @@
   "baseline": {
     "builder_blob": "6aebc01e0cd0a8a93dd3c3794cb8e887bc35e3a3",
     "builder_path": "tools/static_build.py",
-    "source_commit": "5d5cd42427c566f4687d85fe8ba923eaaed426cb",
-    "source_state": "Open-file relocation following; independent Python and native outputs match byte for byte",
-    "reviewed_source_diff_sha256": "d0c249f319cf84ea3738e5e38ccc20e6734c5d26d1df93496ddd4d528d84cc7f"
+    "source_commit": "285394bc05d6ae80e70eaefa33aa757029352529",
+    "source_state": "Preserve pending native input when files disappear; independent Python and native output bytes match",
+    "reviewed_source_diff_sha256": "191c7590f35a78067cc3baa48b6d2c438d185c2b4055a092b221c3c2963cc0b5"
   },
   "reviewed_text_changes": {},
   "sha256": {
@@ -30,6 +30,6 @@
     "locales/zh-Hans.json": "da944a99ece0e48667a748c79aa980c3f986ef39579d5f280f6c8ea673ace585",
     "locales/zh-Hant.json": "95558104264896984a87261090bf7d32802d115ee593ee9da13b5fe638e5feae",
     "yomux.css": "f660c9cc0c2554352c75b9c1b092b8f30aff1c01eb8018cbce8514591093f485",
-    "yomux.js": "65cff887a742b65ff95525cdb8481bdfc7a45bcf59f21d28d6d268df89b9add8"
+    "yomux.js": "eee711ea944b4da3f7813678c57bc9f7abb019f2fad38b79d2d66337da1c1be1"
   }
 }

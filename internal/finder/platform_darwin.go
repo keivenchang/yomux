@@ -136,6 +136,13 @@ func resolvedDescriptorPath(file *os.File) (string, error) {
 	}
 	return filepath.Clean(path), nil
 }
+
+func descriptorPathMayAlias(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	// F_GETPATH follows the vnode path cache, which any hardlink opener can change.
+	return !ok || stat.Nlink != 1
+}
+
 func resolvedChildPath(dir *os.File, name string) (string, error) {
 	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
