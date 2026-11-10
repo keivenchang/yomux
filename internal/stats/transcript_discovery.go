@@ -222,6 +222,12 @@ func recentTranscriptCandidates(ctx context.Context, root string, bounds transcr
 }
 
 func recentTranscriptCandidatesWithCursor(ctx context.Context, root string, bounds transcriptDiscoveryBounds, cursors *transcriptDiscoveryCursorStore) ([]transcriptCandidate, error) {
+	return recentTranscriptCandidatesWithPageReader(ctx, root, bounds, cursors, readCodexDirectoryPage)
+}
+
+type transcriptDirectoryPageReader func(*os.File, int64) ([]string, int64, bool, error)
+
+func recentTranscriptCandidatesWithPageReader(ctx context.Context, root string, bounds transcriptDiscoveryBounds, cursors *transcriptDiscoveryCursorStore, readPage transcriptDirectoryPageReader) ([]transcriptCandidate, error) {
 	if bounds.maxFiles <= 0 || bounds.maxDirs <= 0 || bounds.maxBytes <= 0 {
 		return nil, errors.New("transcript-discovery-bound-invalid")
 	}
@@ -286,7 +292,7 @@ func recentTranscriptCandidatesWithCursor(ctx context.Context, root string, boun
 			return savePartial(errTranscriptDiscoveryEntryBudgetExhausted)
 		}
 		var directoryVersion transcriptDiscoveryDirectoryCursor
-		entries, err := readTranscriptDirectoryBounded(ctx, dir.path, bounds.maxEntries-inspectedEntries, cursors, &directoryVersion)
+		entries, err := readTranscriptDirectoryBounded(ctx, dir.path, bounds.maxEntries-inspectedEntries, cursors, &directoryVersion, readPage)
 		if err != nil && !errors.Is(err, errTranscriptDiscoveryEntryBudgetExhausted) && !isTranscriptDiscoveryInterrupted(err) {
 			if os.IsNotExist(err) {
 				continue
@@ -466,7 +472,7 @@ type transcriptDirectoryEntry struct {
 	err  error
 }
 
-func readTranscriptDirectoryBounded(ctx context.Context, path string, maxEntries int, cursors *transcriptDiscoveryCursorStore, observed *transcriptDiscoveryDirectoryCursor) ([]transcriptDirectoryEntry, error) {
+func readTranscriptDirectoryBounded(ctx context.Context, path string, maxEntries int, cursors *transcriptDiscoveryCursorStore, observed *transcriptDiscoveryDirectoryCursor, readPage transcriptDirectoryPageReader) ([]transcriptDirectoryEntry, error) {
 	if maxEntries <= 0 {
 		return nil, errTranscriptDiscoveryEntryBudgetExhausted
 	}
@@ -520,7 +526,7 @@ func readTranscriptDirectoryBounded(ctx context.Context, path string, maxEntries
 			return entries, err
 		}
 		previousCookie := cursor.cookie
-		names, nextCookie, done, err := readCodexDirectoryPage(directory, previousCookie)
+		names, nextCookie, done, err := readPage(directory, previousCookie)
 		if err != nil {
 			cursors.save(path, cursor)
 			return entries, err
@@ -575,4 +581,90 @@ func (d *TranscriptPathDiscovery) Next(ctx context.Context, root string, limit i
 		paths = append(paths, candidate.path)
 	}
 	return paths, err
+}
+
+// SharedTranscriptDiscovery is the server's single directory enumeration owner.
+// Immutable directory pages coalesce overlapping reads. Each consumer retains
+// its own traversal cursor, admission bounds, and cancellation outcome.
+type SharedTranscriptDiscovery struct {
+	pathMu  sync.Mutex
+	cursors *transcriptDiscoveryCursorStore
+	mu      sync.Mutex
+	pages   map[transcriptDirectoryPageKey]sharedTranscriptDirectoryPage
+}
+type transcriptDirectoryPageKey struct {
+	path                            string
+	device, inode                   uint64
+	modTimeNS, changeTimeNS, cookie int64
+}
+type sharedTranscriptDirectoryPage struct {
+	at         time.Time
+	names      []string
+	nextCookie int64
+	done       bool
+}
+
+func directoryPageKey(file *os.File, cookie int64) (transcriptDirectoryPageKey, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return transcriptDirectoryPageKey{}, err
+	}
+	device, inode := fileIdentity(info)
+	return transcriptDirectoryPageKey{file.Name(), device, inode, info.ModTime().UnixNano(), codexDirectoryChangeTimeNS(info), cookie}, nil
+}
+
+func (d *SharedTranscriptDiscovery) readPage(file *os.File, cookie int64) ([]string, int64, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	key, err := directoryPageKey(file, cookie)
+	if err != nil {
+		return nil, cookie, false, err
+	}
+	if page, ok := d.pages[key]; ok && time.Since(page.at) < 5*time.Second {
+		return append([]string(nil), page.names...), page.nextCookie, page.done, nil
+	}
+	names, nextCookie, done, err := readCodexDirectoryPage(file, cookie)
+	if err != nil {
+		return names, nextCookie, done, err
+	}
+	current, err := directoryPageKey(file, cookie)
+	if err != nil {
+		return nil, cookie, false, err
+	}
+	if current != key {
+		return names, nextCookie, done, nil
+	}
+	if d.pages == nil {
+		d.pages = make(map[transcriptDirectoryPageKey]sharedTranscriptDirectoryPage)
+	}
+	if len(d.pages) >= maxTranscriptDiscoveryFrontierRoots {
+		for key := range d.pages {
+			delete(d.pages, key)
+			break
+		}
+	}
+	d.pages[key] = sharedTranscriptDirectoryPage{time.Now(), append([]string(nil), names...), nextCookie, done}
+	return names, nextCookie, done, nil
+}
+
+func (d *SharedTranscriptDiscovery) candidates(ctx context.Context, root string, bounds transcriptDiscoveryBounds, cursors *transcriptDiscoveryCursorStore) ([]transcriptCandidate, error) {
+	return recentTranscriptCandidatesWithPageReader(ctx, root, bounds, cursors, d.readPage)
+}
+func (d *SharedTranscriptDiscovery) Paths(ctx context.Context, root string) ([]string, error) {
+	d.pathMu.Lock()
+	defer d.pathMu.Unlock()
+	if d.cursors == nil {
+		d.cursors = newTranscriptDiscoveryCursorStore()
+	}
+	cursors := d.cursors
+	candidates, err := d.candidates(ctx, root, transcriptDiscoveryBounds{maxFiles: defaultTranscriptDiscoveryFiles, maxDirs: defaultTranscriptDiscoveryDirs, maxBytes: defaultTranscriptDiscoveryBytes}, cursors)
+	paths := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		paths = append(paths, candidate.path)
+	}
+	return paths, err
+}
+
+func TranscriptDiscoveryPending(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errTranscriptDiscoveryFileBudgetExhausted) || errors.Is(err, errTranscriptDiscoveryDirectoryBudgetExhausted) || errors.Is(err, errTranscriptDiscoveryEntryBudgetExhausted) || err != nil && err.Error() == "transcript-discovery-byte-budget-exhausted"
 }

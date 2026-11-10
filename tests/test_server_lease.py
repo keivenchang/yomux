@@ -1,11 +1,17 @@
+import ast
 import json
+import errno
+import os
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 import subprocess
 import sys
 import time
 import pytest
 
 from tests.gate_harness import HttpPortLease
+from tests.gate_harness import run_fixture_cleanup_phases
 from tests import isolated_dev_server as isolated_server_module
 from tests.isolated_dev_server import build_environment
 from tests.isolated_dev_server import build_paths
@@ -15,6 +21,7 @@ from tests.isolated_dev_server import stop_and_reap_daemons
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
 from yomux_lib.infra.host_identity import HostIdentity
+from yomux_lib.infra.host_identity import LocalProcessReason
 from yomux_lib.infra.host_identity import current_host_identity
 from yomux_lib.infra.root_paths import YomuxRoots
 from yomux_lib import server_lease as server_lease_module
@@ -23,6 +30,163 @@ from yomux_lib.server_lease import acquire_instance_and_port_leases
 from yomux_lib.server_lease import acquire_instance_root_lease
 from yomux_lib.server_lease import instance_root_is_available
 from yomux_lib.server_lease import InstanceLeaseError
+
+
+@pytest.mark.parametrize("filename,consumer,server_name", [
+    ("test_server_lease.py", "test_process_level_root_lease_refuses_second_server_on_another_port", "first"),
+    ("test_server_lease.py", "test_go_process_level_force_does_not_override_root_lease", "first"),
+    ("test_server_lease.py", "test_isolated_server_restart_failure_reaps_descendants_without_adopting_child", "server"),
+    ("test_server_lease.py", "test_go_process_level_force_does_not_override_root_lease_on_a_different_port", "first"),
+    ("test_launcher_row_wiring.py", "test_exec_launched_server_passes_the_real_session_probe_and_tears_down_by_pid", "server"),
+])
+def test_server_journey_cleanup_retires_tmux_after_server_failure(filename, consumer, server_name):
+    path = Path(__file__).with_name(filename)
+    source = ast.parse(path.read_text())
+    target = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == consumer)
+    boundary = next(node for node in target.body if isinstance(node, ast.Try) and node.finalbody)
+    calls = []
+    failure = RuntimeError("server retirement sentinel")
+
+    def fail_server(_server):
+        calls.append("server")
+        raise failure
+
+    scope = {
+        server_name: SimpleNamespace(process=SimpleNamespace(poll=lambda: None)),
+        "runtime": "private tmux", "tmux_runtime": "private tmux", "root": "owned root",
+        "stop_and_reap_daemons": fail_server,
+        "stop_isolated_tmux_runtime": lambda runtime: calls.append(runtime),
+        "shutil": SimpleNamespace(rmtree=lambda root: calls.append(root)),
+        "run_fixture_cleanup_phases": run_fixture_cleanup_phases,
+    }
+    with pytest.raises(RuntimeError) as raised:
+        exec(compile(ast.Module(body=boundary.finalbody, type_ignores=[]), str(path), "exec"), scope)
+    assert raised.value is failure
+    assert calls == ["server", "private tmux", *(["owned root"] if filename == "test_launcher_row_wiring.py" else [])]
+
+
+def test_stop_and_reap_daemons_reaps_captured_children_after_stop_failure(monkeypatch):
+    calls = []
+    failure = RuntimeError("server retirement sentinel")
+
+    def fail_stop():
+        calls.append("server")
+        raise failure
+
+    def record_reap(descendants):
+        calls.append(descendants)
+        return []
+
+    monkeypatch.setattr(isolated_server_module, "process_descendants", lambda _pid: [(42, "captured identity", "daemon")])
+    monkeypatch.setattr(isolated_server_module, "reap_descendants", record_reap)
+    monkeypatch.setattr(isolated_server_module.Path, "is_dir", lambda _path: True)
+    with pytest.raises(RuntimeError) as raised:
+        stop_and_reap_daemons(SimpleNamespace(process=SimpleNamespace(pid=123), stop=fail_stop))
+    assert raised.value is failure
+    assert calls == ["server", [(42, "captured identity", "daemon")]]
+
+
+@pytest.mark.parametrize('operation', ['write', 'fsync'])
+def test_server_port_record_failure_releases_descriptor(monkeypatch, tmp_path, operation):
+    opened = []
+    original_open = os.open
+
+    def record_open(*args, **kwargs):
+        descriptor = original_open(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    def fail_record(*_args):
+        raise OSError('injected lease record failure')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(server_lease_module.os, 'open', record_open)
+        patch.setattr(server_lease_module.os, operation, fail_record)
+        try:
+            with pytest.raises(OSError, match='injected lease record failure'):
+                acquire_server_port_lease(9123, state_dir=tmp_path)
+            assert opened
+            for descriptor in opened:
+                with pytest.raises(OSError):
+                    os.fstat(descriptor)
+        finally:
+            for descriptor in opened:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+    replacement = acquire_server_port_lease(9123, state_dir=tmp_path)
+    assert replacement is not None
+    replacement.release()
+
+
+def test_server_lease_release_retires_every_descriptor_after_unlock_failure(monkeypatch, tmp_path):
+    descriptors = [os.open(tmp_path / str(index), os.O_CREAT | os.O_RDWR, 0o600) for index in range(3)]
+    lease = server_lease_module.ServerPortLease(0, tmp_path, descriptors[0], tuple(descriptors[1:]))
+    original_flock = server_lease_module.fcntl.flock
+
+    def fail_first_unlock(descriptor, operation):
+        if descriptor == descriptors[0]:
+            raise OSError('injected unlock failure')
+        return original_flock(descriptor, operation)
+
+    monkeypatch.setattr(server_lease_module.fcntl, 'flock', fail_first_unlock)
+    try:
+        with pytest.raises(OSError, match='injected unlock failure'):
+            lease.release()
+        for descriptor in descriptors:
+            with pytest.raises(OSError):
+                os.fstat(descriptor)
+    finally:
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def test_server_port_record_completes_partial_writes(monkeypatch, tmp_path):
+    original_write = os.write
+    writes = []
+
+    def short_write(descriptor, payload):
+        writes.append(len(payload))
+        return original_write(descriptor, payload[:max(1, len(payload) // 2)])
+
+    monkeypatch.setattr(server_lease_module.os, 'write', short_write)
+    lease = acquire_server_port_lease(9123, state_dir=tmp_path)
+    try:
+        assert json.loads(lease.path.read_text())['port'] == 9123
+        assert len(writes) > 1
+    finally:
+        lease.release()
+
+
+def test_force_stop_cannot_certify_unreadable_owner_after_lock_release(monkeypatch, tmp_path):
+    identity = current_host_identity()
+    record = identity.process_record_fields()
+    current = server_lease_module.is_current_local_process(record, host_identity=identity)
+    unavailable = replace(current, current=False, reason=LocalProcessReason.PROCESS_IDENTITY_UNAVAILABLE)
+    signals = []
+    ticks = iter(range(100))
+    path = tmp_path / "instance.lock"
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    monkeypatch.setattr(server_lease_module, "_read_unlocked_instance_record", lambda _: record)
+    monkeypatch.setattr(server_lease_module, "is_current_local_process", lambda *_, **__: unavailable if signals else current)
+    monkeypatch.setattr(server_lease_module, "_signal_verified_instance_owner", lambda _record, _identity, signum: signals.append(signum))
+    monkeypatch.setattr(server_lease_module, "_try_lock_instance_path", lambda _: descriptor)
+    monkeypatch.setattr(server_lease_module.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(server_lease_module.time, "sleep", lambda _: None)
+    try:
+        with pytest.raises(RuntimeError, match="identity"):
+            server_lease_module._force_stop_instance_owner((path,), record, identity)
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+    assert len(signals) == 1
 
 
 def _roots(tmp_path, prefix=""):
@@ -482,9 +646,10 @@ def test_process_level_root_lease_refuses_second_server_on_another_port(monkeypa
             check=False,
         )
     finally:
-        if first is not None:
-            stop_and_reap_daemons(first)
-        stop_isolated_tmux_runtime(runtime)
+        run_fixture_cleanup_phases("server lease journey", [
+            ("server", lambda: stop_and_reap_daemons(first) if first is not None else None),
+            ("tmux runtime", lambda: stop_isolated_tmux_runtime(runtime)),
+        ])
 
     assert second is not None
     assert second.returncode == 1
@@ -505,9 +670,10 @@ def test_go_process_level_force_does_not_override_root_lease(monkeypatch, tmp_pa
         assert first.process.poll() is None
         first.assert_serving()
     finally:
-        if first is not None:
-            stop_and_reap_daemons(first)
-        stop_isolated_tmux_runtime(runtime)
+        run_fixture_cleanup_phases("server lease journey", [
+            ("server", lambda: stop_and_reap_daemons(first) if first is not None else None),
+            ("tmux runtime", lambda: stop_isolated_tmux_runtime(runtime)),
+        ])
 
 
 def test_isolated_server_readiness_failure_reaps_child_and_releases_port_lease(monkeypatch, tmp_path):
@@ -610,9 +776,10 @@ def test_isolated_server_restart_failure_reaps_descendants_without_adopting_chil
         assert {(pid, identity) for pid, identity, _cmdline in old_descendants} <= reaped_identities
         assert server.port_lease is not None and not server.port_lease.reserved
     finally:
-        if server is not None:
-            stop_and_reap_daemons(server)
-        stop_isolated_tmux_runtime(runtime)
+        run_fixture_cleanup_phases("server lease journey", [
+            ("server", lambda: stop_and_reap_daemons(server) if server is not None else None),
+            ("tmux runtime", lambda: stop_isolated_tmux_runtime(runtime)),
+        ])
 
 
 def test_go_process_level_force_does_not_override_root_lease_on_a_different_port(monkeypatch, tmp_path):
@@ -627,6 +794,7 @@ def test_go_process_level_force_does_not_override_root_lease_on_a_different_port
         assert first.process.poll() is None
         first.assert_serving()
     finally:
-        if first is not None:
-            stop_and_reap_daemons(first)
-        stop_isolated_tmux_runtime(runtime)
+        run_fixture_cleanup_phases("server lease journey", [
+            ("server", lambda: stop_and_reap_daemons(first) if first is not None else None),
+            ("tmux runtime", lambda: stop_isolated_tmux_runtime(runtime)),
+        ])

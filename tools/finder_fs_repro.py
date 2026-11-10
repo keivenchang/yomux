@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Measure real Finder filesystem traffic with two isolated browsers against a local ephemeral server."""
+"""Retained contracts for the retired Python Finder filesystem measurement tool."""
 
 from __future__ import annotations
 
@@ -592,19 +592,8 @@ def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_sec
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    work_root = Path(args.output).parent / f"finder-fs-repro-{uuid.uuid4().hex}"
-    work_root.mkdir(parents=True, exist_ok=True)
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        report = run_measurement(
-            monkeypatch,
-            work_root,
-            idle_seconds=float(args.idle_seconds),
-            event_timeout=float(args.event_timeout),
-        )
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
-    return 0
+    parse_args(argv)
+    raise SystemExit("Python Finder measurement is retired; use the native Go Finder browser regression tests.")
 
 
 if __name__ == "__main__":

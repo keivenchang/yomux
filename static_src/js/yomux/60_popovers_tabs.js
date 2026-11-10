@@ -1516,7 +1516,7 @@ function windowMetadataRowsHtml(row) {
   const displayPaths = paths.length ? paths : (row.path ? [String(row.path)] : []);
   for (const path of displayPaths) rows.push(popoverRow(t('common.field.path'), filePopoverPathHtml(path)));
   if (git.branch) rows.push(popoverRow(t('common.field.branch'), windowMetadataBranchHtml(git)));
-  if (git.root && !displayPaths.includes(git.root)) rows.push(popoverRow(t('popover.repo'), git.root));
+  if (git.root && !displayPaths.includes(git.root)) rows.push(popoverRow(t('popover.repo'), esc(git.root)));
   if (git.worktree) rows.push(popoverRow(t('popover.worktree'), worktreePopoverValueHtml(git.worktree)));
   if (git.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
   if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
@@ -1568,7 +1568,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const activityText = popoverActivityText(session, git);
   if (activityText) rows.push(popoverRow(yoagentTabLabel(), esc(activityText)));
   if (!perWindowMetadata) {
-    rows.push(popoverRow(t('common.field.path'), displayPath));
+    rows.push(popoverRow(t('common.field.path'), esc(displayPath)));
     if (git?.branch) rows.push(popoverRow(t('common.field.branch'), sessionBranchValueHtml(session, info)));
   }
   let linearValue = '';
@@ -1584,7 +1584,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   }
   const subject = currentBranchSubject(git);
   if (subject && !pr?.number) rows.push(popoverRow(t('common.descriptionShort'), `<div class="popover-desc">${esc(subject)}</div>`));
-  if (!perWindowMetadata && git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
+  if (!perWindowMetadata && git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), esc(git.root)));
   // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
   if (!perWindowMetadata && git?.worktree) rows.push(popoverRow(t('popover.worktree'), worktreePopoverValueHtml(git.worktree)));
   if (!perWindowMetadata && git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
@@ -1956,71 +1956,6 @@ function cancelDragOperationState() {
   clearDropPreview();
 }
 
-function paneDragPreviewMetrics(slot, event) {
-  const rect = layoutSlotScreenRect(slot);
-  const fallbackWidth = 360;
-  const fallbackHeight = 220;
-  const sourceWidth = Math.max(1, Number(rect?.width) || fallbackWidth);
-  const sourceHeight = Math.max(1, Number(rect?.height) || fallbackHeight);
-  const viewport = appViewport();
-  const viewportWidth = effectiveViewportWidth(viewport);
-  const viewportHeight = Math.max(240, Number(viewport.height) || 800);
-  const maxWidth = Math.min(720, Math.max(220, viewportWidth * 0.64));
-  const maxHeight = Math.min(420, Math.max(160, viewportHeight * 0.58));
-  const scale = Math.min(1, maxWidth / sourceWidth, maxHeight / sourceHeight);
-  const width = Math.max(180, Math.round(sourceWidth * scale));
-  const height = Math.max(120, Math.round(sourceHeight * scale));
-  const sourceOffsetX = rect ? (Number(event?.clientX) || rect.left) - rect.left : width * 0.12;
-  const sourceOffsetY = rect ? (Number(event?.clientY) || rect.top) - rect.top : 18;
-  return {
-    width,
-    height,
-    offsetX: Math.max(16, Math.min(width - 16, Math.round(sourceOffsetX * scale))),
-    offsetY: Math.max(16, Math.min(height - 16, Math.round(sourceOffsetY * scale))),
-  };
-}
-
-function paneDragPreviewHtml(slot) {
-  const tabs = paneTabs(slot);
-  const active = activeItemForSide(slot) || tabs[0] || slot;
-  const title = itemLabel(active);
-  const count = tabs.length;
-  const extra = tabs
-    .filter(item => item !== active)
-    .slice(0, 3)
-    .map(item => `<span>${esc(itemLabel(item))}</span>`)
-    .join('');
-  return `
-    <div class="pane-drag-image-frame">
-      <div class="pane-drag-image-title">${esc(title)}</div>
-      <div class="pane-drag-image-meta">${esc(tPlural('common.tabs', count))}</div>
-      ${extra ? `<div class="pane-drag-image-tabs">${extra}</div>` : ''}
-    </div>`;
-}
-
-function startPaneDragPreview(event, slot, options = {}) {
-  stopCustomDragPreview();
-  const metrics = paneDragPreviewMetrics(slot, event);
-  const preview = document.createElement('div');
-  preview.className = 'pane-drag-image drag-image';
-  preview.dataset.dragSlot = slot;
-  preview.innerHTML = paneDragPreviewHtml(slot);
-  preview.style.position = 'fixed';
-  preview.style.pointerEvents = 'none';
-  preview.style.zIndex = '99999';
-  preview.style.width = `${metrics.width}px`;
-  preview.style.height = `${metrics.height}px`;
-  document.body.appendChild(preview);
-  dragState.customPreview = preview;
-  dragState.customPreviewOffset = {x: metrics.offsetX, y: metrics.offsetY};
-  moveCustomDragPreview(event);
-  if (options.nativeDrag === true) {
-    bindCustomDragPreviewListeners();
-    preview.getBoundingClientRect();
-    event.dataTransfer?.setDragImage?.(transparentNativeDragImage(), 0, 0);
-  }
-}
-
 // #47: tab drags use the native drag image (see startSessionDrag) — the clone-follow tab preview is
 // gone. The custom-preview machinery below is retained only for the rich FILE drag preview.
 function startFileDragPreview(event, paths, entry) {
@@ -2151,29 +2086,6 @@ function startSessionDrag(event, session, sourceSlot = null, options = {}) {
   }
   resetDragTabRectCache();
   dragTimingMark('startSessionDrag:end');
-}
-
-function startPaneDrag(event, sourceSlot) {
-  const slot = layoutSlotKeys().includes(sourceSlot) ? sourceSlot : null;
-  if (!slot || slotIsFileExplorerPane(slot)) {
-    event.preventDefault?.();
-    return;
-  }
-  const active = activeItemForSide(slot);
-  if (!active) {
-    event.preventDefault?.();
-    return;
-  }
-  dragTimingMark('startPaneDrag');
-  dragState.item = active;
-  dragState.sourceSlot = slot;
-  dragState.paneSlot = slot;
-  dragState.filePayload = null;
-  const payload = JSON.stringify({slot});
-  event.dataTransfer.effectAllowed = 'move';
-  setYomuxDragData(event.dataTransfer, 'pane', payload);
-  event.dataTransfer.setData('text/plain', paneTabs(slot).map(itemLabel).join('\n'));
-  startPaneDragPreview(event, slot, {nativeDrag: true});
 }
 
 function endSessionDrag(event) {

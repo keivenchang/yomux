@@ -56,12 +56,10 @@ from .lifetime import authorize_service_destruction
 from .lifetime import terminate_authorized_processes
 from ..filesystem.io_ops import read_json_file
 from ..host_identity import LocalProcessDiagnostic
-from ..host_identity import LocalProcessReason
 from .registry import ProcessTableEntry
 from .registry import bounded_process_table
 from .registry import live_process_group
 from .registry import namespace_dimension
-from .registry import pid_is_serving
 from .registry import process_record_diagnostic
 from .registry import process_spawn_generation
 from .registry import resolve_tracked_local_service_groups
@@ -102,11 +100,6 @@ class GroupOverloadWatchdog:
     # tells this watchdog what it may see also drives what it may prove.
     generation_reader: Callable[[int], str | None] = process_spawn_generation
     process_group_reader: Callable[[int], int | None] = live_process_group
-    # The escalation's liveness poll. `pid_is_serving` is the SAME zombie-aware
-    # rule `bounded_process_table` applies per row, asked about one pid: the poll
-    # runs every 30ms per target during a CPU overload, and sweeping the whole
-    # process table on each pass would be a second load on top of the first.
-    liveness_reader: Callable[[int], bool] = pid_is_serving
     # Who still owns a tracked service. Deliberately the DEFAULT (/proc-backed)
     # fence rather than one bound to the sampled process table: the table is a
     # snapshot taken to measure CPU, and proving a supervisor DEAD from a
@@ -202,19 +195,10 @@ class GroupOverloadWatchdog:
                 return True
         return False
 
-    def _identity_replaced(self, pid: int) -> bool:
-        """Whether the exact identity this batch was authorized against is gone.
+    def _identity_diagnostic(self, pid: int) -> LocalProcessDiagnostic:
+        """Re-prove the same fenced identity throughout escalation."""
 
-        Reads the SAME fenced record the authorization was built from, so the
-        answer cannot drift from the decision. Anything other than a proven
-        reuse is False here: "gone" is the escalation's own success condition
-        and "unreadable" is already handled by the authorization refusing.
-        """
-
-        record = self._fenced_records.get(int(pid))
-        if record is None:
-            return False
-        return process_record_diagnostic(record).reason is LocalProcessReason.PROCESS_IDENTITY_REUSED
+        return process_record_diagnostic(self._fenced_records[int(pid)])
 
     def _service_supervisor(self, group: dict[str, Any]) -> LocalProcessDiagnostic | None:
         """Prove who still owns one tracked service, from that service's own record.
@@ -408,14 +392,7 @@ class GroupOverloadWatchdog:
                 ))
         outcomes = terminate_authorized_processes(
             leaders + members,
-            # Two different questions, deliberately answered by two different
-            # readers. The poll asks only "is this pid still SERVING". The
-            # identity question runs only at the phase boundaries, where the
-            # private loop this replaced asked it too: a pid recycled between the
-            # SIGTERM and the SIGKILL is a different process and must yield, not
-            # be force-killed.
-            still_current=self.liveness_reader,
-            identity_replaced=self._identity_replaced,
+            identity_diagnostic=self._identity_diagnostic,
             signal_process=self.kill,
             grace_seconds=self.grace_seconds,
             force_seconds=self.force_seconds,

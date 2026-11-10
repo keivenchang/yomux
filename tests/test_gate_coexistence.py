@@ -5,23 +5,16 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 import io
-import json
 import os
 import re
 import shlex
 import signal
-import sqlite3
-import stat
 import subprocess
-import sys
-import tarfile
 import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from http import HTTPStatus
 from http.client import HTTPConnection
 from pathlib import Path
 from threading import Barrier
@@ -61,17 +54,6 @@ from yomux_lib.local_services.registry import SpawnProcessOwnership
 pytestmark = pytest.mark.socket
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-V0610_REF = "v0.6.10"
-OLD_SQLITE_ARTIFACTS = (
-    "stats-v6.sqlite3",
-    "login-throttle.sqlite3",
-    "tmux-recovery.sqlite3",
-    "search-index.sqlite3",
-    "yochat.sqlite3",
-)
-OLD_JSON_ARTIFACTS = ("activity.json", "events.jsonl")
-OLD_ARTIFACTS = (*OLD_SQLITE_ARTIFACTS, *OLD_JSON_ARTIFACTS)
-STATS_ARTIFACT_RE = re.compile(r"^stats-v(?P<schema>[0-9]+)\.sqlite3$")
 CONCURRENT_CAPTURE_TIMEOUT_SECONDS = 5
 
 
@@ -507,99 +489,6 @@ def _runtime_relative_paths(root: Path) -> frozenset[Path]:
     return frozenset(path.relative_to(root) for path in root.rglob("*"))
 
 
-def _runtime_tree_snapshot(root: Path) -> dict[Path, tuple[str, int, str]]:
-    snapshot: dict[Path, tuple[str, int, str]] = {}
-    for relative in sorted(_runtime_relative_paths(root)):
-        path = root / relative
-        metadata = path.lstat()
-        mode = stat.S_IMODE(metadata.st_mode)
-        if stat.S_ISREG(metadata.st_mode):
-            kind = "file"
-            value = hashlib.sha256(path.read_bytes()).hexdigest()
-        elif stat.S_ISDIR(metadata.st_mode):
-            kind = "directory"
-            value = ""
-        elif stat.S_ISLNK(metadata.st_mode):
-            kind = "symlink"
-            value = os.readlink(path)
-        elif stat.S_ISSOCK(metadata.st_mode):
-            kind = "socket"
-            value = ""
-        else:
-            kind = "other"
-            value = str(stat.S_IFMT(metadata.st_mode))
-        snapshot[relative] = (kind, mode, value)
-    return snapshot
-
-
-def _assert_created_paths_confined(build: RunningBuild) -> tuple[Path, ...]:
-    created = tuple(
-        build.paths.root / relative
-        for relative in sorted(_runtime_relative_paths(build.paths.root) - build.baseline_paths)
-    )
-    root = build.paths.root.resolve(strict=False)
-    escaped: list[Path] = []
-    for path in created:
-        # A final symlink is an entry created inside the runtime root; resolving
-        # its target would classify Codex executable shims as created binaries.
-        location = path.parent.resolve(strict=False) / path.name if path.is_symlink() else path.resolve(strict=False)
-        try:
-            location.relative_to(root)
-        except ValueError:
-            escaped.append(path)
-    assert created, f"{build.label} created no observable runtime paths"
-    assert not escaped, f"{build.label} created paths that resolve outside {root}: {escaped}"
-    return created
-
-
-def _health_request_at_barrier(build: RunningBuild, barrier: Barrier) -> tuple[str, int, bool, int | None]:
-    barrier.wait(timeout=5)
-    status, _headers, body = build.request("/api/ping")
-    return build.label, status, json.loads(body).get("ok") is True, build.process.poll()
-
-
-def _assert_concurrent_health(builds: tuple[RunningBuild, ...], *, requests_per_build: int = 4) -> None:
-    targets = tuple(build for build in builds for _request in range(requests_per_build))
-    barrier = Barrier(len(targets))
-    with ThreadPoolExecutor(max_workers=len(targets), thread_name_prefix="gate-o1") as executor:
-        futures = tuple(executor.submit(_health_request_at_barrier, build, barrier) for build in targets)
-        results = tuple(future.result(timeout=10) for future in futures)
-
-    assert len(results) == len(builds) * requests_per_build, results
-    for build in builds:
-        observed = [result for result in results if result[0] == build.label]
-        assert len(observed) == requests_per_build, results
-        healthy = all(
-            status == HTTPStatus.OK and ok and exit_code is None
-            for _label, status, ok, exit_code in observed
-        )
-        assert healthy, observed
-
-
-def _assert_survivor_does_not_touch_stopped_peer(stopped: RunningBuild, survivor: RunningBuild) -> None:
-    stopped_stats = _assert_build_wrote_own_stats(stopped)
-    survivor_stats = _assert_build_wrote_own_stats(survivor)
-    _assert_concurrent_health((stopped, survivor))
-
-    for build, stats_paths in ((stopped, stopped_stats), (survivor, survivor_stats)):
-        created = set(_assert_created_paths_confined(build))
-        assert set(stats_paths) <= created, (build.label, stats_paths, created)
-
-    stopped.stop()
-    stopped_tree = _runtime_tree_snapshot(stopped.paths.root)
-    _assert_concurrent_health((survivor,), requests_per_build=8)
-    _assert_build_wrote_own_stats(survivor)
-    _assert_healthy(survivor)
-    current_tree = _runtime_tree_snapshot(stopped.paths.root)
-    changed = {
-        path: (stopped_tree.get(path), current_tree.get(path))
-        for path in sorted(stopped_tree.keys() | current_tree.keys())
-        if stopped_tree.get(path) != current_tree.get(path)
-    }
-    assert not changed, f"{survivor.label} touched {stopped.label}'s stopped runtime tree: {changed}"
-    _assert_created_paths_confined(survivor)
-
-
 def test_o1_service_capture_is_serialized_while_health_requests_converge(monkeypatch: pytest.MonkeyPatch) -> None:
     """Capture bookkeeping cannot race the requests used to prove concurrent health."""
 
@@ -710,152 +599,6 @@ def _spawn_build(
     return build
 
 
-def _assert_healthy(build: RunningBuild) -> None:
-    status, _headers, body = build.request("/api/ping")
-    assert status == HTTPStatus.OK, (build.label, status, body, build.output[-20:])
-    assert json.loads(body)["ok"] is True
-    assert build.process.poll() is None, (build.label, build.output[-20:])
-
-
-def _trigger_stats(build: RunningBuild) -> tuple[int, bytes]:
-    status, _headers, body = build.request(
-        "/api/stats-snapshot?range_seconds=300&resolution=AUTO&client_id=coexistence-gate"
-    )
-    assert status != HTTPStatus.INTERNAL_SERVER_ERROR, (build.label, status, body, build.output[-20:])
-    return status, body
-
-
-def _stats_artifacts(state_dir: Path) -> tuple[Path, ...]:
-    return tuple(
-        path
-        for path in sorted(state_dir.rglob("stats-v*.sqlite3"))
-        if STATS_ARTIFACT_RE.fullmatch(path.name)
-    )
-
-
-def _assert_build_wrote_own_stats(build: RunningBuild) -> tuple[Path, ...]:
-    _trigger_stats(build)
-    artifacts = _stats_artifacts(build.paths.state_dir)
-    assert artifacts, f"{build.label} did not create a versioned stats database in {build.paths.state_dir}"
-    assert all(path.stat().st_size > 0 for path in artifacts), artifacts
-    return artifacts
-
-
-def _seed_v0610_artifacts(
-    state_dir: Path,
-) -> dict[str, str]:
-    """Create immutable legacy-shaped artifacts without booting a retired backend."""
-    state_dir.mkdir(parents=True, exist_ok=True)
-    for name in OLD_SQLITE_ARTIFACTS:
-        path = state_dir / name
-        connection = sqlite3.connect(path)
-        try:
-            connection.execute("CREATE TABLE gate_v0610_fixture (marker TEXT NOT NULL)")
-            connection.execute("INSERT INTO gate_v0610_fixture VALUES ('preserve-me')")
-            connection.commit()
-        finally:
-            connection.close()
-    activity_path = state_dir / "activity.json"
-    event_path = state_dir / "events.jsonl"
-    if not activity_path.exists():
-        activity_path.write_text('{"records":{}}\n', encoding="utf-8")
-    if not event_path.exists():
-        event_path.write_text('{"fixture":"v0.6.10"}\n', encoding="utf-8")
-    return _artifact_hashes(state_dir)
-
-
-def _artifact_hashes(state_dir: Path) -> dict[str, str]:
-    hashes: dict[str, str] = {}
-    for name in OLD_ARTIFACTS:
-        path = state_dir / name
-        assert path.is_file(), path
-        hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
-    return hashes
-
-
-def _sqlite_write_lock_failures(state_dir: Path) -> dict[str, str]:
-    failures: dict[str, str] = {}
-    for name in OLD_SQLITE_ARTIFACTS:
-        connection = sqlite3.connect(
-            f"file:{state_dir / name}?mode=rw",
-            uri=True,
-            timeout=0,
-            isolation_level=None,
-        )
-        try:
-            connection.execute("BEGIN EXCLUSIVE")
-            connection.execute("ROLLBACK")
-        except sqlite3.OperationalError as error:
-            failures[name] = str(error)
-        finally:
-            connection.close()
-    return failures
-
-
-def _runtime_socket_paths(build: RunningBuild) -> set[Path]:
-    sockets: set[Path] = set()
-    tmux_socket = build.tmux.socket_path
-    if stat.S_ISSOCK(tmux_socket.lstat().st_mode):
-        sockets.add(tmux_socket.resolve(strict=False))
-    for root in (build.paths.state_dir, build.paths.config_dir, build.paths.cache_dir):
-        for path in root.rglob("*"):
-            try:
-                mode = path.lstat().st_mode
-            except OSError:
-                continue
-            if stat.S_ISSOCK(mode):
-                sockets.add(path.resolve(strict=False))
-    return sockets
-
-
-def _runtime_lock_paths(build: RunningBuild) -> set[Path]:
-    locks = {
-        path.resolve(strict=False)
-        for root in (build.paths.root, build.paths.state_dir)
-        for path in root.rglob("*.lock")
-        if path.is_file()
-    }
-    return locks
-
-
-def _assert_observed_paths_confined(label: str, paths: set[Path], roots: tuple[Path, ...]) -> None:
-    resolved_roots = tuple(root.resolve(strict=False) for root in roots)
-    escaped = []
-    for path in sorted(paths):
-        if not any(path.resolve(strict=False).is_relative_to(root) for root in resolved_roots):
-            escaped.append(path)
-    assert not escaped, f"{label} observed runtime paths outside {resolved_roots}: {escaped}"
-
-
-def _newer_stats_artifacts(state_dir: Path) -> tuple[Path, ...]:
-    newer = []
-    for path in _stats_artifacts(state_dir):
-        match = STATS_ARTIFACT_RE.fullmatch(path.name)
-        assert match is not None
-        if int(match.group("schema")) > 6:
-            newer.append(path)
-    return tuple(newer)
-
-
-@pytest.fixture(scope="session")
-def v0610_source(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    source_root = tmp_path_factory.mktemp("v0610-source")
-    archive = subprocess.run(
-        ["git", "archive", "--format=tar", V0610_REF],
-        cwd=REPO_ROOT,
-        check=False,
-        capture_output=True,
-    )
-    assert archive.returncode == 0, archive.stderr.decode("utf-8", errors="replace")
-    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
-        if sys.version_info >= (3, 12):
-            bundle.extractall(source_root, filter="data")
-        else:
-            bundle.extractall(source_root)
-    assert (source_root / "yolomux.py").is_file()
-    return source_root
-
-
 @pytest.fixture
 def private_tmux_factory(
     monkeypatch: pytest.MonkeyPatch,
@@ -875,8 +618,10 @@ def private_tmux_factory(
     try:
         yield start
     finally:
-        for runtime in reversed(runtimes):
-            stop_isolated_tmux_runtime(runtime)
+        run_fixture_cleanup_phases("coexistence tmux runtimes", [
+            (f"runtime-{index}", lambda runtime=runtime: stop_isolated_tmux_runtime(runtime))
+            for index, runtime in enumerate(reversed(runtimes))
+        ])
 
 
 @pytest.fixture
@@ -919,16 +664,25 @@ def running_build_factory(
         )
 
 
+def test_private_tmux_factory_retires_every_runtime_after_one_stop_failure(monkeypatch, tmp_path):
+    stopped = []
+    runtimes = iter(("first", "second"))
+    failure = RuntimeError("private tmux retirement sentinel")
 
+    def stop(runtime):
+        stopped.append(runtime)
+        if runtime == "second":
+            raise failure
 
-
-
-
-
-
-
-
-
+    monkeypatch.setattr(f"{__name__}.start_isolated_tmux_runtime", lambda *_args, **_kwargs: next(runtimes))
+    monkeypatch.setattr(f"{__name__}.stop_isolated_tmux_runtime", stop)
+    fixture = private_tmux_factory.__wrapped__(monkeypatch, tmp_path)
+    start = next(fixture)
+    assert (start(), start()) == ("first", "second")
+    with pytest.raises(RuntimeError) as raised:
+        next(fixture)
+    assert raised.value is failure
+    assert stopped == ["second", "first"]
 
 
 def test_o6_exact_member_barrier_signals_pidfd_not_reused_numeric_pid(

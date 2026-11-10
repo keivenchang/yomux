@@ -113,7 +113,7 @@ func TestRefillHostSingletonReloadProgressFailureAndRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	op := httptest.NewRecorder()
-	s.operation(op, httptest.NewRequest("GET", "/api/operations/"+first["operation_id"].(string), nil))
+	s.operation(op, httptest.NewRequest("GET", "/api/operations/"+first["operation_id"].(string), nil).WithContext(context.WithValue(context.Background(), authContextKey{}, authUser{role: "admin"})))
 	var receipt map[string]any
 	if err := json.Unmarshal(op.Body.Bytes(), &receipt); err != nil {
 		t.Fatal(err)

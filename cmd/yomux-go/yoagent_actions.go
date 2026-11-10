@@ -20,6 +20,8 @@ import (
 
 	"github.com/keivenchang/yomux/internal/chat"
 	"github.com/keivenchang/yomux/internal/stats"
+	"github.com/keivenchang/yomux/internal/tailfile"
+	"github.com/keivenchang/yomux/internal/work"
 )
 
 const nativeYOAgentActionPreviewTTL = 2 * time.Minute
@@ -72,7 +74,7 @@ type nativeYOAgentActionPreview struct {
 type nativeYOAgentActions struct {
 	server   *server
 	mu       sync.Mutex
-	sendMu   sync.Mutex
+	sendMu   work.ContextMutex
 	watchWG  sync.WaitGroup
 	closed   bool
 	previews map[string]nativeYOAgentActionPreview
@@ -92,7 +94,7 @@ type nativeYOAgentActionWait struct {
 	Transcript string
 	StartedAt  time.Time
 	Target     nativeYOAgentActionTarget
-	Offset     int64
+	Position   tailfile.Position
 	Cancel     context.CancelFunc
 }
 
@@ -414,6 +416,16 @@ func (actions *nativeYOAgentActions) execute(ctx context.Context, previewID stri
 	if previewID == "" {
 		return map[string]any{"ok": false, "error": "preview_id is required"}, http.StatusBadRequest
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(actions.ctx, cancel)
+	defer stop()
+	defer cancel()
+	if err := actions.sendMu.LockContext(ctx, actions.ctx.Done()); err != nil {
+		return map[string]any{"ok": false, "preview_id": previewID, "reason_code": "cancelled", "error": "action send cancelled"}, http.StatusRequestTimeout
+	}
+	defer actions.sendMu.Unlock()
+	// Preview identity and expiry must be checked after queue admission. A
+	// copied preview could otherwise survive another request consuming it.
 	actions.mu.Lock()
 	actions.pruneLocked(actions.now())
 	preview, found := actions.previews[previewID]
@@ -421,22 +433,20 @@ func (actions *nativeYOAgentActions) execute(ctx context.Context, previewID stri
 	if !found {
 		return map[string]any{"ok": false, "preview_id": previewID, "reason_code": "preview-expired", "error": "action preview expired or unknown"}, http.StatusNotFound
 	}
-	actions.sendMu.Lock()
-	defer actions.sendMu.Unlock()
 	current, err := actions.target(ctx, preview.Session)
 	if err != nil || current.SessionIdentity != preview.Target.SessionIdentity || current.PaneTarget != preview.Target.PaneTarget || current.ProcessInstanceID != preview.Target.ProcessInstanceID || current.AgentKind != preview.Target.AgentKind {
 		return map[string]any{"ok": false, "preview_id": previewID, "session": preview.Session, "reason_code": "stale-target", "error": "action target changed; create a fresh preview"}, http.StatusConflict
 	}
-	transcriptOffset := int64(0)
+	transcriptPosition := tailfile.Position{}
 	if preview.ReturnResult && preview.Submit {
 		if current.AgentTranscript == "" {
 			return map[string]any{"ok": false, "preview_id": previewID, "session": preview.Session, "reason_code": "result-source-unavailable", "error": "target agent transcript is unavailable; prompt was not sent"}, http.StatusConflict
 		}
-		info, statErr := os.Stat(current.AgentTranscript)
-		if statErr != nil || !info.Mode().IsRegular() {
+		var checkpointErr error
+		transcriptPosition, checkpointErr = actions.server.checkpointTranscript(ctx, current.AgentTranscript)
+		if checkpointErr != nil {
 			return map[string]any{"ok": false, "preview_id": previewID, "session": preview.Session, "reason_code": "result-source-unavailable", "error": "target agent transcript could not be read; prompt was not sent"}, http.StatusConflict
 		}
-		transcriptOffset = info.Size()
 	}
 	if err := actions.pastePrompt(ctx, current.PaneTarget, preview.Text); err != nil {
 		return map[string]any{"ok": false, "preview_id": previewID, "session": preview.Session, "reason_code": "paste-failed", "error": err.Error()}, http.StatusConflict
@@ -479,7 +489,7 @@ func (actions *nativeYOAgentActions) execute(ctx context.Context, previewID stri
 	resultWatch := map[string]any{"started": false}
 	if preview.ReturnResult && preview.Submit {
 		var watchErr error
-		resultWatch, watchErr = actions.startResultWatch(preview, current, transcriptOffset)
+		resultWatch, watchErr = actions.startResultWatch(preview, current, transcriptPosition)
 		if watchErr != nil {
 			slog.Error("YO!agent result watch could not start", "session", preview.Session, "error", watchErr)
 			resultWatch = map[string]any{"started": false, "error": watchErr.Error()}
@@ -492,7 +502,7 @@ func (actions *nativeYOAgentActions) execute(ctx context.Context, previewID stri
 	return map[string]any{"ok": true, "preview_id": previewID, "session": preview.Session, "sent": preview.Submit, "answer": answer, "return_result": preview.ReturnResult, "result_watch": resultWatch, "transport": "tmux", "conversation": conversation}, http.StatusOK
 }
 
-func (actions *nativeYOAgentActions) startResultWatch(preview nativeYOAgentActionPreview, target nativeYOAgentActionTarget, offset int64) (map[string]any, error) {
+func (actions *nativeYOAgentActions) startResultWatch(preview nativeYOAgentActionPreview, target nativeYOAgentActionTarget, position tailfile.Position) (map[string]any, error) {
 	id, err := nativeYOAgentRandomID()
 	if err != nil {
 		return nil, fmt.Errorf("create result wait identity: %w", err)
@@ -500,7 +510,7 @@ func (actions *nativeYOAgentActions) startResultWatch(preview nativeYOAgentActio
 	ctx, cancel := context.WithCancel(actions.ctx)
 	wait := nativeYOAgentActionWait{
 		ID: "yar_" + strings.TrimPrefix(id, "ya_"), Session: preview.Session, Locale: preview.Locale,
-		Transcript: target.AgentTranscript, StartedAt: actions.now(), Target: target, Offset: offset, Cancel: cancel,
+		Transcript: target.AgentTranscript, StartedAt: actions.now(), Target: target, Position: position, Cancel: cancel,
 	}
 	actions.mu.Lock()
 	if actions.closed {
@@ -535,19 +545,22 @@ func (actions *nativeYOAgentActions) watchResult(ctx context.Context, wait nativ
 	defer deadline.Stop()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	var pending []byte
-	offset := wait.Offset
+	position := wait.Position
 	lastText := ""
 	lastChange := actions.now()
 	sawWork := false
 	for {
-		items, nextOffset, nextPending, err := readTranscriptItemsSinceWithPending(wait.Transcript, offset, pending)
+		items, batch, err := actions.server.readTranscriptItems(ctx, wait.Transcript, position)
+		if batch.Reset {
+			lastText, sawWork = "", false
+			lastChange = actions.now()
+		}
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
 				slog.Warn("YO!agent result transcript read failed", "wait_id", wait.ID, "error", err)
 			}
 		} else {
-			offset, pending = nextOffset, nextPending
+			position = batch.After
 			var pieces []string
 			for _, item := range items {
 				if nativeAgentStringSetting(item, "role", "") != "assistant" {
@@ -576,7 +589,7 @@ func (actions *nativeYOAgentActions) watchResult(ctx context.Context, wait nativ
 		if state == stats.AgentStatusRun {
 			sawWork = true
 		}
-		if lastText != "" && state == stats.AgentStatusIdle && (sawWork || actions.now().Sub(wait.StartedAt) >= 5*time.Second) && actions.now().Sub(lastChange) >= 2*time.Second {
+		if err == nil && batch.Complete && lastText != "" && state == stats.AgentStatusIdle && (sawWork || actions.now().Sub(wait.StartedAt) >= 5*time.Second) && actions.now().Sub(lastChange) >= 2*time.Second {
 			actions.completeWait(ctx, wait, lastText, false)
 			return
 		}

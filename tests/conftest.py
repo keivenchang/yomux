@@ -235,8 +235,21 @@ def _defect2_attribution_path():
     return directory / f"worker-{os.environ.get('PYTEST_XDIST_WORKER') or 'master'}.jsonl"
 
 
+def _item_attribution_path(item):
+    if _attribution_path_key not in item.stash:
+        item.stash[_attribution_path_key] = _defect2_attribution_path()
+    return item.stash[_attribution_path_key]
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    # Admission precedes fixture setup: tests may intentionally replace environment roots.
+    _item_attribution_path(item)
+    yield
+
+
 def pytest_runtest_logreport(report):
-    if report.when != "call" and not (report.when == "setup" and report.outcome != "passed"):
+    if report.when != "call" and report.outcome == "passed":
         return
     # Under xdist the controller ALSO receives every worker's report, with `node` set to the
     # worker it came from. Writing there would duplicate every row into a `master` file that
@@ -244,39 +257,38 @@ def pytest_runtest_logreport(report):
     # the process that actually ran the test writes.
     if getattr(report, "node", None) is not None:
         return
-    path = _defect2_attribution_path()
+    if hasattr(report, "yomux_attribution_path"):
+        path = Path(report.yomux_attribution_path) if report.yomux_attribution_path else None
+    else:
+        path = _defect2_attribution_path()
     if path is None:
         return
     row = {
         "nodeid": report.nodeid,
-        "worker": os.environ.get("PYTEST_XDIST_WORKER") or "master",
         "phase": report.when,
         "outcome": report.outcome,
         "duration": round(float(getattr(report, "duration", 0.0)), 6),
         "start": float(getattr(report, "start", 0.0)) or time.time(),
         "pid": os.getpid(),
     }
-    _write_test_attribution(row)
+    _write_test_attribution(row, path)
 
 
-def _write_test_attribution(row, path=None):
-    path = path if path is not None else _defect2_attribution_path()
+def _write_test_attribution(row, path):
     if path is None:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(_attribution_json_dumps(row, sort_keys=True) + "\n")
+            handle.write(_attribution_json_dumps({**row, "worker": path.stem.removeprefix("worker-")}, sort_keys=True) + "\n")
     except OSError as error:
         print(f"Test attribution unavailable at {path}: {error}", file=sys.stderr)
 
 
 def pytest_runtest_call(item):
-    path = _defect2_attribution_path()
-    item.stash[_attribution_path_key] = path
+    path = _item_attribution_path(item)
     lease = item.funcargs.get("browser")
     _write_test_attribution({"event": "start", "nodeid": item.nodeid,
-                             "worker": os.environ.get("PYTEST_XDIST_WORKER") or "master",
                              "browser_generation": lease.generation if lease else None,
                              "pid": os.getpid(), "at": time.time()}, path)
 
@@ -285,17 +297,18 @@ def pytest_runtest_call(item):
 def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
+    path = _item_attribution_path(item)
+    # Report extensions must remain JSON-safe for pytest-xdist's worker transport.
+    report.yomux_attribution_path = str(path) if path is not None else ""
     if report.outcome == "skipped" and item.get_closest_marker("real_agent_urls") is not None:
         report.outcome = "failed"
         report.longrepr = f"{item.nodeid}: required real-client URL sample did not run: {report.longrepr}"
     if report.when != "call":
         return
-    path = item.stash.get(_attribution_path_key, _defect2_attribution_path())
     if path is None:
         return
     lease = item.funcargs.get("browser")
     row = {"event": "finish", "nodeid": item.nodeid, "outcome": report.outcome,
-           "worker": os.environ.get("PYTEST_XDIST_WORKER") or "master",
            "browser_generation": lease.generation if lease else None,
            "pid": os.getpid(), "at": time.time()}
     if report.user_properties:

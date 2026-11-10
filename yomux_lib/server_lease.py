@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 import fcntl
 import json
 import os
@@ -46,11 +47,7 @@ class ServerPortLease:
         fds = tuple(fd for fd in (self.fd, *self.extra_fds) if fd >= 0)
         self.fd = -1
         self.extra_fds = ()
-        for fd in fds:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            finally:
-                os.close(fd)
+        _release_fds(list(fds))
 
 
 def _read_unlocked_instance_record(path: Path) -> dict | None:
@@ -138,7 +135,7 @@ def _force_stop_instance_owner(
         # The old process may release its file locks from a signal handler before it has
         # actually stopped.  Do not let the replacement run beside that still-verified process;
         # the process-start identity is the fence, not merely reacquisition of the lock files.
-        return not _verified_instance_owner(expected_record, identity)
+        return _proven_stale_instance_owner(expected_record, identity)
 
     def wait_for_owner_exit(deadline: float) -> bool:
         while time.monotonic() < deadline:
@@ -215,7 +212,12 @@ def _write_instance_record(fds: list[int], payload: bytes) -> None:
     for fd in fds:
         os.ftruncate(fd, 0)
         os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, payload)
+        offset = 0
+        while offset < len(payload):
+            written = os.write(fd, payload[offset:])
+            if written <= 0:
+                raise OSError("failed to write instance lease record")
+            offset += written
         os.fsync(fd)
 
 
@@ -350,19 +352,20 @@ def acquire_server_port_lease(
     except OSError:
         os.close(fd)
         return None
-    payload = json.dumps(
-        {
-            **identity.process_record_fields(),
-            "pgid": os.getpgid(0),
-            "port": clean_port,
-        },
-        sort_keys=True,
-    ) + "\n"
-    os.ftruncate(fd, 0)
-    os.lseek(fd, 0, os.SEEK_SET)
-    os.write(fd, payload.encode("utf-8"))
-    os.fsync(fd)
-    return ServerPortLease(port=clean_port, path=path, fd=fd)
+    with ExitStack() as cleanup:
+        cleanup.callback(_release_fds, [fd])
+        payload = json.dumps(
+            {
+                **identity.process_record_fields(),
+                "pgid": os.getpgid(0),
+                "port": clean_port,
+            },
+            sort_keys=True,
+        ) + "\n"
+        _write_instance_record([fd], payload.encode("utf-8"))
+        lease = ServerPortLease(port=clean_port, path=path, fd=fd)
+        cleanup.pop_all()
+        return lease
 
 
 def _port_record_path(port: int, state_dir: Path, identity: HostIdentity) -> Path:

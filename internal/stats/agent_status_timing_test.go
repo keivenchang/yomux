@@ -107,10 +107,11 @@ func TestStatsServiceRetriesUnavailableAgentStatusAtBoundedCadence(t *testing.T)
 }
 
 func TestAgentStatusCommitSignalsBeforeAttentionMaintenance(t *testing.T) {
-	notified := false
+	notified, maintained := false, false
 	collector := NewAgentStatusCollector(func(context.Context) ([]AgentRecord, []error) { return nil, nil }, nil, &recordingBatchWriter{}, &collectorClock{now: time.Unix(100, 0)}, AgentStatusCollectorConfig{
 		Committed: func() { notified = true },
 		AttentionCommitted: func([]string) error {
+			maintained = true
 			if !notified {
 				t.Error("durable status publication waited for attention-store maintenance")
 			}
@@ -118,6 +119,9 @@ func TestAgentStatusCommitSignalsBeforeAttentionMaintenance(t *testing.T) {
 		},
 	})
 	collector.RunOnce(context.Background())
+	if !notified || !maintained {
+		t.Fatalf("commit/maintenance callbacks not exercised: notified=%v maintained=%v", notified, maintained)
+	}
 }
 
 func TestStatsServiceExpiresCachedAgentStatusWithoutReadingSQLite(t *testing.T) {

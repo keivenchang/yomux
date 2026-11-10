@@ -169,7 +169,14 @@ func encodeRingBucketPayload(bucket MaterializedBucket, noData []MaterializedNoD
 	return string(encoded), nil
 }
 
-func decodeRingBucketPayloadWithMetadata(value string) (decodedRingBucketPayload, error) {
+func decodeRingBucketPayloadWithMetadata(value string) (decoded decodedRingBucketPayload, err error) {
+	defer func() {
+		if err == nil {
+			// Reject corrupt typed costs at the same boundary as corrupt JSON so
+			// the service records durable lifecycle repair for this exact slot.
+			err = validateMaterializedCostRange(MaterializedLayer{Buckets: []MaterializedBucket{decoded.bucket}})
+		}
+	}()
 	var envelope ringBucketPayload
 	decoder := json.NewDecoder(bytes.NewReader([]byte(value)))
 	decoder.DisallowUnknownFields()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -118,31 +120,16 @@ func TestUpdateRoutesKeepStatusReadableAndInstallationAdminOnly(t *testing.T) {
 	post.SetBasicAuth("admin", "admin-pass")
 	started := httptest.NewRecorder()
 	s.protected(http.HandlerFunc(s.selfUpdate)).ServeHTTP(started, post)
-	if started.Code != http.StatusOK {
-		t.Fatalf("new admin update status = %d, want 200: %s", started.Code, started.Body.String())
+	if started.Code != http.StatusConflict {
+		t.Fatalf("unverified build accepted: %d %s", started.Code, started.Body.String())
 	}
-	if err := json.Unmarshal(started.Body.Bytes(), &payload); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(s.updateJobPath); !os.IsNotExist(err) {
+		t.Fatalf("unverified upgrade created job: %v", err)
 	}
-	if payload["ok"] != true || payload["restarting"] != true || payload["target"] != "0.10.7" {
-		t.Fatalf("unexpected new update acknowledgement: %#v", payload)
-	}
-	deadline := time.After(time.Second)
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if completed := s.loadUpdateJob(); completed.State == "failed" {
-			break
-		}
-		select {
-		case <-ticker.C:
-		case <-deadline:
-			t.Fatal("test update worker did not finish")
-		}
-	}
+
 }
 
-func TestSelfUpdateDryRunDoesNotCreateOrStartJob(t *testing.T) {
+func TestSelfUpdateDryRunDoesNotClaimAnUnverifiedBuild(t *testing.T) {
 	config := t.TempDir()
 	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: admin\n    password: admin-pass\n    role: admin\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -153,14 +140,14 @@ func TestSelfUpdateDryRunDoesNotCreateOrStartJob(t *testing.T) {
 	request.SetBasicAuth("admin", "admin-pass")
 	response := httptest.NewRecorder()
 	s.protected(http.HandlerFunc(s.selfUpdate)).ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("dry-run status = %d, want 200: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusConflict {
+		t.Fatalf("dry-run status = %d, want 409: %s", response.Code, response.Body.String())
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["dry_run"] != true || payload["restarting"] != false || payload["target"] != "0.10.7" {
+	if payload["ok"] != false || payload["dry_run"] != true || payload["restarting"] != false {
 		t.Fatalf("unexpected dry-run response: %#v", payload)
 	}
 	if _, err := os.Stat(s.updateJobPath); !os.IsNotExist(err) {
@@ -210,6 +197,7 @@ func TestSelfUpdateRefusesDirtyAndDivergedCheckouts(t *testing.T) {
 			jobPath := filepath.Join(config, "self-update-job.json")
 			job := selfUpdateJob{ID: scenario, State: "preparing", Target: "0.10.7", TargetSHA: target, StartedAt: time.Now()}
 			s := &server{root: canonicalRoot, config: config, updateJobPath: jobPath}
+
 			s.runSelfUpdate(job)
 			result := s.loadUpdateJob()
 			if result.State != "failed" {
@@ -237,7 +225,7 @@ func TestSelfUpdateRefusesDirtyAndDivergedCheckouts(t *testing.T) {
 }
 
 func TestSelfUpdatePreparesBeforeFastForwardAndLaunchesManagedInstance(t *testing.T) {
-	for _, scenario := range []string{"prepared", "installed", "build-failure", "native-incompatible"} {
+	for _, scenario := range []string{"prepared", "installed", "build-failure", "native-incompatible", "changed-during-build", "artifact-tampered", "checkout-edited"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			gitRun(t, root, "init", "--initial-branch=main")
@@ -271,6 +259,9 @@ func TestSelfUpdatePreparesBeforeFastForwardAndLaunchesManagedInstance(t *testin
 			}
 			if scenario == "native-incompatible" {
 				buildScript = strings.ReplaceAll(buildScript, "if [ \"$1\" = \"--operator\" ]; then printf '0.10.7\\n'; exit 0; fi", "if [ \"$1\" = \"--operator\" ]; then exit 64; fi")
+			}
+			if scenario == "changed-during-build" {
+				buildScript += "printf 'local edit' > \"$YOMUX_UPDATE_TEST_SOURCE/local.txt\"\n"
 			}
 			write("tools/build_go.sh", buildScript, 0o700)
 			write("bazel-bin/tools/staticgen/staticgen_/staticgen", "#!/bin/sh\nset -eu\n[ \"$1\" = --source-root ]\n[ \"$3\" = --output-directory ]\nmkdir -p \"$4\"\nprintf 'new-js\\n' > \"$4/yomux.js\"\nprintf 'new-css\\n' > \"$4/yomux.css\"\n", 0o700)
@@ -341,8 +332,11 @@ chmod 700 "$2/bin/yomux"
 				defer ticker.Stop()
 				for {
 					current := s.loadUpdateJob()
+					if current.State == "idle" {
+						return
+					}
 					if current.ID == job.ID && (current.State == "complete" || current.State == "failed") {
-						if scenario != "build-failure" && scenario != "native-incompatible" && current.State != "complete" {
+						if (scenario == "prepared" || scenario == "installed") && current.State != "complete" {
 							t.Errorf("managed launcher did not complete: %#v", current)
 						}
 						return
@@ -355,6 +349,75 @@ chmod 700 "$2/bin/yomux"
 					}
 				}
 			})
+			prepared, prepareErr := s.prepareSelfUpdate(context.Background(), job)
+			if got := strings.TrimSpace(gitRun(t, root, "rev-parse", "HEAD")); got != baseSHA {
+				t.Fatalf("preflight changed HEAD: %s", got)
+			}
+			if data, err := os.ReadFile(filepath.Join(runtimeRoot, "static", "yomux.js")); scenario != "installed" && (err != nil || string(data) != "old-js\n") {
+				t.Fatalf("preflight changed live assets: %q %v", data, err)
+			}
+			if _, err := os.Stat(argsPath); !os.IsNotExist(err) {
+				t.Fatal("preflight launched server")
+			}
+			if _, err := os.Stat(s.updateJobPath); !os.IsNotExist(err) {
+				t.Fatal("preflight created installation job")
+			}
+			if scenario == "changed-during-build" {
+				if prepareErr == nil || !strings.Contains(prepareErr.Error(), "checkout changed") {
+					t.Fatalf("stale preflight accepted: %v", prepareErr)
+				}
+				return
+			}
+			if scenario == "build-failure" || scenario == "native-incompatible" {
+				if prepareErr == nil {
+					t.Fatal("broken candidate passed preflight")
+				}
+			} else {
+				if prepareErr != nil {
+					t.Fatal(prepareErr)
+				}
+				job.prepared = prepared
+				if scenario == "artifact-tampered" || scenario == "checkout-edited" {
+					path := filepath.Join(prepared.stage, "static", "yomux.js")
+					want := "artifacts changed"
+					if scenario == "checkout-edited" {
+						path, want = filepath.Join(root, "local.txt"), "checkout changed"
+					}
+					if err := os.WriteFile(path, []byte("changed"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					s.runSelfUpdate(job)
+					if failed := s.loadUpdateJob(); failed.State != "failed" || !strings.Contains(failed.Error, want) {
+						t.Fatalf("stale candidate activated: %+v", failed)
+					}
+					if got := strings.TrimSpace(gitRun(t, root, "rev-parse", "HEAD")); got != baseSHA {
+						t.Fatal("stale candidate moved HEAD")
+					}
+					if _, err := os.Stat(argsPath); !os.IsNotExist(err) {
+						t.Fatal("stale candidate launched server")
+					}
+					return
+				}
+
+				// A second build would now fail; activation must reuse the verified output.
+				if err := os.WriteFile(filepath.Join(prepared.stage, "tools", "build_go.sh"), []byte("#!/bin/sh\nexit 81\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "build-failure" {
+				retryConfig := t.TempDir()
+				retryServer := &server{root: runtimeRoot, config: retryConfig, updateJobPath: filepath.Join(retryConfig, "job.json")}
+				for attempt := range 3 {
+					_, err := retryServer.prepareSelfUpdate(context.Background(), selfUpdateJob{ID: fmt.Sprintf("preflight-%d", attempt), Target: job.Target, TargetSHA: targetSHA})
+					if err == nil || !strings.Contains(err.Error(), "fixture build failure") {
+						t.Fatalf("retry build error: %v", err)
+					}
+				}
+				entries, err := os.ReadDir(filepath.Join(retryConfig, "self-update"))
+				if err != nil || len(entries) != 2 || entries[0].Name() != "preflight" || entries[1].Name() != "preflight.owner" {
+					t.Fatalf("unbounded retry stages: %v %v", entries, err)
+				}
+			}
 			s.runSelfUpdate(job)
 			result := s.loadUpdateJob()
 			if scenario == "build-failure" || scenario == "native-incompatible" {
@@ -462,6 +525,21 @@ chmod 700 "$2/bin/yomux"
 	}
 }
 
+func TestSelfUpdateRecoveryRetiresInterruptedPreparation(t *testing.T) {
+	for _, state := range []string{"preparing", "activating"} {
+		t.Run(state, func(t *testing.T) {
+			s := &server{updateJobPath: filepath.Join(t.TempDir(), "job.json")}
+			if err := s.saveUpdateJob(selfUpdateJob{ID: "interrupted", State: state}); err != nil {
+				t.Fatal(err)
+			}
+			s.recoverSelfUpdateJob()
+			if job := s.loadUpdateJob(); job.State != "failed" || !strings.Contains(job.Error, "interrupted") {
+				t.Fatalf("stale job still blocks updates: %+v", job)
+			}
+		})
+	}
+}
+
 func TestSelfUpdateRecoveryVerifiesPinnedTargetAndAwaitsManagedReadiness(t *testing.T) {
 	root := t.TempDir()
 	gitRun(t, root, "init", "--initial-branch=main")
@@ -538,6 +616,96 @@ func TestUpdateCheckerPinsManifestAndRecoversOffline(t *testing.T) {
 			t.Fatalf("unexpected update result: %#v", result)
 		}
 	}
+	var states []string
+	checker.publish = func(result updateSnapshot) {
+		states = append(states, result.BuildState)
+		if checker.Snapshot().BuildState != result.BuildState {
+			t.Error("publication did not expose the current readiness snapshot")
+		}
+	}
+	checker.prepare = func(context.Context, selfUpdateJob) (*preparedSelfUpdate, error) {
+		return nil, errors.New("fixture compiler unavailable")
+	}
+	failed := checker.Check(context.Background())
+	if !failed.Available || failed.BuildState != "failed" || failed.BuildError != "fixture compiler unavailable" || failed.prepared != nil {
+		t.Fatalf("build failure hid availability: %+v", failed)
+	}
+	payload := updateStatusPayload(failed)
+	if payload["available"] != true || payload["build_state"] != "failed" {
+		t.Fatalf("readiness absent from status: %+v", payload)
+	}
+	if !reflect.DeepEqual(states, []string{"checking", "failed"}) {
+		t.Fatalf("readiness events: %v", states)
+	}
+	builds := 0
+	checker.prepare = func(_ context.Context, job selfUpdateJob) (*preparedSelfUpdate, error) {
+		builds++
+		source, installation, err := nativeUpdateSource(installedRoot)
+		return &preparedSelfUpdate{runtimeRoot: installedRoot, root: source, head: strings.TrimSpace(gitRun(t, repo, "rev-parse", "HEAD")), installation: installation, target: job.TargetSHA}, err
+	}
+	ready := checker.Check(context.Background())
+	if ready.BuildState != "ready" || ready.BuildError != "" || ready.prepared == nil {
+		t.Fatalf("retry did not recover: %+v", ready)
+	}
+	cached := checker.Check(context.Background())
+	if cached.prepared != ready.prepared || builds != 1 {
+		t.Fatalf("verified candidate was rebuilt: builds=%d", builds)
+	}
+	t.Run("status refresh build retires before shutdown returns", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		checker := newUpdateChecker(installedRoot, "0.10.6", func() string { return "minor" })
+		started := make(chan *os.Process, 1)
+		finished := make(chan error, 1)
+		buildDone := make(chan struct{})
+		checker.prepare = func(ctx context.Context, _ selfUpdateJob) (*preparedSelfUpdate, error) {
+			cmd := exec.CommandContext(ctx, "sleep", "60")
+			cmd.Env = testsupport.SyntheticEnvironment()
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
+			if err := cmd.Start(); err != nil {
+				return nil, err
+			}
+			started <- cmd.Process
+			err := cmd.Wait()
+			finished <- err
+			close(buildDone)
+			return nil, ctx.Err()
+		}
+		s := &server{updates: checker, producerContext: ctx, serverCancel: cancel}
+		s.updateStatus(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/update-status", nil))
+		var child *os.Process
+		select {
+		case child = <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("status refresh did not launch the fixture build")
+		}
+		t.Cleanup(func() {
+			select {
+			case <-buildDone:
+				return
+			default:
+				_ = syscall.Kill(-child.Pid, syscall.SIGKILL)
+			}
+			select {
+			case <-buildDone:
+			case <-time.After(5 * time.Second):
+				t.Error("fixture child did not retire")
+			}
+		})
+		s.shutdown()
+		select {
+		case err := <-finished:
+			if err == nil {
+				t.Fatal("blocked build completed without cancellation")
+			}
+		default:
+			t.Fatal("shutdown returned while its build child was still running")
+		}
+		if err := syscall.Kill(-child.Pid, 0); !errors.Is(err, syscall.ESRCH) {
+			t.Fatalf("build process group survived shutdown: %v", err)
+		}
+	})
 	if err := os.Rename(remote, remote+".offline"); err != nil {
 		t.Fatal(err)
 	}

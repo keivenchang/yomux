@@ -1,43 +1,8 @@
 """Characterization contracts for shared fixture parents."""
-import json
-from pathlib import Path
-from types import SimpleNamespace
-
-import pytest
-
-from tests.helpers.fixture_http_server import FixtureHttpServer
-from tests.helpers.fixture_http_server import header_values
 from tests.helpers.prompt_corpus import PromptCorpus
 from tests.helpers.prompt_corpus import PromptCorpusPreset
 
 
-
-
-# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
-@pytest.mark.shared_tooling
-def test_fixture_http_server_cleanup_keeps_order_and_first_error(monkeypatch):
-    events = []
-
-    class Server:
-        def shutdown(self):
-            events.append("shutdown")
-            raise RuntimeError("shutdown failed")
-
-        def server_close(self):
-            events.append("close")
-            raise RuntimeError("close failed")
-
-    class Thread:
-        def join(self, timeout):
-            events.append(("join", timeout))
-
-        def is_alive(self):
-            return False
-
-    runtime = FixtureHttpServer(Server(), Thread(), "fixture-parent characterization")
-    with pytest.raises(RuntimeError, match="shutdown failed"):
-        runtime.close()
-    assert events == ["shutdown", "close", ("join", 2)]
 
 
 def test_prompt_corpus_presets_preserve_format_empty_path_and_raw_text_policies(tmp_path):

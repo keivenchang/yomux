@@ -140,7 +140,7 @@ The shared browser must capability-gate unavailable terminal/session paths. Go p
 
 * `/api/fs/fast/list`, `/api/fs/list`, `/api/fs/read`, `/api/fs/info`, `/api/fs/raw`
 
-* `/api/fs/write`, `/api/fs/delete`, `/api/fs/rename`, `/api/fs/mkdir`, `/api/upload`
+* `/api/fs/write`, `/api/fs/delete`, `/api/fs/rename`, `/api/fs/move`, `/api/fs/mkdir`, `/api/upload`
 
 * `/api/fs/search`, `/api/fs/search-stream`, `/api/fs/index-status`, `/api/fs/unindex`
 

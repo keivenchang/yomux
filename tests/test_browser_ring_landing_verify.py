@@ -117,7 +117,6 @@ def _launch_server(
     tmux_socket: Path,
     database_path: Path,
 ) -> subprocess.Popen[bytes]:
-    output = log_path.open("ab")
     fixture_root = runtime_dir.parent
     # Every child path is fixture-owned. Do not copy ambient values here: a host
     # Codex root, temporary directory, or lock path could reintroduce real client
@@ -179,34 +178,35 @@ def _launch_server(
     environment["YOLOMUX_STATS_DISABLE_COLLECTORS"] = "1"
     environment["PYTHONUNBUFFERED"] = "1"
     environment = child_process_artifact_environment(REPO_ROOT, environ=environment)
-    process = subprocess.Popen(
-        (
-            str(go_test_server_binary(REPO_ROOT)),
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--http",
-            "--root",
-            str(REPO_ROOT),
-            "--config",
-            str(fixture_root / "config"),
-            "--stats",
-            str(database_path),
-        ),
-        cwd=REPO_ROOT,
-        env=environment,
-        stdout=output,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
-    output.close()
+    with log_path.open("ab") as output:
+        process = subprocess.Popen(
+            (
+                str(go_test_server_binary(REPO_ROOT)),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--http",
+                "--root",
+                str(REPO_ROOT),
+                "--config",
+                str(fixture_root / "config"),
+                "--stats",
+                str(database_path),
+            ),
+            cwd=REPO_ROOT,
+            env=environment,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
     return process
 
 
 # Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
 @pytest.mark.shared_tooling
-def test_ring_server_launch_replaces_ambient_client_roots(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("spawn_failure", [False, True])
+def test_ring_server_launch_replaces_ambient_client_roots(monkeypatch, tmp_path: Path, spawn_failure) -> None:
     """A hostile operator environment must not reach the ring fixture child."""
 
     runtime_dir = tmp_path / "runtime"
@@ -220,6 +220,8 @@ def test_ring_server_launch_replaces_ambient_client_roots(monkeypatch, tmp_path:
     def capture(command, **kwargs):
         captured["command"] = command
         captured.update(kwargs)
+        if spawn_failure:
+            raise OSError("fixture spawn failure")
         return FakeProcess()
 
     monkeypatch.setenv("HOME", "/host/home")
@@ -229,15 +231,14 @@ def test_ring_server_launch_replaces_ambient_client_roots(monkeypatch, tmp_path:
     monkeypatch.setattr(sys.modules[__name__], "go_test_server_binary", lambda _root: Path("/tmp/yomux-go"))
     monkeypatch.setattr(subprocess, "Popen", capture)
 
-    process = _launch_server(
-        7222,
-        tmp_path / "server.log",
-        runtime_dir,
-        tmp_path / "tmux.sock",
-        tmp_path / storage.DATABASE_FILENAME,
-    )
-
-    assert isinstance(process, FakeProcess)
+    arguments = (7222, tmp_path / "server.log", runtime_dir,
+                 tmp_path / "tmux.sock", tmp_path / storage.DATABASE_FILENAME)
+    if spawn_failure:
+        with pytest.raises(OSError, match="fixture spawn failure"):
+            _launch_server(*arguments)
+    else:
+        assert isinstance(_launch_server(*arguments), FakeProcess)
+    assert captured["stdout"].closed, "the fixture owns its log descriptor even when spawning fails"
     environment = captured["env"]
     assert isinstance(environment, dict)
     assert environment["HOME"] == str(tmp_path / "home")
@@ -268,15 +269,15 @@ def _stop_server(process: subprocess.Popen[bytes]) -> None:
 
 
 def _retire_browser_and_stop_server(browser_driver, runtime: ExternalRuntime, process: subprocess.Popen[bytes]) -> None:
-    phases = []
-    current_url = str(browser_driver.current_url)
-    if current_url == runtime.base_url or current_url.startswith(f"{runtime.base_url}/"):
-        phases.append((
-            "browser diagnostic retirement",
-            lambda: browser_console.retire_browser_after_strict_diagnostic_gate(browser_driver),
-        ))
-    phases.append(("server stop", lambda: _stop_server(process)))
-    run_fixture_cleanup_phases("ring browser server stop", phases)
+    def retire_browser():
+        current_url = str(browser_driver.current_url)
+        if current_url == runtime.base_url or current_url.startswith(f"{runtime.base_url}/"):
+            browser_console.retire_browser_after_strict_diagnostic_gate(browser_driver)
+
+    run_fixture_cleanup_phases("ring browser server stop", (
+        ("browser diagnostic retirement", retire_browser),
+        ("server stop", lambda: _stop_server(process)),
+    ))
 
 
 @pytest.mark.e2e
@@ -317,6 +318,53 @@ def test_ring_server_stop_preserves_retirement_failure_after_stopping_process(mo
     assert events == [("retire", browser_driver), ("stop", process)]
 
 
+@pytest.mark.shared_tooling
+def test_ring_server_stop_survives_browser_url_lookup_failure(monkeypatch):
+    events = []
+
+    class DisconnectedBrowser:
+        @property
+        def current_url(self):
+            raise RuntimeError("browser disconnected during retirement")
+
+    process = object()
+    monkeypatch.setattr(sys.modules[__name__], "_stop_server", lambda current: events.append(current))
+    with pytest.raises(RuntimeError, match="browser disconnected during retirement"):
+        _retire_browser_and_stop_server(DisconnectedBrowser(), ExternalRuntime(port=43210, tmux=None), process)
+    assert events == [process]
+
+
+@pytest.mark.shared_tooling
+@pytest.mark.parametrize("journey", [
+    "test_ring_landing_real_page_restart_and_zero_gap",
+    "test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells",
+])
+def test_ring_journey_retires_daemons_after_browser_retirement_failure(monkeypatch, tmp_path, journey):
+    module = sys.modules[__name__]
+    calls = []
+    prepared = SimpleNamespace(port=7900, runtime=object(), service_runtime_dir=tmp_path,
+                               database_path=tmp_path / "stats.db", log_path=tmp_path / "server.log")
+    monkeypatch.setattr(module, "go_test_server_binary", lambda *_args: Path("/fixture/yomux-go"))
+    monkeypatch.setattr(module, "_prepare_ring_runtime", lambda *_args: prepared)
+    monkeypatch.setattr(module, "_seed_zero_and_gap", lambda *_args, **_kwargs: ({}, {}))
+    monkeypatch.setattr(module, "_launch_server", lambda *_args: SimpleNamespace(args=["/fixture/yomux-go"]))
+
+    def fail_wait(*_args):
+        raise ValueError("fixture readiness failure")
+
+    def fail_retirement(*_args):
+        calls.append("browser-and-server")
+        raise RuntimeError("fixture retirement failure")
+
+    monkeypatch.setattr(module, "_wait_http", fail_wait)
+    monkeypatch.setattr(module, "_retire_browser_and_stop_server", fail_retirement)
+    monkeypatch.setattr(module, "_retire_ring_fixture_daemons", lambda *_args: calls.append("daemons"))
+    with pytest.raises(RuntimeError, match="fixture retirement failure"):
+        getattr(module, journey)(None, None, monkeypatch, object(), None,
+                                 SimpleNamespace(socket_path=tmp_path / "tmux.sock"), None)
+    assert calls == ["browser-and-server", "daemons"]
+
+
 def _go_stats_request(
     port: int,
     path: str,
@@ -355,6 +403,13 @@ def _retire_ring_fixture_daemons(paths: GateRuntimePaths) -> None:
     label = "ring browser restart"
     retire_local_service_daemons_beneath(paths.root, label=label)
     assert_no_surviving_local_service_daemons(paths.root, label=label)
+
+
+def _retire_ring_runtime(browser_driver, runtime, process, paths):
+    run_fixture_cleanup_phases("ring browser runtime", (
+        ("browser and server", lambda: _retire_browser_and_stop_server(browser_driver, runtime, process)),
+        ("fixture daemons", lambda: _retire_ring_fixture_daemons(paths)),
+    ))
 
 
 @pytest.mark.e2e
@@ -973,10 +1028,9 @@ def test_ring_landing_real_page_restart_and_zero_gap(
         assert matching_gap, first_zero_gap
         assert first_zero_gap["gapRects"], first_zero_gap
 
-        _retire_browser_and_stop_server(browser, runtime, process)
+        _retire_ring_runtime(browser, runtime, process, gate_runtime_paths)
         server_process_retired = process.poll() is not None
         assert server_process_retired, process.pid
-        _retire_ring_fixture_daemons(gate_runtime_paths)
 
         restart_started = time.monotonic()
         previous_server_pid = process.pid
@@ -1040,8 +1094,7 @@ def test_ring_landing_real_page_restart_and_zero_gap(
         }
         print("RING_BROWSER_EVIDENCE=" + json.dumps(evidence, sort_keys=True), flush=True)
     finally:
-        _retire_browser_and_stop_server(browser, runtime, process)
-        _retire_ring_fixture_daemons(gate_runtime_paths)
+        _retire_ring_runtime(browser, runtime, process, gate_runtime_paths)
 
 
 # --- publish -> invalidate -> production restart -> first ready page ----------------------------
@@ -1181,8 +1234,7 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
         assert before["slots"][rebuildable_address]["bucket_start"] == rebuildable_start
 
         # Production-style restart: the page and the Go server stop before offline mutation.
-        _retire_browser_and_stop_server(browser, prepared.runtime, process)
-        _retire_ring_fixture_daemons(gate_runtime_paths)
+        _retire_ring_runtime(browser, prepared.runtime, process, gate_runtime_paths)
 
         # With the Go owner stopped, wait out the 1-second window and contradict both cells through
         # the fixture Store. Contradicting while nothing can
@@ -1265,5 +1317,4 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
             "cost_tokens": rendered_total,
         }, sort_keys=True), flush=True)
     finally:
-        _retire_browser_and_stop_server(browser, prepared.runtime, process)
-        _retire_ring_fixture_daemons(gate_runtime_paths)
+        _retire_ring_runtime(browser, prepared.runtime, process, gate_runtime_paths)

@@ -1,12 +1,15 @@
 import json
 import math
 import re
+
+import pytest
 from pathlib import Path
 from urllib.parse import quote
 
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
 
 from yomux_lib import filesystem
@@ -1591,6 +1594,7 @@ def test_finder_64_item_batch_settles_from_operation_terminal_event(browser, tmp
             done({
               batchSize: batchRequests.length,
               ids: batchRequests.map(request => request.id),
+              requestedPaths: paths,
               resultPaths: results.map(result => result.path),
               errors: jsDebugFailureEvents('error'),
               rejections: jsDebugFailureEvents('rejection'),
@@ -1605,9 +1609,22 @@ def test_finder_64_item_batch_settles_from_operation_terminal_event(browser, tmp
     assert not metrics.get("error"), metrics
     assert metrics["batchSize"] == 64
     assert len(set(metrics["ids"])) == 64
-    assert len(metrics["resultPaths"]) == 64
+    assert metrics["resultPaths"] == metrics["requestedPaths"], {"resultPaths": metrics["resultPaths"]}
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
+
+
+def test_finder_batch_gate_rejects_results_for_another_path(browser, tmp_path, monkeypatch):
+    original_execute = browser.execute_async_script
+
+    def execute_with_wrong_paths(script, *args):
+        if "const paths = Array.from({length: 64}" in script:
+            script = script.replace("payload: {path: request.path, name:", "payload: {path: '/home/test/wrong.txt', name:")
+        return original_execute(script, *args)
+
+    monkeypatch.setattr(browser, "execute_async_script", execute_with_wrong_paths)
+    with pytest.raises(AssertionError, match="resultPaths"):
+        test_finder_64_item_batch_settles_from_operation_terminal_event(browser, tmp_path)
 
 
 @pytest.mark.shared_tooling
@@ -1714,6 +1731,8 @@ def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
         "/home/test": [
             {"name": "project", "kind": "dir"},
             {"name": "note.txt", "kind": "file"},
+            {"name": "preview.png", "kind": "file"},
+            {"name": "preview.gif", "kind": "file"},
         ],
         "/home/test/project": [{"name": "src", "kind": "dir"}],
     }
@@ -1727,7 +1746,9 @@ def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
         lambda driver: driver.execute_script(
             """
             return document.querySelector('.file-tree-row[data-path="/home/test/project"]')
-              && document.querySelector('.file-tree-row[data-path="/home/test/note.txt"]');
+              && document.querySelector('.file-tree-row[data-path="/home/test/note.txt"]')
+              && document.querySelector('.file-tree-row[data-path="/home/test/preview.png"]')
+              && document.querySelector('.file-tree-row[data-path="/home/test/preview.gif"]');
             """
         )
     )
@@ -1739,15 +1760,53 @@ def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
             text: button.textContent.trim(),
             disabled: button.disabled,
           }));
+          const layoutForMenu = () => Array.from(document.querySelector('.file-context-menu').children).map(child => child.matches('button')
+            ? {type: 'action', text: child.textContent.trim(), hasIcon: Boolean(child.querySelector('.file-context-menu-icon-svg'))}
+            : {type: 'separator'});
+          const sizingForMenu = () => {
+            const contextMenu = document.querySelector('.file-context-menu');
+            const contextItem = contextMenu.querySelector('button');
+            const appItem = [...document.querySelectorAll('.app-menu-command')].find(item => !item.querySelector('.app-menu-detail'));
+            const contextStyle = getComputedStyle(contextItem);
+            const appStyle = getComputedStyle(appItem);
+            return {
+              rowHeight: contextItem.getBoundingClientRect().height,
+              appRowHeight: appItem.getBoundingClientRect().height,
+              padding: contextStyle.padding,
+              appPadding: appStyle.padding,
+              font: contextStyle.font,
+              appFont: appStyle.font,
+              menuPadding: getComputedStyle(contextMenu).padding,
+              appMenuPadding: getComputedStyle(document.querySelector('.app-menu-popover')).padding,
+            };
+          };
           const folderRow = document.querySelector('.file-tree-row[data-path="/home/test/project"]');
-          await showFileTreeContextMenu(folderRow, '/home/test/project', {kind: 'dir', name: 'project'}, 32, 32);
+          selectFileTreePath('/home/test/project');
+          await showFileTreeContextMenu(folderRow, '/home/test/project', {kind: 'dir', name: 'project'}, 32, 32, {surface: 'finder'});
           const folderButtons = rowsForMenu();
+          const folderLayout = layoutForMenu();
+          const folderSizing = sizingForMenu();
           closeFileContextMenu();
           const fileRow = document.querySelector('.file-tree-row[data-path="/home/test/note.txt"]');
-          await showFileTreeContextMenu(fileRow, '/home/test/note.txt', {kind: 'file', name: 'note.txt'}, 32, 32);
+          selectFileTreePath('/home/test/note.txt');
+          await showFileTreeContextMenu(fileRow, '/home/test/note.txt', {kind: 'file', name: 'note.txt'}, 32, 32, {surface: 'finder'});
           const fileButtons = rowsForMenu();
+          const fileLayout = layoutForMenu();
+          const fileSizing = sizingForMenu();
           closeFileContextMenu();
-          done({folderButtons, fileButtons, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          const imageMenus = {};
+          const imageModes = {};
+          for (const name of ['preview.png', 'preview.gif']) {
+            const path = `/home/test/${name}`;
+            const row = document.querySelector(`.file-tree-row[data-path="${path}"]`);
+            selectFileTreePath(path);
+            await showFileTreeContextMenu(row, path, {kind: 'file', name}, 32, 32, {surface: 'finder'});
+            imageMenus[name] = rowsForMenu().map(button => button.text);
+            closeFileContextMenu();
+            setFileEditorViewMode(path, 'edit');
+            imageModes[name] = editorViewModeFor(path);
+          }
+          done({folderButtons, fileButtons, folderLayout, fileLayout, folderSizing, fileSizing, imageMenus, imageModes, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
         })().catch(error => done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}));
         """
     )
@@ -1757,6 +1816,45 @@ def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
     folder_zip = [button for button in metrics["folderButtons"] if button["text"] == "Zip & download"]
     assert folder_zip == [{"text": "Zip & download", "disabled": False}], metrics
     assert all(button["text"] != "Zip & download" for button in metrics["fileButtons"]), metrics
+    folder_actions = [row["text"] for row in metrics["folderLayout"] if row["type"] == "action"]
+    file_actions = [row["text"] for row in metrics["fileLayout"] if row["type"] == "action"]
+    assert folder_actions[:4] == ["Get Info", "Rename", "Zip & download", "Copy relative path"], metrics
+    assert file_actions[:4] == ["Edit in new tab", "Preview in new tab", "ΔShow Diff", "Get Info"], metrics
+    assert metrics["imageMenus"] == {
+        "preview.png": ["Preview in new tab", "Get Info", "Rename", "Copy relative path", "Copy full path", "Copy image", "Download", "Delete"],
+        "preview.gif": ["Preview in new tab", "Get Info", "Rename", "Copy relative path", "Copy full path", "Copy image", "Download", "Delete"],
+    }, metrics
+    assert metrics["imageModes"] == {"preview.png": "preview", "preview.gif": "preview"}, metrics
+    for layout in (metrics["folderLayout"], metrics["fileLayout"]):
+        actions = [row["text"] for row in layout if row["type"] == "action"]
+        assert actions[-1] == "Delete", layout
+        assert actions.index("Get Info") < actions.index("Rename"), layout
+        assert actions.index("Rename") < actions.index("Copy relative path") < actions.index("Copy full path") < actions.index("Download"), layout
+        assert all(row["hasIcon"] for row in layout if row["type"] == "action"), layout
+        assert all(layout[index]["type"] != "separator" or layout[index + 1]["type"] != "separator" for index in range(len(layout) - 1)), layout
+    for sizing in (metrics["folderSizing"], metrics["fileSizing"]):
+        assert sizing["rowHeight"] == sizing["appRowHeight"], sizing
+        assert sizing["padding"] == sizing["appPadding"], sizing
+        assert sizing["font"] == sizing["appFont"], sizing
+        assert sizing["menuPadding"] == sizing["appMenuPadding"], sizing
+    original_size = browser.get_window_size()
+    try:
+        browser.set_window_size(390, 844)
+        mobile = browser.execute_script(
+            """
+            const path = '/home/test/note.txt';
+            const row = document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${path}"]`);
+            selectFileTreePath(path);
+            showFileTreeContextMenu(row, path, {kind: 'file', name: 'note.txt'}, innerWidth - 2, innerHeight - 2, {surface: 'finder'});
+            const rect = document.querySelector('.file-context-menu').getBoundingClientRect();
+            return {left: rect.left, right: rect.right, width: rect.width, viewportWidth: innerWidth,
+              top: rect.top, bottom: rect.bottom, viewportHeight: innerHeight};
+            """
+        )
+    finally:
+        browser.set_window_size(original_size["width"], original_size["height"])
+    assert mobile["left"] >= 0 and mobile["right"] <= mobile["viewportWidth"], mobile
+    assert mobile["bottom"] <= mobile["viewportHeight"], mobile
 
 
 def test_finder_copy_path_uses_the_visible_pending_root_input(browser, tmp_path):
@@ -1912,13 +2010,13 @@ def test_finder_tree_toolbar_and_disclosure_use_real_events(browser, tmp_path):
     assert metrics["final"]["errors"] == [] and metrics["final"]["rejections"] == [], metrics
 
 
-def test_finder_create_actions_use_visible_root_and_reject_invalid_names(browser, tmp_path):
+def test_finder_create_actions_use_active_working_directory_and_reject_invalid_names(browser, tmp_path):
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=files,1&layout=left&tabs=left:files",
+        "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1",
         settings={"file_explorer": {"root_mode": "fixed"}},
-        fs_entries={"/home/test": []},
+        fs_entries={"/home/test": [{"name": "notes", "kind": "dir"}], "/home/test/notes": []},
     )
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ [data-file-explorer-new-file]') && document.querySelector('#panel-__finder__ [data-file-explorer-new-folder]')")
@@ -1927,6 +2025,8 @@ def test_finder_create_actions_use_visible_root_and_reject_invalid_names(browser
         """
         const done = arguments[0];
         const panel = document.querySelector('#panel-__finder__');
+        explicitPaneFocusState.tmuxSession = '1';
+        window.terminalCurrentPath = session => session === '1' ? '/home/test/notes' : '';
         const originalFetch = window.fetch;
         const originalPrompt = window.prompt;
         const prompts = ['created.txt', 'created-dir', 'bad/name'];
@@ -1955,7 +2055,7 @@ def test_finder_create_actions_use_visible_root_and_reject_invalid_names(browser
         panel.querySelector('[data-file-explorer-new-file]').click();
         waitFor(() => requests.length === 1, () => {
           panel.querySelector('[data-file-explorer-new-folder]').click();
-          waitFor(() => requests.length === 2 && panel.querySelector('.file-tree-row[data-path="/home/test/created.txt"]') && panel.querySelector('.file-tree-row[data-path="/home/test/created-dir"]'), () => {
+          waitFor(() => requests.length === 2, () => {
             panel.querySelector('[data-file-explorer-new-file]').click();
             requestAnimationFrame(() => requestAnimationFrame(() => {
               window.fetch = originalFetch;
@@ -1969,8 +2069,8 @@ def test_finder_create_actions_use_visible_root_and_reject_invalid_names(browser
     assert not metrics.get("error"), metrics
     assert metrics["root"] == "/home/test", metrics
     assert metrics["requests"] == [
-        {"path": "/api/fs/write", "body": {"path": "/home/test/created.txt", "content": ""}},
-        {"path": "/api/fs/mkdir", "body": {"path": "/home/test/created-dir"}},
+        {"path": "/api/fs/write", "body": {"path": "/home/test/notes/created.txt", "content": "", "create_only": True}},
+        {"path": "/api/fs/mkdir", "body": {"path": "/home/test/notes/created-dir"}},
     ], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
@@ -2095,8 +2195,6 @@ def test_finder_context_delete_invalidates_parent_and_removes_the_real_row(brows
             const body = JSON.parse(options.body || '{}');
             requests.push(body);
             window.__fixtureFsEntries['/home/test'] = [];
-            const rows = [...document.querySelectorAll('#panel-__finder__ .file-tree-row[data-path]')];
-            rows.filter(node => node.dataset.path === '/home/test/remove-me.txt').forEach(node => node.remove());
             return new Response(JSON.stringify({path: body.path}), {headers: {'Content-Type': 'application/json'}});
           }
           return originalFetch(input, options);
@@ -2126,6 +2224,19 @@ def test_finder_context_delete_invalidates_parent_and_removes_the_real_row(brows
     assert not metrics.get("error"), metrics
     assert metrics["requests"] == [{"path": "/home/test/remove-me.txt"}], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_finder_delete_gate_rejects_a_request_without_row_removal(browser, tmp_path, monkeypatch):
+    original_execute = browser.execute_async_script
+
+    def execute_without_row_removal(script, *args):
+        if "delete did not refresh the Finder tree" in script:
+            script = "removeFileTreePathsImmediately = () => {}; refreshFileExplorerTrees = async () => {};\n" + script
+        return original_execute(script, *args)
+
+    monkeypatch.setattr(browser, "execute_async_script", execute_without_row_removal)
+    with pytest.raises(AssertionError, match="delete did not refresh the Finder tree"):
+        test_finder_context_delete_invalidates_parent_and_removes_the_real_row(browser, tmp_path)
 
 
 def test_finder_context_delete_directory_removes_subtree_immediately(browser, tmp_path):
@@ -2686,8 +2797,8 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
           await waitFor(() => !gitDiffTabState.get(item)?.worktreeController);
           const fieldNames = ['caret', 'sha', 'date', 'changes', 'author', 'description'];
           await new Promise(resolve => requestAnimationFrame(resolve));
-          // Worktree refresh replaces the Dirty details but retains commit rows. Measure
-          // the current connected pair after that redraw rather than the retired summary.
+          // Worktree refresh retains the mounted Dirty summary and commit rows.
+          // Measure that connected pair after its content update.
           const dirtyRow = panel.querySelector('.git-diff-worktree-summary');
           const commitRow = panel.querySelector('.git-diff-commit-row[data-git-diff-commit]');
           const fields = fieldNames.map((name, index) => {
@@ -2736,7 +2847,7 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
             firstDirtyLayout,
             fields,
             mediumFields,
-            dirtyReplaced: dirtyRow !== initialDirtyRow && !initialDirtyRow.isConnected,
+            dirtyRetained: dirtyRow === initialDirtyRow && initialDirtyRow.isConnected,
             dirtyChangesText: dirtyChangesWide.textContent,
             dirtyChangesClientWidth: dirtyWide.changesClientWidth,
             dirtyChangesScrollWidth: dirtyWide.changesScrollWidth,
@@ -2757,7 +2868,7 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
     )
     assert not metrics.get("error"), metrics
     assert metrics["firstDirtyLayout"]["lines"] == 1, metrics["firstDirtyLayout"]
-    assert metrics["dirtyReplaced"], metrics
+    assert metrics["dirtyRetained"], metrics
     assert all(field["dirtyConnected"] and field["commitConnected"] and field["visible"] and field["delta"] <= 1 for field in metrics["fields"]), metrics["fields"]
     assert all(not field["visible"] or field["delta"] <= 1 for field in metrics["mediumFields"]), metrics["mediumFields"]
     assert metrics["dirtyChangesText"] == "3 files +74 -22", metrics
@@ -4424,6 +4535,10 @@ def test_differ_ref_change_preserves_finder_worktree_counts(browser, tmp_path):
           repos: [{repo, from_ref: 'abc123def456', to_ref: 'current', count: 1, added: 12_345, removed: 555_000}],
           files: [{session: '1', repo, path: 'a.py', abs_path: `${repo}/a.py`, status: 'A', added: 12_345, removed: 555_000}],
         };
+        await window.__yomuxTestWaitFor(
+          () => differPanel.querySelector('[data-diff-ref-controls][data-diff-ref-repo="/repo/app"] [data-diff-ref-from]'),
+          {timeoutMs: 5000, description: 'Differ repository ref input'},
+        );
         const input = differPanel.querySelector('[data-diff-ref-controls][data-diff-ref-repo="/repo/app"] [data-diff-ref-from]');
         input.value = 'abc123def456';
         input.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
@@ -7227,3 +7342,380 @@ def test_finder_sync_context_expansion_and_rejected_watch_recovery(browser, tmp_
     assert 'error' not in result, result
     assert result == {'watchCalls': 2, 'qualificationClosed': True, 'latentRestored': True}
     consume_only_expected_js_debug_api_error(browser, path='/api/watch/roots', status=400, method='POST', query={})
+
+
+@pytest.mark.parametrize('theme', ['dark', 'light'])
+def test_move_and_shared_decision_dialog_colors_are_readable(browser, tmp_path, theme):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=1', sessions=['1'], settings={'appearance': {'theme': theme}})
+    browser.execute_script("window.__moveColorDecision=confirmFinderMove(['/home/keivenc/dev/notes/t5t/2025.md'],'/home/keivenc/dev/notes/t5t/t5t')")
+    WebDriverWait(browser, 5).until(lambda driver: driver.find_elements(By.CSS_SELECTOR, '.finder-move-dialog [role="dialog"]'))
+    comparison = browser.execute_script("""
+      const source=document.querySelector('.finder-move-source'),target=document.querySelector('.finder-move-target'),arrow=document.querySelector('.finder-move-arrow');
+      return source && target && arrow ? {source:source.textContent,target:target.textContent,
+        changed:[...target.querySelectorAll('strong')].map(node=>node.textContent),
+        label:document.querySelector('.finder-move-from').textContent,
+        separateLines:source.getBoundingClientRect().bottom<=arrow.getBoundingClientRect().top
+          && arrow.getBoundingClientRect().bottom<=target.getBoundingClientRect().top} : null;
+    """)
+    assert comparison == {'source': '/home/keivenc/dev/notes/t5t/2025.md',
+                          'target': '/home/keivenc/dev/notes/t5t/t5t/2025.md', 'changed': ['t5t'],
+                          'label': 'Move from:', 'separateLines': True}
+
+    def assert_dialog_contrast():
+        colors = browser.execute_script("""
+          const dialog=document.querySelector('.file-editor-dialog');
+          return [...dialog.querySelectorAll('.file-editor-dialog-title,.file-editor-dialog-body,.file-editor-dialog-action')].map(node=>{
+            const paint=getComputedStyle(node);
+            return {label:node.className,color:paint.color,background:paint.backgroundColor==='rgba(0, 0, 0, 0)' ? getComputedStyle(dialog).backgroundColor : paint.backgroundColor};
+          });
+        """)
+        for paint in colors:
+            assert wcag_contrast_ratio(paint['color'], paint['background']) >= 4.5, paint
+
+    assert_dialog_contrast()
+    browser.find_element(By.CSS_SELECTOR, '[data-dialog-action="no"]').click()
+    assert browser.execute_async_script('window.__moveColorDecision.then(arguments[arguments.length-1])') is False
+    original_size = browser.get_window_size()
+    try:
+        browser.set_window_size(540, 720)
+        paths = ['/home/test/<img src=x>.md', '/home/test/sibling file.md']
+        destination = '/home/test/' + '/'.join(['destination-folder'] * 14)
+        browser.execute_script('window.__moveBatchDecision=confirmFinderMove(arguments[0],arguments[1])', paths, destination)
+        geometry = browser.execute_script("""
+          const dialog=document.querySelector('.finder-move-dialog [role="dialog"]');
+          const body=dialog.querySelector('.file-editor-dialog-body'),rect=dialog.getBoundingClientRect();
+          return {sources:[...dialog.querySelectorAll('.finder-move-source')].map(node=>node.textContent),
+            targets:[...dialog.querySelectorAll('.finder-move-target')].map(node=>node.textContent),
+            changes:[...dialog.querySelectorAll('.finder-move-target strong')].map(node=>({text:node.textContent,weight:getComputedStyle(node).fontWeight})),
+            contained:rect.left>=0 && rect.right<=innerWidth && body.scrollWidth<=body.clientWidth+1,
+            actionsVisible:dialog.querySelector('.file-editor-dialog-actions').getBoundingClientRect().bottom<=innerHeight,
+            images:dialog.querySelectorAll('img').length};
+        """)
+        assert geometry['sources'] == paths, geometry
+        assert geometry['targets'] == [destination + '/<img src=x>.md', destination + '/sibling file.md'], geometry
+        assert all(change['text'] == '/'.join(['destination-folder'] * 14) and int(change['weight']) >= 700 for change in geometry['changes']), geometry
+        assert len(geometry['changes']) == 2 and geometry['images'] == 0, geometry
+        assert geometry['contained'] and geometry['actionsVisible'], geometry
+        browser.find_element(By.CSS_SELECTOR, '.finder-move-dialog [data-dialog-action="no"]').click()
+        assert browser.execute_async_script('window.__moveBatchDecision.then(arguments[arguments.length-1])') is False
+    finally:
+        try:
+            browser.execute_script("document.querySelector('.finder-move-dialog [data-dialog-action=\"no\"]')?.click()")
+            browser.execute_async_script('Promise.resolve(window.__moveBatchDecision).then(arguments[arguments.length-1])')
+        finally:
+            browser.set_window_size(original_size['width'], original_size['height'])
+    browser.execute_script("window.__dangerColorDecision=showFileEditorDecisionDialog({title:'Delete item',message:'This action cannot be undone',messageVariant:'danger',actions:[{id:'cancel',label:'Cancel'},{id:'delete',label:'Delete',variant:'danger'}]})")
+    assert_dialog_contrast()
+    browser.find_element(By.CSS_SELECTOR, '[data-dialog-action="cancel"]').click()
+    assert browser.execute_async_script('window.__dangerColorDecision.then(arguments[arguments.length-1])') == 'cancel'
+
+
+@pytest.mark.parametrize("mode", ["advanced", "normal"])
+def test_finder_drag_move_yes_no_and_theme_guides(browser, tmp_path, mode):
+    load_live_runtime_boot_fixture(
+        browser, tmp_path, '?sessions=files,1&layout=left&tabs=left:files',
+        settings={'general': {'default_tabber_mode': mode}},
+        fs_entries={
+            '/home/test': [{'name': 'move.txt', 'kind': 'file'}, {'name': 'destination', 'kind': 'dir'}],
+            '/home/test/destination': [],
+        },
+    )
+    if mode == 'normal':
+        browser.execute_async_script('''
+          const done = arguments[0];
+          storeTabberNormalSelections([finderItemId]);
+          applyTabberNormalSelections(finderItemId).then(() => done(true), error => done({error: String(error)}));
+        ''')
+    source_selector = '#panel-__finder__ .file-tree-row[data-path="/home/test/move.txt"]'
+    target_selector = '#panel-__finder__ .file-tree-row[data-path="/home/test/destination"]'
+    WebDriverWait(browser, 10).until(lambda driver: driver.find_elements(By.CSS_SELECTOR, target_selector))
+    browser.execute_script('''
+      window.__finderMoveRequests = [];
+      const original = window.fetch;
+      window.fetch = async (input, options = {}) => {
+        if (new URL(String(input), location.href).pathname !== '/api/fs/move') return original(input, options);
+        const body = JSON.parse(options.body);
+        window.__finderMoveRequests.push(body);
+        window.__fixtureFsEntries['/home/test'] = [{name: 'destination', kind: 'dir'}];
+        window.__fixtureFsEntries['/home/test/destination'] = [{name: 'move.txt', kind: 'file'}];
+        return new Response(JSON.stringify({complete: true, moved: [{old_path: '/home/test/move.txt', path: '/home/test/destination/move.txt'}]}), {headers: {'Content-Type': 'application/json'}});
+      };
+    ''')
+    for decision in ('no', 'escape', 'yes'):
+        source = browser.find_element(By.CSS_SELECTOR, source_selector)
+        target = browser.find_element(By.CSS_SELECTOR, target_selector)
+        ActionChains(browser).move_to_element(source).click_and_hold().move_to_element(target).pause(0.2).perform()
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+            'return document.querySelector(arguments[0]).classList.contains("finder-move-drop-target")', target_selector))
+        assert browser.execute_script('return window.__finderMoveRequests.length') == 0
+        ActionChains(browser).release().perform()
+        modal = WebDriverWait(browser, 5).until(lambda driver: driver.find_element(By.CSS_SELECTOR, '.finder-move-dialog [role="dialog"]'))
+        assert '/home/test/move.txt' in modal.text and '/home/test/destination' in modal.text
+        assert browser.execute_script('return document.activeElement.dataset.dialogAction') == 'no'
+        assert browser.execute_script('return window.__finderMoveRequests.length') == 0
+        if decision == 'escape':
+            browser.switch_to.active_element.send_keys(Keys.ESCAPE)
+        else:
+            browser.find_element(By.CSS_SELECTOR, f'.finder-move-dialog [data-dialog-action="{decision}"]').click()
+        WebDriverWait(browser, 5).until(lambda driver: not driver.find_elements(By.CSS_SELECTOR, '.finder-move-dialog'))
+        if decision != 'yes':
+            assert browser.execute_script('return window.__finderMoveRequests.length') == 0
+            assert browser.find_elements(By.CSS_SELECTOR, source_selector)
+    WebDriverWait(browser, 10).until(lambda driver: not driver.find_elements(By.CSS_SELECTOR, source_selector))
+    assert browser.execute_script('return window.__finderMoveRequests') == [
+        {'paths': ['/home/test/move.txt'], 'destination': '/home/test/destination'}]
+    metrics = browser.execute_async_script('''
+      const done = arguments[0];
+      (async () => {
+        const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/destination"]');
+        await expandDirectoryRow(row, row.dataset.path, {manual: true, user: true});
+        const tree = row.closest('.file-explorer-tree-panel');
+        const child = tree.querySelector('.file-tree-children');
+        const capture = () => {
+          const guide = getComputedStyle(child, '::before');
+          let surface = tree;
+          while (surface && (getComputedStyle(surface).backgroundColor === 'rgba(0, 0, 0, 0)' || getComputedStyle(surface).backgroundColor === 'transparent')) surface = surface.parentElement;
+          const probe = document.createElement('span');
+          probe.style.color = 'var(--active-accent-bright)';
+          child.appendChild(probe);
+          const accent = getComputedStyle(probe).color;
+          probe.style.color = 'color-mix(in srgb, var(--active-accent-bright) 50%, var(--panel))';
+          const blended = getComputedStyle(probe).color;
+          probe.remove();
+          return {accent, blended, color: guide.borderInlineStartColor, width: guide.borderInlineStartWidth, background: surface ? getComputedStyle(surface).backgroundColor : 'rgb(0, 0, 0)', left: guide.left};
+        };
+        const wasLight = document.body.classList.contains('theme-light');
+        const wasResolvedLight = document.body.classList.contains('theme-resolved-light');
+        document.body.classList.remove('theme-light', 'theme-resolved-light');
+        applyActiveColor('green');
+        const dark = capture();
+        applyActiveColor('blue');
+        const darkBlue = capture();
+        document.body.classList.add('theme-light', 'theme-resolved-light');
+        applyActiveColor('blue');
+        const light = capture();
+        applyActiveColor('purple');
+        const lightPurple = capture();
+        document.body.classList.toggle('theme-light', wasLight);
+        document.body.classList.toggle('theme-resolved-light', wasResolvedLight);
+        applyActiveColor(initialSetting('appearance.active_color', 'green'));
+        done({dark, darkBlue, light, lightPurple, moved: !!tree.querySelector('[data-path="/home/test/destination/move.txt"]'), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+      })().catch(error => done({error: String(error)}));
+    ''')
+    assert not metrics.get('error'), metrics
+    assert metrics['moved'], metrics
+    assert metrics['errors'] == [] and metrics['rejections'] == [], metrics
+    assert metrics['dark']['width'] == metrics['light']['width'] == '1px', metrics
+    assert metrics['dark']['left'] == metrics['light']['left'], metrics
+    for theme in ('dark', 'darkBlue', 'light', 'lightPurple'):
+        assert metrics[theme]['color'] == metrics[theme]['blended'], metrics
+        assert metrics[theme]['color'] != metrics[theme]['accent'], metrics
+    assert metrics['dark']['color'] != metrics['darkBlue']['color'], metrics
+    assert metrics['light']['color'] != metrics['lightPurple']['color'], metrics
+
+
+def load_repo_diff_interaction_fixture(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=files,1&layout=left&tabs=left:files')
+    browser.execute_script(r"""
+      const repo='/home/test/scroll-repo', sha='a'.repeat(40), parent='b'.repeat(40), item=gitDiffItemFor(repo);
+      const hostedRemote={provider:'github',base_url:'https://github.com/example/scroll-repo'};
+      const commits=[{sha,short:sha.slice(0,9),subject:'Long release commit',authored_at:1700000000,
+        files:64,added:72,removed:2,binary_files:0,signature_status:'N'}];
+      const worktree={available:true,dirty:true,files:2,added:2,removed:0,binary_files:0,modified_at:1700000000,
+        status_counts:{M:2},entries:[{status:'M',path:'dirty/one.go',added:1,removed:0},{status:'M',path:'dirty/two.go',added:1,removed:0}]};
+      const state=ensureGitDiffTabState(item,{path:repo,repo,head:sha,repositoryIdentity:'fixture-repo',shallowBoundary:'complete',
+        relativePath:'',hostedRemote,commits,visibleCommitCount:commits.length,loaded:true,loadAttempted:true,
+        snapshotCursor:'snapshot',nextCursor:'',worktreeStatus:worktree,worktreeStatusExpanded:true});
+      state.expanded.add(sha);state.focusedSha=sha;
+      gitDiffCommitRecordFor(state,sha).detail={repo,sha,parents:[parent],from_ref:parent,to_ref:sha,
+        repository_identity:'fixture-repo',shallow_boundary:'complete',authored_at:1700000000,
+        message:Array.from({length:100},(_,i)=>`Release story line ${i}: preserve the workspace and every scroll position.`).join('\n'),
+        files:Array.from({length:64},(_,i)=>({status:'M',path:`${i<32?'src':'docs'}/file-${String(i).padStart(2,'0')}.go`,added:1,removed:0})),
+        message_truncated:false,files_truncated:false,truncated:false};
+      const panel=createGitDiffPanel(item);panelNodes.set(item,panel);
+      panel.style.cssText='position:fixed;inset:64px 20px 20px;z-index:2000;width:auto;height:auto';
+      document.body.append(panel);renderGitDiffPanel(item,{panel});
+      const originalFetch=window.fetch;
+      window.fetch=(input,options)=>{
+        const url=new URL(String(input),location.href);
+        if(url.pathname==='/api/fs/git-history'){
+          const payload=url.searchParams.get('worktree')==='only'
+            ? {repository_identity:'fixture-repo',worktree_status:worktree}
+            : {path:repo,repo,relative_path:'',hosted_remote:hostedRemote,head:sha,repository_identity:'fixture-repo',shallow_boundary:'complete',
+               snapshot_cursor:'snapshot',next_cursor:'',commits,worktree_status:worktree};
+          return Promise.resolve(new Response(JSON.stringify(payload),{headers:{'Content-Type':'application/json'}}));
+        }
+        return originalFetch(input,options);
+      };
+      const message=panel.querySelector('.git-diff-commit-message');
+      message.scrollIntoView({block:'center'});
+      window.__repoDiffInteraction={item,panel,state,message,originalFetch};
+    """)
+    return browser.find_element(By.CSS_SELECTOR, '.git-diff-commit-message')
+
+
+def repo_diff_interaction_snapshot(browser):
+    result = browser.execute_script("""
+      const p=window.__repoDiffInteraction;
+      return {message:p.panel.querySelector('.git-diff-commit-message')===p.message,
+        scroll:p.panel.querySelector('.git-diff-commit-message').scrollTop,
+        expectedScroll:p.expectedScroll,bodyScroll:p.panel.querySelector('.git-diff-panel-body').scrollTop,
+        expectedBodyScroll:p.expectedBodyScroll,focused:document.activeElement===p.focused,
+        focusedPath:document.activeElement?.dataset?.path||'',selection:String(getSelection()),expectedSelection:p.selection,
+        worktree:p.panel.querySelector('.git-diff-worktree-status')===p.worktree,
+        file:p.focused?.isConnected===true};
+    """)
+    print('Repo Diff interaction:', json.dumps(result, sort_keys=True))
+    return result
+
+
+def finish_repo_diff_interaction_fixture(browser):
+    browser.execute_script("""
+      const p=window.__repoDiffInteraction;if(!p)return;
+      window.fetch=p.originalFetch;cleanupGitDiffTab(p.item);p.panel.remove();panelNodes.delete(p.item);delete window.__repoDiffInteraction;
+    """)
+
+
+def test_repo_diff_disclosure_keeps_scrolled_commit_message(browser, tmp_path):
+    message = load_repo_diff_interaction_fixture(browser, tmp_path)
+    try:
+        ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(message), 0, 160).perform()
+        WebDriverWait(browser, 5).until(lambda d: d.execute_script('return window.__repoDiffInteraction.message.scrollTop>40'))
+        browser.execute_script("""
+          const p=window.__repoDiffInteraction;p.expectedScroll=p.message.scrollTop;
+          p.expectedBodyScroll=p.panel.querySelector('.git-diff-panel-body').scrollTop;
+          p.focused=p.panel.querySelector('.git-diff-commit-detail .file-tree-row[data-kind="dir"]');
+          p.worktree=p.panel.querySelector('.git-diff-worktree-status');
+        """)
+        browser.find_element(By.CSS_SELECTOR, '.git-diff-commit-detail .file-tree-row[data-kind="dir"]').click()
+        immediate = repo_diff_interaction_snapshot(browser)
+        browser.execute_async_script('const done=arguments[arguments.length-1];requestAnimationFrame(()=>requestAnimationFrame(done));')
+        settled = repo_diff_interaction_snapshot(browser)
+        for result in [immediate, settled]:
+            assert result['message'] is True, result
+            assert abs(result['scroll'] - result['expectedScroll']) <= 1, result
+            assert result['focused'] is True and result['file'] is True, result
+            assert abs(result['bodyScroll'] - result['expectedBodyScroll']) <= 1, result
+    finally:
+        finish_repo_diff_interaction_fixture(browser)
+
+
+@pytest.mark.parametrize('refresh', ['render', 'history', 'worktree', 'stats'])
+@pytest.mark.parametrize('focus_surface', ['commit', 'worktree', 'commit-link'])
+def test_repo_diff_passive_render_preserves_live_interaction(browser, tmp_path, refresh, focus_surface):
+    message = load_repo_diff_interaction_fixture(browser, tmp_path)
+    try:
+        ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(message), 0, 160).perform()
+        WebDriverWait(browser, 5).until(lambda d: d.execute_script('return window.__repoDiffInteraction.message.scrollTop>40'))
+        browser.execute_script("""
+          const p=window.__repoDiffInteraction;
+          p.focused=p.panel.querySelector(arguments[0]==='worktree'
+            ? '.git-diff-worktree-status .file-tree-row[data-kind="dir"]'
+            : arguments[0]==='commit-link' ? '.git-diff-commit-row .git-diff-commit-sha[href]'
+            : '.git-diff-commit-detail .file-tree-row[data-kind="dir"]');
+          p.focused.focus({preventScroll:true});
+          const range=document.createRange();range.setStart(p.message.firstChild,0);range.setEnd(p.message.firstChild,32);
+          getSelection().removeAllRanges();getSelection().addRange(range);p.selection=String(getSelection());
+          p.expectedScroll=p.message.scrollTop;p.expectedBodyScroll=p.panel.querySelector('.git-diff-panel-body').scrollTop;
+          p.worktree=p.panel.querySelector('.git-diff-worktree-status');
+        """, focus_surface)
+        assert browser.execute_script('return document.activeElement === window.__repoDiffInteraction.focused'), focus_surface
+        stages = browser.execute_async_script("""
+          const done=arguments[arguments.length-1],refresh=arguments[0],p=window.__repoDiffInteraction;
+          (async()=>{
+            if(refresh==='history') await refreshGitDiffHistory(p.item,{refresh:true});
+            else if(refresh==='worktree') await refreshGitDiffWorktree(p.item);
+            else if(refresh==='stats') applyGitDiffStatsPayload(p.item,p.state,{shallow_boundary:'complete',
+              commits:[{...p.state.commits[0],added:p.state.commits[0].added+1}]});
+            else renderGitDiffPanel(p.item);
+            await window.__yomuxTestWaitFor(()=>!p.state.worktreeController,{timeoutMs:5000});
+          })().then(()=>done(true),error=>done(String(error.stack||error)));
+        """, refresh)
+        assert stages is True, stages
+        immediate = repo_diff_interaction_snapshot(browser)
+        browser.execute_async_script('const done=arguments[arguments.length-1];requestAnimationFrame(()=>requestAnimationFrame(done));')
+        settled = repo_diff_interaction_snapshot(browser)
+        for result in [immediate, settled]:
+            assert result['message'] is True, result
+            assert abs(result['scroll'] - result['expectedScroll']) <= 1, result
+            assert abs(result['bodyScroll'] - result['expectedBodyScroll']) <= 1, result
+            assert result['focused'] is True and result['file'] is True, result
+            assert result['selection'] == result['expectedSelection'], result
+            assert result['worktree'] is True, result
+    finally:
+        finish_repo_diff_interaction_fixture(browser)
+
+
+def test_shared_child_reconciliation_keeps_live_focus_and_selection(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=1')
+    result = browser.execute_script("""
+      const parent=document.createElement('div'),obsolete=document.createElement('header'),live=document.createElement('div');
+      const button=document.createElement('button'),text=document.createElement('pre');
+      button.textContent='Active control';text.textContent='Keep the selected text connected';live.append(button,text);
+      parent.append(obsolete,live);document.body.append(parent);button.focus();
+      const range=document.createRange();range.setStart(text.firstChild,0);range.setEnd(text.firstChild,8);
+      getSelection().removeAllRanges();getSelection().addRange(range);const selection=String(getSelection());
+      const moves=[];const insert=parent.insertBefore.bind(parent);
+      parent.insertBefore=(node,before)=>{moves.push(node===live?'live':'other');return insert(node,before);};
+      try{
+        reconcileChildNodes(parent,[live]);
+        return {focused:document.activeElement===button,selection:String(getSelection()),expected:selection,
+          same:parent.firstElementChild===live,count:parent.children.length,moves};
+      }finally{getSelection().removeAllRanges();parent.remove();}
+    """)
+    assert result == {'focused': True, 'selection': result['expected'], 'expected': result['expected'],
+                    'same': True, 'count': 1, 'moves': []}, result
+    assert result['expected'] == 'Keep the', result
+
+
+@pytest.mark.parametrize('next_cursor', ['', 'after-loaded-tail'])
+def test_repo_diff_same_snapshot_refresh_keeps_loaded_reading_window(browser, tmp_path, next_cursor):
+    load_repo_diff_interaction_fixture(browser, tmp_path)
+    try:
+        browser.execute_script("""
+          const p=window.__repoDiffInteraction,s=p.state,first=s.commits[0];
+          const detail=s.commitRecords.get(first.sha).detail;
+          s.commits=Array.from({length:40},(_,i)=>({...first,sha:i===0?first.sha:i.toString(16).padStart(40,'0'),subject:`Commit ${i}`}));
+          const tail=s.commits.at(-1).sha;
+          s.visibleCommitCount=40;s.nextCursor=arguments[0];s.expanded.clear();s.expanded.add(tail);s.focusedSha=tail;
+          gitDiffCommitRecordFor(s,tail).detail={...detail,sha:tail,to_ref:tail};
+          renderGitDiffPanel(p.item);
+          const priorFetch=window.fetch;
+          window.fetch=(input,options)=>{
+            const url=new URL(String(input),location.href);
+            if(url.pathname==='/api/fs/git-history'&&url.searchParams.get('worktree')!=='only'){
+              return Promise.resolve(new Response(JSON.stringify({path:s.path,repo:s.repo,relative_path:s.relativePath,
+                hosted_remote:s.hostedRemote,head:s.head,repository_identity:s.repositoryIdentity,shallow_boundary:s.shallowBoundary,
+                snapshot_cursor:s.snapshotCursor,next_cursor:'after-first-page',commits:[first],worktree_status:s.worktreeStatus}),
+                {headers:{'Content-Type':'application/json'}}));
+            }
+            return priorFetch(input,options);
+          };
+          p.message=p.panel.querySelector('.git-diff-commit-message');p.message.scrollIntoView({block:'center'});
+          p.focused=p.panel.querySelector('.git-diff-commit-detail .file-tree-row[data-kind="dir"]');
+          p.focused.focus({preventScroll:true});p.worktree=p.panel.querySelector('.git-diff-worktree-status');
+        """, next_cursor)
+        message = browser.find_element(By.CSS_SELECTOR, '.git-diff-commit-message')
+        ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(message), 0, 160).perform()
+        WebDriverWait(browser, 5).until(lambda d: d.execute_script('return window.__repoDiffInteraction.message.scrollTop>40'))
+        browser.execute_script("""
+          const p=window.__repoDiffInteraction;p.expectedScroll=p.message.scrollTop;
+          p.expectedBodyScroll=p.panel.querySelector('.git-diff-panel-body').scrollTop;
+          const range=document.createRange();range.setStart(p.message.firstChild,0);range.setEnd(p.message.firstChild,32);
+          getSelection().removeAllRanges();getSelection().addRange(range);p.selection=String(getSelection());
+        """)
+        result = browser.execute_async_script("""
+          const done=arguments[arguments.length-1],p=window.__repoDiffInteraction;
+          refreshGitDiffHistory(p.item,{refresh:true}).then(()=>done({commits:p.state.commits.length,
+            visible:p.state.visibleCommitCount,next:p.state.nextCursor}),error=>done(String(error.stack||error)));
+        """)
+        assert result == {'commits': 40, 'visible': 40, 'next': next_cursor}, result
+        for _ in range(2):
+            snapshot = repo_diff_interaction_snapshot(browser)
+            assert snapshot['message'] and snapshot['file'] and snapshot['focused'], snapshot
+            assert abs(snapshot['scroll'] - snapshot['expectedScroll']) <= 1, snapshot
+            assert abs(snapshot['bodyScroll'] - snapshot['expectedBodyScroll']) <= 1, snapshot
+            assert snapshot['selection'] == snapshot['expectedSelection'], snapshot
+            browser.execute_async_script('const done=arguments[arguments.length-1];requestAnimationFrame(()=>requestAnimationFrame(done));')
+    finally:
+        finish_repo_diff_interaction_fixture(browser)

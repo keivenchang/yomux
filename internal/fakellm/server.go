@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -171,12 +172,24 @@ func writeStream(w http.ResponseWriter, response map[string]any, anthropic bool)
 	}
 	events := []map[string]any{response}
 	if anthropic {
-		messageStart := map[string]any{"type": "message_start", "message": response}
-		messageStart["message"].(map[string]any)["usage"] = map[string]any{"input_tokens": 12, "output_tokens": 0}
+		message := maps.Clone(response)
+		message["content"] = []any{}
+		message["stop_reason"] = nil
+		message["usage"] = map[string]any{"input_tokens": 12, "output_tokens": 0}
+		block := response["content"].([]any)[0].(map[string]any)
+		start := maps.Clone(block)
+		delta := map[string]any{"type": "text_delta", "text": block["text"]}
+		if block["type"] == "tool_use" {
+			start["input"] = map[string]any{}
+			input, _ := json.Marshal(block["input"])
+			delta = map[string]any{"type": "input_json_delta", "partial_json": string(input)}
+		} else {
+			start["text"] = ""
+		}
 		events = []map[string]any{
-			messageStart,
-			{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}},
-			{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": "fake completion"}},
+			{"type": "message_start", "message": message},
+			{"type": "content_block_start", "index": 0, "content_block": start},
+			{"type": "content_block_delta", "index": 0, "delta": delta},
 			{"type": "content_block_stop", "index": 0},
 			{"type": "message_delta", "delta": map[string]any{"stop_reason": response["stop_reason"], "stop_sequence": nil}, "usage": map[string]any{"output_tokens": 8}},
 			{"type": "message_stop"},
@@ -185,9 +198,20 @@ func writeStream(w http.ResponseWriter, response map[string]any, anthropic bool)
 		// OpenAI only sends usage in the terminal chunk when requested with
 		// stream_options.include_usage. This chunk is accepted by clients that
 		// request usage and harmless for clients that do not.
+		choice := response["choices"].([]any)[0].(map[string]any)
+		delta := maps.Clone(choice["message"].(map[string]any))
+		if calls, ok := delta["tool_calls"].([]any); ok {
+			streamCalls := make([]any, len(calls))
+			for index, raw := range calls {
+				call := maps.Clone(raw.(map[string]any))
+				call["index"] = index
+				streamCalls[index] = call
+			}
+			delta["tool_calls"] = streamCalls
+		}
 		events = []map[string]any{
-			{"id": "chatcmpl_fake_1", "object": "chat.completion.chunk", "created": 1700000000, "model": openAIModel, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": "fake completion"}, "finish_reason": nil}}},
-			{"id": "chatcmpl_fake_1", "object": "chat.completion.chunk", "created": 1700000000, "model": openAIModel, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}},
+			{"id": "chatcmpl_fake_1", "object": "chat.completion.chunk", "created": 1700000000, "model": openAIModel, "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": nil}}},
+			{"id": "chatcmpl_fake_1", "object": "chat.completion.chunk", "created": 1700000000, "model": openAIModel, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": choice["finish_reason"]}}, "usage": response["usage"]},
 		}
 	}
 	for _, event := range events {
@@ -244,8 +268,14 @@ func boundedDuration(value string, maximum time.Duration) time.Duration {
 	if duration, err := time.ParseDuration(value); err == nil {
 		return clamp(duration, maximum)
 	}
-	if milliseconds, err := strconv.Atoi(value); err == nil {
-		return clamp(time.Duration(milliseconds)*time.Millisecond, maximum)
+	if milliseconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if milliseconds > int64(maximum/time.Millisecond) {
+			return maximum
+		}
+		if milliseconds <= 0 {
+			return 0
+		}
+		return time.Duration(milliseconds) * time.Millisecond
 	}
 	return 0
 }

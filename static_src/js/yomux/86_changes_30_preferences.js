@@ -1,7 +1,7 @@
 function activePreferenceControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-setting-path], [data-preferences-search], [data-preferences-search-action], [data-preference-section-toggle], [data-preferences-reset-all], [data-preferences-reset-confirm], [data-preferences-reset-cancel]') || null;
+  return active.closest?.('[data-setting-path], [data-preferences-search], [data-preferences-search-action], [data-preference-section-toggle], [data-preference-section-target], [data-preferences-reset-all], [data-preferences-reset-confirm], [data-preferences-reset-cancel]') || null;
 }
 
 function clampPreferenceNumber(item, value) {
@@ -56,6 +56,13 @@ function codexModelDefaultEffort(model) {
 function settingPatchForPath(path, value) {
   if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionSettingPatch(value);
   const patch = settingPatch(path, value);
+  if (path === 'appearance.editor_font_size' || path === 'appearance.preview_font_size') {
+    patch.appearance = {
+      ...(patch.appearance || {}),
+      editor_font_size: value,
+      preview_font_size: value,
+    };
+  }
   if (path === 'appearance.global_font_size' && boolSetting('appearance.sync_font_sizes', true)) {
     patch.appearance = {
       ...(patch.appearance || {}),
@@ -181,11 +188,6 @@ function savePreferenceControl(control) {
     forcePreferences: path === 'appearance.sync_font_sizes',
   })
     .then(() => {
-      const scheme = activeEditorScheme();
-      if ((path === 'appearance.editor_dark_color_scheme' && scheme.dark)
-        || (path === 'appearance.editor_light_color_scheme' && !scheme.dark)) {
-        setFileEditorThemeMode(value);
-      }
       if (path === 'uploads.max_bytes' && Number(value) > uploadRsyncRecommendationBytes && Number(previousValue) <= uploadRsyncRecommendationBytes) {
         showUploadRsyncRecommendation({sizeBytes: Number(value)});
       }
@@ -221,8 +223,8 @@ function resetAllPreferences() {
 
 function clampEditorPreviewFontSize(value) {
   const number = Number(value);
-  if (!Number.isFinite(number)) return Math.max(8, Math.min(32, editorFontSize + 1));
-  return Math.max(8, Math.min(32, Math.round(number)));
+  if (!Number.isFinite(number)) return Math.max(6, Math.min(28, editorFontSize));
+  return Math.max(6, Math.min(28, Math.round(number)));
 }
 
 function updateEditorPreviewFontControls(scope = document) {
@@ -232,7 +234,7 @@ function updateEditorPreviewFontControls(scope = document) {
   });
   scope.querySelectorAll?.('[data-editor-preview-font-step]')?.forEach(button => {
     const step = Number(button.dataset.editorPreviewFontStep || 0);
-    button.disabled = readOnlyMode || !step || (step < 0 && value <= 8) || (step > 0 && value >= 32);
+    button.disabled = readOnlyMode || !step || (step < 0 && value <= 6) || (step > 0 && value >= 28);
     button.setAttribute('aria-disabled', button.disabled ? 'true' : 'false');
   });
 }
@@ -244,11 +246,11 @@ function setEditorPreviewFontSize(value) {
     updateEditorPreviewFontControls();
     return;
   }
-  editorPreviewFontSize = next;
+  setEditorAndPreviewFontSizes(next);
   applyCssSettings();
   updateEditorPreviewFontControls();
   refreshFilePreviewPopouts();
-  saveSettingsPatch(settingPatch('appearance.preview_font_size', next))
+  saveSettingsPatch(settingPatchForPath('appearance.preview_font_size', next))
     .then(() => { showLayoutStatus(t('status.previewFontSizeSaved')); })
     .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
 }

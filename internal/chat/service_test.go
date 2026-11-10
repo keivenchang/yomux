@@ -50,6 +50,73 @@ func testService(t *testing.T, now *float64) *Service {
 	return service
 }
 
+func TestBootstrapDeltaCoversUnreadBatchBoundary(t *testing.T) {
+	for _, example := range []struct {
+		name    string
+		unread  int
+		read    int
+		expired int
+	}{
+		{"empty", 0, 0, 0}, {"below", 49, 0, 0}, {"full", 50, 0, 0},
+		{"overflow-one", 51, 0, 0}, {"overflow-five", 55, 0, 0},
+		{"read-anchor-and-expired", 55, 3, 2}, {"read-tail", 0, 3, 0},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			now := float64(2000000)
+			service := testService(t, &now)
+			ctx := context.Background()
+			for i := 0; i < example.expired+example.read+example.unread; i++ {
+				input := NewMessage{Message: Message{MessagePayload: MessagePayload{
+					Username: "bob", SenderInstance: "peer", ClientUUID: fmt.Sprint(i), Body: "unread message",
+				}}}
+				if i < example.expired {
+					timestamp := now - DefaultRetentionDays*86400 - 1
+					input.Timestamp = &timestamp
+				}
+				if _, _, err := service.store.Insert(ctx, input); err != nil {
+					t.Fatal(err)
+				}
+			}
+			anchor := int64(example.expired + example.read)
+			if _, err := service.store.ReadUpTo(ctx, DefaultRoom, "alice", anchor); err != nil {
+				t.Fatal(err)
+			}
+			bootstrap, err := service.Bootstrap(ctx, "alice", "browser")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bootstrap.ReadUpToID != anchor || len(bootstrap.Messages) != min(50, example.unread) {
+				t.Fatalf("bootstrap read=%d rows=%d", bootstrap.ReadUpToID, len(bootstrap.Messages))
+			}
+			if bootstrap.Revision != anchor+int64(example.unread) {
+				t.Fatalf("bootstrap revision=%d, want full room tail", bootstrap.Revision)
+			}
+			delta, err := service.Delta(ctx, "alice", bootstrap.NewerCursor, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			messages := append(bootstrap.Messages, delta.Messages...)
+			if len(messages) != example.unread {
+				t.Fatalf("bootstrap/delta rows=%d, want %d", len(messages), example.unread)
+			}
+			for i, message := range messages {
+				if message.ID != anchor+int64(i)+1 {
+					t.Fatalf("message[%d]=%d, skipped or duplicated unread ID", i, message.ID)
+				}
+			}
+			if example.read > 0 {
+				if bootstrap.OlderCursor == nil {
+					t.Fatal("bootstrap lost read history pagination")
+				}
+				older, err := service.Page(ctx, "alice", *bootstrap.OlderCursor, nil)
+				if err != nil || len(older.Messages) != example.read {
+					t.Fatalf("read history rows=%d err=%v", len(older.Messages), err)
+				}
+			}
+		})
+	}
+}
+
 func TestServiceOriginalPythonBrowserContract(t *testing.T) {
 	path, err := runfiles.Rlocation("yomux/tests/fixtures/chat_service_contract.json")
 	if err != nil {

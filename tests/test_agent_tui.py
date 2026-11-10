@@ -971,6 +971,67 @@ def test_send_prompt_reports_unsubmitted_text_left_in_composer():
     assert result.reason_code == "unsubmitted"
 
 
+@pytest.mark.parametrize('screen_key', ['blocked', 'unknown', 'future-state'])
+def test_send_prompt_preflight_requires_a_known_accepting_state(screen_key):
+    calls = []
+    target = {'pane_target': '%1', 'agent_kind': 'claude'}
+    state = classify_agent_pane(
+        target,
+        include_transcript_activity=False,
+        capture_func=lambda _target, visible_only=False: claude_composer('❯ '),
+        capture_styled_func=lambda _target, visible_only=False: '',
+        prompt_classifier=lambda *_args: {'visible': False},
+        screen_classifier=lambda *_args: {'key': screen_key, 'text': 'not accepting'},
+    )
+    result = send_prompt(
+        target,
+        'new prompt',
+        preflight_state=state,
+        clear_existing=False,
+        verify_submit=False,
+        paste_func=lambda *args, **kwargs: calls.append(args) or completed(),
+    )
+    assert not result.sent
+    assert not result.ok
+    assert result.reason_code == screen_key
+    assert not calls
+
+
+def test_prompt_delivery_refuses_a_missing_capture_before_paste():
+    calls = []
+    result = send_prompt(
+        '%1',
+        'new prompt',
+        preflight=False,
+        verify_submit=False,
+        capture_func=lambda *_args, **_kwargs: None,
+        capture_styled_func=lambda *_args, **_kwargs: '',
+        cursor_func=lambda _target: AgentTuiCursor(),
+        paste_func=lambda *args, **kwargs: calls.append(args) or completed(),
+    )
+    assert not result.ok
+    assert not result.sent
+    assert result.reason_code == 'draft-unclearable'
+    assert not calls
+
+
+def test_prompt_delivery_reports_a_missing_capture_after_paste():
+    calls = []
+    result = send_prompt(
+        '%1',
+        'new prompt',
+        preflight=False,
+        clear_existing=False,
+        capture_func=lambda *_args, **_kwargs: None,
+        capture_styled_func=lambda *_args, **_kwargs: '',
+        paste_func=lambda *args, **kwargs: calls.append(args) or completed(),
+    )
+    assert not result.ok
+    assert result.pasted
+    assert result.reason_code == 'submit-unverified'
+    assert len(calls) == 1
+
+
 def test_send_prompt_preflight_refuses_non_agent_and_questions():
     non_agent = send_prompt(
         {"pane_target": "%1"},

@@ -350,7 +350,7 @@ def tmux_capture_pane_styled(target: str, lines: int = 80, visible_only: bool = 
 
 
 def tmux_send_enter(target: str) -> None:
-    tmux_run("send-keys", "-t", tmux_exact_target(target), "Enter", check=False)
+    tmux_run("send-keys", "-t", tmux_exact_target(target), "Enter")
 
 
 def tmux_clear_input(target: str, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
@@ -395,7 +395,7 @@ def tmux_move_to_option(target: str, option: int, selected_option: int | None = 
     delta = option - selected
     key = "Down" if delta > 0 else "Up"
     for _ in range(min(abs(delta), 6)):
-        tmux_run("send-keys", "-t", exact_target, key, check=False)
+        tmux_run("send-keys", "-t", exact_target, key)
         time.sleep(0.1)
 
 

@@ -18,6 +18,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from threading import Event
 
@@ -415,277 +416,290 @@ def run_local_rpc_service(
     the wire can express that wait, so the caller can only report it as
     unattributed latency.
     """
-    previous_handlers = install_stop_signal_handlers(stop_event)
-    launching_parent_pid = max(0, int(parent_pid_reader()))
-    requested_socket_path = socket_path
-    socket_path = safe_socket_path(socket_path, prefix=f"yolomux-{service_name}")
-    socket_alias = requested_socket_path if requested_socket_path != socket_path else None
-    # ONE lifetime owner for every local service, built here rather than in each
-    # daemon so no service can go back to graceful-only. The launching
-    # supervisor's identity is captured now, while that process is still
-    # provable; after it exits, `getppid()` would name init and prove nothing.
-    service_identity = current_host_identity()
-    lifetime_owner = ServiceLifetimeOwner.for_launching_parent(
-        service_name,
-        stop_event,
-        parent_pid=launching_parent_pid,
-        host_identity=service_identity,
-    )
-    lifetime_path = socket_path.with_suffix(".lifetime.json")
-    preflight_mutable_roots(unix_sockets=[socket_path])
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(socket_path.parent, 0o700)
-    except OSError:
-        pass
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(lock_path.parent, 0o700)
-    except OSError:
-        pass
-    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        owns_lock = False
+    with ExitStack() as cleanup:
+        previous_handlers = install_stop_signal_handlers(stop_event)
+        cleanup.callback(restore_signal_handlers, previous_handlers)
+        launching_parent_pid = max(0, int(parent_pid_reader()))
+        requested_socket_path = socket_path
+        socket_path = safe_socket_path(socket_path, prefix=f"yolomux-{service_name}")
+        socket_alias = requested_socket_path if requested_socket_path != socket_path else None
+        # ONE lifetime owner for every local service, built here rather than in each
+        # daemon so no service can go back to graceful-only. The launching
+        # supervisor's identity is captured now, while that process is still
+        # provable; after it exits, `getppid()` would name init and prove nothing.
+        service_identity = current_host_identity()
+        lifetime_owner = ServiceLifetimeOwner.for_launching_parent(
+            service_name,
+            stop_event,
+            parent_pid=launching_parent_pid,
+            host_identity=service_identity,
+        )
+        lifetime_path = socket_path.with_suffix(".lifetime.json")
+        preflight_mutable_roots(unix_sockets=[socket_path])
+        socket_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.chmod(socket_path.parent, 0o700)
         except OSError:
-            return 0
-        owns_lock = True
-        if owns_lock:
-            try:
-                socket_path.unlink()
-            except FileNotFoundError:
-                pass
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            pass
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            old_umask = os.umask(0o177)
+            os.chmod(lock_path.parent, 0o700)
+        except OSError:
+            pass
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        cleanup.callback(os.close, lock_fd)
+        try:
+            owns_lock = False
             try:
-                server.bind(str(socket_path))
-            finally:
-                os.umask(old_umask)
-            os.chmod(socket_path, 0o600)
-            if socket_alias is not None:
-                socket_alias.parent.mkdir(parents=True, exist_ok=True)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return 0
+            owns_lock = True
+            if owns_lock:
                 try:
-                    socket_alias.unlink()
+                    socket_path.unlink()
                 except FileNotFoundError:
                     pass
-                socket_alias.symlink_to(socket_path)
-            server.listen(16)
-            server.settimeout(0.1)
-            # Published beside the socket, not behind the status RPC: the moment
-            # "who is keeping this daemon alive" matters most is when the daemon
-            # is wedged and cannot answer an RPC at all.
-            publish_failure = lifetime_owner.publish(lifetime_path)
-            if publish_failure:
-                logger.warning(
-                    "local service %s could not publish its lifetime record at %s: %s",
-                    service_name,
-                    lifetime_path,
-                    publish_failure,
-                )
-            if on_start is not None:
-                # Stateful initialization belongs after singleton ownership and
-                # listener publication.  A losing contender must never open or
-                # migrate the winner's database before discovering the lock.
-                on_start()
-            handler_limit = max(0, int(concurrent_handlers))
-            handler_slots = threading.BoundedSemaphore(handler_limit) if handler_limit else None
-            handler_threads: set[threading.Thread] = set()
-            handler_threads_lock = threading.Lock()
-            capacity_lock = threading.Lock()
-            active_handlers = 0
-            capacity_rejections = 0
-
-            def serve_connection(connection: socket.socket, accepted_at: float, queue_wait_ms: float, capacity_saturated: bool, rejection_count: int) -> None:
-                nonlocal active_handlers
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                old_umask = os.umask(0o177)
                 try:
-                    with connection:
-                        connection.settimeout(LOCAL_SERVICE_CONNECTION_TIMEOUT_SECONDS)
-                        uid = peer_uid(connection)
-                        if uid is not None and uid != os.getuid():
-                            write_message(connection, None, {"ok": False, "error": LOCAL_SERVICE_ERROR_PEER_UID_MISMATCH}, legacy=True)
-                            return
-                        pid = peer_pid(connection)
-                        self_connected = pid is not None and pid == os.getpid()
-                        if not self_connected:
-                            on_client()
-                        try:
-                            read_started = time.monotonic()
-                            envelope, payload, request_binary, legacy = read_message(connection)
-                            read_completed = time.monotonic()
-                        except (LocalRpcError, OSError):
+                    server.bind(str(socket_path))
+                finally:
+                    os.umask(old_umask)
+                os.chmod(socket_path, 0o600)
+                if socket_alias is not None:
+                    socket_alias.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        socket_alias.unlink()
+                    except FileNotFoundError:
+                        pass
+                    socket_alias.symlink_to(socket_path)
+                server.listen(16)
+                server.settimeout(0.1)
+                # Published beside the socket, not behind the status RPC: the moment
+                # "who is keeping this daemon alive" matters most is when the daemon
+                # is wedged and cannot answer an RPC at all.
+                publish_failure = lifetime_owner.publish(lifetime_path)
+                if publish_failure:
+                    logger.warning(
+                        "local service %s could not publish its lifetime record at %s: %s",
+                        service_name,
+                        lifetime_path,
+                        publish_failure,
+                    )
+                if on_start is not None:
+                    # Stateful initialization belongs after singleton ownership and
+                    # listener publication.  A losing contender must never open or
+                    # migrate the winner's database before discovering the lock.
+                    on_start()
+                handler_limit = max(0, int(concurrent_handlers))
+                handler_slots = threading.BoundedSemaphore(handler_limit) if handler_limit else None
+                handler_threads: set[threading.Thread] = set()
+                handler_threads_lock = threading.Lock()
+                capacity_lock = threading.Lock()
+                active_handlers = 0
+                capacity_rejections = 0
+
+                def serve_connection(connection: socket.socket, accepted_at: float, queue_wait_ms: float, capacity_saturated: bool, rejection_count: int) -> None:
+                    nonlocal active_handlers
+                    try:
+                        with connection:
+                            connection.settimeout(LOCAL_SERVICE_CONNECTION_TIMEOUT_SECONDS)
+                            uid = peer_uid(connection)
+                            if uid is not None and uid != os.getuid():
+                                write_message(connection, None, {"ok": False, "error": LOCAL_SERVICE_ERROR_PEER_UID_MISMATCH}, legacy=True)
+                                return
+                            pid = peer_pid(connection)
+                            self_connected = pid is not None and pid == os.getpid()
+                            if not self_connected:
+                                on_client()
                             try:
-                                write_message(connection, None, {"ok": False, "error": LOCAL_SERVICE_ERROR_INVALID_REQUEST}, legacy=True)
-                            except OSError:
-                                pass
-                        else:
-                            service_started = time.monotonic()
-                            # Publish the proven verdict for this one connection. A
-                            # lease is the claim that keeps a daemon alive, so the
-                            # only place that can prove "this is me talking to
-                            # myself" has to be the place that says so.
-                            _CONNECTION_VERDICT.value = self_connected
-                            try:
-                                response, response_binary = handle(payload, request_binary)
-                            except Exception as exc:
-                                # A request failure is data-plane state. Letting it escape the
-                                # serial listener kills the daemon, turns one bad path into a
-                                # socket-retry loop, and hides the typed refusal from its caller.
-                                logger.exception("local service %s handler failed", service_name)
-                                response, response_binary = {
-                                    "ok": False,
-                                    "error": "service request failed",
-                                    "error_code": "handler_failed",
-                                    "exception_type": type(exc).__name__,
-                                }, b""
-                            finally:
-                                _CONNECTION_VERDICT.value = None
-                            # The registry's final startup probe requires the responder's
-                            # birth identity on the wire, including a late-ready daemon.
-                            if response.get("ok") is True and payload.get("action") in ("ping", "status"):
-                                response = {**service_identity.process_record_fields(), **response}
-                            with capacity_lock:
-                                response_rejection_count = capacity_rejections
-                            response_envelope = None if legacy or envelope is None else LocalRpcEnvelope(
-                                service=service_name,
-                                method=envelope.method,
-                                request_id=envelope.request_id,
-                                trace_id=envelope.trace_id,
-                                deadline_ms=envelope.deadline_ms,
-                                priority=envelope.priority,
-                                owner_generation=envelope.owner_generation,
-                                config_generation=envelope.config_generation,
-                                payload=response,
-                                accept_to_read_ms=(read_started - accepted_at) * 1000.0,
-                                read_complete_ms=(read_completed - read_started) * 1000.0,
-                                service_duration_ms=(time.monotonic() - service_started) * 1000.0,
-                                queue_wait_ms=queue_wait_ms,
-                                queue_depth=0,
-                                capacity_limit=handler_limit,
-                                capacity_saturated=capacity_saturated,
-                                capacity_rejections=response_rejection_count,
-                            )
-                            try:
-                                write_message(connection, response_envelope, response, response_binary, legacy=legacy)
+                                read_started = time.monotonic()
+                                envelope, payload, request_binary, legacy = read_message(connection)
+                                read_completed = time.monotonic()
                             except (LocalRpcError, OSError):
                                 try:
-                                    write_message(connection, None, {"ok": False, "error": LOCAL_SERVICE_ERROR_RESPONSE_TOO_LARGE}, legacy=True)
+                                    write_message(connection, None, {"ok": False, "error": LOCAL_SERVICE_ERROR_INVALID_REQUEST}, legacy=True)
                                 except OSError:
                                     pass
-                finally:
-                    if handler_slots is not None:
-                        handler_slots.release()
-                        with capacity_lock:
-                            active_handlers -= 1
-                    with handler_threads_lock:
-                        handler_threads.discard(threading.current_thread())
-
-            try:
-                while not stop_event.is_set():
-                    if launching_parent_pid > 1 and int(parent_pid_reader()) != launching_parent_pid:
-                        lifetime_owner.request_retirement("launching_supervisor_exited")
-                        lifetime_owner.publish(lifetime_path)
-                        continue
-                    try:
-                        connection, _address = server.accept()
-                    except TimeoutError:
-                        if handler_slots is not None:
-                            with capacity_lock:
-                                if active_handlers:
-                                    continue
-                        try:
-                            if on_idle():
-                                # The last valid external claim is gone. Setting
-                                # `stop_event` is a REQUEST the listener may never
-                                # honour -- a stuck handler, a blocking shutdown
-                                # hook, or a non-daemon thread at interpreter exit
-                                # all leave the daemon up. Waiting for the next
-                                # launcher start to force it is the future-restart
-                                # authority the supervision contract forbids, so
-                                # the owner bounds this exit itself.
-                                lifetime_owner.request_retirement("idle_no_external_claim")
-                                lifetime_owner.publish(lifetime_path)
-                        except Exception as exc:
-                            traceback_text = traceback.format_exc()
-                            if on_idle_failure is not None:
+                            else:
+                                service_started = time.monotonic()
+                                # Publish the proven verdict for this one connection. A
+                                # lease is the claim that keeps a daemon alive, so the
+                                # only place that can prove "this is me talking to
+                                # myself" has to be the place that says so.
+                                _CONNECTION_VERDICT.value = self_connected
                                 try:
-                                    on_idle_failure(exc, traceback_text)
-                                except Exception:
-                                    logger.exception("local service %s idle-failure callback failed", service_name)
-                            else:
-                                logger.exception("local service %s idle hook failed", service_name)
-                        continue
-                    accepted_at = time.monotonic()
-                    if handler_slots is None:
-                        serve_connection(connection, accepted_at, 0.0, False, 0)
-                    else:
-                        queue_started = time.monotonic()
-                        acquired = handler_slots.acquire(blocking=False)
-                        queue_wait_ms = (time.monotonic() - queue_started) * 1000.0
-                        with capacity_lock:
-                            if acquired:
-                                active_handlers += 1
-                                saturated = active_handlers >= handler_limit
-                                rejection_count = capacity_rejections
-                            else:
-                                capacity_rejections += 1
-                                saturated = True
-                                rejection_count = capacity_rejections
-                    if handler_slots is not None and not acquired:
-                        with connection:
-                            try:
-                                write_message(connection, None, {"ok": False, "error": LOCAL_SERVICE_ERROR_BUSY, "queue_wait_ms": queue_wait_ms, "queue_depth": 0, "capacity_limit": handler_limit, "capacity_saturated": saturated, "capacity_rejected": True, "capacity_rejections": rejection_count}, legacy=True)
-                            except OSError:
-                                pass
-                    elif handler_slots is not None:
-                        worker = threading.Thread(target=serve_connection, args=(connection, accepted_at, queue_wait_ms, saturated, rejection_count), name=f"{service_name}-rpc", daemon=True)
+                                    response, response_binary = handle(payload, request_binary)
+                                except Exception as exc:
+                                    # A request failure is data-plane state. Letting it escape the
+                                    # serial listener kills the daemon, turns one bad path into a
+                                    # socket-retry loop, and hides the typed refusal from its caller.
+                                    logger.exception("local service %s handler failed", service_name)
+                                    response, response_binary = {
+                                        "ok": False,
+                                        "error": "service request failed",
+                                        "error_code": "handler_failed",
+                                        "exception_type": type(exc).__name__,
+                                    }, b""
+                                finally:
+                                    _CONNECTION_VERDICT.value = None
+                                # The registry's final startup probe requires the responder's
+                                # birth identity on the wire, including a late-ready daemon.
+                                if response.get("ok") is True and payload.get("action") in ("ping", "status"):
+                                    response = {**service_identity.process_record_fields(), **response}
+                                with capacity_lock:
+                                    response_rejection_count = capacity_rejections
+                                response_envelope = None if legacy or envelope is None else LocalRpcEnvelope(
+                                    service=service_name,
+                                    method=envelope.method,
+                                    request_id=envelope.request_id,
+                                    trace_id=envelope.trace_id,
+                                    deadline_ms=envelope.deadline_ms,
+                                    priority=envelope.priority,
+                                    owner_generation=envelope.owner_generation,
+                                    config_generation=envelope.config_generation,
+                                    payload=response,
+                                    accept_to_read_ms=(read_started - accepted_at) * 1000.0,
+                                    read_complete_ms=(read_completed - read_started) * 1000.0,
+                                    service_duration_ms=(time.monotonic() - service_started) * 1000.0,
+                                    queue_wait_ms=queue_wait_ms,
+                                    queue_depth=0,
+                                    capacity_limit=handler_limit,
+                                    capacity_saturated=capacity_saturated,
+                                    capacity_rejections=response_rejection_count,
+                                )
+                                try:
+                                    write_message(connection, response_envelope, response, response_binary, legacy=legacy)
+                                except (LocalRpcError, OSError):
+                                    try:
+                                        write_message(connection, None, {"ok": False, "error": LOCAL_SERVICE_ERROR_RESPONSE_TOO_LARGE}, legacy=True)
+                                    except OSError:
+                                        pass
+                    finally:
+                        if handler_slots is not None:
+                            handler_slots.release()
+                            with capacity_lock:
+                                active_handlers -= 1
                         with handler_threads_lock:
-                            handler_threads.add(worker)
-                        worker.start()
-                    # A completed request may have more clients queued behind it.
-                    # Maintenance runs only after an actual accept timeout so
-                    # background work cannot jump ahead of interactive RPCs.
-            except KeyboardInterrupt:
-                stop_event.set()
-            finally:
-                with handler_threads_lock:
-                    workers = tuple(handler_threads)
-                for worker in workers:
-                    worker.join(timeout=0.1)
-        finally:
-            server.close()
-    finally:
-        if on_shutdown is not None:
-            on_shutdown()
-        # The listener completed on its own, so the armed escalation stands down
-        # before it can signal a process that is already leaving.
-        lifetime_owner.note_exited_gracefully()
-        if owns_lock:
-            try:
-                lifetime_path.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as error:
-                logger.warning(
-                    "local service %s could not remove its lifetime record at %s: %s",
-                    service_name,
-                    lifetime_path,
-                    type(error).__name__,
-                )
-            if socket_alias is not None:
+                            handler_threads.discard(threading.current_thread())
+
                 try:
-                    socket_alias.unlink()
-                except FileNotFoundError:
-                    pass
+                    while not stop_event.is_set():
+                        if launching_parent_pid > 1 and int(parent_pid_reader()) != launching_parent_pid:
+                            lifetime_owner.request_retirement("launching_supervisor_exited")
+                            lifetime_owner.publish(lifetime_path)
+                            continue
+                        try:
+                            connection, _address = server.accept()
+                        except TimeoutError:
+                            if handler_slots is not None:
+                                with capacity_lock:
+                                    if active_handlers:
+                                        continue
+                            try:
+                                if on_idle():
+                                    # The last valid external claim is gone. Setting
+                                    # `stop_event` is a REQUEST the listener may never
+                                    # honour -- a stuck handler, a blocking shutdown
+                                    # hook, or a non-daemon thread at interpreter exit
+                                    # all leave the daemon up. Waiting for the next
+                                    # launcher start to force it is the future-restart
+                                    # authority the supervision contract forbids, so
+                                    # the owner bounds this exit itself.
+                                    lifetime_owner.request_retirement("idle_no_external_claim")
+                                    lifetime_owner.publish(lifetime_path)
+                            except Exception as exc:
+                                traceback_text = traceback.format_exc()
+                                if on_idle_failure is not None:
+                                    try:
+                                        on_idle_failure(exc, traceback_text)
+                                    except Exception:
+                                        logger.exception("local service %s idle-failure callback failed", service_name)
+                                else:
+                                    logger.exception("local service %s idle hook failed", service_name)
+                            continue
+                        accepted_at = time.monotonic()
+                        if handler_slots is None:
+                            serve_connection(connection, accepted_at, 0.0, False, 0)
+                        else:
+                            queue_started = time.monotonic()
+                            acquired = handler_slots.acquire(blocking=False)
+                            queue_wait_ms = (time.monotonic() - queue_started) * 1000.0
+                            with capacity_lock:
+                                if acquired:
+                                    active_handlers += 1
+                                    saturated = active_handlers >= handler_limit
+                                    rejection_count = capacity_rejections
+                                else:
+                                    capacity_rejections += 1
+                                    saturated = True
+                                    rejection_count = capacity_rejections
+                        if handler_slots is not None and not acquired:
+                            with connection:
+                                try:
+                                    write_message(connection, None, {"ok": False, "error": LOCAL_SERVICE_ERROR_BUSY, "queue_wait_ms": queue_wait_ms, "queue_depth": 0, "capacity_limit": handler_limit, "capacity_saturated": saturated, "capacity_rejected": True, "capacity_rejections": rejection_count}, legacy=True)
+                                except OSError:
+                                    pass
+                        elif handler_slots is not None:
+                            worker = None
+                            try:
+                                worker = threading.Thread(target=serve_connection, args=(connection, accepted_at, queue_wait_ms, saturated, rejection_count), name=f"{service_name}-rpc", daemon=True)
+                                with handler_threads_lock:
+                                    handler_threads.add(worker)
+                                worker.start()
+                            finally:
+                                if worker is None or worker.ident is None:
+                                    connection.close()
+                                    handler_slots.release()
+                                    with capacity_lock:
+                                        active_handlers -= 1
+                                    with handler_threads_lock:
+                                        handler_threads.discard(worker)
+                        # A completed request may have more clients queued behind it.
+                        # Maintenance runs only after an actual accept timeout so
+                        # background work cannot jump ahead of interactive RPCs.
+                except KeyboardInterrupt:
+                    stop_event.set()
+                finally:
+                    with handler_threads_lock:
+                        workers = tuple(handler_threads)
+                    for worker in workers:
+                        worker.join(timeout=0.1)
+            finally:
+                server.close()
+        finally:
             try:
-                socket_path.unlink()
-            except FileNotFoundError:
-                pass
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
-        os.close(lock_fd)
-        restore_signal_handlers(previous_handlers)
-    return 0
+                if on_shutdown is not None:
+                    on_shutdown()
+            finally:
+                # The listener completed on its own, so the armed escalation stands down
+                # before it can signal a process that is already leaving.
+                lifetime_owner.note_exited_gracefully()
+                if owns_lock:
+                    try:
+                        lifetime_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except OSError as error:
+                        logger.warning(
+                            "local service %s could not remove its lifetime record at %s: %s",
+                            service_name,
+                            lifetime_path,
+                            type(error).__name__,
+                        )
+                    if socket_alias is not None:
+                        try:
+                            socket_alias.unlink()
+                        except FileNotFoundError:
+                            pass
+                    try:
+                        socket_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    try:
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+        return 0

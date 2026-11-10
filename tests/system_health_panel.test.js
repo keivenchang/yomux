@@ -715,17 +715,11 @@ test('NO value from an unreadable payload reaches the HTML, by whole-output swee
 
   // Every surface, with the disclosures and Advanced OPEN -- the regions that read the block most
   // deeply are exactly the ones a collapsed-by-default render would never have exercised.
-  const rendered = [
-    renderRoster(hostile, {expanded: [sentinels.inventory, 'local-services', 'statsd']}),
-    renderAlerts(hostile),
-    renderSnapshot(healthSnapshot(hostile.health)),
-  ].join('\n');
+  const roster = renderRoster(hostile, {expanded: [sentinels.inventory, 'local-services', 'statsd']});
+  const alerts = renderAlerts(hostile);
   for (const [name, value] of Object.entries(sentinels)) {
-    // `renderSnapshot` is called with the block directly, which is the ONE path that legitimately
-    // renders it -- it is included above only to prove the sentinels are renderable at all.
-    const roster = renderRoster(hostile, {expanded: [sentinels.inventory, 'local-services', 'statsd']});
     assert.equal(roster.includes(value), false, `${name}=${value} from an unreadable payload reached the roster HTML`);
-    assert.equal(renderAlerts(hostile).includes(value), false, `${name}=${value} reached the alert slot`);
+    assert.equal(alerts.includes(value), false, `${name}=${value} reached the alert slot`);
   }
 
   // The roster is exactly the three rows, and the third one says why.

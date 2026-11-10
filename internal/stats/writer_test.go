@@ -25,6 +25,49 @@ func writerBatch() AppendBatch {
 	}
 }
 
+type singleUseJSONPayload struct{ calls *int }
+
+func (value singleUseJSONPayload) MarshalJSON() ([]byte, error) {
+	*value.calls++
+	if *value.calls > 1 {
+		return nil, errors.New("second encoding sentinel")
+	}
+	return []byte(`"validated"`), nil
+}
+
+func TestWriterPersistsValidatedPayloadWithoutReencoding(t *testing.T) {
+	for _, table := range []string{"observations", "usage_atoms"} {
+		t.Run(table, func(t *testing.T) {
+			writer := newAgentTokenTestWriter(t)
+			calls := 0
+			batch := writerBatch()
+			batch.CoverageEpochs, batch.UnavailableSpans = nil, nil
+			if table == "observations" {
+				batch.UsageAtoms = nil
+				batch.Observations[0].Payload["probe"] = singleUseJSONPayload{&calls}
+			} else {
+				batch.Observations = nil
+				batch.UsageAtoms[0].Payload["probe"] = singleUseJSONPayload{&calls}
+			}
+			if _, err := writer.AppendBatch(context.Background(), batch); err != nil {
+				t.Fatal(err)
+			}
+			var payload string
+			if err := writer.db.QueryRow("SELECT payload_json FROM " + table).Scan(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 || !strings.Contains(payload, `"probe":"validated"`) {
+				t.Fatalf("unchecked payload persisted: calls=%d payload=%q", calls, payload)
+			}
+			_, err := writer.AppendBatch(context.Background(), batch)
+			var invalidPayload *ContractError
+			if !errors.As(err, &invalidPayload) || calls != 2 {
+				t.Fatalf("subsequent append reused stale validation: calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}
+
 func TestWriterConcurrentCloseAndReads(t *testing.T) {
 	ctx := context.Background()
 	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
@@ -266,8 +309,8 @@ func TestSchema9UsesPythonAffinityAndRejectsInvalidConstraints(t *testing.T) {
 		{name: "negative source generation", query: "UPDATE schema_meta SET source_generation=-1 WHERE singleton=1"},
 		{name: "coverage end before start", query: "INSERT INTO coverage_epochs VALUES ('cpu','schema-test','bad-coverage',10,9,1,1)"},
 		{name: "unavailable non-positive span", query: "INSERT INTO unavailable_spans VALUES ('gpu','schema-test','bad-gap',10,10,1,'offline',1)"},
-		{name: "misaligned ring slot", query: "INSERT INTO aggregate_ring_slots(resolution_seconds,slot_index,bucket_start,bucket_json,complete,source_generation,ring_generation,published_at,payload_version) VALUES (10,180,1,'{}',1,1,1,1,1)"},
-		{name: "partial ring slot", query: "INSERT INTO aggregate_ring_slots(resolution_seconds,slot_index,bucket_start,bucket_json,complete,source_generation,ring_generation,published_at,payload_version) VALUES (10,180,NULL,'{}',0,0,0,0,0)"},
+		{name: "misaligned ring slot", query: "UPDATE aggregate_ring_slots SET bucket_start=1,bucket_json='{}',complete=1,source_generation=1,ring_generation=1,published_at=1,payload_version=1 WHERE resolution_seconds=10 AND slot_index=0"},
+		{name: "partial ring slot", query: "UPDATE aggregate_ring_slots SET bucket_json='{}' WHERE resolution_seconds=10 AND slot_index=0"},
 		{name: "misaligned invalidation", query: "INSERT INTO ring_invalidations(resolution_seconds,bucket_start,source_generation,reason,created_at) VALUES (10,1,1,'bad',1)"},
 		{name: "negative applied timestamp", query: "INSERT INTO ring_invalidations(resolution_seconds,bucket_start,source_generation,reason,created_at,applied_at) VALUES (10,0,1,'bad',1,-1)"},
 	}
@@ -337,7 +380,7 @@ func TestAppendUsageChunkBoundariesPreserveReplayRepairAndRollback(t *testing.T)
 			conflict.Payload["quantity"] = 99.0
 			checkpoint := Checkpoint{Key: "chunk-test", Kind: "transcript", Version: 1}
 			_, err = writer.AppendWithCheckpoints(ctx, AppendBatch{UsageAtoms: append(fresh, conflict)}, []Checkpoint{checkpoint})
-			if err == nil || err.Error() != "usage atom identity conflicts with stored data" {
+			if err == nil || requireAppendError(t, err).Unwrap().Error() != "usage atom identity conflicts with stored data" {
 				t.Fatalf("chunk conflict = %v", err)
 			}
 			after, err := writer.refillBaseline(ctx, 0, 100)
@@ -355,7 +398,7 @@ func TestAppendUsageChunkBoundariesPreserveReplayRepairAndRollback(t *testing.T)
 					want = "append_batch.identity: conflicting duplicate idempotency key"
 				}
 				_, err := writer.AppendBatch(ctx, AppendBatch{UsageAtoms: append(append([]UsageAtom{}, atoms...), duplicate)})
-				if err == nil || err.Error() != want {
+				if err == nil || requireAppendError(t, err).Unwrap().Error() != want {
 					t.Fatalf("chunk duplicate = %v, want %q", err, want)
 				}
 			}
@@ -510,7 +553,7 @@ func TestAppendBatchRollsBackWhenRingInvalidationWriteFails(t *testing.T) {
 		CoverageEpochs:   []CoverageEpoch{{Family: "cpu", SourceID: "host", EpochID: "epoch-2", StartedAt: 30, EndedAt: &end, NativeCadenceSeconds: 1, OwnerGeneration: 2}},
 		UnavailableSpans: []UnavailableSpan{{Family: "gpu", SourceID: "device-0", EpochID: "epoch-2", StartedAt: 30, EndedAt: 40, NativeCadenceSeconds: 1, Reason: "synthetic outage", OwnerGeneration: 2}},
 	}
-	if _, err := writer.AppendBatch(ctx, batch); err == nil || !strings.Contains(err.Error(), "synthetic ring invalidation failure") {
+	if _, err := writer.AppendBatch(ctx, batch); err == nil || !strings.Contains(requireAppendError(t, err).Unwrap().Error(), "synthetic ring invalidation failure") {
 		t.Fatalf("append with failing synthetic invalidation trigger error = %v", err)
 	}
 	if got := writer.SourceGeneration(); got != beforeGeneration {
@@ -789,7 +832,7 @@ func TestWriterPruneDeletesAndClipsFactsAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Generation != 2 || result.Observations != 1 || result.UsageAtoms != 1 || result.CoverageClipped != 1 || result.UnavailableClipped != 1 {
+	if result.Generation != 2 || result.Observations != 1 || result.UsageAtoms != 1 || result.CoverageClipped != 0 || result.UnavailableClipped != 1 {
 		t.Fatalf("prune result = %+v", result)
 	}
 	var count int
@@ -800,8 +843,8 @@ func TestWriterPruneDeletesAndClipsFactsAtomically(t *testing.T) {
 		t.Fatalf("old usage atoms = %d, err=%v", count, err)
 	}
 	var started float64
-	if err = writer.db.QueryRow("SELECT started_at FROM coverage_epochs WHERE epoch_id='epoch'").Scan(&started); err != nil || started != 100 {
-		t.Fatalf("clipped coverage start = %v, err=%v", started, err)
+	if err = writer.db.QueryRow("SELECT started_at FROM coverage_epochs WHERE epoch_id='epoch'").Scan(&started); err != nil || started != 0 {
+		t.Fatalf("immutable coverage start = %v, err=%v", started, err)
 	}
 	pending, err := writer.PendingInvalidationCells(ctx)
 	if err != nil || len(pending) == 0 {
@@ -1429,5 +1472,77 @@ func TestAppendTimingsSeparateWriterContentionAndCommit(t *testing.T) {
 	}
 	if timings.Wait <= 0 || timings.Validation <= 0 || timings.Transaction <= 0 || timings.Commit <= 0 || timings.Commit > timings.Transaction {
 		t.Fatalf("phase measurements = %+v", timings)
+	}
+}
+
+func TestWriterContinuesEpochAfterRetention(t *testing.T) {
+	ctx := context.Background()
+	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "retention.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	batch := writerBatch()
+	end := float64(RetentionSeconds + 200)
+	batch.CoverageEpochs[0].EndedAt = &end
+	if _, err := writer.AppendBatch(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	for _, cutoff := range []float64{100, 110, 120} {
+		if _, err := writer.Prune(ctx, float64(RetentionSeconds)+cutoff); err != nil {
+			t.Fatal(err)
+		}
+		end++
+		batch.Observations[0].EventID = fmt.Sprintf("after-prune-%g", cutoff)
+		batch.Observations[0].ObservedAt = end - 1
+		batch.UsageAtoms[0].EventID = fmt.Sprintf("tokens-after-prune-%g", cutoff)
+		batch.UsageAtoms[0].ObservedAt = end - 1
+		if _, err := writer.AppendBatch(ctx, batch); err != nil {
+			t.Fatalf("append after cutoff %g: %v", cutoff, err)
+		}
+	}
+}
+
+func TestExternalReconciliationRetriesAfterFailedInvalidation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	payload := emptyRingBucketPayload(t, 90, 10, 0, 100)
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: 90, BucketJSON: payload, Complete: true}}, 0, 100, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.db.ExecContext(ctx, `CREATE TEMP TRIGGER reject_reconcile BEFORE INSERT ON ring_invalidations BEGIN SELECT RAISE(ABORT, 'fixture transient failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	external, err := sql.Open("sqlite3", writerURI(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer external.Close()
+	if _, err := external.ExecContext(ctx, `INSERT INTO observations VALUES ('external','cpu','host',95,'epoch',0,'{}')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.ReconcileExternalMutationAt(ctx, 100); err == nil {
+		t.Fatal("injected invalidation failure was not reached")
+	}
+	if writer.ProductFresh(10, 90, 100) {
+		t.Fatal("failed external repair left stale products admissible")
+	}
+	if _, err := writer.db.ExecContext(ctx, `DROP TRIGGER reject_reconcile`); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.ReconcileExternalMutationAt(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := writer.PendingInvalidationCells(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].BucketStart != 90 {
+		t.Fatalf("external mutation repair lost after transient failure: %+v", pending)
 	}
 }

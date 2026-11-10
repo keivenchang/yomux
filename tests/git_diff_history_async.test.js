@@ -1,4 +1,4 @@
-const {assert, fs, deferredFetch, controllableSseResponse, sseFrame: rawSseFrame, loadYomux, jsonResponse: rawJsonResponse, flushAsyncWork, canonical, test, testAsync, runSuites} = require('./browser_helpers/layout_test_helper');
+const {assert, fs, vm, deferredFetch, controllableSseResponse, sseFrame: rawSseFrame, loadYomux, jsonResponse: rawJsonResponse, flushAsyncWork, canonical, test, testAsync, runSuites} = require('./browser_helpers/layout_test_helper');
 
 const withBoundary = payload => payload && typeof payload === 'object'
   && (typeof payload.repo === 'string' || Array.isArray(payload.commits))
@@ -17,6 +17,121 @@ function installVisibleGitDiffPanel(api, item) {
 }
 
 async function runGitDiffHistorySuite() {
+  for (const [name, changed] of Object.entries({
+    head: {head: 'd'.repeat(40)}, path: {path: '/other'}, repo: {repo: '/other'},
+    identity: {repository_identity: 'other'}, scope: {relative_path: 'subdir'},
+    shallow: {shallow_boundary: 'other'}, snapshot: {snapshot_cursor: 'other'},
+    missingSnapshot: {snapshot_cursor: ''}, missingIdentity: {repository_identity: ''},
+    prefix: {commits: [{sha: 'd'.repeat(40)}]}, completeShorter: {next_cursor: ''},
+  })) {
+    await testAsync(`Git history refresh prunes an unproven loaded window (${name})`, async () => {
+      const api = loadYomux('', ['1']);
+      const item = api.gitDiffItemFor('/repo');
+      const commits = ['a', 'b', 'c'].map(letter => ({sha: letter.repeat(40), subject: letter,
+        files: 1, added: 1, removed: 0, binary_files: 0}));
+      const state = api.setGitDiffTabStateForTest(item, {
+        path: '/repo', repo: '/repo', repositoryIdentity: 'repo-a', relativePath: '',
+        shallowBoundary: 'complete', head: commits[0].sha, snapshotCursor: 'snapshot-zero',
+        commits, visibleCommitCount: 3, nextCursor: 'after-loaded-tail', loaded: true, loadAttempted: true,
+        expanded: new Set([commits[2].sha]), focusedSha: commits[2].sha,
+      });
+      const payload = {
+        path: '/repo', repo: '/repo', repository_identity: 'repo-a', relative_path: '',
+        shallow_boundary: 'complete', head: commits[0].sha, snapshot_cursor: 'snapshot-zero',
+        commits: [commits[0]], next_cursor: 'after-first-page', ...changed,
+      };
+      api.gitDiffCommitRecordForTest(state, commits[2].sha).detail = {message: 'cached tail'};
+      api.setFetchForTest(() => Promise.resolve(jsonResponse(payload)));
+      assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
+      assert.deepStrictEqual([...state.commits.map(commit => commit.sha)], payload.commits.map(commit => commit.sha));
+      assert.equal(state.visibleCommitCount, 1);
+      assert.equal(state.nextCursor, payload.next_cursor);
+      assert.equal(state.expanded.has(commits[2].sha), false);
+      assert.equal(state.focusedSha, '');
+      assert.equal(state.commitRecords.has(commits[2].sha), false);
+    });
+  }
+  for (const nextCursor of ['', 'after-loaded-tail']) {
+    await testAsync(`Git history refresh preserves the loaded snapshot window (${nextCursor || 'complete'})`, async () => {
+      const api = loadYomux('', ['1']);
+      const item = api.gitDiffItemFor('/repo');
+      const commits = ['a', 'b', 'c'].map(letter => ({sha: letter.repeat(40), subject: letter,
+        files: 1, added: 1, removed: 0, binary_files: 0}));
+      const state = api.setGitDiffTabStateForTest(item, {
+        path: '/repo', repo: '/repo', repositoryIdentity: 'repo-a', relativePath: '',
+        shallowBoundary: 'complete', head: commits[0].sha, snapshotCursor: 'snapshot-zero',
+        commits, visibleCommitCount: 3, nextCursor, loaded: true, loadAttempted: true,
+        expanded: new Set([commits[2].sha]), focusedSha: commits[2].sha,
+        truncated: true, truncationReason: 'loaded-tail-limit',
+      });
+      const tailRecord = api.gitDiffCommitRecordForTest(state, commits[2].sha);
+      tailRecord.detail = {message: 'cached tail'};
+      api.setFetchForTest(() => Promise.resolve(jsonResponse({
+        path: '/repo', repo: '/repo', repository_identity: 'repo-a', relative_path: '',
+        shallow_boundary: 'complete', head: commits[0].sha, snapshot_cursor: 'snapshot-zero',
+        commits: [commits[0]], next_cursor: 'after-first-page',
+      })));
+      assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
+      assert.deepStrictEqual([...state.commits.map(commit => commit.sha)], commits.map(commit => commit.sha));
+      assert.equal(state.visibleCommitCount, 3);
+      assert.equal(state.nextCursor, nextCursor, 'pagination continues after the retained tail');
+      assert.equal(state.focusedSha, commits[2].sha);
+      assert.equal(state.expanded.has(commits[2].sha), true);
+      assert.equal(state.commitRecords.get(commits[2].sha), tailRecord);
+      assert.equal(tailRecord.detail.message, 'cached tail');
+      assert.equal(state.truncated, true, 'refresh cannot erase a retained tail warning');
+      assert.equal(state.truncationReason, 'loaded-tail-limit');
+    });
+  }
+  await testAsync('stream retirement releases aborted readers without warning and reports other failures', async () => {
+    const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const start = core.indexOf('async function retireStreamReader(');
+    const warnings = [];
+    const context = {console: {warn: (...args) => warnings.push(args)}};
+    vm.createContext(context);
+    vm.runInContext(core.slice(start, core.indexOf('\nfunction ', start)), context);
+    for (const name of ['AbortError', 'Error']) {
+      const failure = Object.assign(new Error('cancel failed'), {name});
+      let released = false;
+      await context.retireStreamReader({cancel: async () => { throw failure; }, releaseLock: () => { released = true; }});
+      assert.equal(released, true);
+      assert.equal(warnings.length, name === 'AbortError' ? 0 : 1);
+      if (warnings.length) assert.equal(warnings[0][1], failure);
+    }
+  });
+  for (const [file, name, next, event, run] of [
+    ['85_git_diff_viewer', 'function gitDiffStatsStreamRequest(', 'function gitDiffHistoryViewportIndices(', 'chunk', context => context.gitDiffStatsStreamRequest({statsControllers: new Set()}, '/fixture', context.fail)],
+    ['20_layout_state', 'async function consumeFileQuickOpenSearchStream(', 'async function fileQuickOpenSearchRootResult(', 'chunk', context => context.consumeFileQuickOpenSearchStream('/fixture', 'query', 1, {})],
+    ['86_changes_10_session_files', 'async function fetchSessionFilesStream(', 'function renderSessionFilesDestination(', 'repo', context => context.fetchSessionFilesStream('/fixture', {}, () => true, context.fail)],
+    ['45_file_explorer_actions', 'async function fileMetadataStream(', 'async function showFileGetInfo(', 'progress', context => context.fileMetadataStream('/fixture', {}, null, context.fail)],
+  ]) {
+    await testAsync(`${file} retires its stream after a consumer rejects a chunk`, async () => {
+      const source = fs.readFileSync(`static_src/js/yomux/${file}.js`, 'utf8');
+      const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+      const helperStart = core.indexOf('async function retireStreamReader(');
+      const helper = helperStart < 0 ? '' : core.slice(helperStart, core.indexOf('\nfunction ', helperStart));
+      let cancelled = false;
+      const body = new ReadableStream({
+        start(controller) { controller.enqueue(new TextEncoder().encode(`event: ${event}\ndata: {}\n\n`)); },
+        cancel() { cancelled = true; },
+      });
+      const failure = new Error('consumer rejected chunk');
+      const context = {
+        AbortController, TextDecoder, console,
+        apiFetch: async () => ({ok: true, body}),
+        createFileQuickOpenSseParser: loadYomux().fileQuickOpenSseParserForTest,
+        fileQuickOpenSseStreamOptions: options => options,
+        fileQuickOpenSearchQueryString: () => '', fileQuickOpenState: {requestId: 1},
+        applyFileQuickOpenSearchChunk() { throw failure; },
+        fail() { throw failure; },
+      };
+      vm.createContext(context);
+      vm.runInContext(helper + source.slice(source.indexOf(name), source.indexOf(next)), context);
+      await assert.rejects(run(context), error => error === failure);
+      assert.equal(cancelled, true, 'a rejected consumer must stop the producer');
+      assert.equal(body.locked, false, 'a rejected consumer must release its reader');
+    });
+  }
   test('Git history stats cannot publish across a changed shallow boundary', () => {
     const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
@@ -385,6 +500,33 @@ async function runGitDiffHistorySuite() {
     stream.close();
     await flushAsyncWork();
     assert.equal(api.gitDiffTabStateForTest(item).commits[0].signature_status, 'N', 'the refreshed signature status reaches the row');
+  });
+
+  await testAsync('history refresh merges missing signature enrichment and keeps the hosted anchor focused', async () => {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const item = api.gitDiffItemFor('/repo');
+    const sha = 'a'.repeat(40);
+    const state = api.setGitDiffTabStateForTest(item, {
+      path: '/repo', repo: '/repo', repositoryIdentity: 'repo-id', relativePath: '',
+      shallowBoundary: 'complete', head: sha, snapshotCursor: 'snapshot-zero',
+      commits: [{sha, short: 'aaaaaaaaa', subject: 'initial', files: 1, added: 1, removed: 0, binary_files: 0, signature_status: 'N'}],
+      visibleCommitCount: 1, loaded: true, loadAttempted: true,
+    });
+    state.hostedRemote = {provider: 'github', base_url: 'https://github.com/fixture/history'};
+    const panel = installVisibleGitDiffPanel(api, item);
+    const anchor = panel.querySelector('.git-diff-commit-sha');
+    anchor.focus();
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({
+      path: '/repo', repo: '/repo', relative_path: '', repository_identity: 'repo-id',
+      shallow_boundary: 'complete', head: sha, snapshot_cursor: 'snapshot-one',
+      hosted_remote: {provider: 'github', base_url: 'https://github.com/fixture/history'},
+      commits: [{sha, short: 'aaaaaaaaa', subject: 'refreshed', files: 1, added: 2, removed: 0, binary_files: 0}],
+      next_cursor: '', truncated: false,
+    })));
+
+    assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
+    assert.equal(state.commits[0].signature_status, 'N', 'the incoming history row omitted signature enrichment');
+    assert.equal(panel.querySelector('.git-diff-commit-sha'), anchor, 'refresh retains the focused hosted link node');
   });
 
   await testAsync('Git history refresh cancels an in-flight stats backfill before applying stale counts', async () => {

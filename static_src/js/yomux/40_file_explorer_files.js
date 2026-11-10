@@ -1008,8 +1008,9 @@ async function refreshFileExplorerFromWatchDiffOnce(payload = {}, options = {}) 
     if (diffPayload.token && fileExplorerFilesystemPushToken !== String(diffPayload.token)) return;
     await refreshOpenFilesFromPush(diffPayload);
   } catch (error) {
+    if (error?.terminalAuthentication === true) return;
     console.warn('client fs watch diff refresh failed', error);
-    if (!fileExplorerTreePaneIsVisible()) await refreshOpenFilesIfChanged({paths: watchedFiles});
+    if (!fileExplorerTreePaneIsVisible()) await refreshOpenFilesIfChanged({paths: watchedFiles, fresh: true});
     else if (requestedFull) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, trigger: 'watch-diff-fallback'});
     else await refreshFileExplorerIfChanged({trigger: 'watch-diff-fallback'});
   }
@@ -1049,6 +1050,7 @@ function fileEntryStatusFromWatchFilePayload(item) {
       mtime_ns: mtime,
       mtime,
       size: Number.isFinite(size) ? size : null,
+      ...(Number.isInteger(signature[4]) ? {mode: signature[4]} : {}),
     },
     missing: false,
     error: '',
@@ -1178,6 +1180,7 @@ function directoryEntriesSignature(entries) {
       Number.isFinite(Number(entry?.size)) ? Number(entry.size) : '',
       Number.isFinite(Number(entry?.mtime)) ? Number(entry.mtime) : '',
       entry?.is_symlink ? '1' : '0',
+      entry?.mode ?? '', entry?.permissions || '', entry?.entry_size ?? '',
     ].join('\x1f'))
     .sort()
     .join('\x1e');
@@ -4270,10 +4273,12 @@ function reconcileChildNodes(parent, nextNodes, options = {}) {
       arranged.splice(index, 0, child);
     });
   }
+  const retained = new Set(arranged);
+  // Remove obsolete prefixes first: moving a retained subtree clears its native focus and selection.
+  for (const child of Array.from(parent.children || [])) if (!retained.has(child)) child.remove();
   arranged.forEach((node, index) => {
     if (parent.children[index] !== node) parent.insertBefore(node, parent.children[index] || null);
   });
-  while (parent.children.length > arranged.length) parent.lastElementChild?.remove();
 }
 
 function setClassNameIfChanged(node, className) {
@@ -4348,6 +4353,26 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   if (diff.nextElementSibling !== dirCount) row.insertBefore(dirCount, diff.nextElementSibling);
   if (dirCount.nextElementSibling !== status) row.insertBefore(status, dirCount.nextElementSibling);
   if (status.nextElementSibling !== date) row.insertBefore(date, status.nextElementSibling);
+  let permissions = row.querySelector(':scope > .file-tree-permissions');
+  if (!permissions) {
+    permissions = document.createElement('span');
+    permissions.className = 'file-tree-permissions';
+  }
+  if (date.nextElementSibling !== permissions) row.insertBefore(permissions, date.nextElementSibling);
+  let size = row.querySelector(':scope > .file-tree-size');
+  if (!size) {
+    size = document.createElement('span');
+    size.className = 'file-tree-size';
+  }
+  if (permissions.nextElementSibling !== size) row.insertBefore(size, permissions.nextElementSibling);
+  if (options.preserveFileDetails !== true) {
+    row.classList.toggle('has-file-details', Boolean(options.permissionsText || options.sizeText));
+    permissions.textContent = options.permissionsText || '';
+    setHiddenIfChanged(permissions, !options.permissionsText);
+    size.textContent = options.sizeText || '';
+    setAttributeIfChanged(size, 'title', options.sizeTitle || null);
+    setHiddenIfChanged(size, !options.sizeText);
+  }
   setClassNameIfChanged(icon, ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' '));
   if (options.disclosureExpanded === true || options.disclosureExpanded === false) {
     setDisclosureTriangleElement(icon, options.disclosureExpanded === true);
@@ -4452,6 +4477,11 @@ function fileTreeRowDerivedState(fullPath, entry, options = {}) {
     icon,
     displayName,
     contentOptions: {
+      permissionsText: !differMode && fileExplorerPermissionsVisible() ? (entry.permissions || '—') : '',
+      sizeText: !differMode && fileExplorerPermissionsVisible()
+        ? (entry.kind === 'dir' ? ' ' : (entry.entry_size != null || entry.size != null ? formatFileSize(entry.entry_size ?? entry.size) : '—')) : '',
+      sizeTitle: entry.kind !== 'dir' && (entry.entry_size != null || entry.size != null) ? `${entry.entry_size ?? entry.size} bytes` : '',
+      preserveFileDetails: options.preserveFileDetails === true,
       gitStatus,
       gitStatusTitle: indexExcludedEntry
         ? t('finder.index.excluded')
@@ -4871,7 +4901,7 @@ function* renderTreeChildrenSteps(container, parentPath, entries, depth, options
   const isCurrent = () => fileTreeRenderOwners.get(container) === owner
     && container.parentElement === parent && (!wasConnected || container.isConnected !== false)
     && (!options.isCurrent || options.isCurrent());
-  entries = yield* filterFileExplorerDeletedPathTombstonesSteps(parentPath, entries, {isCurrent});
+  if (options.differMode !== true) entries = yield* filterFileExplorerDeletedPathTombstonesSteps(parentPath, entries, {isCurrent});
   if (!isCurrent()) return superseded();
   // Step the .file-tree-children::before guide line per nesting level: rows indent 14px/level
   // (updateFileTreeRow padding-left = base + depth*14), and the children wrappers are NOT physically
@@ -4954,7 +4984,7 @@ function* renderTreeChildrenSteps(container, parentPath, entries, depth, options
   let previousRow = null;
   for (const entry of visible) {
     if (!isCurrent()) return superseded();
-    if (!filterFileExplorerDeletedPathTombstones(parentPath, [entry]).length) continue;
+    if (renderOptions.differMode !== true && !filterFileExplorerDeletedPathTombstones(parentPath, [entry]).length) continue;
     if (typeof renderOptions.refreshContext === 'function') Object.assign(renderOptions, renderOptions.refreshContext());
     const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
     const row = existingRows.get(fullPath) || document.createElement('div');
@@ -5274,6 +5304,7 @@ function updateFileTreeGitStatusRows(targetRows = null, options = {}) {
       expanded: entry.kind === 'dir' && fileTreeDirectoryExpanded(fullPath),
       iconText: row.querySelector(':scope > .file-tree-icon')?.textContent || '',
       preserveDate: true,
+      preserveFileDetails: true,
       deferSessionFilesDiff: typeof finderSessionFilesDiffIsDeferred === 'function' && finderSessionFilesDiffIsDeferred(),
     }));
     if (isRepo) {
@@ -6220,6 +6251,7 @@ function toggleFileExplorerDirectoryIndexed(path) {
 
 function updateFileExplorerIndexedDirectoryRows() {
   document.querySelectorAll('.file-tree-row.kind-dir[data-path]').forEach(row => {
+    if (row.dataset.tabberType || fileTreeRowIsDiffer(row)) return;
     const path = row.dataset.path || '';
     const indexed = fileExplorerDirectoryIsIndexed(path);
     const excluded = fileExplorerPathIsExcluded(path);
@@ -6230,19 +6262,7 @@ function updateFileExplorerIndexedDirectoryRows() {
     row.classList.toggle('index-excluded-entry', excluded);
     row.classList.toggle('indexed-descendant-directory', indexedDescendant);
     if (indexed) ensureFileIndexStatus(path);  // warm + learn building/ready for the badge
-    const icon = row.querySelector(':scope > .file-tree-icon');
-    if (icon) {
-      setClassNameIfChanged(icon, ['file-tree-icon', 'file-icon-dir', indexed ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '));
-    }
-    const status = row.querySelector(':scope > .file-tree-git-status');
-    if (status) {
-      const badge = fileExplorerIndexBadgeText(path);
-      if (status.textContent !== badge) status.textContent = badge;
-      const title = fileExplorerIndexBadgeTitle(path);
-      if (title) status.setAttribute('title', title);
-      else status.removeAttribute('title');
-      setHiddenIfChanged(status, !badge);
-    }
+    updateFileTreeGitStatusRows([row]);
   });
 }
 
@@ -6651,17 +6671,21 @@ function adoptNormalTabberLayoutSelections(slots = layoutSlots) {
 async function applyTabberNormalSelections(active = '', revision = tabberModeRevision, activationRevision = tabberNormalPointerPreviewState.activationRevision) {
   if (tabberIsAdvanced() || revision !== tabberModeRevision) return false;
   if (activationRevision !== tabberNormalPointerPreviewState.activationRevision) return false;
-  if (active && active !== tabberItemId) tabberSidebarSinglePane = false;
   installTabberSidebarResizeObserver();
   if (!itemInLayout(tabberItemId) && typeof openFileSurfacePane === 'function') await openFileSurfacePane(tabberItemId);
   if (tabberIsAdvanced() || revision !== tabberModeRevision || activationRevision !== tabberNormalPointerPreviewState.activationRevision) return false;
+  return applyTabberNormalSelectionLayout(active);
+}
+
+function applyTabberNormalSelectionLayout(active = '', options = {}) {
+  if (active && active !== tabberItemId) tabberSidebarSinglePane = false;
   const selected = (tabberNormalSelections || []).filter(isLayoutItem);
   const focusSession = selected.includes(active) ? active : selected[selected.length - 1] || tabberItemId;
   const next = normalTabberLayoutSlotsForSelections(selected, focusSession);
   applyLayoutSlots(next, {focusSession: tabberSidebarSinglePane ? tabberItemId : focusSession, prune: false, sessionButtons: false, preservePlaceholderSlots: true, tabberNormalSelection: true});
   if (!tabberSidebarSinglePane && focusSession !== tabberItemId) {
     const slot = slotForSession(focusSession);
-    if (slot) activatePaneTab(slot, focusSession, {userInitiated: true});
+    if (slot) activatePaneTab(slot, focusSession, {userInitiated: options.userInitiated !== false});
   }
   syncTabberSidebarToggle();
   return true;
@@ -6825,6 +6849,7 @@ function setTabberMode(value, options = {}) {
     renderPaneTabStrips();
   }
   syncTabberSidebarToggle();
+  if (options.refresh !== false) renderSessionButtons();
   return true;
 }
 
@@ -8044,4 +8069,31 @@ function bindTabberPanel(panel) {
 
   });
   });
+}
+
+// Successful namespace changes share Finder selection and expansion remapping.
+function applyFileTreePathMapping(oldPath, newPath) {
+  const remap = path => path === oldPath || path.startsWith(`${oldPath}/`) ? `${newPath}${path.slice(oldPath.length)}` : path;
+  const remapSet = paths => { const updated = [...paths].map(remap); paths.clear(); updated.forEach(path => paths.add(path)); };
+  const remapMap = paths => { const updated = [...paths].map(([path, value]) => [remap(path), value]); paths.clear(); updated.forEach(([path, value]) => paths.set(path, value)); };
+  for (const paths of [fileExplorerSelectedPaths, fileExplorerExpanded]) remapSet(paths);
+  remapMap(fileExplorerSyncUserExpansionState);
+  remapSet(fileExplorerSyncManualCollapsedPaths);
+  for (const record of fileExplorerSyncTargetRecords.values()) {
+    record.expandedPaths = record.expandedPaths.map(remap);
+    record.selectedPaths = record.selectedPaths.map(remap);
+    record.cursorPath = remap(record.cursorPath);
+    record.anchorPath = remap(record.anchorPath);
+    remapMap(record.userExpansion);
+    remapSet(record.manualCollapsedPaths);
+  }
+  if (fileExplorerSelectionLead) fileExplorerSelectionLead = remap(fileExplorerSelectionLead);
+  if (fileExplorerSelectionAnchor) fileExplorerSelectionAnchor = remap(fileExplorerSelectionAnchor);
+  if (fileTreeRenamePath === oldPath) fileTreeRenamePath = null;
+  for (const path of [...fileState.keys()]) {
+    const next = remap(path);
+    if (next !== path && renameOpenFilePath(path, next) === false) {
+      throw new Error(t('finder.move.destinationOpen', {path: next}));
+    }
+  }
 }

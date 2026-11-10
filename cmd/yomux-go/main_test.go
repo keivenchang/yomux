@@ -54,6 +54,22 @@ func TestNormalizeYomuxEnvironmentMirrorsCanonicalValuesToLegacyReaders(t *testi
 	}
 }
 
+func TestAgentStatusRefreshPublishesAutoApproveRefreshEvent(t *testing.T) {
+	broker := newEventBroker()
+	server := &server{events: broker}
+	server.publishAgentStatusRefresh()
+
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	if len(broker.events) != 1 {
+		t.Fatalf("published events = %d, want one status refresh", len(broker.events))
+	}
+	event := broker.events[0]
+	if event.Type != "auto_approve_changed" || event.Resource != "auto_approve_changed" || event.Payload["refresh"] != true {
+		t.Fatalf("status refresh event = %#v, want auto_approve_changed refresh", event)
+	}
+}
+
 func TestManagedLaunchLeasesStayWithServerAndNeverReachChildren(t *testing.T) {
 	t.Cleanup(func() { acceptedLaunchLeaseFDs = nil })
 	lease, err := os.CreateTemp(t.TempDir(), "instance.lock")
@@ -96,6 +112,71 @@ func TestManagedLaunchLeasesStayWithServerAndNeverReachChildren(t *testing.T) {
 	defer competitor.Close()
 	if err := syscall.Flock(int(competitor.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
 		t.Fatal("server lost lease")
+	}
+}
+
+func TestLaunchListenerRejectsNonListeningDescriptors(t *testing.T) {
+	t.Cleanup(func() { acceptedLaunchLeaseFDs = nil })
+	for _, socketType := range []int{syscall.SOCK_STREAM, syscall.SOCK_DGRAM} {
+		t.Run(strconv.Itoa(socketType), func(t *testing.T) {
+			fd, err := syscall.Socket(syscall.AF_INET, socketType, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer syscall.Close(fd)
+			if err := syscall.Bind(fd, &syscall.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := acceptLaunchDescriptors("", fd); err == nil {
+				t.Fatal("bound socket accepted without listen")
+			}
+		})
+	}
+	file, err := os.CreateTemp(t.TempDir(), "not-a-socket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := acceptLaunchDescriptors("", int(file.Fd())); err == nil {
+		t.Fatal("regular file accepted as a listener")
+	}
+}
+
+func TestLaunchListenerValidationPreservesQueuedConnections(t *testing.T) {
+	t.Cleanup(func() { acceptedLaunchLeaseFDs = nil })
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	client, err := net.Dial("tcp4", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	file, err := listener.(*net.TCPListener).File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := acceptLaunchDescriptors("", int(file.Fd())); err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.(*net.TCPListener).SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("listener validation consumed the queued connection: %v", err)
+	}
+	defer accepted.Close()
+	connected, err := client.(*net.TCPConn).File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connected.Close()
+	if err := acceptLaunchDescriptors("", int(connected.Fd())); err == nil {
+		t.Fatal("connected socket accepted as a listener")
 	}
 }
 
@@ -2174,8 +2255,13 @@ func TestPhase45FinderHTTPRoutesUseReadAndMutationContracts(t *testing.T) {
 	if rename.Code != http.StatusOK {
 		t.Fatalf("rename route = %d %s", rename.Code, rename.Body.String())
 	}
+	move := httptest.NewRecorder()
+	s.fsMove(move, httptest.NewRequest(http.MethodPost, "/api/fs/move", bytes.NewBufferString(`{"paths":["`+filepath.Join(root, "renamed.txt")+`"],"destination":"`+filepath.Join(root, "folder")+`"}`)))
+	if move.Code != http.StatusOK || !strings.Contains(move.Body.String(), `"complete":true`) {
+		t.Fatalf("move route = %d %s", move.Code, move.Body.String())
+	}
 	delete := httptest.NewRecorder()
-	deleteRequest := httptest.NewRequest(http.MethodPost, "/api/fs/delete", bytes.NewBufferString(`{"path":"`+filepath.Join(root, "renamed.txt")+`"}`))
+	deleteRequest := httptest.NewRequest(http.MethodPost, "/api/fs/delete", bytes.NewBufferString(`{"path":"`+filepath.Join(root, "folder", "renamed.txt")+`"}`))
 	s.fsDelete(delete, deleteRequest)
 	if delete.Code != http.StatusOK {
 		t.Fatalf("delete route = %d %s", delete.Code, delete.Body.String())
@@ -2217,6 +2303,15 @@ func TestFastFinderListBypassesBusyFinderWorkers(t *testing.T) {
 	s.fsFastList(record, httptest.NewRequest(http.MethodGet, "/api/fs/fast/list?path="+url.QueryEscape(root), nil))
 	if record.Code != http.StatusOK || !bytes.Contains(record.Body.Bytes(), []byte(`"entries"`)) || bytes.Contains(record.Body.Bytes(), []byte(`"state":"accepted"`)) {
 		t.Fatalf("fast list waited for busy Finder workers: status=%d body=%s", record.Code, record.Body.String())
+	}
+}
+
+func TestWriteRejectsEmptyExpectedFileIdentity(t *testing.T) {
+	s := &server{}
+	response := httptest.NewRecorder()
+	s.fsWrite(response, httptest.NewRequest(http.MethodPost, "/api/fs/write", strings.NewReader(`{"path":"/missing","content":"text","expected_file_id":""}`)))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("empty identity status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -3573,8 +3668,12 @@ func TestPhase45FinderGitRoutesExposeDiffAndBlameContracts(t *testing.T) {
 	}
 
 	diff := serve("readonly", "readonly", http.MethodGet, "/api/fs/diff?path="+url.QueryEscape(path)+"&from=HEAD&to=current")
+	if diff.Code != http.StatusForbidden {
+		t.Fatalf("readonly diff content admitted: %d", diff.Code)
+	}
+	diff = serve("admin", "admin", http.MethodGet, "/api/fs/diff?path="+url.QueryEscape(path)+"&from=HEAD&to=current")
 	if diff.Code != http.StatusOK || !bytes.Contains(diff.Body.Bytes(), []byte(`"relative_path":"note.txt"`)) || !bytes.Contains(diff.Body.Bytes(), []byte(`+two`)) {
-		t.Fatalf("readonly diff route = %d %s", diff.Code, diff.Body.String())
+		t.Fatalf("admin diff route = %d %s", diff.Code, diff.Body.String())
 	}
 
 	history := serve("readonly", "readonly", http.MethodGet, "/api/fs/git-history?path="+url.QueryEscape(root)+"&limit=1")
@@ -3621,8 +3720,12 @@ func TestPhase45FinderGitRoutesExposeDiffAndBlameContracts(t *testing.T) {
 	}
 	sha := string(bytes.TrimSpace(headOutput))
 	commit := serve("readonly", "readonly", http.MethodGet, "/api/fs/git-commit?path="+url.QueryEscape(root)+"&commit="+url.QueryEscape(sha)+"&head="+url.QueryEscape(sha))
+	if commit.Code != http.StatusForbidden {
+		t.Fatalf("readonly commit content admitted: %d", commit.Code)
+	}
+	commit = serve("admin", "admin", http.MethodGet, "/api/fs/git-commit?path="+url.QueryEscape(root)+"&commit="+url.QueryEscape(sha)+"&head="+url.QueryEscape(sha))
 	if commit.Code != http.StatusOK || !bytes.Contains(commit.Body.Bytes(), []byte(`"sha"`)) || !bytes.Contains(commit.Body.Bytes(), []byte(`"files"`)) {
-		t.Fatalf("readonly commit route = %d %s", commit.Code, commit.Body.String())
+		t.Fatalf("admin commit route = %d %s", commit.Code, commit.Body.String())
 	}
 
 	blame := serve("admin", "admin", http.MethodGet, "/api/batch/blame?path="+url.QueryEscape(path))
@@ -7495,7 +7598,7 @@ func TestPhase3OperationStatusAndAcknowledgementAreExact(t *testing.T) {
 		t.Fatal(err)
 	}
 	status := httptest.NewRecorder()
-	s.operation(status, httptest.NewRequest(http.MethodGet, "/api/operations/op-exact", nil))
+	s.operation(status, httptest.NewRequest(http.MethodGet, "/api/operations/op-exact", nil).WithContext(context.WithValue(context.Background(), authContextKey{}, authUser{role: "admin"})))
 	if status.Code != http.StatusAccepted || !bytes.Contains(status.Body.Bytes(), []byte(`"state":"queued"`)) || !bytes.Contains(status.Body.Bytes(), []byte(`"request"`)) {
 		t.Fatalf("queued operation status = %d %s", status.Code, status.Body.String())
 	}
@@ -7579,6 +7682,10 @@ func TestEventBrokerPendingUpdatesPreserveIncrementalPayloads(t *testing.T) {
 		path     []string
 		payloads []map[string]any
 	}{
+		{"file relocations", "file_relocated", []string{"tracking_id"}, []map[string]any{
+			{"tracking_id": "first", "revision": 2, "old_path": "/old-one", "new_path": "/new-one", "file_id": "1"},
+			{"tracking_id": "second", "revision": 2, "old_path": "/old-two", "new_path": "/new-two", "file_id": "2"},
+		}},
 		{"native filesystem invalidations", "fs_changed", []string{"paths"}, []map[string]any{
 			{"paths": []string{"first"}, "reason": "filesystem-change", "token": "t1", "revision": 1},
 			{"paths": []string{"second"}, "reason": "filesystem-change", "token": "t2", "revision": 2},
@@ -8196,7 +8303,7 @@ func TestAcknowledgedLargeOperationReplayIsBoundedAndJournalIsVersioned(t *testi
 		t.Fatalf("ack response = %d %s", response.Code, response.Body.String())
 	}
 	status := httptest.NewRecorder()
-	s.operation(status, httptest.NewRequest(http.MethodGet, "/api/operations/op-large", nil))
+	s.operation(status, httptest.NewRequest(http.MethodGet, "/api/operations/op-large", nil).WithContext(context.WithValue(context.Background(), authContextKey{}, authUser{role: "admin"})))
 	if status.Code != http.StatusGone || !bytes.Contains(status.Body.Bytes(), []byte(`"operation_replay_evicted"`)) {
 		t.Fatalf("bounded replay status = %d %s", status.Code, status.Body.String())
 	}
@@ -9311,5 +9418,112 @@ func TestTabberNewRosterSurvivesMaintenanceFailure(t *testing.T) {
 	roster, err := s.tmuxSessionRosterSnapshotLocked(true)
 	if err != nil || !strings.Contains(strings.Join(roster.sessions, ","), "new") {
 		t.Fatalf("lost fresh roster: %v %v", roster.sessions, err)
+	}
+}
+
+func TestGoHealthLifecycleUnknownClassificationSurvivesLaterRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.json")
+	started := time.Unix(1700003000, 0)
+	first, err := newGoHealthLifecycle(path, "first", 100, started, "demand")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.markShutdown("terminated", 0, true, started.Add(time.Second))
+	second, err := newGoHealthLifecycle(path, "second", 101, started.Add(time.Minute), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.markShutdown("terminated", 0, true, started.Add(time.Minute+time.Second))
+	third, err := newGoHealthLifecycle(path, "third", 102, started.Add(2*time.Minute), "demand")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := third.snapshotNow()
+	if snapshot.RestartCount != 2 || snapshot.DemandStartCount != 1 || snapshot.DemandAvailable || snapshot.UnexpectedAvailable || snapshot.HistoryCoverage != "partial" {
+		t.Fatalf("earlier unclassified restart advertised complete: %+v", snapshot)
+	}
+}
+
+func TestGitHistoryStatsStreamRejectsWhitespaceScheduleWithoutPanic(t *testing.T) {
+	s := &server{}
+	request := httptest.NewRequest(http.MethodGet, "/api/fs/git-history-stats-stream?path=/fixture&cursor=fixture&count=0&batch_sizes=%20", nil)
+	response := httptest.NewRecorder()
+	s.fsGitHistoryStatsStream(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid stats schedule status=%d", response.Code)
+	}
+}
+
+func TestBackgroundOwnerRefusesMissingLease(t *testing.T) {
+	config := t.TempDir()
+	if err := os.Mkdir(filepath.Join(config, "go-background-owner.lock"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	owner := newGoBackgroundOwner(config, "/repo", 18021)
+	defer owner.close()
+	if owner.owner || owner.requestRefresh("search-index", nil)["accepted"] == true {
+		t.Fatalf("background work admitted without lease: %v", owner.statusPayload())
+	}
+	if _, err := os.Stat(filepath.Join(config, "go-background-owner.json")); !os.IsNotExist(err) {
+		t.Fatalf("unleased owner published authoritative record: %v", err)
+	}
+}
+
+func TestProcessCPUSamplesRetireWithCensus(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	s := &server{
+		threadCPU:             map[string]childCPUState{"retired-thread": {At: now, Identity: "retired-thread", CPUSeconds: 1}},
+		childCPU:              map[string]childCPUState{"exited-child": {At: now, Identity: "exited-child", CPUSeconds: 1}},
+		childProcessEntriesFn: func(int) ([]procEntry, error) { return nil, nil },
+	}
+	s.readGoThreadMetrics(now.Add(time.Second), os.Getpid(), nil)
+	s.readGoChildProcessMetrics(now.Add(time.Second))
+	if len(s.threadCPU) != 0 || len(s.childCPU) != 0 {
+		t.Fatalf("retired CPU samples retained: threads=%d children=%d", len(s.threadCPU), len(s.childCPU))
+	}
+}
+
+func TestCPUSampleCensusPreservesRatesAndIdentity(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	previous := map[string]childCPUState{}
+	for census := 0; census < 3; census++ {
+		current := map[string]childCPUState{}
+		percent := sampleCPUPercent(now.Add(time.Duration(census)*time.Second), "live", float64(census), previous, current)
+		if census == 0 && percent != nil || census > 0 && (percent == nil || *percent != 100) {
+			t.Fatalf("census %d CPU rate = %v", census, percent)
+		}
+		if got := sampleCPUPercent(now, fmt.Sprintf("new-%d", census), 1, previous, current); got != nil {
+			t.Fatalf("new identity inherited CPU rate: %v", *got)
+		}
+		if len(current) != 2 {
+			t.Fatalf("census %d retained %d samples", census, len(current))
+		}
+		previous = current
+	}
+}
+
+func TestNativeProcessMetricsCarryStartIdentity(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux proc identity collection")
+	}
+	tasks, err := os.ReadDir(filepath.Join("/proc", strconv.Itoa(os.Getpid()), "task"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{childProcessEntriesFn: func(int) ([]procEntry, error) {
+		return []procEntry{{PID: os.Getppid(), PPID: os.Getpid()}}, nil
+	}}
+	threads := s.readGoThreadMetrics(time.Now(), os.Getpid(), tasks)
+	children := s.readGoChildProcessMetrics(time.Now())
+	if len(threads) == 0 || len(children) != 1 {
+		t.Fatalf("native sample rows: threads=%d children=%d", len(threads), len(children))
+	}
+	for _, thread := range threads {
+		if thread.Identity == "" {
+			t.Errorf("thread %d lost native process start identity", thread.TID)
+		}
+	}
+	if children[0].Identity == "" {
+		t.Error("child process lost native process start identity")
 	}
 }

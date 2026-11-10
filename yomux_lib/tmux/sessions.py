@@ -561,10 +561,7 @@ def codex_transcript_meta(path: Path) -> tuple[str, str]:
         # A rollout scanned before its session_meta line lands must not pin an
         # empty result forever; re-read it until the thread id appears.
         return meta
-    if len(_CODEX_TRANSCRIPT_META_CACHE) >= _CODEX_TRANSCRIPT_META_CACHE_MAX:
-        for key in list(_CODEX_TRANSCRIPT_META_CACHE)[: _CODEX_TRANSCRIPT_META_CACHE_MAX // 2]:
-            _CODEX_TRANSCRIPT_META_CACHE.pop(key, None)
-    _CODEX_TRANSCRIPT_META_CACHE[identity] = meta
+    store_bounded_memo(_CODEX_TRANSCRIPT_META_CACHE, identity, meta, _CODEX_TRANSCRIPT_META_CACHE_MAX)
     return meta
 
 
@@ -577,6 +574,8 @@ def _read_codex_transcript_meta(path: Path) -> tuple[str, str]:
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
                     continue
                 if record.get("type") != "session_meta" or not isinstance(record.get("payload"), dict):
                     continue
@@ -603,7 +602,7 @@ def codex_transcript_family_paths(path: Path, candidates: list[Path] | None = No
 
     root = path.expanduser().resolve(strict=False)
     root_id, _parent_thread_id = codex_transcript_meta(root)
-    if candidates is None and not root_id:
+    if not root_id:
         return [root]
     sessions_root = next((ancestor for ancestor in root.parents if ancestor.name == "sessions"), None)
     window = list(candidates) if candidates is not None else recent_codex_transcript_candidates(root=sessions_root)
@@ -664,8 +663,10 @@ def read_claude_agent(
         metadata = read_json_file(meta_path, {}, exceptions=())
     except OSError as exc:
         return agent_error(session, "claude", pane, process, str(exc))
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         return agent_error(session, "claude", pane, process, f"invalid session metadata: {exc}")
+    if not isinstance(metadata, dict):
+        return agent_error(session, "claude", pane, process, "invalid session metadata: expected an object")
 
     session_id = metadata.get("sessionId")
     transcript_path = None
@@ -799,16 +800,15 @@ def store_bounded_memo(memo: dict, key: Any, value: Any, max_entries: int) -> No
 # files, then repeated both in mtime order — 160 of the 173 tail_file_lines calls in one
 # discover_sessions(enrich_paths=True), and ~75% of its CPU.
 #
-# The header record (session_meta, first line) is written when the rollout is created and never
-# rewritten, so it is memoized on the path alone. Keying it on the path needs no stat(), which
-# keeps the filename-ordered pass free of the per-rollout stat storm it was written to avoid.
+# Header and tail values share file-identity invalidation: a path may be observed before its
+# header is written or may be replaced by a different rollout.
 #
 # A transcript tail is NOT immutable: the live session appends to it. Anything derived from a
 # tail is therefore memoized on the file's identity, so an appended file is re-read and a resumed
 # session that adopts an old filename is still found. Codex rollout cwds and the Claude pane cwd
 # are the same problem and share one parent, memoized_transcript_tail_value, rather than each
 # hand-rolling a stat-versioned dict.
-_CODEX_HEADER_CWD_MEMO: dict[str, str | None] = {}
+_CODEX_HEADER_CWD_MEMO: dict[str, tuple[TranscriptFileIdentity, str | None]] = {}
 _CODEX_TAIL_CWDS_MEMO: dict[str, tuple[TranscriptFileIdentity, frozenset[str]]] = {}
 _CLAUDE_LATEST_CWD_MEMO: dict[str, tuple[TranscriptFileIdentity, str | None]] = {}
 _TRANSCRIPT_MEMO_MAX = 4096  # deleted transcripts orphan entries; bound like the directory catalog
@@ -1014,14 +1014,7 @@ def newest_codex_transcript(paths: list[Path]) -> Path | None:
 
 
 def memoized_codex_transcript_header_cwd(path: Path) -> str | None:
-    """The rollout's session_meta cwd. Immutable once written, so memoized on the path alone."""
-
-    key = str(path)
-    if key in _CODEX_HEADER_CWD_MEMO:
-        return _CODEX_HEADER_CWD_MEMO[key]
-    value = codex_transcript_header_cwd(path)
-    store_bounded_memo(_CODEX_HEADER_CWD_MEMO, key, value, _TRANSCRIPT_MEMO_MAX)
-    return value
+    return memoized_transcript_tail_value(_CODEX_HEADER_CWD_MEMO, path, codex_transcript_header_cwd, None)
 
 
 def _codex_transcript_tail_cwds(path: Path) -> frozenset[str]:

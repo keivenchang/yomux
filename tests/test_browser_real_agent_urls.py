@@ -520,3 +520,65 @@ def test_real_xterm_explicit_hyperlink_lifecycle(browser, isolated_dev_server_fa
     ''')
     assert 'error' not in result, result
     assert not result['failures'], result['failures']
+
+
+@pytest.mark.parametrize('prefix', ['\u754c ', '\U0001f600 ', 'e\u0301 '], ids=['wide', 'astral', 'combining'])
+def test_real_xterm_unicode_url_pointer_contract(browser, isolated_dev_server_factory, request, tmp_path, prefix):
+    server = isolated_dev_server_factory('unicode-url-pointer')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    session = server.tmux.sessions[0]
+    browser.get(server.base_url + f'/?sessions={session}&layout=left&tabs=left:{session}')
+    WebDriverWait(browser, 20).until(lambda driver: driver.execute_script(
+        'return initialAppShellPainted && typeof installTerminalLinkProvider === "function"'))
+    origin = urlsplit(browser.current_url)
+    browser.execute_cdp_cmd('Browser.grantPermissions', {
+        'origin': f'{origin.scheme}://{origin.netloc}',
+        'permissions': ['clipboardReadWrite', 'clipboardSanitizedWrite'],
+    })
+    observation = browser.execute_async_script(r'''
+      const prefix=arguments[0],done=arguments[arguments.length-1];
+      (async()=>{
+        const host=document.createElement('div');host.id='unicode-url-repro';host.className='terminal';
+        host.style.cssText='position:fixed;left:20px;top:120px;width:1100px;height:150px;z-index:var(--z-terminal-badge);background:black';
+        document.body.appendChild(host);
+        const term=new Terminal({cols:100,rows:4,allowProposedApi:true});term.open(host);
+        window.__unicodeUrlTerminal=term;
+        installTerminalLinkProvider('unicode-url-repro',term,host);
+        installTerminalContextMenu('unicode-url-repro',term,host);
+        const url='https://example.test/unicode';
+        await new Promise(resolve=>term.write(prefix+url,resolve));
+        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+        const line=term.buffer.active.getLine(0),cells=[];
+        for(let index=0;index<term.cols;index++)cells.push({column:index+1,text:line.getCell(index).getChars(),width:line.getCell(index).getWidth()});
+        const rect=terminalScreenElement(host).getBoundingClientRect(),cell=terminalCellDimensions(term,host);
+        const firstColumn=cells.findIndex(cell=>cell.text==='h')+1,column=firstColumn+url.length-1;
+        return {url,realXterm:term.element.classList.contains('xterm')&&!String(Terminal).includes('FakeTerminal'),
+          rows:[line.translateToString(true)],cells,
+          point:{x:rect.left+(column-0.5)*cell.width,y:rect.top+cell.height/2,column},
+          first:terminalReferenceAtPosition(term,{x:firstColumn,y:1})?.href||null,
+          final:terminalReferenceAtPosition(term,{x:column,y:1})?.href||null,
+          after:terminalReferenceAtPosition(term,{x:column+1,y:1})?.href||null};
+      })().then(done,error=>done({error:String(error.stack||error)}));
+    ''', prefix)
+    (tmp_path / 'unicode-url-pointer.json').write_text(json.dumps(observation, indent=2), encoding='utf-8')
+    print(json.dumps({key: value for key, value in observation.items() if key != 'cells'}))
+    assert 'error' not in observation and observation['realXterm'], observation
+    point = observation['point']
+    browser.execute_cdp_cmd('Input.dispatchMouseEvent', {
+        'type': 'mouseMoved', 'x': point['x'], 'y': point['y'],
+    })
+    menu_action(browser, point, 'Copy URL')
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+        'return statusEl?.textContent === t("status.copied")'))
+    copied = browser.execute_async_script('const done=arguments[0];navigator.clipboard.readText().then(done,error=>done({error:String(error)}))')
+    assert copied == observation['url'], observation
+    assert observation['first'] == observation['final'] == observation['url'], observation
+    assert observation['after'] is None, observation
+    devtools, connection = browser.start_devtools()
+    connection.execute(devtools.page.enable())
+    opened = []
+    callback = connection.add_callback(devtools.page.WindowOpen, opened.append)
+    request.addfinalizer(lambda: connection.remove_callback(devtools.page.WindowOpen, callback))
+    menu_action(browser, point, 'Open URL')
+    WebDriverWait(browser, 5).until(lambda driver: opened)
+    assert opened[-1].url == observation['url']

@@ -32,6 +32,7 @@ import pytest
 
 from tools.instance_isolation import normalize_yomux_environment
 from tools.native_process_scope import action_writable_directories
+from yomux_lib.infra.numeric import is_finite_number
 
 
 CALIBRATION_SAMPLE_COUNT = 7
@@ -149,8 +150,8 @@ def run_browser_latency_calibration(browser: Any, *, reset_page: bool = True) ->
     samples = result.get("samplesMs")
     calibration_now = result.get("calibrationNowMs")
     assert isinstance(samples, list) and len(samples) == CALIBRATION_SAMPLE_COUNT, result
-    assert all(isinstance(sample, (int, float)) and math.isfinite(sample) and sample > 0 for sample in samples), result
-    assert isinstance(calibration_now, (int, float)) and math.isfinite(calibration_now) and calibration_now > 0, result
+    assert all(is_finite_number(sample) and sample > 0 for sample in samples), result
+    assert is_finite_number(calibration_now) and calibration_now > 0, result
     return result
 
 
@@ -418,7 +419,7 @@ def _darwin_platform_profile(populations: dict[str, dict[str, Any]]) -> dict[str
 
     limits: dict[str, float] = {}
     population_shape_valid = all(
-        isinstance(populations[name].get("probes"), int) and populations[name]["probes"] > 0
+        isinstance(populations[name].get("probes"), int) and not isinstance(populations[name]["probes"], bool) and populations[name]["probes"] > 0
         for name in required
     )
     for signal in sorted(DARWIN_PROFILE_SIGNALS):
@@ -427,11 +428,10 @@ def _darwin_platform_profile(populations: dict[str, dict[str, Any]]) -> dict[str
         ranges = [populations[name].get(signal) for name in required]
         if any(not isinstance(value, (list, tuple)) or len(value) != 2 for value in ranges):
             break
-        values = [[float(item) for item in value] for value in ranges]
-        if any(not all(math.isfinite(item) and item > 0 for item in value) or value[0] > value[1] for value in values):
+        if any(not all(is_finite_number(item) and item > 0 for item in value) or value[0] > value[1] for value in ranges):
             break
-        post_lane_high = values[1][1]
-        saturated_low = values[2][0]
+        post_lane_high = ranges[1][1]
+        saturated_low = ranges[2][0]
         limit = HOST_QUALIFICATION_GUARD_MARGIN * post_lane_high
         if limit >= saturated_low:
             break
@@ -672,7 +672,7 @@ def outliers_required_to_move(sample_count: int, selected_index: int) -> int:
     probe rather than what the probe measured.
     """
 
-    return max(1, sample_count - 1 - selected_index) + 1
+    return max(1, sample_count - selected_index)
 
 
 def work_unit_statistic(samples: list[float]) -> float:
@@ -844,7 +844,13 @@ def host_qualification(
             # Fail closed. An unavailable signal is an unqualified host, never a silent pass.
             reasons.append({"signal": signal, "measured": None, "limit": limit, "reason": "signal_unavailable"})
             continue
-        if float(value) > float(limit):
+        if not is_finite_number(value) or value < 0:
+            reasons.append({"signal": signal, "measured": value, "limit": limit, "reason": "signal_malformed"})
+            continue
+        if not is_finite_number(limit) or limit < 0:
+            reasons.append({"signal": signal, "measured": value, "limit": limit, "reason": "limit_malformed"})
+            continue
+        if value > limit:
             reasons.append({"signal": signal, "measured": float(value), "limit": float(limit), "reason": "over_limit"})
     return {
         "qualified": not reasons,
@@ -926,6 +932,8 @@ def browser_calibration_qualification(calibration: dict[str, Any], *, admission_
     it certifies. Neither value ever changes a ceiling.
     """
 
+    if not all(is_finite_number(value) and value > 0 for value in (calibration["calibrationNowMs"], admission_ms)):
+        raise ValueError("browser calibration inputs must be finite and positive")
     calibration_now_ms = float(calibration["calibrationNowMs"])
     qualified = calibration_now_ms <= float(admission_ms)
     return {
@@ -959,7 +967,7 @@ def merged_qualification(*qualifications: dict[str, Any]) -> dict[str, Any]:
 def fixed_ceiling_verdict(*, label: str, raw_measured_ms: float, ceiling_ms: float, statistic: str = "max") -> dict[str, Any]:
     """Judge one measurement against the product's fixed ceiling. No host input, ever."""
 
-    if not all(math.isfinite(float(value)) and float(value) > 0 for value in (raw_measured_ms, ceiling_ms)):
+    if not all(is_finite_number(value) and value > 0 for value in (raw_measured_ms, ceiling_ms)):
         raise ValueError(f"fixed ceiling inputs must be finite and positive: {(raw_measured_ms, ceiling_ms)!r}")
     return {
         "label": label,
@@ -1003,11 +1011,15 @@ def calibration_pressure_verdict(
 
     if not quiet_samples_ms or not busy_samples_ms:
         raise ValueError("the pressure verdict needs samples on both sides")
+    if not all(is_finite_number(value) and value > 0 for value in (*quiet_samples_ms, *busy_samples_ms, move_ratio)):
+        raise ValueError("pressure verdict samples and ratio must be finite and positive")
     quiet_median_ms = float(median(quiet_samples_ms))
     busy_median_ms = float(median(busy_samples_ms))
-    if not all(math.isfinite(value) and value > 0 for value in (quiet_median_ms, busy_median_ms)):
-        raise ValueError(f"pressure verdict medians must be finite and positive: {(quiet_median_ms, busy_median_ms)!r}")
+    if not all(is_finite_number(value) and value > 0 for value in (quiet_median_ms, busy_median_ms)):
+        raise ValueError("pressure verdict medians must be finite and positive")
     ratio = busy_median_ms / quiet_median_ms
+    if not is_finite_number(ratio):
+        raise ValueError("pressure verdict ratio must be finite and positive")
     return {
         "statistic": "median",
         "quiet_median_ms": round(quiet_median_ms, 6),

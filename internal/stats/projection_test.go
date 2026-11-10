@@ -1,7 +1,8 @@
 package stats
 
 import (
-	"strings"
+	"math"
+	"strconv"
 	"testing"
 )
 
@@ -74,7 +75,7 @@ func TestProjectionRejectsInvalidInputAndLimits(t *testing.T) {
 	}
 	tooMany := make([]Observation, MaxProjectionInputs+1)
 	for i := range tooMany {
-		tooMany[i] = projectionObservation(strings.Repeat("x", i+1), 0)
+		tooMany[i] = projectionObservation(strconv.Itoa(i), 0)
 	}
 	if _, err := ProjectObservations(projectionRequest(), tooMany, nil); err == nil {
 		t.Fatal("oversized input accepted")
@@ -83,5 +84,15 @@ func TestProjectionRejectsInvalidInputAndLimits(t *testing.T) {
 	delete(missingQuantity.Payload, "quantity")
 	if _, err := ProjectTokens(projectionRequest(), []UsageAtom{missingQuantity}); err == nil {
 		t.Fatal("missing quantity accepted")
+	}
+}
+
+func TestProjectionRejectsUnderflowedBucketCount(t *testing.T) {
+	request := ProjectionRequest{Start: 0, End: math.SmallestNonzeroFloat64, Resolution: math.MaxFloat64}
+	if _, err := ProjectObservations(request, []Observation{projectionObservation("underflow", 0)}, nil); err == nil {
+		t.Fatal("underflowed bucket count admitted")
+	}
+	if _, err := ProjectTokens(request, []UsageAtom{projectionUsage("underflow", "input", "none", 0, 1)}); err == nil {
+		t.Fatal("underflowed token bucket count admitted")
 	}
 }

@@ -53,7 +53,7 @@ function splitPercent(value) {
 
 function splitPercentForDisplay(value) {
   const rounded = Math.round(splitPercent(value) * 10) / 10;
-  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
+  return String(rounded);
 }
 
 // Finder, Differ, and Tabber are independent tabs.  Keep every layout decision that treats them
@@ -1292,6 +1292,12 @@ function layoutUrlPreferencesStateSnapshot() {
   };
 }
 
+function layoutUrlFileSurfaceMode(element) {
+  const panel = element?.closest?.('.file-explorer-panel');
+  return fileExplorerModeFromUrlParam(fileExplorerViewForItem(panel?.dataset?.panelItem))
+    || normalizeFileExplorerMode(fileExplorerMode);
+}
+
 function layoutUrlScrollTargetForElement(element) {
   if (!element?.closest) return null;
   const editorPanel = element.closest('.file-editor-panel');
@@ -1306,7 +1312,7 @@ function layoutUrlScrollTargetForElement(element) {
   }
   const finderScroller = element.closest('.file-explorer-tree-panel, .file-explorer-changes-panel');
   if (finderScroller) {
-    const mode = normalizeFileExplorerMode(fileExplorerMode);
+    const mode = layoutUrlFileSurfaceMode(finderScroller);
     return {target: `finder:${mode}`, kind: 'finder', mode, element: finderScroller};
   }
   const preferencesScroller = element.closest('.preferences-scroll');
@@ -1385,7 +1391,7 @@ function layoutUrlScrollElementForPayload(payload = {}) {
     const item = String(payload.item || '');
     const source = String(payload.source || 'editor') === 'preview' ? 'preview' : 'editor';
     const panels = Array.from(document.querySelectorAll('.file-editor-panel'));
-    const panel = panels.find(candidate => ((item && candidate.dataset?.layoutItem === item) || (path && candidate.dataset?.filePath === path)));
+    const panel = panels.find(candidate => item ? candidate.dataset?.layoutItem === item : path && candidate.dataset?.filePath === path);
     if (!panel) return null;
     const element = source === 'preview'
       ? panel.querySelector('.file-editor-preview-pane-panel')
@@ -1395,7 +1401,8 @@ function layoutUrlScrollElementForPayload(payload = {}) {
   if (target.startsWith('finder:')) {
     const mode = String(payload.mode || target.slice('finder:'.length) || '');
     const selector = mode === 'diff' || mode === 'tabber' ? '.file-explorer-changes-panel' : '.file-explorer-tree-panel';
-    const element = Array.from(document.querySelectorAll(selector)).find(node => node.offsetParent !== null) || document.querySelector(selector);
+    const elements = Array.from(document.querySelectorAll(selector)).filter(node => layoutUrlFileSurfaceMode(node) === mode);
+    const element = elements.find(node => node.offsetParent !== null) || elements[0];
     return element ? {kind: 'finder', element} : null;
   }
   if (target === 'preferences') {
@@ -1850,6 +1857,11 @@ function pinnedTabIconHtml(item) {
   return `<span class="pane-tab-pin-icon" title="${esc(label)}" aria-label="${esc(label)}"></span>`;
 }
 
+function setPinnedTabItems(items) {
+  pinnedTabItems = normalizePinnedTabItems(items);
+  writeStoredPinnedTabs();
+}
+
 function setTabPinned(item, pinned) {
   const resolved = resolveLayoutItem(item);
   if (!isPinnableTab(resolved)) {
@@ -1858,8 +1870,7 @@ function setTabPinned(item, pinned) {
   }
   const nextPinned = pinnedTabItems.filter(tab => tab !== resolved);
   if (pinned) nextPinned.push(resolved);
-  pinnedTabItems = normalizePinnedTabItems(nextPinned);
-  writeStoredPinnedTabs();
+  setPinnedTabItems(nextPinned);
   const next = cloneLayoutSlots(layoutSlots);
   for (const slot of layoutSlotKeys(next)) {
     next[slot] = paneStateWithTabsForSlot(slot, paneTabs(slot, next), activeItemForSide(slot, next), next);
@@ -2053,14 +2064,21 @@ function retireTmuxSessionLifecycleRecord(record) {
   if (!record || record.phase === 'retired') return false;
   record.phase = 'retired';
   record.pendingUntil = 0;
-  for (const controller of record.controllers) controller.abort?.(new DOMException('session generation retired', 'AbortError'));
-  record.controllers.clear();
-  for (const scope of record.lifecycleScopes) scope.dispose?.('session-retired');
-  record.lifecycleScopes.clear();
-  for (const source of record.sources) source.close?.();
-  record.sources.clear();
-  for (const timer of record.timers) clearTimeout(timer);
-  record.timers.clear();
+  const cleanup = createLifecycleScope();
+  for (const [resources, dispose] of [
+    [record.timers, timer => clearTimeout(timer)],
+    [record.sources, source => source.close?.()],
+    [record.lifecycleScopes, scope => scope.dispose?.('session-retired')],
+    [record.controllers, controller => controller.abort?.(new DOMException('session generation retired', 'AbortError'))],
+  ]) cleanup.replace(Symbol(), resources, owned => {
+    // Scopes release their own sources and timers; inspect remaining groups only
+    // after those upstream owners retire, so a handle is never closed twice.
+    const group = createLifecycleScope();
+    for (const resource of owned) group.replace(Symbol(), resource, dispose);
+    owned.clear();
+    group.dispose('session-retired');
+  });
+  cleanup.dispose('session-retired');
   return true;
 }
 
@@ -3412,8 +3430,7 @@ function globalActivityCountsFromAgentWindows() {
   return {running, ask, blocked, unavailable, attention, idle: Math.max(0, total - running - attention - unavailable), total};
 }
 
-function globalActivityStatusLineHtml() {
-  const counts = globalActivityCounts();
+function globalActivityStatusLineHtml(counts = globalActivityCounts()) {
   if (!counts.total) return '';
   // Keep the compact control to its established three status tones. An unavailable row is not
   // user attention: it has no actionable status ball and must not turn a healthy working row red.
@@ -3493,7 +3510,7 @@ function updateTopbarActivityStatus() {
   const node = document.getElementById('topbarActivity');
   if (!node) return;
   const counts = globalActivityCounts();
-  const html = globalActivityStatusLineHtml();
+  const html = globalActivityStatusLineHtml(counts);
   node.innerHTML = html;
   const mobileCountBalls = topbarActivityUsesMobileCountBalls();
   node.hidden = !html || (mobileCountBalls && !topbarActivityVisibleCount(counts));
@@ -3555,10 +3572,8 @@ function syncAttentionAnimation(node, active) {
   node.classList?.toggle?.('heartbeat-pulse', enabled);
   if (enabled) {
     attentionAnimationClockDelay();
-    node.style.removeProperty(attentionAnimationDelayProperty);
-  } else {
-    node.style.removeProperty(attentionAnimationDelayProperty);
   }
+  node.style.removeProperty(attentionAnimationDelayProperty);
 }
 
 function statusIndicatorClassItems(...classes) {
@@ -3857,7 +3872,7 @@ function keyboardShortcutCatalog() {
       {label: t('common.commandPalette'), keys: appShortcutText('P', {shift: true})},
       {label: t('shortcuts.fileQuickOpen'), keys: appShortcutText('P')},
       {label: t('shortcuts.openYoagentRight'), keys: appShortcutText('B', {alt: true})},
-      {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
+      {label: t('shortcuts.toggleFinder', {name: fileSurfaceGroupLabel()}), keys: appShortcutText('B')},
       {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
       {label: t('common.keyboardShortcuts'), keys: '?'},
       {label: t('shortcuts.closeMenu'), keys: 'Esc'},
@@ -3891,7 +3906,7 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.moveTab'), keys: t('shortcuts.keys.dragTab')},
       {label: t('common.sessionActions'), keys: t('shortcuts.keys.rightClick')},
     ]},
-    {section: t('shortcuts.section.finderDiffer', {finder: fileExplorerLabel(), differ: t('brand.tab.changes')}), items: [
+    {section: fileSurfaceGroupLabel(), items: [
       {label: t('shortcuts.finderDiffer.moveSelection'), keys: '↑ / ↓ / Home / End'},
       {label: t('shortcuts.finderDiffer.extendSelection'), keys: 'Shift+↑ / ↓ / Home / End'},
       {label: t('shortcuts.finderDiffer.expandCollapseFolders'), keys: '→ / ←'},
@@ -4152,7 +4167,7 @@ function flattenMenuCommands(items, prefix = []) {
         detail: item.detail || '',
         key: `menu:${[...prefix, item.label].join('/')}`,
         targetItem: item.targetItem || '',
-        keybinding: commandPaletteKeybinding([...prefix, item.label].join(' / '), item.detail || ''),
+        keybinding: item.keybinding || commandPaletteKeybinding([...prefix, item.label].join(' / '), item.detail || ''),
         run: item.action,
       });
     }
@@ -5277,9 +5292,7 @@ function fileQuickOpenRetainedCandidates(candidates, query) {
   }));
 }
 
-// Fold TRUE duplicate file-search hits: same path, same resolved realpath (symlink / overlay
-// overlap), or same basename+size (content-mirror copies kept in two repos). Genuinely-different
-// same-name files (different size) both survive; unknown-size hits dedupe by path/realpath only.
+// Fold the same path or resolved realpath from overlapping roots; name and size do not prove identity.
 function dedupeFileSearchResults(files) {
   const seen = new Set();
   const out = [];
@@ -5287,7 +5300,6 @@ function dedupeFileSearchResults(files) {
     const path = file?.path || '';
     if (!path) continue;
     const keys = [`p:${path}`, `r:${file.realpath || path}`];
-    if (Number.isFinite(Number(file.size))) keys.push(`n:${basenameOf(path)}|${Number(file.size)}`);
     if (keys.some(key => seen.has(key))) continue;
     keys.forEach(key => seen.add(key));
     out.push(file);
@@ -5498,21 +5510,25 @@ async function consumeFileQuickOpenSearchStream(searchRoot, query, requestId, fe
     }
   });
 
-  while (true) {
-    const result = await reader.read();
-    if (cancelled) return {stale: true, root: streamRoot, files: []};
-    if (requestId !== fileQuickOpenState.requestId) {
-      cancelReader();
-      return {stale: true, root: streamRoot, files: []};
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (cancelled) return {stale: true, root: streamRoot, files: []};
+      if (requestId !== fileQuickOpenState.requestId) {
+        cancelReader();
+        return {stale: true, root: streamRoot, files: []};
+      }
+      if (result.done) break;
+      parser.feed(decoder.decode(result.value, {stream: true}));
     }
-    if (result.done) break;
-    parser.feed(decoder.decode(result.value, {stream: true}));
+    parser.feed(decoder.decode());
+    parser.finish();
+    if (streamError) throw streamError;
+    return {ok: true, stream: true, root: streamRoot, searchRoot, files, ...streamSummary};
+  } finally {
+    fetchOptions?.signal?.removeEventListener?.('abort', cancelReader);
+    await retireStreamReader(reader);
   }
-  parser.feed(decoder.decode());
-  parser.finish();
-  fetchOptions?.signal?.removeEventListener?.('abort', cancelReader);
-  if (streamError) throw streamError;
-  return {ok: true, stream: true, root: streamRoot, searchRoot, files, ...streamSummary};
 }
 
 async function fileQuickOpenSearchRootResult(searchRoot, query, requestId, fetchOptions) {
@@ -6067,7 +6083,7 @@ const notificationEventDefinitions = Object.freeze({
   chatMessage: Object.freeze({scope: 'global', target: 'chat', system: true, suppressFocused: true, priority: 'message', coalesce: true}),
   yoagentJob: Object.freeze({scope: 'global', target: 'session', system: true, suppressFocused: true, priority: 'job', coalesce: true}),
   watchedPullRequest: Object.freeze({scope: 'global', system: true, priority: 'pullRequest', coalesce: true}),
-  update: Object.freeze({scope: 'global', system: false, priority: 'update', coalesce: true}),
+  update: Object.freeze({scope: 'global', system: false, priority: 'update', coalesce: true, refreshOnChange: true}),
   indexCoverage: Object.freeze({scope: 'global', system: false, priority: 'warning', coalesce: true, dismissOnly: true}),
   statsResolution: Object.freeze({scope: 'global', system: false, priority: 'warning', coalesce: true}),
   startupTip: Object.freeze({scope: 'global', system: false, priority: 'tip', coalesce: true}),
@@ -6128,6 +6144,7 @@ function emitNotification(type, payload = {}) {
       targetItem,
       notificationTarget: target,
       coalesceKey: key,
+      refreshOnChange: definition.refreshOnChange === true,
       onClick: payload.onClick,
       onClose: payload.onClose,
       actions: payload.actions,
@@ -6365,7 +6382,10 @@ function showToast(title, lines, options = {}) {
     dismissCoalescedToast(options.coalesceKey, record.node);
     return record.node;
   }
-  if (recentContent?.has(contentKey)) {
+  const replacesChangedContent = options.refreshOnChange === true && options.coalesceKey
+    && [...toastRecords.values()].some(record => record.node?.parentNode === container
+      && record.coalesceKeys?.has(options.coalesceKey) && record.contentKey !== contentKey);
+  if (recentContent?.has(contentKey) && !replacesChangedContent) {
     setLimitedMapEntry(recentContent, contentKey, now, toastRecentContentLimit);
     return null;
   }
@@ -7205,6 +7225,7 @@ function updateSessionList(nextSessions, options = {}) {
     preserveRemovedItems: removedSessions,
     preserveRemovedSlots: true,
   });
+  reconcileEditorNav();
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
@@ -7225,11 +7246,20 @@ function applyLayoutSlots(nextSlots, options = {}) {
   const prevShape = layoutShapeSignature(layoutSlots);
   const activeOnlyActivation = options.activeOnlyActivation === true
     && dockviewLayoutActiveOnlySignature(nextSlots) === dockviewLayoutActiveOnlySignature(layoutSlots);
-  layoutSlots = activeOnlyActivation ? cloneLayoutSlots(nextSlots) : normalizeLayoutSlotsForViewport(nextSlots, {
+  nextSlots = activeOnlyActivation ? cloneLayoutSlots(nextSlots) : normalizeLayoutSlotsForViewport(nextSlots, {
     focusSession: options.focusSession,
     preserveMissingSidePane: options.preserveMissingSidePane === true,
     preservePlaceholderSlots: options.preservePlaceholderSlots === true,
   });
+  const removalFocus = reconcileEditorNav(options.previousFocus, [], nextSlots);
+  if (removalFocus) {
+    options = {...options, focusSession: removalFocus, userInitiated: false};
+    if (!itemInLayout(removalFocus, nextSlots) && !tabberIsAdvanced() && !tabberSidebarSinglePane) {
+      storeTabberNormalSelections([removalFocus], {syncLayout: false});
+      nextSlots = normalTabberLayoutSlotsForSelections([removalFocus], removalFocus, nextSlots);
+    }
+  }
+  layoutSlots = nextSlots;
   cleanupRemovedDynamicLayoutItems(previousItems, new Set(paneItems(layoutSlots)));
   adoptNormalTabberLayoutSelections();
   activeSessions = sessionsFromLayout();
@@ -7278,7 +7308,8 @@ function applyLayoutSlots(nextSlots, options = {}) {
     const focusGeneration = tabSwitchHighlightGeneration;
     setTimeout(() => {
       if (focusGeneration === tabSwitchHighlightGeneration && autoFocusCanFollowCursor()
-          && activeSessions.includes(options.focusSession)) focusPanel(options.focusSession);
+          && activeSessions.includes(options.focusSession)
+          && focusedPanelItem === options.focusSession) focusPanel(options.focusSession);
     }, 80);
   } else if (!options.message) {
     resetLayoutStatusSurface();
@@ -7423,6 +7454,7 @@ function performLayoutRender(request = {}) {
       syncPanelVisibility(previousActive);
       renderAutoApproveButtons();
     }
+    finishEditorNavFocus();
     completeLayoutMutationGeneration(renderRequest.options.completionGeneration);
     return;
   }

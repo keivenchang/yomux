@@ -165,3 +165,45 @@ func postJSON(t *testing.T, url string, value any) jsonResponse {
 	}
 	return jsonResponse{StatusCode: response.StatusCode, Body: decoded}
 }
+
+func TestStreamingPreservesToolScenario(t *testing.T) {
+	for _, path := range []string{"/v1/chat/completions", "/v1/messages"} {
+		for _, scenario := range []string{"tool", "approval"} {
+			t.Run(path+"/"+scenario, func(t *testing.T) {
+				response := httptest.NewRecorder()
+				NewHandler(Config{Scenario: scenario}).ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"stream":true}`)))
+				body := response.Body.String()
+				if !strings.Contains(body, `request_approval`) || !strings.Contains(body, `continue`) || strings.Contains(body, `fake completion`) {
+					t.Fatalf("tool scenario stream lost tool payload: %s", body)
+				}
+				if path == "/v1/chat/completions" && !strings.Contains(body, `"finish_reason":"tool_calls"`) {
+					t.Fatalf("missing streamed tool finish reason: %s", body)
+				}
+				if path == "/v1/messages" && (!strings.Contains(body, `"type":"input_json_delta"`) || !strings.Contains(body, `"stop_reason":"tool_use"`)) {
+					t.Fatalf("missing streamed tool input or stop reason: %s", body)
+				}
+			})
+		}
+	}
+}
+
+func TestMillisecondDurationBoundsBeforeMultiplication(t *testing.T) {
+	if got := boundedDuration("9223372036855", MaxDelay); got != MaxDelay {
+		t.Fatalf("overflowed duration = %v, want %v", got, MaxDelay)
+	}
+}
+
+func TestStreamDoesNotMutateResponse(t *testing.T) {
+	for _, anthropic := range []bool{false, true} {
+		response := responseFor("tool", anthropic)
+		before, err := json.Marshal(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeStream(httptest.NewRecorder(), response, anthropic)
+		after, err := json.Marshal(response)
+		if err != nil || string(before) != string(after) {
+			t.Fatalf("stream mutated canonical provider response; anthropic=%v err=%v", anthropic, err)
+		}
+	}
+}

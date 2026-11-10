@@ -709,15 +709,15 @@ def text_still_in_composer(
     deadline = time.monotonic() + max(0.0, wait_seconds)
     pause = threading.Event()
     while True:
-        try:
-            visible_text = visible_composer_source(
-                tui_target.target,
-                capture_func(tui_target.target, visible_only=True) or "",
-                capture_styled_func=capture_styled_func,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return False
-        pending = " ".join(visible_composer_text(visible_text).split())
+        capture = capture_agent_pane(
+            tui_target.target,
+            include_cursor=False,
+            capture_func=capture_func,
+            capture_styled_func=capture_styled_func,
+        )
+        if not capture.ok:
+            raise OSError(capture.error)
+        pending = " ".join(visible_composer_text(capture.visible_text).split())
         if not pending:
             return False
         prefix_len = min(120, len(needle))
@@ -744,12 +744,15 @@ def clear_composer(
         return AgentTuiClearResult(ok=False, cleared=False, error="target pane is missing")
 
     def composer_state_for_target() -> AgentComposerState:
-        visible_text = visible_composer_source(
+        capture = capture_agent_pane(
             tui_target.target,
-            capture_func(tui_target.target, visible_only=True) or "",
+            capture_func=capture_func,
             capture_styled_func=capture_styled_func,
+            cursor_func=cursor_func,
         )
-        return read_composer_state(AgentTuiCapture(target=tui_target.target, visible_text=visible_text, cursor=cursor_func(tui_target.target)))
+        if not capture.ok:
+            raise OSError(capture.error)
+        return read_composer_state(capture)
 
     try:
         composer = composer_state_for_target()
@@ -829,7 +832,7 @@ def send_prompt(
             error = "target pane does not support the YOmux prompt transport" if agent_kind == "opencode" else "target pane does not have a detected Claude or Codex agent"
             return AgentTuiSendResult(ok=False, sent=False, reason_code=reason_code, error=error)
         reason = _reason_code(state.prompt, state.screen)
-        if reason in {"approval", "needs-input", "busy", "disconnected", "error"}:
+        if reason not in {"idle", "done", "draft-clearable"}:
             messages = {
                 "approval": "target agent is at an approval prompt",
                 "needs-input": "target agent is asking a question",
@@ -837,7 +840,7 @@ def send_prompt(
                 "disconnected": str(state.screen.get("text") or "target pane is not reachable"),
                 "error": str(state.screen.get("text") or "target pane is not reachable"),
             }
-            return AgentTuiSendResult(ok=False, sent=False, reason_code=reason, error=messages[reason])
+            return AgentTuiSendResult(ok=False, sent=False, reason_code=reason, error=messages.get(reason, str(state.screen.get("text") or "target agent is not accepting prompts")))
         if reason == "draft-clearable" and not clear_existing:
             return AgentTuiSendResult(ok=False, sent=False, reason_code="draft-clearable", error="target input box already contains unsent text")
     clear_result = AgentTuiClearResult(ok=True, cleared=False)
@@ -872,14 +875,29 @@ def send_prompt(
             error=cmd_error(result, "tmux paste-buffer failed"),
             returncode=result.returncode,
         )
-    if submit and verify_submit and text_still_in_composer(
-        tui_target.target,
-        text,
-        wait_seconds=verify_wait_seconds,
-        poll_seconds=verify_poll_seconds,
-        capture_func=capture_func,
-        capture_styled_func=capture_styled_func,
-    ):
+    unsubmitted = False
+    if submit and verify_submit:
+        try:
+            unsubmitted = text_still_in_composer(
+                tui_target.target,
+                text,
+                wait_seconds=verify_wait_seconds,
+                poll_seconds=verify_poll_seconds,
+                capture_func=capture_func,
+                capture_styled_func=capture_styled_func,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return AgentTuiSendResult(
+                ok=False,
+                sent=False,
+                pasted=True,
+                cleared=clear_result.cleared,
+                clear_result=clear_result,
+                reason_code="submit-unverified",
+                error=str(exc),
+                returncode=result.returncode,
+            )
+    if unsubmitted:
         return AgentTuiSendResult(
             ok=False,
             sent=False,

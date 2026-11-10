@@ -2,7 +2,6 @@ import ast
 import json
 from pathlib import Path
 import re
-import signal
 import subprocess
 from types import SimpleNamespace
 
@@ -11,13 +10,8 @@ import pytest
 from tools import docker_image
 from tools import bazel_execution_contract
 from tools.bazel_execution_contract import repository_release_context
-from tests.source_inventory import parsed_python_source
-from tests.source_inventory import python_source_paths
 from yomux_lib import common
 from yomux_lib import version
-from yomux_lib.filesystem import git_ops
-from yomux_lib.tmux import process_group_ownership
-from yomux_lib.yoagent import conversation
 
 
 def test_package_and_runtime_versions_use_one_source():
@@ -190,38 +184,23 @@ def test_positive_finite_number_normalizes_counter_inputs():
     assert common.positive_finite_number("invalid") == 0.0
 
 
+@pytest.mark.parametrize("value", [10 ** 1000, -10 ** 1000], ids=["large-positive", "large-negative"])
+def test_oversized_counter_input_uses_invalid_number_outcome(value):
+    assert common.positive_finite_number(value) == 0.0
 
 
+def test_concurrent_private_runtime_creation_retains_validation(tmp_path, monkeypatch):
+    path = tmp_path / "runtime"
+    mkdir = Path.mkdir
+    raced = False
 
+    def concurrent_mkdir(candidate, *args, **kwargs):
+        nonlocal raced
+        if candidate == path and not raced:
+            raced = True
+            mkdir(candidate, mode=0o700)
+        return mkdir(candidate, *args, **kwargs)
 
-def test_terminate_process_group_waits_after_sigkill(monkeypatch):
-    calls = []
-
-    class FakeProcess:
-        pid = 12345
-        waits = 0
-
-        def poll(self):
-            return None
-
-        def wait(self, timeout=None):
-            calls.append(("wait", timeout))
-            self.waits += 1
-            if self.waits == 1:
-                raise subprocess.TimeoutExpired("cmd", timeout)
-            return 0
-
-    process = FakeProcess()
-    monkeypatch.setattr(process_group_ownership.os, "getpgid", lambda pid: pid)
-    monkeypatch.setattr(process_group_ownership.os, "killpg", lambda pid, sig: calls.append(("killpg", pid, sig)))
-    monkeypatch.setattr(process_group_ownership, "process_start_identity", lambda pid: "fixture-start")
-    process_group_ownership.record_owned_process_group(process)
-
-    common.terminate_process_group(process)
-
-    assert calls == [
-        ("killpg", 12345, signal.SIGTERM),
-        ("wait", 2.0),
-        ("killpg", 12345, signal.SIGKILL),
-        ("wait", 2.0),
-    ]
+    monkeypatch.setattr(Path, "mkdir", concurrent_mkdir)
+    common._ensure_private_runtime_directory(path)
+    assert path.stat().st_mode & 0o777 == 0o700

@@ -9,6 +9,7 @@ import random
 import subprocess
 import threading
 import time
+from contextlib import ExitStack
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -126,21 +127,22 @@ class AutoApproveProcessLock:
 
     def acquire(self) -> tuple[bool, dict[str, Any] | None]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+", encoding="utf-8")
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            owner = read_auto_approve_lock_owner(handle)
-            owner["lock_path"] = str(self.path)
-            handle.close()
-            return False, owner
-        handle.seek(0)
-        handle.truncate()
-        handle.write(json.dumps(self.owner, sort_keys=True) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-        self.handle = handle
-        return True, None
+        with ExitStack() as cleanup:
+            handle = cleanup.enter_context(self.path.open("a+", encoding="utf-8"))
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                owner = read_auto_approve_lock_owner(handle)
+                owner["lock_path"] = str(self.path)
+                return False, owner
+            handle.seek(0)
+            handle.truncate()
+            handle.write(json.dumps(self.owner, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            self.handle = handle
+            cleanup.pop_all()
+            return True, None
 
     def release(self) -> None:
         if self.handle is None:
@@ -209,7 +211,11 @@ class AutoApproveWorker:
             self.lock_owner = owner
             self.update(error=auto_approve_lock_message(owner), **auto_approve_lock_message_fields("last_action", owner))
             return False, owner
-        self.thread.start()
+        try:
+            self.thread.start()
+        finally:
+            if self.thread.ident is None:
+                self.process_lock.release()
         return True, None
 
     def stop(self) -> bool:

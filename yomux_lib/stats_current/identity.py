@@ -39,7 +39,11 @@ def identity_text(
         raise IdentityValidationError(f"{name} must be a non-empty string")
     if _CONTROL_CHARACTERS.search(normalized) is not None:
         raise IdentityValidationError(f"{name} contains control characters")
-    if len(normalized.encode("utf-8")) > maximum_bytes:
+    try:
+        encoded = normalized.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise IdentityValidationError(f"{name} must contain valid UTF-8 text") from error
+    if len(encoded) > maximum_bytes:
         raise IdentityValidationError(f"{name} exceeds {maximum_bytes} bytes")
     return normalized
 

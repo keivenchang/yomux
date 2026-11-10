@@ -158,7 +158,7 @@ def test_copied_platform_utility_can_execute_outside_system_location(tmp_path, m
 @pytest.mark.skipif(platform.system() != "Darwin", reason="platform utilities are macOS-specific")
 def test_signed_platform_utilities_execute_from_bundle(tmp_path, monkeypatch):
     tools = bazel_execution_contract.NATIVE_DARWIN_PLATFORM_TOOLS
-    assert set(tools) == {"ioreg", "mount", "sysctl", "system_profiler"}
+    assert set(tools) == {"ioreg", "lsof", "mount", "shasum", "sysctl", "system_profiler", "vm_stat"}
     assert set(tools).issubset(bazel_execution_contract.required_native_tools("Darwin"))
     assert set(tools).intersection(bazel_execution_contract.required_native_tools("Linux")) == {"mount"}
     layouts = {}

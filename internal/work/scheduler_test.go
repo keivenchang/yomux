@@ -298,6 +298,31 @@ func TestSchedulerPanicCompletesAndWorkerContinues(t *testing.T) {
 	}
 }
 
+func TestContextMutexTryLockSharesOwnershipWithQueuedWaiters(t *testing.T) {
+	var mutex ContextMutex
+	if !mutex.TryLock() || mutex.TryLock() {
+		t.Fatal("TryLock did not enforce exclusive ownership")
+	}
+	acquired := make(chan struct{})
+	go func() {
+		mutex.Lock()
+		close(acquired)
+		mutex.Unlock()
+	}()
+	mutex.Unlock()
+	select {
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("blocking waiter did not acquire released TryLock")
+	}
+	mutex.Lock()
+	mutex.Unlock()
+	if !mutex.TryLock() {
+		t.Fatal("TryLock did not acquire released blocking lock")
+	}
+	mutex.Unlock()
+}
+
 func TestContextMutexCancelledWaitDoesNotTakeOwnership(t *testing.T) {
 	var mutex ContextMutex
 	mutex.Lock()

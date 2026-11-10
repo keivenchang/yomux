@@ -25,6 +25,7 @@ from tests.helpers.route_contract import ALL_ROUTES
 from tests.helpers.route_contract import RESPONSE_SSE
 from tests.helpers.route_contract import RESPONSE_WEBSOCKET
 from yomux_lib.server_logs import ServerLogRing
+from yomux_lib.infra.inotify_capacity import UNMEASURED_LIMIT
 from tests import gate_harness as gate_harness_module
 from tests.browser_helpers import browser_console
 from yomux_lib import browser_diagnostic_receipts
@@ -41,7 +42,6 @@ from tests.gate_harness import capture_fixture_self_baseline
 from tests.gate_harness import capture_resource_ledger
 from tests.gate_harness import FIXTURE_INOTIFY_NOT_RETURNED_CODE
 from tests.gate_harness import gate_runtime_paths
-from tests.gate_harness import inotify_instance_census
 from tests.gate_harness import local_service_daemons_beneath
 from tests.gate_harness import retire_local_service_daemons_beneath
 from tests.gate_harness import remove_fixture_runtime_root
@@ -847,6 +847,22 @@ def test_expected_js_debug_failure_retirement_rejects_noninteger_or_duplicate_id
 def test_browser_receipt_barrier_rejects_hybrid_blocker_shapes(blocker):
     with pytest.raises(AssertionError, match="receipt barrier"):
         browser_diagnostic_receipts.validate_browser_receipt_barrier(browser_receipt_barrier_with_blocker(blocker))
+
+
+@pytest.mark.parametrize("status", ([], {}))
+@pytest.mark.parametrize("projection", (False, True))
+def test_browser_receipt_rejects_unhashable_status_with_typed_diagnostic(status, projection):
+    blocker = {**normal_browser_receipt_blocker(), "status": status}
+    barrier = browser_receipt_barrier_with_blocker(normal_browser_receipt_blocker())
+    if projection:
+        value = {"receipts": [blocker], "barrier": barrier}
+        validate = browser_diagnostic_receipts.validate_browser_receipt_projection
+    else:
+        barrier["blocking"] = [blocker]
+        value = barrier
+        validate = browser_diagnostic_receipts.validate_browser_receipt_barrier
+    with pytest.raises(browser_diagnostic_receipts.BrowserReceiptBarrierValidationError):
+        validate(value)
 
 
 @pytest.mark.parametrize(
@@ -3437,6 +3453,19 @@ def test_fixture_retirement_reclaims_late_spawned_worker_by_private_tmpdir(tmp_p
     assert state["signals"] == [(worker_pid, gate_harness_module.signal.SIGTERM)]
 
 
+def test_fixture_worker_tmpdir_disappearance_cannot_split_one_identity_check(tmp_path, monkeypatch):
+    process = gate_harness_module.FixtureSpawnedProcessIdentity(43270, "proc:worker", "generation")
+    reads = []
+    def tmpdir(_pid):
+        reads.append(_pid)
+        return tmp_path / "tmp" if len(reads) == 1 else None
+    monkeypatch.setattr(gate_harness_module, "process_start_identity", lambda _pid: process.start_identity)
+    monkeypatch.setattr(gate_harness_module, "process_spawn_generation", lambda _pid: process.generation_marker)
+    monkeypatch.setattr(gate_harness_module, "_fixture_process_tmpdir", tmpdir)
+    assert gate_harness_module._fixture_spawned_process_still_running(process, tmp_path) is True
+    assert reads == [process.pid]
+
+
 def test_fixture_escalates_stubborn_owned_service_group_within_original_bound(monkeypatch):
     state = {"group_exists": True, "signals": [], "waits": [], "reaped": False}
 
@@ -4309,22 +4338,89 @@ def test_resource_ledger_measures_the_uid_wide_inotify_limit_not_only_the_fd_tab
 
     assert snapshot.phase == "before"
     assert snapshot.worker_pid == os.getpid()
-    assert snapshot.fd_count >= 1
+    assert snapshot.fd_count >= 1 if sys.platform.startswith("linux") else snapshot.fd_count == 0
     assert snapshot.rlimit_nofile_soft >= 1
-    assert snapshot.inotify_max_user_instances >= 1
-    assert snapshot.inotify_max_user_watches >= 1
-    # One snapshot must be internally consistent. The uid-wide total is shared
-    # with every other process this user runs, so it genuinely changes between
-    # two censuses and must never be asserted across separate measurements.
-    assert snapshot.inotify_instances_user == sum(snapshot.inotify_instances_by_pid.values())
-    assert snapshot.inotify_instances_self == snapshot.inotify_instances_by_pid.get(os.getpid(), 0)
-    census_total, census_by_pid = inotify_instance_census()
-    assert census_total == sum(census_by_pid.values())
+    if sys.platform.startswith("linux"):
+        assert snapshot.inotify_max_user_instances >= 1
+        assert snapshot.inotify_max_user_watches >= 1
+    else:
+        assert snapshot.inotify_max_user_instances == snapshot.inotify_max_user_watches == UNMEASURED_LIMIT
+    # One snapshot must be internally consistent. Separate snapshots are not
+    # compared because ambient processes can change the uid-wide total.
+    if not sys.platform.startswith("linux"):
+        assert snapshot.inotify_instances_user == UNMEASURED_LIMIT
+        assert snapshot.inotify_census_error == ""
+    elif snapshot.inotify_instances_user == UNMEASURED_LIMIT:
+        assert snapshot.inotify_census_error
+        assert snapshot.inotify_instances_by_pid == {}
+        assert snapshot.inotify_instances_self >= 0
+    else:
+        assert snapshot.inotify_census_error == ""
+        assert snapshot.inotify_instances_user == sum(snapshot.inotify_instances_by_pid.values())
+        assert snapshot.inotify_instances_self == snapshot.inotify_instances_by_pid.get(os.getpid(), 0)
     # An empty root owns no daemons, so the ledger must not invent one.
     assert snapshot.local_service_daemons == ()
     assert snapshot.as_reason()["inotify_max_user_instances"] == snapshot.inotify_max_user_instances
 
 
+def test_unreadable_uid_census_keeps_daemon_leak_attribution(tmp_path, monkeypatch):
+    daemon = gate_harness_module.LocalServiceDaemonIdentity(
+        pid=4321,
+        ppid=1,
+        process_group=4321,
+        service="tests.fixture_service",
+        socket_path=str(tmp_path / "runtime" / "service.sock"),
+        spawn_generation="fixture-generation",
+        inotify_instances=UNMEASURED_LIMIT,
+    )
+
+    def unreadable_census():
+        raise PermissionError("ambient same-uid process is unreadable")
+
+    monkeypatch.setattr(gate_harness_module, "inotify_instance_census", unreadable_census)
+    monkeypatch.setattr(
+        gate_harness_module,
+        "local_service_daemons_beneath",
+        lambda _root, *, inotify_by_pid=None: (daemon,),
+    )
+
+    with pytest.raises(AssertionError) as failure:
+        gate_harness_module.assert_no_surviving_local_service_daemons(tmp_path, label="permission-repro")
+
+    reason = json.loads(str(failure.value))
+    assert reason["error_code"] == gate_harness_module.LOCAL_SERVICE_DAEMON_SURVIVED_CODE
+    assert reason["label"] == "permission-repro"
+    assert reason["root"] == str(tmp_path)
+    assert reason["surviving"] == [daemon.as_reason()]
+    assert reason["surviving"][0]["inotify_instances"] == UNMEASURED_LIMIT
+    assert reason["ledger"]["inotify_census_error"] == (
+        "PermissionError: ambient same-uid process is unreadable"
+    )
+
+
+def test_local_service_daemon_count_is_unknown_without_a_census(tmp_path, monkeypatch):
+    pid = 4321
+    socket_path = tmp_path / "runtime" / "service.sock"
+    entry = SimpleNamespace(
+        ppid=1,
+        pgid=pid,
+        command=f"python -m tests.fixture_service --serve --socket {socket_path}",
+    )
+    monkeypatch.setattr(gate_harness_module, "bounded_process_table", lambda: {pid: entry})
+    monkeypatch.setattr(gate_harness_module, "process_spawn_generation", lambda _pid: "generation")
+
+    daemon = gate_harness_module.local_service_daemons_beneath(tmp_path)[0]
+
+    assert daemon.pid == pid
+    assert daemon.inotify_instances == UNMEASURED_LIMIT
+    assert daemon.as_reason()["inotify_instances"] == UNMEASURED_LIMIT
+    assert gate_harness_module.local_service_daemons_beneath(
+        tmp_path,
+        inotify_by_pid={pid: 2},
+    )[0].inotify_instances == 2
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires Linux inotify kernel API")
 def test_worker_inotify_baseline_guard_fires_on_a_real_leaked_instance():
     """Negative control: a genuinely retained inotify instance must fail its fixture."""
 
@@ -4474,3 +4570,152 @@ def test_live_occupant_that_cannot_be_proven_still_refuses_to_signal(tmp_path, m
     assert reason["process_group"] == live_pid
     assert reason["disproven_occupants"] == [[43222, "proc:44222"]]
     assert signals == []
+
+
+def test_browser_lease_blank_navigation_cannot_discard_diagnostics(monkeypatch):
+    calls = []
+    raw = SimpleNamespace(get=lambda url: calls.append(("raw navigation", url)))
+    lease = object.__new__(browser_layout._BrowserDriverLease)
+    object.__setattr__(lease, "_driver", raw)
+
+    def reject(driver, **options):
+        assert driver is lease
+        assert options == {"require_js_debug_store": False}
+        calls.append(("strict retirement",))
+        raise AssertionError("retained JS canary")
+
+    monkeypatch.setattr(browser_layout, "retire_browser_after_strict_diagnostic_gate", reject)
+    with pytest.raises(AssertionError, match="retained JS canary"):
+        lease.get("about:blank")
+    assert calls == [("strict retirement",)]
+
+
+def test_browser_lease_close_preserves_real_gesture_after_diagnostic_failure(monkeypatch):
+    calls = []
+    raw = SimpleNamespace(close=lambda: calls.append("real close"))
+    lease = object.__new__(browser_layout._BrowserDriverLease)
+    object.__setattr__(lease, "_driver", raw)
+
+    def reject(driver, **options):
+        assert driver is lease
+        assert options == {"require_js_debug_store": False, "close_window": raw.close}
+        calls.append("strict diagnostics")
+        raw.close()
+        raise AssertionError("secondary JS canary")
+
+    monkeypatch.setattr(browser_layout, "retire_browser_after_strict_diagnostic_gate", reject)
+    with pytest.raises(AssertionError, match="secondary JS canary"):
+        lease.close()
+    assert calls == ["strict diagnostics", "real close"]
+
+
+def test_browser_reset_checks_every_secondary_realm_and_restores_primary(monkeypatch):
+    current = ["primary"]
+    calls = []
+    raw = SimpleNamespace(window_handles=["primary", "bad", "clean"],
+                          _yomux_primary_window_handle="primary")
+    raw.switch_to = SimpleNamespace(window=lambda handle: current.__setitem__(0, handle))
+    raw.close = lambda: calls.append(("real close", current[0]))
+    lease = object.__new__(browser_layout._BrowserDriverLease)
+    object.__setattr__(lease, "_driver", raw)
+
+    def diagnose(_driver, **options):
+        assert options == {"require_js_debug_store": False, "close_window": raw.close}
+        calls.append(("diagnostics", current[0]))
+        raw.close()
+        if current[0] == "bad":
+            raise AssertionError("secondary JS canary")
+
+    monkeypatch.setattr(browser_layout, "retire_browser_after_strict_diagnostic_gate", diagnose)
+    with pytest.raises(AssertionError, match="secondary JS canary"):
+        browser_layout._reset_browser_windows(lease)
+    assert calls == [("diagnostics", "bad"), ("real close", "bad"),
+                     ("diagnostics", "clean"), ("real close", "clean")]
+    assert current == ["primary"]
+
+
+def test_browser_reset_preserves_primary_secondary_failures_and_replaces_invalid_driver(monkeypatch):
+    calls = []
+    lease = SimpleNamespace(execute_script=lambda _source: "http://fixture",
+                            replace_after_invalid_session=lambda: calls.append("replace"))
+    request = SimpleNamespace(node=SimpleNamespace(funcargs={"browser": lease}))
+
+    def primary(*_args, **_options):
+        calls.append("primary")
+        raise browser_layout.WebDriverException("invalid session id")
+
+    def profile(*_args, **_options):
+        calls.append("profile")
+        raise AssertionError("secondary diagnostic canary")
+
+    monkeypatch.setattr(browser_layout, "retire_browser_after_strict_diagnostic_gate", primary)
+    monkeypatch.setattr(browser_layout, "_reset_reused_browser_state", profile)
+    with pytest.raises(BaseExceptionGroup) as failure:
+        browser_layout.reset_reused_browser_after_test(request)
+    assert failure.value.subgroup(browser_layout.WebDriverException) is not None
+    assert failure.value.subgroup(AssertionError) is not None
+    assert calls == ["primary", "profile", "replace"]
+
+
+def test_browser_profile_cleanup_continues_after_secondary_diagnostic_failure(monkeypatch):
+    calls = []
+    driver = SimpleNamespace(_yomux_test_origins={"http://fixture"},
+                             execute_cdp_cmd=lambda name, _args: calls.append(name),
+                             delete_all_cookies=lambda: calls.append("cookies"),
+                             get=lambda url: calls.append(url),
+                             execute_script=lambda _source: calls.append("focus"),
+                             set_window_size=lambda *_size: calls.append("size"))
+
+    def fail_windows(_driver):
+        calls.append("windows")
+        raise AssertionError("secondary diagnostic canary")
+
+    monkeypatch.setattr(browser_layout, "_reset_browser_windows", fail_windows)
+    monkeypatch.setattr(browser_layout, "_FIXTURE_HTTP_BASE", None)
+    monkeypatch.setattr(browser_layout, "remove_browser_test_new_document_scripts", lambda _driver: calls.append("scripts"))
+    monkeypatch.setattr(browser_layout, "read_browser_console_log", lambda _driver: ())
+    with pytest.raises(AssertionError, match="secondary diagnostic canary"):
+        browser_layout._reset_reused_browser_state(driver, retired_origin="http://fixture")
+    assert calls == ["windows", "scripts", "Storage.clearDataForOrigin", "cookies", "Browser.resetPermissions",
+                     "Browser.setDownloadBehavior", "Emulation.setCPUThrottlingRate", "Emulation.clearDeviceMetricsOverride",
+                     "Emulation.setEmulatedMedia", "about:blank", "focus", "size"]
+
+
+@pytest.mark.parametrize("failure", ["capture", "missing", "malformed", "duplicate", "console", "close"])
+def test_close_diagnostic_failures_preserve_initial_evidence_and_actual_cleanup(failure):
+    calls = []
+    canary = {"type": "error", "message": "INITIAL_CLOSE_CANARY", "id": 1}
+    snapshot = {"jsDebug": {"reachable": True, "isArray": True, "events": [canary], "errors": [canary],
+                             "receiptBarrier": clean_browser_receipt_barrier()},
+                "journey": {"reachable": False, "visitedSurfaces": []}}
+
+    class Driver:
+        prefix = ""
+
+        def execute_script(self, _source, prefix):
+            self.prefix = prefix
+            if failure == "capture":
+                raise RuntimeError("capture failure")
+            return snapshot
+
+        def get_log(self, _kind):
+            if failure == "console":
+                raise RuntimeError("console failure")
+            if failure in {"capture", "missing"}:
+                return []
+            text = self.prefix + ("invalid" if failure == "malformed" else json.dumps(snapshot))
+            entry = {"level": "INFO", "message": "console-api 1:1 " + json.dumps(text)}
+            return [entry, entry] if failure == "duplicate" else [entry]
+
+    def close():
+        calls.append("actual close")
+        if failure == "close":
+            raise RuntimeError("close failure")
+
+    with pytest.raises((AssertionError, BaseExceptionGroup)) as rejected:
+        browser_console.retire_browser_after_strict_diagnostic_gate(Driver(), close_window=close)
+    assert calls == ["actual close"]
+    if failure != "capture":
+        assert "INITIAL_CLOSE_CANARY" in repr(rejected.value)
+    if failure in {"capture", "console", "close"}:
+        assert failure + " failure" in repr(rejected.value)

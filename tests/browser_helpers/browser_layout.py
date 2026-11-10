@@ -270,6 +270,23 @@ _FIXTURE_PIXEL_GIF = bytes.fromhex(
 )
 
 
+# 20 ms of unsigned 8-bit mono PCM silence at 8 kHz.
+_FIXTURE_SILENT_WAV = bytes.fromhex(
+    "52494646c400000057415645666d74201000000001000100401f0000401f00000100080064617461a0000000"
+) + bytes([128]) * 160
+# Chromium 152 MediaRecorder, canvas.captureStream(0), one black 16 x 16 VP8 frame.
+_FIXTURE_BLACK_WEBM = bytes.fromhex(
+    "1a45dfa39f4286810142f7810142f2810442f381084282847765626d4287810442858102185380670100000000000132"
+    "114d9b74b94dbb8b53ab841549a96653ac816e4dbb8b53ab841654ae6b53ac81934dbb8b53ab841f43b67553ac81c14d"
+    "bb8c53ab841c53bb6b53ac820120ecae0000000000000000000000000000000000000000000000000000000000000000"
+    "00000000000000000000000000001549a966a02ad7b1830f42404489843f8000004d80864368726f6d65574186436872"
+    "6f6d651654ae6ba9aea7d7810173c58749d70092a5837183810155ee81018685565f565038e08ab08110ba811053c081"
+    "011f43b6750100000000000053e78100a0cea1a3810000001002009d012a100010000007088585889984880124100060"
+    "6b00feffab508075a1a6a6a4ee8101a59f1002009d012a1000100000070885858899848801241000606b00feffba8300"
+    "1c53bb6b8dbb8bb38100b786f78101f181c1"
+)
+
+
 def _fixture_http_base() -> str:
     global _FIXTURE_HTTP_BASE
     if _FIXTURE_HTTP_BASE:
@@ -340,11 +357,11 @@ class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
                 body = b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>'
                 content_type = "image/svg+xml"
             elif suffix in {".mp3", ".wav", ".ogg"}:
-                body = b""
-                content_type = "audio/mpeg"
+                body = _FIXTURE_SILENT_WAV
+                content_type = "audio/wav"
             elif suffix in {".mp4", ".webm", ".mov"}:
-                body = b""
-                content_type = "video/mp4"
+                body = _FIXTURE_BLACK_WEBM
+                content_type = "video/webm"
             elif suffix == ".pdf":
                 body = b"%PDF-1.4\n%%EOF\n"
                 content_type = "application/pdf"
@@ -484,6 +501,8 @@ def new_chrome_driver(window_size: str | tuple[int, int] | None = None, *, profi
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--ignore-certificate-errors")
     options.set_capability("acceptInsecureCerts", True)
+    # Pagehide receipts use INFO so successful close evidence is distinct from browser failures.
+    options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
     if os.environ.get("YOMUX_BROWSER_BLOCK_EXTERNAL_DNS") == "1":
         options.add_argument("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1")
     requested_size = window_size or DEFAULT_BROWSER_WINDOW_SIZE
@@ -848,7 +867,9 @@ def start_fixture_runtime(monkeypatch, tmp_path, options: FixtureRuntimeOptions)
     paths = native_dev_server.build_paths(tmp_path / "native-browser")
     tmux_runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path, session_count=options.session_count, session_cwd=options.session_cwd)
     try:
-        app = native_dev_server.start_isolated_dev_server("native browser", REPO_ROOT, paths, tmux_runtime)
+        app = native_dev_server.start_isolated_dev_server(
+            "native browser", REPO_ROOT, paths, tmux_runtime, dangerously_yolo=options.dangerously_yolo
+        )
         return FixtureRuntime(app, list(tmux_runtime.sessions), tmux_runtime, paths)
     except BaseException:
         stop_isolated_tmux_runtime(tmux_runtime)
@@ -1027,12 +1048,32 @@ class _BrowserDriverLease:
             setattr(self._driver, name, value)
 
     def get(self, url):
+        if str(url) == "about:blank":
+            # Teardown callbacks must snapshot the live realm before navigation destroys it.
+            retire_browser_after_strict_diagnostic_gate(self, require_js_debug_store=False)
+            return None
         parsed = urlsplit(str(url))
         if parsed.scheme in {"http", "https"} and parsed.netloc:
             origins = set(getattr(self._driver, "_yomux_test_origins", set()))
             origins.add(f"{parsed.scheme}://{parsed.netloc}")
             self._driver._yomux_test_origins = origins
+            current = urlsplit(self._driver.current_url)
+            fragment_only = parsed._replace(fragment="") == current._replace(fragment="") and bool(parsed.fragment)
+            if not fragment_only:
+                retire_browser_after_strict_diagnostic_gate(
+                    self, require_js_debug_store=False, destination_url=str(url),
+                )
+                return None
         return self._driver.get(url)
+
+    def refresh(self):
+        retire_browser_after_strict_diagnostic_gate(
+            self, require_js_debug_store=False, destination_url=self.current_url, reload_page=True,
+        )
+
+    def close(self):
+        # Capture this realm through the real close gesture so opener behavior is preserved.
+        retire_browser_after_strict_diagnostic_gate(self, require_js_debug_store=False, close_window=self._driver.close)
 
     def replace_after_invalid_session(self):
         # Retire the crashed driver through the one shared owner - bounded quit -> TERM -> KILL ->
@@ -1061,41 +1102,48 @@ def _reset_browser_windows(driver):
     if primary not in handles:
         primary = handles[0]
         driver._yomux_primary_window_handle = primary
-    for handle in handles:
-        if handle == primary:
-            continue
+    def close_window(handle):
         driver.switch_to.window(handle)
         driver.close()
-    driver.switch_to.window(primary)
+
+    run_fixture_cleanup_phases("browser windows", [
+        ("secondary window", lambda handle=handle: close_window(handle))
+        for handle in handles if handle != primary
+    ] + [("primary window", lambda: driver.switch_to.window(primary))])
 
 
 def _reset_reused_browser_state(driver, *, retired_origin=None):
     """Return a worker-reused browser to a known blank, profile-clean state."""
-    _reset_browser_windows(driver)
-    remove_browser_test_new_document_scripts(driver)
-    origin = retired_origin
-    if origin is None:
-        origin = driver.execute_script("return location.origin;")
-    origins = set(getattr(driver, "_yomux_test_origins", set()))
-    if origin and origin != "null":
-        origins.add(origin)
-    fixture_origin = _FIXTURE_HTTP_BASE
-    if fixture_origin:
-        origins.add(fixture_origin)
-    for storage_origin in sorted(origins):
-        driver.execute_cdp_cmd("Storage.clearDataForOrigin", {"origin": storage_origin, "storageTypes": "all"})
-    driver._yomux_test_origins = set()
-    driver._yomux_server_log_boundary = None
-    driver.delete_all_cookies()
-    driver.execute_cdp_cmd("Browser.resetPermissions", {})
-    driver.execute_cdp_cmd("Browser.setDownloadBehavior", {"behavior": "deny"})
-    driver.execute_cdp_cmd("Emulation.setCPUThrottlingRate", {"rate": 1})
-    driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
-    driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
-    read_browser_console_log(driver)
-    driver.get("about:blank")
-    driver.execute_script("document.body.tabIndex = -1; document.body.focus();")
-    driver.set_window_size(*DEFAULT_BROWSER_WINDOW_SIZE)
+    def reset_profile():
+        remove_browser_test_new_document_scripts(driver)
+        origin = retired_origin
+        if origin is None:
+            origin = driver.execute_script("return location.origin;")
+        origins = set(getattr(driver, "_yomux_test_origins", set()))
+        if origin and origin != "null":
+            origins.add(origin)
+        fixture_origin = _FIXTURE_HTTP_BASE
+        if fixture_origin:
+            origins.add(fixture_origin)
+        for storage_origin in sorted(origins):
+            driver.execute_cdp_cmd("Storage.clearDataForOrigin", {"origin": storage_origin, "storageTypes": "all"})
+        driver._yomux_test_origins = set()
+        driver._yomux_server_log_boundary = None
+        driver.delete_all_cookies()
+        driver.execute_cdp_cmd("Browser.resetPermissions", {})
+        driver.execute_cdp_cmd("Browser.setDownloadBehavior", {"behavior": "deny"})
+        driver.execute_cdp_cmd("Emulation.setCPUThrottlingRate", {"rate": 1})
+        driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
+        read_browser_console_log(driver)
+        driver.get("about:blank")
+        driver.execute_script("document.body.tabIndex = -1; document.body.focus();")
+        driver.set_window_size(*DEFAULT_BROWSER_WINDOW_SIZE)
+
+    run_fixture_cleanup_phases("browser profile", (
+        ("browser windows", lambda: _reset_browser_windows(driver)),
+        ("profile state", reset_profile),
+    ))
 
 
 def _invalid_browser_session(error):
@@ -1170,17 +1218,23 @@ def reset_reused_browser_after_test(request):
         return
     try:
         retired_origin = lease.execute_script("return location.origin;")
-        retirement_error = None
-        try:
-            retire_browser_after_strict_diagnostic_gate(
-                lease,
-                require_js_debug_store=False,
-            )
-        except BaseException as error:
-            retirement_error = error
-        _reset_reused_browser_state(lease, retired_origin=retired_origin)
-        if retirement_error is not None:
-            raise retirement_error.with_traceback(retirement_error.__traceback__)
+        run_fixture_cleanup_phases("reused browser", (
+            ("primary diagnostics", lambda: retire_browser_after_strict_diagnostic_gate(
+                lease, require_js_debug_store=False,
+            )),
+            ("profile reset", lambda: _reset_reused_browser_state(lease, retired_origin=retired_origin)),
+        ))
+    except BaseExceptionGroup as error:
+        if error.subgroup(lambda cause: isinstance(cause, WebDriverException) and _invalid_browser_session(cause)) is None:
+            raise
+
+        def preserve_failures():
+            raise error
+
+        run_fixture_cleanup_phases("invalid reused browser", (
+            ("original failures", preserve_failures),
+            ("driver replacement", lease.replace_after_invalid_session),
+        ))
     except WebDriverException as error:
         if not _invalid_browser_session(error):
             raise
@@ -1200,7 +1254,6 @@ def _reset_browser_state(request):
 
 
 def pane_fixture_html(width):
-    css = app_css()
     tabs = "\n".join(
         f"""
         <button type="button" class="pane-tab {'active' if number == 5 else ''}">
@@ -1247,7 +1300,6 @@ def pane_fixture_html(width):
 
 
 def menu_fixture_html():
-    css = app_css()
     rows = "\n".join(
         f"""
         <button type="button" class="app-menu-command app-menu-tab-command">
@@ -1290,7 +1342,6 @@ def menu_fixture_html():
 
 
 def pc_controls_fixture_html():
-    css = app_css()
     return page_html(
         f"""
         <div class="tabs" role="tablist">
@@ -1339,7 +1390,6 @@ def pc_controls_fixture_html():
 
 
 def topbar_font_fixture_html():
-    css = app_css()
     return page_html(
         f"""
         <header id="topbar-fixture" class="topbar">
@@ -1497,7 +1547,6 @@ def codemirror_editor_controls_fixture_html():
 
 
 def editor_diff_ref_toolbar_fixture_html():
-    css = app_css()
     return page_html(
         f"""
         <article class="panel file-editor-panel active-pane">
@@ -1645,7 +1694,7 @@ def codemirror_todo_diff_overview_fixture_html():
             }});
             panel._cmView = view;
             panel._cmMode = 'diff';
-            const chunks = diffOverviewCodeMirrorChunks(view, panel);
+            const chunks = diffOverviewCodeMirrorChunks(view);
             const rows = diffOverviewRowsFromCodeMirrorChunks(chunks, current, original);
             const content = view.scrollDOM.querySelector('.cm-content');
             if (content) content.style.minHeight = `${{Math.ceil(rows.totalRows * diffOverviewLineHeight(view, container))}}px`;
@@ -1795,7 +1844,7 @@ def codemirror_file_explorer_diff_overview_fixture_html():
             }};
             window.__fileExplorerDiffOverviewMetrics = async function() {{
               await settle();
-              const cmChunks = diffOverviewCodeMirrorChunks(view, panel);
+              const cmChunks = diffOverviewCodeMirrorChunks(view);
               const chunks = cmChunks.map(chunk => ({{
                 fromA: chunk.fromA,
                 toA: chunk.toA,
@@ -2205,7 +2254,6 @@ def codemirror_wrap_toggle_fixture_html():
 
 
 def finder_click_toolbar_fixture_html():
-    css = app_css()
     return page_html(
         f"""
         <article id="finder-panel" class="panel file-explorer-panel active-pane" data-file-explorer-mode="files">
@@ -2395,7 +2443,6 @@ def codemirror_scrollbar_overview_fixture_html():
 
 
 def split_seam_fixture_html():
-    css = app_css()
     return page_html(
         f"""
         <div class="layout-root split-column">
@@ -2707,6 +2754,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         );
       }
       function fixtureStatsCostReport() {
+        if (window.__fixtureStatsCostReport) return structuredClone(window.__fixtureStatsCostReport);
         return {
           schema_version: 4,
           total_micro_usd: 0,
@@ -2885,6 +2933,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         return {entry, info: {path, name, kind: entry.kind || (entriesByPath[path] ? 'dir' : 'file'),
           size: entry.size ?? null, mtime: entry.mtime ?? null, mtime_ns: entry.mtime_ns ?? null, realpath: path}};
       }
+      const fixtureHttpFetch = window.fetch.bind(window);
       window.fetch = async (input, options = {}) => {
         const url = new URL(String(input), 'https://localhost');
         const body = options.body ? JSON.parse(options.body || '{}') : null;
@@ -2906,6 +2955,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
             && !url.pathname.startsWith('/api/stats-')) {
           return jsonResponse({error: 'stats-only fixture rejects unrelated route'}, 404);
         }
+        if (url.pathname === '/api/fs/raw') return fixtureHttpFetch(input, options);
         if (url.pathname === '/api/chat/bootstrap') {
           if (window.__fixtureHoldChatBootstrap) {
             await new Promise(resolve => { window.__fixtureReleaseChatBootstrap = resolve; });
@@ -3354,7 +3404,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
       <body>
         {app_root_open}
         <header class="topbar">
-          <div class="brand-cell"><div class="brand brand-title title" aria-label="YOmux test"><span class="brand-mark">Y</span><span class="brand-second brand-nv">O</span><span class="brand-blue">m</span><span class="brand-red">u</span><span class="brand-yellow">x</span><span class="brand-version">test</span></div><span id="httpsWarning" class="transport-warning" hidden></span></div>
+          <div class="brand-cell"><div class="brand brand-title title" aria-label="YOmux test"><span class="brand-mark">Y</span><span class="brand-second brand-nv">O</span><span class="brand-blue">m</span><span class="brand-red">u</span><span class="brand-yellow">x</span><span class="brand-version">test</span><button type="button" class="brand-update-badge" data-update-badge hidden title="Update available" aria-label="Update available">update</button></div><span id="httpsWarning" class="transport-warning" hidden></span></div>
           <div id="sessionButtons" class="app-menu-area" aria-label="Application menus"></div>
           <div class="actions">
             <div id="latencyMeter" class="latency-meter topbar-status-surface"><svg class="latency-graph" viewBox="0 0 44 18"><polyline id="latencyLine" class="latency-line" points=""></polyline></svg><span id="latencyNumber" class="latency-number">-- ms</span></div>
@@ -3657,8 +3707,6 @@ def live_runtime_bundle_ready_state(state, expected_path="", expected_redirect_p
     if expected_path and current_path and current_path != expected_path:
         allowed = frozenset(str(path) for path in expected_redirect_paths)
         if current_path in allowed:
-            return state
-        if allowed and str(state.get("url", "")).startswith("chrome-error://chromewebdata/"):
             return state
         return False
     anchor_ready = state.get("grid") or state.get("appRoot")

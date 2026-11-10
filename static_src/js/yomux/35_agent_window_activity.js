@@ -1290,7 +1290,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     const recordedAcknowledgement = agentWindowActivityAcknowledgementKeyIsRecorded(ackKey, {...options, cooldown_acknowledged: false});
     const acknowledging = acknowledgementVisualActive;
     const acknowledged = recordedAcknowledgement && !acknowledging;
-    const transitionStartedAt = agentWindowTransitionStartedAt(previous, 'attention', nowSeconds);
+    const transitionStartedAt = agentWindowTransitionStartedAt(previous, visualTone, nowSeconds);
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
       record.activity = {

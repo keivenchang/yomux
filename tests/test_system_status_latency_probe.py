@@ -1,30 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Measured latency probe for `GET /api/system-status`, before and after the snapshot owner.
+"""Pure contracts for system-status measurement joins, identity, and error reporting.
 
-This module measures; it does not assert a product budget. It exists because the queue item that
-moved this route onto a background snapshot required a NUMBER for the first-request (cold) path and
-for the steady state, taken to one stated protocol, on both sides of the change.
-
-The protocol, fixed here so a later run cannot quietly redefine it:
-
-* the headline quantity is SERVER HANDLER TIME - route entry to response serialization - read back
-  out of the server's own per-request performance ring (`app.performance_records`, role
-  `http-endpoint`, surface `GET /api/system-status`), not timed by the client;
-* CLIENT ROUND TRIP is recorded beside it as a separate number and never substituted for it;
-* the sample is `SAMPLE_REQUESTS` requests after `WARMUP_REQUESTS` discarded warmup requests, at a
-  stated fixed concurrency (`CONCURRENCY`, default 1, recorded in the artifact either way);
-* the COLD request is the very first `/api/system-status` this server process ever answers, taken
-  before any warmup and reported on its own - averaging it into the sample is what hid it before;
-* the snapshot publish cadence and the freshness deadline in force are recorded with the sample,
-  because a steady-state number means nothing without the cadence that produced it;
-* `loadavg` is recorded as an observed side fact only. It is ambient noise, not a workload, and the
-  artifact labels it that way so it cannot later be cited as the load condition.
-
-Run it explicitly; it is skipped in the gate because a pre-change run costs about a minute of real
-route assembly:
-
-    YOLOMUX_MEASURE_SYSTEM_STATUS=before python3 -m pytest tests/test_system_status_latency_probe.py
+These tests validate sample admission and nearest-rank acceptance with synthetic data.
+The standalone tools/system_status_latency_probe.py owns live measurement; this suite
+does not produce latency certification.
 """
 
 from __future__ import annotations
@@ -32,21 +12,13 @@ from __future__ import annotations
 import dataclasses
 import errno
 import hashlib
-import json
 import math
 import os
-from pathlib import Path
-import platform
 import secrets
-import socket
-import statistics
 import subprocess
-import time
 from typing import Any
 from typing import Sequence
-from urllib.parse import urlencode
 
-from http.client import HTTPConnection
 import pytest
 
 from tools import bazel_execution_contract
@@ -54,33 +26,15 @@ from tools import system_status_latency_probe
 from yomux_lib import common as common_module
 from yomux_lib.infra import listener_census
 
-from tests.gate_harness import GateAuthCredentials
-from tests.gate_harness import GateLiveServer
 from tests.gate_harness import gate_auth_credentials  # noqa: F401
 from tests.native_gate_fixtures import gate_authenticated_live_server  # noqa: F401
 from tests.gate_harness import gate_http_port  # noqa: F401
-from tests.gate_harness import gate_http_request
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
-# One authenticated-fixture login helper, not a third copy of the same form post.
-from tests.helpers.http_routes import login_cookie as _login_cookie
 
 
-MEASURE_ENV = "YOLOMUX_MEASURE_SYSTEM_STATUS"
-# The probe runs inside the isolated test container, whose filesystem is thrown away. The one
-# host directory mounted at the same absolute path is the evidence directory `docker/run-tests.sh`
-# already binds, so the raw artifact is written there rather than into a container-local HOME that
-# would vanish with the run.
-ARTIFACT_DIR_ENV = "YOLOMUX_E2E_EVIDENCE_DIR"
-DEFAULT_ARTIFACT_DIR = Path.home() / "yolomux-evidence" / "f1"
 SYSTEM_STATUS_PATH = "/api/system-status"
 SYSTEM_STATUS_SURFACE = f"GET {SYSTEM_STATUS_PATH}"
-WARMUP_REQUESTS = 20
-SAMPLE_REQUESTS = 200
-CONCURRENCY = 1
-# W9: the browser's capture-marker header. Each sampled request carries a UNIQUE marker so the
-# server tags each per-request record with a unique measurement_request_id we can join one-to-one.
-MEASUREMENT_HEADER = "X-YOmux-Measurement"
 # W9: the stated headline for this queue item -- server assembly time from route entry to the wire
 # representation being ready, stamped by the shared response writer BEFORE any header/body byte
 # leaves. compute_ms/write_ms are retained beside it as diagnostics, not as the headline.
@@ -232,25 +186,6 @@ def acceptance_outcome(values: Sequence[float], budget_ms: float = REPRESENTATIO
     return {"ok": p99 < float(budget_ms), "p99_ms": p99, "budget_ms": float(budget_ms), "count": len(series)}
 
 
-
-
-def _await_server_handler_samples(runtime: GateLiveServer, expected: int, *, timeout: float = 5.0) -> list[dict[str, Any]]:
-    """Wait for the server's own record of the last response.
-
-    The performance record is written AFTER the response bytes leave, so a client that read its
-    body can legitimately be one record ahead of the ring. Waiting for the count is the difference
-    between a real measurement and a flaky one; it is not a retry of the measurement itself.
-    """
-
-    deadline = time.monotonic() + timeout
-    records = _server_handler_samples(runtime)
-    while len(records) < expected and time.monotonic() < deadline:
-        time.sleep(0.01)
-        records = _server_handler_samples(runtime)
-    assert len(records) == expected, f"expected {expected} records, got {len(records)}"
-    return records
-
-
 def _percentile(values: list[float], fraction: float) -> float:
     """Nearest-rank percentile: the value an observer can point at, not an interpolation."""
 
@@ -261,25 +196,10 @@ def _percentile(values: list[float], fraction: float) -> float:
     return ordered[rank - 1]
 
 
-def _summary(values: list[float]) -> dict[str, float]:
-    return {
-        "count": len(values),
-        "min": min(values),
-        "median": statistics.median(values),
-        "mean": statistics.fmean(values),
-        "p95": _percentile(values, 0.95),
-        "p99": _percentile(values, 0.99),
-        "max": max(values),
-    }
-
-
-
-
 # ---- gate-safe synthetic proofs of the probe's pure logic --------------------------------------
 #
 # These run in the gate: they prove the join/validation/percentile/identity rules that decide
-# whether a run is valid, without paying for a live 200-sample assembly (that acceptance run is
-# W14, against a settled server). The live probe above imports the very same functions.
+# whether a synthetic run is valid, without starting a live measurement.
 
 
 def _record(request_id: str, ready_ms: float, *, status: str = "200", compute_ms: float = 1.0, write_ms: float = 0.5) -> dict[str, Any]:
@@ -296,8 +216,6 @@ def _record(request_id: str, ready_ms: float, *, status: str = "200", compute_ms
             "write_ms": write_ms,
         },
     }
-
-
 
 
 def test_join_returns_the_headline_series_in_issued_order_for_a_clean_run() -> None:

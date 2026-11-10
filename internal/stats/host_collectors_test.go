@@ -386,6 +386,7 @@ func TestParseLinuxCPU(t *testing.T) {
 		ok   bool
 	}{
 		{"real proc stat", "cpu  100 20 30 400 50 6 7 8\ncpu0 1 2", CPUHostCounters{Busy: 171, Total: 621}, true},
+		{"guest already included in user and nice", "cpu  100 20 30 400 50 6 7 8 20 10", CPUHostCounters{Busy: 171, Total: 621}, true},
 		{"missing aggregate", "cpu0 1 2 3", CPUHostCounters{}, false},
 		{"malformed", "cpu 1 nope 3", CPUHostCounters{}, false},
 		{"zero", "cpu 0 0 0 0", CPUHostCounters{}, false},
@@ -1121,5 +1122,31 @@ func TestDarwinAvailableMemoryRejectsUnavailableObservations(t *testing.T) {
 				t.Fatalf("available=%d err=%v", got, err)
 			}
 		})
+	}
+}
+
+func TestPythonFloatHexSubnormalIdentity(t *testing.T) {
+	for _, item := range []struct {
+		value float64
+		want  string
+	}{
+		{math.SmallestNonzeroFloat64, "0x0.0000000000001p-1022"},
+		{-math.SmallestNonzeroFloat64, "-0x0.0000000000001p-1022"},
+		{math.Float64frombits(0x000fffffffffffff), "0x0.fffffffffffffp-1022"},
+	} {
+		if got := pythonFloatHex(item.value); got != item.want {
+			t.Errorf("hex(%g)=%q want%q", item.value, got, item.want)
+		}
+	}
+}
+
+func TestIOAcceleratorRepresentationsShareMemoryBounds(t *testing.T) {
+	for _, value := range []string{"12", "-1", "18446744073709551616", "1e100"} {
+		jsonData := []byte(`[{"PerformanceStatistics":{"GPU Activity(%)":120,"In use video memory":` + value + `}}]`)
+		xmlData := []byte(`<plist><array><dict><key>PerformanceStatistics</key><dict><key>GPU Activity(%)</key><real>120</real><key>In use video memory</key><real>` + value + `</real></dict></dict></array></plist>`)
+		jsonDevices, xmlDevices := ParseIOAccelerator(jsonData), ParseIOAccelerator(xmlData)
+		if !reflect.DeepEqual(jsonDevices, xmlDevices) {
+			t.Errorf("memory%s: JSON%#v XML%#v", value, jsonDevices, xmlDevices)
+		}
 	}
 }

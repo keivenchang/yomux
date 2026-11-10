@@ -135,8 +135,8 @@ func acceptLaunchDescriptors(manifest string, listenerFD int) error {
 	}
 	leaseCount := len(descriptors)
 	if listenerFD >= 0 {
-		listening, err := syscall.GetsockoptInt(listenerFD, syscall.SOL_SOCKET, syscall.SO_ACCEPTCONN)
-		if listenerFD < 3 || seen[listenerFD] || err != nil || listening != 1 {
+		listening, err := launchSocketListening(listenerFD)
+		if listenerFD < 3 || seen[listenerFD] || err != nil || !listening {
 			return fmt.Errorf("descriptor %d is not a listening socket", listenerFD)
 		}
 		descriptors = append(descriptors, listenerFD)
@@ -263,6 +263,7 @@ func newGoBackgroundOwner(config, root string, ports ...int) *goBackgroundOwner 
 	owner.priority = backgroundOwnerPriority(port)
 	owner.writeFile = writeAtomicFile
 	if config != "" {
+		owner.owner, owner.status = false, "owner_lock_error"
 		if err := os.MkdirAll(config, 0o700); err == nil {
 			owner.ownerPath = filepath.Join(config, "go-background-owner.json")
 			generationDir := filepath.Join(config, "go-background-generations")
@@ -271,13 +272,18 @@ func newGoBackgroundOwner(config, root string, ports ...int) *goBackgroundOwner 
 			owner.generationIndexPath = filepath.Join(generationDir, "index.json")
 			if file, err := os.OpenFile(filepath.Join(config, "go-background-owner.lock"), os.O_CREATE|os.O_RDWR, 0o600); err == nil {
 				owner.lockFile = file
+				owner.owner, owner.status = true, "local"
 				if syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
 					owner.owner = false
 					owner.status = "follower"
 					// Keep the descriptor open: a follower must be able to acquire the
 					// same lock after the incumbent exits.
 				}
+			} else {
+				owner.lastError = err.Error()
 			}
+		} else {
+			owner.lastError = err.Error()
 		}
 	}
 	_ = owner.writeGenerationRecord()

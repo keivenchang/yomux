@@ -3,10 +3,9 @@ const {
   fs,
   loadYomux,
   canonical,
-  test,
-  testAsync,
 } = require('./layout_test_helper');
 
+async function runEditorPreviewInfoGraphSuite(test, testAsync) {
 test('YO!info prefers the normalized work graph without duplicating a shared worktree branch inventory', () => {
   const source = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
   assert.ok(source.includes('function infoHasWorkGraph(info = {})'), 'YO!info recognizes a schema-valid canonical graph explicitly');
@@ -55,12 +54,23 @@ test('YO!info canonical relationship records ignore conflicting legacy projectio
   assert.equal(JSON.stringify(records).includes('legacy-branch'), false, 'legacy branch projection cannot leak into a graph-backed result');
   assert.equal(JSON.stringify(records).includes('#999'), false, 'legacy PR projection cannot leak into a graph-backed result');
 
+  graph.runtime_actors['actor:graph'].pid = 43210;
+  graph.local_branches['branch:graph'].pull_request_ids.push('pr:81');
+  graph.pull_requests['pr:81'] = {id: 'pr:81', number: 81, title: 'second canonical PR', state: 'closed', url: 'https://github.test/canonical/right/pull/81'};
+  api.setTranscriptInfoForTest('graph-session', {work_graph: graph});
+  const [complete] = api.infoRelationshipRecords();
+  assert.equal(complete.aiPid, 43210, 'actor PID survives canonical graph attribution and relationship projection');
+  const completeHtml = api.infoRecordHtmlForTest(complete);
+  assert.ok(completeHtml.includes('pull/80') && completeHtml.includes('pull/81') && completeHtml.includes('2 PRs'), 'all canonical branch PRs reach the rendered relationship record');
+  const [unresolved] = api.infoRelationshipRecords([{branch: 'unresolved', prLookupState: 'stale'}]);
+  assert.ok(api.infoRecordHtmlForTest(unresolved).includes('info-tree-pr-lookup-state-stale'), 'unresolved lookup status survives the relationship projection');
+
   const empty = {...graph, git_worktrees: {}, local_repositories: {}, local_branches: {}, hosted_repositories: {}, pull_requests: {}, linear_issues: {}, path_observations: {}, runtime_actors: {}, tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, worktree_branch_activity: {}};
   api.setTranscriptInfoForTest('graph-session', {work_graph: empty, project: legacyProject, window_metadata: [{git: legacyProject.git}]});
   assert.deepStrictEqual(canonical(api.infoRelationshipRecords()), [], 'a schema-valid empty graph does not revive stale legacy rows');
 });
 
-testAsync('metadata refresh retains a complete graph during lightweight payloads and rejects an older graph generation', async () => {
+await testAsync('metadata refresh retains a complete graph during lightweight payloads and rejects an older graph generation', async () => {
   const api = loadYomux('', ['graph-refresh']);
   const completeGraph = {version: 1, generation: 20, tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, runtime_actors: {}, path_observations: {}, git_worktrees: {'worktree:complete': {id: 'worktree:complete', root: '/complete', local_repository_id: 'repo:complete'}}, local_repositories: {'repo:complete': {id: 'repo:complete', local_branch_ids: []}}, hosted_repositories: {}, local_branches: {}, pull_requests: {}, linear_issues: {}, worktree_branch_activity: {}};
   await api.applySessionMetadataPayloadForTest({session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: completeGraph, metadata_loading: false}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
@@ -70,3 +80,7 @@ testAsync('metadata refresh retains a complete graph during lightweight payloads
   assert.equal(accepted, false, 'a late older graph generation cannot overwrite the newer canonical session graph');
   assert.equal(api.transcriptMetadataStateForTest().payload.sessions['graph-refresh'].work_graph.generation, 20, 'the newer graph remains active after stale delivery');
 });
+
+}
+
+module.exports = {runEditorPreviewInfoGraphSuite};

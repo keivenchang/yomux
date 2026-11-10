@@ -1,13 +1,52 @@
 """Gate J: YO!chat user-visible answer delivery."""
 
+import json
+import sqlite3
+import time
+from urllib.request import urlopen
+
 import pytest
+from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser
 from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
 from tests.gate_harness import run_when_browser_ready
+from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
 
 
 pytestmark = pytest.mark.browser
+
+
+def test_native_chat_mount_loads_the_unread_bootstrap_continuation(browser, isolated_dev_server_factory, request):
+    server = isolated_dev_server_factory('chat-unread-continuation')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    with urlopen(server.base_url + '/api/chat/bootstrap?browser_instance_id=before-unread') as response:
+        initial = json.load(response)
+    assert initial['messages'] == [] and initial['read_up_to_id'] == 0
+    databases = list((server.paths.state_dir / 'hosts').glob('*/yochat.sqlite3'))
+    assert len(databases) == 1
+    def append_messages(first, stop):
+        with sqlite3.connect(databases[0]) as database:
+            database.executemany(
+                'INSERT INTO chat_messages(created_at_utc,room_id,username,sender_instance_id,client_message_uuid,body,is_question) VALUES(?,?,?,?,?,?,?)',
+                [(time.time(), 'global', 'fixture-sender', 'unread-fixture', str(index), f'unread message {index}', 0)
+                 for index in range(first, stop)],
+            )
+
+    append_messages(1, 56)
+    browser.get(server.base_url + '/?sessions=chat&layout=slot1&tabs=slot1:chat')
+    WebDriverWait(browser, 15).until(lambda driver: driver.execute_script("""
+      return typeof chatState !== 'undefined' && chatState.loaded
+        && chatState.messages.size===55 && chatState.messages.has(55)
+        && document.querySelector('#panel-__chat__ [data-chat-message-id="55"]');
+    """))
+    assert browser.execute_script('return [...chatState.messages.keys()]') == list(range(1, 56))
+    append_messages(56, 456)
+    WebDriverWait(browser, 15).until(lambda driver: driver.execute_script("""
+      return chatState.messages.size===455 && chatState.messages.has(455)
+        && document.querySelector('#panel-__chat__ [data-chat-message-id="455"]');
+    """))
+    assert browser.execute_script('return [...chatState.messages.keys()]') == list(range(1, 456))
 
 
 @pytest.mark.parametrize(

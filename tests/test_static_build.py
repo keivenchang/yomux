@@ -82,6 +82,7 @@ def test_write_asset_removes_temporary_file_after_write_or_fsync_failure(tmp_pat
     target = static_dir / "yomux.js"
     target.write_text("previous asset", encoding="utf-8")
     monkeypatch.setattr(sb, "repo_path", lambda name: tmp_path / name)
+    monkeypatch.setattr(sb, "OUTPUT_ROOT", static_dir)
     monkeypatch.setattr(sb, "build_asset", lambda _asset: "replacement asset")
     if failure == "write":
         original_named_temporary_file = sb.tempfile.NamedTemporaryFile
@@ -114,6 +115,32 @@ def test_write_asset_removes_temporary_file_after_write_or_fsync_failure(tmp_pat
         sb.write_asset("yomux.js")
     assert target.read_text(encoding="utf-8") == "previous asset"
     assert list(static_dir.glob(".yomux.js.*")) == []
+
+
+@pytest.mark.parametrize("failure", ["locale", "late_asset"])
+def test_build_once_validates_complete_candidate_before_publishing(tmp_path, monkeypatch, failure):
+    output = tmp_path / "static"
+    output.mkdir()
+    for asset in ("yomux.js", "yomux.css"):
+        (output / asset).write_text("previous " + asset, encoding="utf-8")
+    (tmp_path / "source.js").write_text("const candidate = 2;\n", encoding="utf-8")
+    (tmp_path / "source.css").write_text("__YOMUX_SEARCH_RANK_WEIGHTS__\n" if failure == "late_asset" else "body {}\n", encoding="utf-8")
+    locales = tmp_path / "locales"
+    locales.mkdir()
+    (locales / "en.json").write_text('{"hello":"Hello {name}"}', encoding="utf-8")
+    monkeypatch.setattr(sb, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sb, "OUTPUT_ROOT", output)
+    monkeypatch.setattr(sb, "LOCALES_SRC", locales)
+    monkeypatch.setattr(sb, "LOCALES_OUT", output / "locales")
+    monkeypatch.setattr(sb, "ASSETS", {"yomux.js": ["source.js"], "yomux.css": ["source.css"]})
+    if failure == "late_asset":
+        weights = tmp_path / "internal/finder/search_rank_weights.json"
+        weights.parent.mkdir(parents=True)
+        weights.write_text("{invalid", encoding="utf-8")
+    before = {path.name: path.read_bytes() for path in output.iterdir()}
+    with pytest.raises(sb.BuildError if failure == "locale" else json.JSONDecodeError):
+        sb.build_once(["yomux.js", "yomux.css"])
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == before
 
 
 def _grouped_css_selectors(css):
@@ -580,6 +607,25 @@ def test_css_structure_lint_tree_is_clean():
     assert lint_css_structure() == []
 
 
+@pytest.mark.parametrize('boundary', ['orphan */ .label { color: red; }', '.label { color: red; } /* unfinished'])
+def test_css_structure_lint_rejects_broken_comment_boundaries(monkeypatch, tmp_path, boundary):
+    part = tmp_path / 'broken.css'
+    part.write_text(boundary, encoding='utf-8')
+    monkeypatch.setitem(sb.ASSETS, 'yomux.css', ['broken.css'])
+    monkeypatch.setattr(sb, 'repo_path', lambda path: tmp_path / path)
+    assert any('CSS comment' in error for error in sb.lint_css_structure())
+    with pytest.raises(sb.BuildError, match='CSS comment'):
+        sb.check_css_braces()
+
+
+def test_css_comment_scanner_preserves_quoted_delimiters_and_line_numbers():
+    source = '.label { content: "/* literal */ and \\" */"; }\n/* hidden\n text */\n'
+    result = sb._css_without_comments(source)
+    assert result.startswith('.label { content: "/* literal */ and \\" */"; }')
+    assert result.count('\n') == source.count('\n')
+    assert 'hidden' not in result
+
+
 def test_css_structure_lint_flags_duplicate_property_selector_and_empty_rule(monkeypatch, tmp_path):
     first = tmp_path / "first.css"
     second = tmp_path / "second.css"
@@ -639,6 +685,10 @@ def test_preformatted_text_wrapping_has_one_shared_selector_owner():
         ".file-editor-conflict-compare pre",
         ".git-diff-commit-message",
         ".js-debug-log-message",
+        ".finder-move-source",
+        ".finder-move-target",
+        ".finder-move-dialog .file-editor-dialog-body",
+        ".file-get-info dd",
     )
     selector_group = ",\n".join(selectors[:-1]) + ",\n" + selectors[-1]
     rule = re.search(rf"{re.escape(selector_group)}\s*\{{([^}}]+)\}}", css)
@@ -828,7 +878,7 @@ def test_current_yostats_diagnostics_browser_tests_use_shared_observable_waits()
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source)
     names = {
-        "test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narrow_layout",
+        "test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdog",
     }
     function_sources = {
         node.name: ast.get_source_segment(source, node) or ""
@@ -921,7 +971,7 @@ def test_audited_css_families_have_one_grouped_owner():
     assert frozenset(
         {".file-explorer-title", ".file-explorer-panel-title", ".file-editor-title"}
     ) in panel_groups
-    assert re.search(r"\.pane-drag-image-frame,\s*\.preferences-panel,\s*\.js-debug-panel,\s*\.command-palette-dialog,\s*\.panel,\s*\.transcript,\s*\.summary\s*\{", preferences_css)
+    assert re.search(r"\.preferences-panel,\s*\.js-debug-panel,\s*\.command-palette-dialog,\s*\.panel,\s*\.transcript,\s*\.summary\s*\{", preferences_css)
     assert re.search(r"\.pane-tab-close::before,\s*\.pane-tab-close::after,\s*\.panel-detail-close::before,\s*\.panel-detail-close::after,[\s\S]*?\.tabs \.pane-expand::after\s*\{", preferences_css)
     assert re.search(r"\.file-editor-codemirror \.cm-content ::selection,\s*\.file-editor-codemirror-panel \.cm-content ::selection\s*\{", panels_css)
     assert "body.editor-scheme-yomux-light .file-editor-codemirror .cm-content ::selection" in panels_css
@@ -1522,7 +1572,7 @@ def test_z_index_ownership_lint_checks_css_and_inline_js_styles(monkeypatch, tmp
         ".local-calculated { --z-local-calculated: calc(var(--z-dialog) + 2); }\n",
         encoding="utf-8",
     )
-    inline.write_text("const css = `.inline { z-index: 1000; }`;\n", encoding="utf-8")
+    inline.write_text("const pattern = /[^,;]*/;\nconst css = `.inline { z-index: 1000; }`;\n", encoding="utf-8")
     monkeypatch.setitem(sb.ASSETS, "yomux.css", ["component.css"])
     monkeypatch.setitem(sb.ASSETS, "yomux.js", ["inline.js"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
@@ -1532,7 +1582,7 @@ def test_z_index_ownership_lint_checks_css_and_inline_js_styles(monkeypatch, tmp
         "component.css:4: z-index '7' lacks one named --z-* owner; move literals/arithmetic to 00_tokens_base.css and use var(--z-token)",
         "component.css:5: z-index 'calc(var(--z-dialog) + 1)' lacks one named --z-* owner; move literals/arithmetic to 00_tokens_base.css and use var(--z-token)",
         "component.css:6: z-index 'var(--layer)' lacks one named --z-* owner; move literals/arithmetic to 00_tokens_base.css and use var(--z-token)",
-        "inline.js:1: z-index '1000' lacks one named --z-* owner; move literals/arithmetic to 00_tokens_base.css and use var(--z-token)",
+        "inline.js:2: z-index '1000' lacks one named --z-* owner; move literals/arithmetic to 00_tokens_base.css and use var(--z-token)",
     ]
 
 
@@ -1842,6 +1892,31 @@ def _build_metadata_fixture(tmp_path):
     (source / "assets/runtime/locale-registry.json").write_text(json.dumps([{"code": "fixture", "plural_categories": ["other"]}]))
 
     return source
+
+
+@pytest.mark.parametrize("arguments,code", [(["--help"], 0), (["--invalid-option"], 2), (["unknown.js"], 2)])
+def test_static_build_parses_help_and_errors_before_writer_admission(tmp_path, monkeypatch, capsys, arguments, code):
+    _preserve_build_globals(monkeypatch)
+    slot = tmp_path / "writer"
+    monkeypatch.setattr(sb.worktree_writer, "worktree_declaration_slot", lambda _root: slot)
+    with sb.worktree_writer.acquire_worktree_writer(sb.REPO_ROOT, purpose="argument-fixture", slot_dir=slot, environ={}, heartbeat_interval_seconds=0) as lease:
+        with pytest.raises(SystemExit) as result:
+            sb.main(arguments, environ={})
+        assert result.value.code == code
+        assert sb.worktree_writer.inspect_worktree_writer(sb.REPO_ROOT, host_identity=sb.worktree_writer.current_host_identity(), slot_dir=slot).record["token"] == lease.token
+    output = capsys.readouterr()
+    assert "usage:" in (output.out if code == 0 else output.err)
+    assert "STATIC BUILD REFUSED" not in output.err
+
+
+@pytest.mark.parametrize("arguments", [[], ["--watch"], ["--watch", "--check"], ["--check"], ["--lint-light"], ["--i18n-untranslated-report"]])
+def test_static_build_execution_modes_keep_writer_admission(tmp_path, monkeypatch, capsys, arguments):
+    _preserve_build_globals(monkeypatch)
+    slot = tmp_path / "writer"
+    monkeypatch.setattr(sb.worktree_writer, "worktree_declaration_slot", lambda _root: slot)
+    with sb.worktree_writer.acquire_worktree_writer(sb.REPO_ROOT, purpose="execution-fixture", slot_dir=slot, environ={}, heartbeat_interval_seconds=0):
+        assert sb.main(arguments, environ={}) == 3
+    assert "STATIC BUILD REFUSED" in capsys.readouterr().err
 
 
 def test_selected_source_root_reloads_all_shared_metadata(tmp_path, monkeypatch):

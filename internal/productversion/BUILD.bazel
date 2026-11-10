@@ -1,5 +1,7 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+exports_files(["BUILD.bazel"])
+
 go_library(
     name = "productversion_lib",
     srcs = ["version.go"],
@@ -15,6 +17,12 @@ go_test(
 
 filegroup(
     name = "qualified_sources",
-    srcs = glob(["**"], exclude = ["**/*.lock", "**/*.log"]),
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.lock",
+            "**/*.log",
+        ],
+    ),
     visibility = ["//:__pkg__"],
 )

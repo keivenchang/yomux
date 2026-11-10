@@ -8,7 +8,85 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestDockerMountPolicyProgressAndRootAdmission(t *testing.T) {
+	policy := mustParse(t, "default: approve\n")
+	for _, engine := range []string{"docker", "podman"} {
+		for _, source := range []string{"/tmp", "/"} {
+			for _, options := range []string{
+				"--volume=" + source + ":/data", "-v=" + source + ":/data", "-v" + source + ":/data",
+				"--volume " + source + ":/data", "-v " + source + ":/data",
+				"--mount=type=bind,src=" + source + ",target=/data", "--mount type=bind,source=" + source + ",target=/data",
+				"--name=fixture --volume=" + source + ":/data --network=none",
+				"--name fixture --volume " + source + ":/data --network none",
+				"-itv" + source + ":/data", "-ditv " + source + ":/data",
+				"--cpus=1 -itv" + source + ":/data",
+			} {
+				command := engine + " run " + options + " image echo ok"
+				if !t.Run(command, func(t *testing.T) {
+					done := make(chan Decision, 1)
+					go func() { done <- Evaluate(policy, command, false) }()
+					select {
+					case decision := <-done:
+						want := Approve
+						if source == "/" {
+							want = Ask
+						}
+						if decision.Action != want {
+							t.Fatalf("mount admission=%s, want %s", decision.Action, want)
+						}
+					case <-time.After(time.Second):
+						t.Fatal("mount option parser did not advance")
+					}
+				}) {
+					return
+				}
+			}
+		}
+		for _, options := range []string{"--volume", "-v", "--mount", "--volume=", "-v=", "--mount="} {
+			if decision := Evaluate(policy, engine+" run "+options, false); decision.Action != Ask {
+				t.Fatalf("missing mount value was approved: %s %s", engine, options)
+			}
+		}
+	}
+	for _, options := range [][]string{{"--", "--volume=/:/data"}, {"image", "--volume=/:/data"}} {
+		if parsed := parseDockerOptions(options); parsed.mountsRoot || parsed.ambiguous {
+			t.Fatal("image or post-separator arguments were classified as wrapper mounts")
+		}
+	}
+}
+
+func TestDockerOptionBoundaryAdmission(t *testing.T) {
+	policy := mustParse(t, "default: approve\n")
+	for _, engine := range []string{"docker", "podman"} {
+		for _, action := range []string{"run", "exec", "container run", "container exec"} {
+			for _, options := range []string{"--cpus 1", "--hostname fixture", "--future-option value", "-X value", "-itX value", "-X=value"} {
+				command := engine + " " + action + " " + options + " --volume=/:/host image true"
+				if decision := Evaluate(policy, command, false); decision.Action != Ask {
+					t.Errorf("unknown wrapper boundary admitted: %s decision=%+v", command, decision)
+				}
+			}
+			command := engine + " " + action + " -itu root -- image rm -rf /"
+			if decision := Evaluate(policy, command, false); decision.Action != Block {
+				t.Errorf("shared parser missed destructive payload: %s decision=%+v", command, decision)
+			}
+		}
+		for _, command := range []string{engine + " --context fixture run -v/:/host image true", engine + " --host=fixture container exec image rm -rf /"} {
+			if decision := Evaluate(policy, command, true); decision.Action != Ask {
+				t.Errorf("unknown global wrapper admitted: %s decision=%+v", command, decision)
+			}
+		}
+		for _, options := range []string{"-itv/:/host", "-ditv /:/host", "--cpus=1 --hostname=fixture -itv/:/host"} {
+			command := engine + " run " + options + " image true"
+			if decision := Evaluate(policy, command, true); decision.Action != Ask {
+				t.Errorf("root mount bypassed hard floor: %s decision=%+v", command, decision)
+			}
+		}
+	}
+
+}
 
 func mustParse(t *testing.T, text string) *Policy {
 	t.Helper()

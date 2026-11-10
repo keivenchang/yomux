@@ -701,6 +701,10 @@ async function loadChatBootstrap(options = {}) {
     replaceChatTyping(payload.typing);
     chatMergeMessages(payload.messages, {incoming: wasLoaded || options.incoming === true});
     renderChatPanel({scrollBottom: !wasLoaded});
+    if (payload.messages?.length && Number(payload.messages.at(-1).id) < Number(payload.revision)) {
+      finishChatLoadingRequest(request);
+      return await loadChatDelta(payload.revision);
+    }
     return true;
   } catch (error) {
     statusErr(localizedHtml('common.requestFailed'));
@@ -735,17 +739,23 @@ async function loadOlderChatMessages() {
   }
 }
 
-async function loadChatDelta() {
+async function loadChatDelta(targetRevision = null) {
   if (!chatState.loaded) return loadChatBootstrap({incoming: true});
   const generation = ++chatState.requestGeneration;
-  const params = new URLSearchParams({after: chatState.newerCursor, limit: '200'});
+  const target = Number(targetRevision) || 0;
+  const pageLimit = 200;
   try {
-    const payload = await apiFetchJson(`/api/chat/delta?${params}`, chatRequestOptions());
-    if (generation !== chatState.requestGeneration) return false;
-    chatState.newerCursor = String(payload.newer_cursor || chatState.newerCursor);
-    chatMergeMessages(payload.messages, {incoming: true});
-    renderChatPanel();
-    return true;
+    while (true) {
+      const previousCursor = chatState.newerCursor;
+      const params = new URLSearchParams({after: previousCursor, limit: String(pageLimit)});
+      const payload = await apiFetchJson(`/api/chat/delta?${params}`, chatRequestOptions());
+      if (generation !== chatState.requestGeneration) return false;
+      chatState.newerCursor = String(payload.newer_cursor || previousCursor);
+      chatMergeMessages(payload.messages, {incoming: true});
+      renderChatPanel();
+      if ((target > 0 && Number(payload.revision) >= target) || (payload.messages?.length || 0) < pageLimit
+          || chatState.newerCursor === previousCursor) return true;
+    }
   } catch (error) {
     console.warn('YO!chat delta refresh failed', error);
     return false;
@@ -1066,14 +1076,14 @@ function openChatSearch(panel = document.getElementById(panelDomId(chatItemId)))
 
 async function searchChatHistory(query, options = {}) {
   const text = String(query || '').trim();
+  const generation = ++chatState.searchGeneration;
+  chatState.searchQuery = text;
   chatState.searchOpen = true;
   if (!text) {
     chatState.searchResults = [];
     renderChatPanel();
     return false;
   }
-  const generation = ++chatState.searchGeneration;
-  chatState.searchQuery = text;
   const params = new URLSearchParams({query: text, limit: '20'});
   if (options.next === true && chatState.searchCursor) params.set('cursor', chatState.searchCursor);
   try {
@@ -1084,6 +1094,7 @@ async function searchChatHistory(query, options = {}) {
     renderChatPanel();
     return true;
   } catch (error) {
+    if (generation !== chatState.searchGeneration) return false;
     statusErr(localizedHtml('common.searchFailed'));
     return false;
   }
@@ -1093,8 +1104,8 @@ async function openChatMessageContext(messageId) {
   const panel = document.getElementById(panelDomId(chatItemId));
   const timeline = panel?.querySelector('[data-chat-timeline]');
   if (!chatState.searchSnapshot && timeline) chatState.searchSnapshot = {messages: new Map(chatState.messages), scrollTop: timeline.scrollTop};
+  const generation = ++chatState.contextGeneration;
   try {
-    const generation = ++chatState.contextGeneration;
     const payload = await apiFetchJson(`/api/chat/context?${new URLSearchParams({message_id: String(messageId), before: '3', after: '3'})}`, chatRequestOptions());
     if (generation !== chatState.contextGeneration) return false;
     chatState.messages = new Map([...(payload.before || []), payload.target, ...(payload.after || [])].filter(Boolean).map(message => [Number(message.id), message]));
@@ -1103,6 +1114,7 @@ async function openChatMessageContext(messageId) {
     panel?.querySelector(`[data-chat-message-id="${cssEscape(String(messageId))}"]`)?.scrollIntoView?.({block: 'center'});
     return true;
   } catch (error) {
+    if (generation !== chatState.contextGeneration) return false;
     statusErr(localizedHtml('common.requestFailed'));
     return false;
   }
@@ -1132,6 +1144,7 @@ function resetChatSearchState() {
   chatState.searchCursor = '';
   chatState.searchQuery = '';
   chatState.searchGeneration += 1;
+  chatState.contextGeneration += 1;
   chatState.searchSnapshot = null;
   return snapshot;
 }
@@ -1340,9 +1353,9 @@ function relocalizeChatPanel(panel = document.getElementById(panelDomId(chatItem
   return true;
 }
 
-function handleChatInvalidation(type) {
+function handleChatInvalidation(type, payload = {}) {
   if (type === 'chat_typing_changed') return loadChatBootstrap({incoming: false});
-  return loadChatDelta();
+  return loadChatDelta(payload.revision);
 }
 
 function clearChatLifecycle(options = {}) {

@@ -625,7 +625,7 @@ def test_default_start_lock_is_shared_outside_process_specific_tmpdir(tmp_path):
     assert result.stdout == str(rooted / "cache" / "start.lock")
 
 
-@pytest.mark.parametrize("selector", [[], ["--backend", "go"], ["--backend", "auto"], ["--golang"]])
+@pytest.mark.parametrize("selector", [[], ["--backend", "go"], ["--backend", "auto"], ["--golang"], ["--no-dev"]])
 def test_native_boot_aliases_preserve_launch_and_environment_contract(tmp_path, native_binary, selector):
     environment = synthetic_test_environment({
         "HOME": str(tmp_path / "home"), "YOMUX_GO_BINARY": str(native_binary),

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -417,8 +416,7 @@ func OpenOpenCodeReadOnly(ctx context.Context, path string, openers ...OpenFunc)
 }
 
 func openCodeReadOnlyURI(path string) string {
-	abs, _ := filepath.Abs(path)
-	return "file:" + url.PathEscape(abs) + "?mode=ro&_busy_timeout=1000"
+	return sqliteURI(path, "mode=ro&_busy_timeout=1000")
 }
 
 func openOpenCodeSQLiteReadOnly(uri string) (ReadOnlyDB, error) { return openSQLiteReadOnly(uri) }
@@ -635,14 +633,11 @@ func (d *OpenCodeDatabase) readSessionTreeWindow(ctx context.Context, rootID str
 	truncated := false
 	for len(result) < limit && len(frontier) > 0 {
 		remaining := limit - len(result)
-		placeholders := make([]string, 0, len(frontier)+len(seen))
 		args := make([]any, 0, len(frontier)+len(seen)+1)
 		for _, parent := range frontier {
-			placeholders = append(placeholders, "?")
 			args = append(args, parent)
 		}
 		for id := range seen {
-			placeholders = append(placeholders, "?")
 			args = append(args, id)
 		}
 		parentArgs := strings.TrimSuffix(strings.Repeat("?,", len(frontier)), ",")
@@ -690,14 +685,11 @@ WHERE %s IN (%s) AND id NOT IN (%s)
 		// Filling the bound is not by itself evidence of truncation: the last
 		// selected frontier may simply have no children. Check that boundary
 		// without expanding the bounded window.
-		placeholders := make([]string, 0, len(frontier)+len(seen))
 		args := make([]any, 0, len(frontier)+len(seen)+1)
 		for _, parent := range frontier {
-			placeholders = append(placeholders, "?")
 			args = append(args, parent)
 		}
 		for id := range seen {
-			placeholders = append(placeholders, "?")
 			args = append(args, id)
 		}
 		parentArgs := strings.TrimSuffix(strings.Repeat("?,", len(frontier)), ",")

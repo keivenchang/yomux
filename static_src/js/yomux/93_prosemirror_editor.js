@@ -205,6 +205,8 @@ function prosemirrorMarkdownParser(api, schema) {
   tokenizer.enable('strikethrough');
   const markdownItParse = tokenizer.parse.bind(tokenizer);
   tokenizer.parse = (source, environment) => {
+    const unsupportedHtml = prosemirrorUnsupportedHtmlSource(source);
+    if (unsupportedHtml) throw new Error(`unsupported HTML tag ${unsupportedHtml}`);
     environment = environment || {};
     const htmlElement = html => {
       const template = document.createElement('template');
@@ -294,7 +296,7 @@ function prosemirrorMarkdownParser(api, schema) {
           if (details) {
             token.type = 'details_open';
             if (Array.isArray(token.map) && detailsOpenerEnds.has(token.map[0])) token.map[1] = detailsOpenerEnds.get(token.map[0]);
-            token.meta = {summary: details[1].replace(/<[^>]+>/g, '').trim()};
+            token.meta = {summary: htmlElement(`<summary>${details[1]}</summary>`).textContent.trim()};
           } else if (/^<\/details>\s*$/i.test(html)) {
             token.type = 'details_close';
           } else {
@@ -510,7 +512,7 @@ function prosemirrorMarkdownSerializer(api) {
     markdown_literal_block(state, node) { state.write(node.attrs.source || ''); state.closeBlock(node); },
     markdown_literal_inline(state, node) { state.write(node.attrs.source || ''); },
     details(state, node) {
-      state.write(`<details>\n<summary>${node.attrs.summary}</summary>\n\n`);
+      state.write(`<details>\n<summary>${esc(node.attrs.summary)}</summary>\n\n`);
       state.renderContent(node);
       state.write('\n</details>');
       state.closeBlock(node);
@@ -1392,6 +1394,15 @@ function installProseMirrorInteractions(panel, path, view, schema, api) {
   };
 }
 
+function restartProseMirrorCursorBlink(view, composing = view.composing) {
+  for (const animation of view.dom.getAnimations()) {
+    if (animation.animationName !== 'editor-native-cursor-blink') continue;
+    animation.currentTime = 0;
+    if (composing) animation.pause();
+    else animation.play();
+  }
+}
+
 function createProseMirrorPanel(panel, item, path, state, parts, api) {
   if (!parts?.previewPane) return false;
   panel._pmMediaPromises = [];
@@ -1400,10 +1411,6 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   const parser = prosemirrorMarkdownParser(api, schema);
   const serializer = prosemirrorMarkdownSerializer(api);
   const parseEnvironment = {};
-  const unsupportedHtml = prosemirrorUnsupportedHtmlSource(state.content || '');
-  if (unsupportedHtml) {
-    throw new Error(`unsupported HTML tag ${unsupportedHtml}`);
-  }
   const doc = parser.parse(state.content || '', parseEnvironment);
   panel._pmSourceLineMetadata = prosemirrorSourceLineMetadata(state.content || '', parseEnvironment);
   const container = document.createElement('div');
@@ -1456,10 +1463,15 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
       image: node => prosemirrorImageNodeView(node, panel, path),
       list_item: prosemirrorTaskListItemNodeView,
     },
+    handleDOMEvents: {
+      compositionstart(view) { restartProseMirrorCursorBlink(view, true); return false; },
+      compositionend(view) { restartProseMirrorCursorBlink(view, false); return false; },
+    },
     dispatchTransaction(transaction) {
       if (transaction.docChanged && !markdownFormattingWritable(panel, 'view-editor')) return;
       const nextState = view.state.apply(transaction);
       view.updateState(nextState);
+      if (transaction.docChanged || transaction.selectionSet) restartProseMirrorCursorBlink(view);
       refreshMarkdownFormattingToolbar(panel);
       if (transaction.docChanged && transaction.getMeta('yomuxSourceLineRefresh') !== true) {
         panel._pmSource = null;
@@ -1485,6 +1497,7 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   panel._pmDocumentChanged = false;
   panel._pmSourceLines = panel._pmSourceLineMetadata.topLevel;
   panel._pmIgnoredCommentRanges = parseEnvironment.yomuxIgnoredCommentRanges || [];
+  restoreProseMirrorPanelViewState(item, panel);
   delete panel._pmError;
   delete panel._pmFailureSource;
   parts.previewPane.dataset.prosemirrorState = 'ready';
@@ -1550,6 +1563,9 @@ function renderProseMirrorPreviewMode(panel, item, path, state, parts) {
   void ensurePromise.then(ready => {
     if (!ready && prosemirrorPanelInitializationCurrent(panel, item, path, state, ensureGeneration)) {
       renderProseMirrorFailure(panel, path, parts, panel._pmError || t('editor.prosemirrorDidNotInitialize'));
+    }
+    if (prosemirrorPanelInitializationCurrent(panel, item, path, state, ensureGeneration)) {
+      focusFileEditorPanelIfReady(panel, item);
     }
   });
   return true;

@@ -35,9 +35,11 @@ const {
   finishSuite,
 } = require('./layout_test_helper');
 
-require('./editor_preview_info_graph_suite');
+const {runEditorPreviewInfoGraphSuite} = require('./editor_preview_info_graph_suite');
 
-registerTest('settings refresh cannot replace a known revision with unknown metadata', () => {
+async function runEditorPreviewSharedSuite(test, testAsync) {
+
+test('settings refresh cannot replace a known revision with unknown metadata', () => {
   const api = loadYomux('', ['settings-revision']);
   assert.equal(api.applySettingsPayloadForTest({settings: {}, mtime_ns: 100}, {force: true}), true, 'a newer settings revision applies');
   assert.equal(api.applySettingsPayloadForTest({settings: {editor: {autosave_delay_seconds: 0}}, mtime_ns: 100}, {force: true}), false, 'a duplicate revision cannot overwrite the accepted snapshot');
@@ -45,7 +47,7 @@ registerTest('settings refresh cannot replace a known revision with unknown meta
   assert.equal(api.clientSettingsMtimeNsForTest(), 100, 'the accepted revision remains authoritative');
 });
 
-registerTest('notification duration changes do not refresh unrelated runtime surfaces', () => {
+test('notification duration changes do not refresh unrelated runtime surfaces', () => {
   const api = loadYomux('', ['settings-notification-only']);
   const settings = JSON.parse(JSON.stringify(DEFAULT_TEST_SETTINGS));
   api.applySettingsPayloadForTest({settings, defaults: settings, mtime_ns: 1}, {initial: true});
@@ -71,7 +73,7 @@ registerTest('notification duration changes do not refresh unrelated runtime sur
   assert.deepStrictEqual(calls.filter(name => name !== 'renderPreferencesPanels'), [], `a notification-only change leaves terminal, editor, preview, autosave, CSS, theme, layout and interval owners untouched; changed groups: ${changedGroups.join(', ')}`);
 });
 
-registerTest('settings refresh dispatches only the affected runtime owners', () => {
+test('settings refresh dispatches only the affected runtime owners', () => {
   const api = loadYomux('', ['settings-owner-dispatch']);
   const settings = JSON.parse(JSON.stringify(DEFAULT_TEST_SETTINGS));
   api.applySettingsPayloadForTest({settings, defaults: settings, mtime_ns: 1}, {initial: true});
@@ -103,7 +105,7 @@ registerTest('settings refresh dispatches only the affected runtime owners', () 
   assert.ok(!autosaveCalls.includes('applyTerminalRuntimeSettings'), 'autosave delay changes do not touch terminals');
 });
 
-registerTest('YO!info focus changes only select a different canonical worktree and do not mutate graph membership', () => {
+test('YO!info focus changes only select a different canonical worktree and do not mutate graph membership', () => {
   const api = loadYomux('', ['focus-graph']);
   const graph = {
     version: 1,
@@ -137,7 +139,7 @@ registerTest('YO!info focus changes only select a different canonical worktree a
   assert.equal(JSON.stringify(nextInfo.work_graph), beforeGraph, 'focus changes browser selection only; it does not alter canonical graph entities, PRs, or branches');
 });
 
-registerTest('shared work-graph selectors keep tabs, popovers, and metadata on the focused canonical PR', () => {
+test('shared work-graph selectors keep tabs, popovers, and metadata on the focused canonical PR', () => {
   const api = loadYomux('', ['graph-session']);
   const graph = {
     version: 1,
@@ -179,7 +181,7 @@ registerTest('shared work-graph selectors keep tabs, popovers, and metadata on t
   assert.equal(JSON.stringify(tabberTree).includes('legacy'), false, 'Tabber does not show a conflicting legacy project branch');
 });
 
-registerTest('graph-backed TmuxSession PR decoration aggregates ambiguous focused PRs', () => {
+test('graph-backed TmuxSession PR decoration aggregates ambiguous focused PRs', () => {
   const api = loadYomux('', ['aggregate-session']);
   const graph = {
     version: 1,
@@ -212,7 +214,7 @@ registerTest('graph-backed TmuxSession PR decoration aggregates ambiguous focuse
   assert.ok(api.tabMenuDetailText('aggregate-session', info).includes('2 PRs'), 'menu detail keeps the aggregate rather than a random PR number');
 });
 
-registerTestAsync('moving terminal and YO!info YOTabs changes only YOPane layout state, not the canonical work graph', async () => {
+await testAsync('moving terminal and YO!info YOTabs changes only YOPane layout state, not the canonical work graph', async () => {
   const api = loadYomux('', ['1']);
   const graph = {
     version: 1,
@@ -252,7 +254,7 @@ registerTestAsync('moving terminal and YO!info YOTabs changes only YOPane layout
   assert.equal(api.sessionWorkSummaryForTest('1', info).pullRequests[0].number, 80, 'canonical graph selectors remain intact after layout-only movement');
 });
 
-registerTest('YO!info deduplicates graph worktree rows but exposes observed-path evidence', () => {
+test('YO!info deduplicates graph worktree rows but exposes observed-path evidence', () => {
   const api = loadYomux('', ['observation-session']);
   const graph = {
     version: 1,
@@ -300,7 +302,7 @@ registerTest('YO!info deduplicates graph worktree rows but exposes observed-path
   }
 });
 
-registerTest('YO!info graph rows preserve collapse, search, keyboard controls, and narrow Side Pane CSS contracts', () => {
+test('YO!info graph rows preserve collapse, search, keyboard controls, and narrow Side Pane CSS contracts', () => {
   const api = loadYomux('', ['graph-ui']);
   const rows = [{
     id: 'graph-ui-row',
@@ -326,7 +328,7 @@ registerTest('YO!info graph rows preserve collapse, search, keyboard controls, a
   assert.doesNotMatch(css, /\.dv-groupview\[data-pane-role="side"\] \.info-tree-field\s*\{/, 'Vertical Side Panes do not retain a divergent field-stacking copy');
 });
 
-registerTest('YO!info exposes canonical work-graph dimensions and migration-safe grouping depth', () => {
+test('YO!info exposes canonical work-graph dimensions and migration-safe grouping depth', () => {
   const api = loadYomux('', ['1']);
   const keys = api.infoGroupDimensions().map(dimension => dimension.key);
   assert.deepStrictEqual(canonical(keys), [
@@ -341,7 +343,7 @@ registerTest('YO!info exposes canonical work-graph dimensions and migration-safe
   ], 'saved grouping retains the canonical six-level chain and safely caps longer legacy state');
 });
 
-registerTest('YO!info makes normalized branch activity state visible without hiding the branch name', () => {
+test('YO!info makes normalized branch activity state visible without hiding the branch name', () => {
   const api = loadYomux('', ['1']);
   for (const state of ['current', 'worked', 'available', 'missing']) {
     const html = api.infoRecordHtmlForTest({
@@ -364,7 +366,7 @@ registerTest('YO!info makes normalized branch activity state visible without hid
   ], 'relationship projection distinguishes the path worktree current branch from other available repository branches');
 });
 
-registerTest('YO!info retains every canonical branch PR and renders explicit unresolved lookup states', () => {
+test('YO!info retains every canonical branch PR and renders explicit unresolved lookup states', () => {
   const api = loadYomux('', ['1']);
   const html = api.infoRecordHtmlForTest({
     id: 'branch-multiple-prs',
@@ -382,7 +384,7 @@ registerTest('YO!info retains every canonical branch PR and renders explicit unr
   assert.ok(errorHtml.includes('info-tree-pr-lookup-state-error'), 'YO!info distinguishes a lookup failure from a successful no-PR result');
 });
 
-registerTest('YO!info aggregates canonical PR count without collapsing branch-context PRs', () => {
+test('YO!info aggregates canonical PR count without collapsing branch-context PRs', () => {
   const api = loadYomux('', ['1']);
   const record = {
     id: 'branch-two-prs',
@@ -404,6 +406,8 @@ registerTest('YO!info aggregates canonical PR count without collapsing branch-co
   }
 });
 
+
+}
 
 function tmuxWindowButtonElement(session, index, active = false) {
   const button = new TestElement(`tmux-window-${session}-${index}`, 'button');
@@ -514,6 +518,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     if (!ownsNextTest()) return Promise.resolve();
     return registerTestAsync(name, callback);
   };
+  await runEditorPreviewInfoGraphSuite(test, testAsync);
+  await runEditorPreviewSharedSuite(test, testAsync);
   test('frontend primitives have one shared core owner', () => {
     const api = loadYomux('', ['1']);
     const coreSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
@@ -5779,7 +5785,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setInfoTreeGroupCollapsedForTest(appPathGroupKey, false);
     const prGroupHtml = api.infoTreeHtmlForTest(records, ['pr'], {key: 'name', dir: 'asc'});
     assert.ok(/<span class="info-tree-group-dimension">GitHub PR:<\/span>[\s\S]*<span class="info-tree-group-label info-tree-group-label-pr">[\s\S]*>#10<\/a>[\s\S]*App main PR full description/.test(prGroupHtml), 'YO!info PR group headers render as PR: #number description');
-    assert.ok(prGroupHtml.includes(`<span class="info-tree-group-dimension">${api.t('info.field.githubPr')}:</span>`) && prGroupHtml.includes(`<span class="info-tree-group-label info-tree-group-label-pr">${api.t('info.group.none')}</span>`), 'YO!info missing PR group headers render through the shared localized field and empty labels');
+    assert.ok(prGroupHtml.includes(`<span class="info-tree-group-dimension">${api.t('info.field.githubPr')}:</span>`) && prGroupHtml.includes(`<span class="info-tree-pr-lookup-state info-tree-pr-lookup-state-not-requested">${api.t('notify.permission.default')}</span>`), 'YO!info missing PR group headers retain the canonical localized not-requested lookup status');
     const linearGroupHtml = api.infoTreeHtmlForTest(missingSortRecords, ['linear', 'pr'], {key: 'name', dir: 'asc'});
     assert.ok(linearGroupHtml.includes(`<span class="info-tree-group-dimension">${api.t('info.field.linear')}:</span>`) && linearGroupHtml.includes(`<span class="info-tree-group-label info-tree-group-label-linear">${api.t('info.group.none')}</span>`), 'YO!info missing Linear group headers render through the shared localized field and empty labels');
     const pathOnlyHtml = api.infoTreeHtmlForTest(records, ['path']);
@@ -5843,15 +5849,16 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       {kind: 'codex', state: 'working', window_index: 0},
     ]});
     const statusPriorityHtml = api.infoTreeHtmlForTest(statusPriorityRecords, ['tab'], {key: 'tab', dir: 'asc'});
-    const tabSummaryFor = label => {
-      const index = statusPriorityHtml.indexOf(`>[${label}]</`);
-      const start = statusPriorityHtml.lastIndexOf('<summary', index);
-      const end = statusPriorityHtml.indexOf('</summary>', index);
-      return start >= 0 && end >= 0 ? statusPriorityHtml.slice(start, end) : '';
+    const tabSummaryFor = (html, label) => {
+      const index = html.indexOf(`>[${label}]</`);
+      const start = html.lastIndexOf('<summary', index);
+      const end = html.indexOf('</summary>', index);
+      assert.ok(index >= 0 && start >= 0 && end >= 0, `summary exists for ${label}`);
+      return html.slice(start, end);
     };
-    const redTabSummary = tabSummaryFor('red-tab');
-    const yellowTabSummary = tabSummaryFor('yellow-tab');
-    const greenTabSummary = tabSummaryFor('green-tab');
+    const redTabSummary = tabSummaryFor(statusPriorityHtml, 'red-tab');
+    const yellowTabSummary = tabSummaryFor(statusPriorityHtml, 'yellow-tab');
+    const greenTabSummary = tabSummaryFor(statusPriorityHtml, 'green-tab');
     assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--attention/.test(redTabSummary), 'YO!info Tab group aggregates red attention inside the shared tab token above other child tmux sub-window states');
     assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--working/.test(yellowTabSummary) && !yellowTabSummary.includes('status-indicator--cooldown'), 'YO!info Tab group uses the shared precedence where a live working child outranks a stopped cooldown child');
     assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--working/.test(greenTabSummary), 'YO!info Tab group shows green inside the shared tab token when all child tmux sub-windows are working');
@@ -5866,8 +5873,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       {kind: 'codex', state: 'working', window_index: 3},
     ]});
     const exactWindowHtml = api.infoTreeHtmlForTest(exactWindowRecords, ['tab'], {key: 'tab', dir: 'asc'});
-    const exactWindowSummary = tabSummaryFor('exact-window-tab');
-    assert.equal(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--working/.test(exactWindowSummary), false, 'YO!info Tab group uses the representative tmux sub-window state instead of borrowing a green working glyph from a different child window');
+    const exactWindowSummary = tabSummaryFor(exactWindowHtml, 'exact-window-tab');
+    assert.match(exactWindowSummary, /tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--working/, 'YO!info aggregates the working child through the same shared session status owner');
+    assert.match(exactWindowSummary, /agent-window-status-dot--cooldown-working/, 'the group retains both the stopped and working child tones in its shared aggregate ball');
     assert.ok(/data-info-open-ai-window="3"[\s\S]*status-indicator--working/.test(exactWindowHtml), 'YO!info still renders the real working child tmux sub-window row as green');
     const noOwnerRecord = {
       id: 'orphan',
@@ -6065,7 +6073,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 	    assert.ok(centeredSixFlexCss.includes('.info-tree-field-branch .info-tree-field-value') && centeredSixFlexCss.includes('.info-tree-field-ai .info-tree-field-value') && /display:\s*flex[\s\S]*align-items:\s*center[\s\S]*gap:\s*var\(--space-6\)/.test(centeredSixFlexCss) && /\.info-tree-field-branch \.info-tree-meta-updated,\s*\.info-tree-field-ai \.info-tree-trailing-meta\s*\{[^}]*margin-inline-start:\s*auto/.test(infoTreeCss), 'YO!info branch and sub-window recency consume the shared flex-row owner before local trailing metadata alignment');
 	    assert.ok(centeredSixFlexCss.includes('.info-tree-group[data-info-dimension="path"] > summary .info-tree-group-label-line') && /\.info-tree-group\[data-info-dimension="path"\] > summary \.info-tree-meta-path-activity,[\s\S]*\.info-tree-field-path \.info-tree-meta-path-activity\s*\{[\s\S]*margin-inline-start:\s*auto[\s\S]*text-align:\s*end/.test(infoTreeCss), 'YO!info Path activity consumes the shared flex-row owner before local trailing metadata alignment');
 	    assert.ok(/\.info-tree-trailing-meta\s*\{[\s\S]*color:\s*var\(--subwindow-recency-color\)[\s\S]*font:\s*var\(--ui-font-size-2xs\)\/1 var\(--mono-font\)/.test(infoTreeCss), 'YO!info Git commit and sub-window recency inherit one shared trailing-metadata style');
-	    assert.ok(/function infoRecordAiValueHtml\(record, options = \{\}\) \{[\s\S]*\$\{buttonHtml\}\$\{status\}\$\{pid\}\$\{recency\}/.test(infoSource), 'YO!info places PID inline after the button/status and keeps recency trailing');
+	    assert.ok(/function infoRecordAiValueHtml\(record, options = \{\}\) \{[\s\S]*\$\{buttonHtml\}\$\{pid\}\$\{recency\}/.test(infoSource), 'YO!info places PID inline after the button and keeps recency trailing');
 	    assert.ok(/\.info-tree-ai-pid\s*\{[\s\S]*flex:\s*0 0 auto[\s\S]*color:\s*var\(--subwindow-pid-color\)/.test(infoTreeCss), 'YO!info PID stays inline with its muted shared metadata color');
 	    assert.ok(/:root\s*\{[\s\S]*--subwindow-pid-color:\s*var\(--text-muted-soft\)[\s\S]*--subwindow-recency-color:\s*var\(--text-muted-soft\)[\s\S]*body\.theme-light\s*\{[\s\S]*--subwindow-pid-color:\s*var\(--text-muted-cool\)[\s\S]*--subwindow-recency-color:\s*var\(--text-muted-cool\)/.test(tokenCss), 'sub-window PID and recency use the brighter shared muted metadata color in light mode without changing dark mode');
 	    assert.ok(/function infoRecordAiRecencyHtml\(record\)[\s\S]*function infoRecordAiPidHtml\(record\)[\s\S]*tmuxWindowPidText\(record\?\.aiPid\)/.test(infoSource), 'YO!info reuses the shared PID formatter and existing recency formatter');
@@ -8856,8 +8864,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(/function cycleGlobalThemeSetting[\s\S]*?patch\.appearance\.terminal_theme/.test(source), false, '#261: cycleGlobalThemeSetting no longer pins appearance.terminal_theme');
     // Active-terminal cursor: the focused pane's terminal shows the configured cursor color.
     assert.ok(/const DEFAULT_CURSOR_COLOR\s*=\s*'yellow'/.test(source), 'active-terminal cursor: yellow remains the default cursor color');
-    assert.ok(/const UI_COLOR_PRESETS\s*=\s*\{[\s\S]*yellow:\s*\{labelKey:\s*'pref\.appearance\.active_color\.yellow',\s*cursorLabelKey:\s*'pref\.appearance\.editor_cursor_color\.yellow',\s*cursor:\s*\{dark:\s*'#ffea00',\s*light:\s*'#9a6700'\}/.test(source), 'active-terminal cursor: bright yellow cursor color lives in the shared UI color parent with a light-mode variant');
-    assert.ok(/function terminalCursorColorsForSession[\s\S]*?badConnectionCursorStateActive\(\)[\s\S]*?terminalThemeWithBadConnectionCursor\(\{\}\)[\s\S]*?session === focusedPanelItem \? activeTerminalCursorColorForTheme\(displayTheme\) : displayTheme\.cursor[\s\S]*?cursorAccent: displayTheme\.cursorAccent/.test(source), 'active-terminal cursor: focused and unfocused sessions get complete display cursor pairs unless bad connection owns the cursor');
+    assert.ok(/const UI_COLOR_PRESETS\s*=\s*\{[\s\S]*yellow:\s*\{labelKey:\s*'pref\.appearance\.active_color\.yellow',\s*inverseColor:\s*'blue',\s*cursorLabelKey:\s*'pref\.appearance\.editor_cursor_color\.neon-yellow',\s*cursor:\s*\{dark:\s*'#ffea00',\s*light:\s*'#9a6700'\}/.test(source), 'active-terminal cursor: bright yellow cursor color lives in the shared UI color parent with a light-mode variant');
+    assert.ok(/function terminalCursorColorsForSession[\s\S]*?badConnectionCursorStateActive\(\)[\s\S]*?terminalThemeWithBadConnectionCursor\(\{\}\)[\s\S]*?session === focusedPanelItem \? activeTerminalCursorColorForTheme\(\) : displayTheme\.cursor[\s\S]*?cursorAccent: displayTheme\.cursorAccent/.test(source), 'active-terminal cursor: focused and unfocused sessions get complete display cursor pairs unless bad connection owns the cursor');
     assert.ok(/function terminalThemeForSession[\s\S]*?return \{\.\.\.theme, \.\.\.terminalCursorColorsForSession\(session, theme\)\}/.test(source), 'active-terminal cursor: every terminal theme derives its cursor and cursorAccent from the shared cursor owner');
     assert.ok(/item\.term\.options\.cursorBlink = terminalCursorBlinkEnabled\(\)[\s\S]*?item\.term\.options\.theme = terminalThemeForSession\(session, renderTheme\)/.test(source), 'active-terminal cursor: applyTerminalRuntimeSettings updates blink state and themes the active terminal with the configured render cursor color');
     assert.ok(/cursorBlink: typeof terminalCursorBlinkEnabled === 'function' \? terminalCursorBlinkEnabled\(\) : true/.test(source) && /theme: terminalThemeForSession\(session, renderTheme\)/.test(source), 'active-terminal cursor: a newly-created terminal uses shared blink/theme cursor helpers');
@@ -9001,16 +9009,16 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(hasPane(splitPanes, {tabs: ['1', '__yoagent__'], active: '__yoagent__'}), `existing split places YO!agent into the right pane: ${JSON.stringify(splitPanes)}`);
   });
 
-  test('file search deduplicates mirrors and symlink aliases', () => {
-    // file-search dedupe folds mirror + symlink copies, keeps different-content same-name.
+  test('file search deduplicates paths and symlink aliases', () => {
     const api = loadYomux('', ['1']);
     const deduped = api.dedupeFileSearchResults([
       {path: '/a/notes/DIS-1842.md', realpath: '/a/notes/DIS-1842.md', size: 100},
-      {path: '/b/notes/DIS-1842.md', realpath: '/b/notes/DIS-1842.md', size: 100},   // content mirror -> folded
-      {path: '/c/DIS-1842.md', realpath: '/c/DIS-1842.md', size: 250},                // different content -> kept
+      {path: '/b/notes/DIS-1842.md', realpath: '/b/notes/DIS-1842.md', size: 100},
+      {path: '/c/DIS-1842.md', realpath: '/c/DIS-1842.md', size: 250},
+      {path: '/a/notes/DIS-1842.md', realpath: '/a/notes/DIS-1842.md', size: 100},
       {path: '/d/link.md', realpath: '/a/notes/DIS-1842.md', size: 100},              // symlink overlap -> folded
     ]).map(file => file.path);
-    assert.deepStrictEqual([...deduped], ['/a/notes/DIS-1842.md', '/c/DIS-1842.md'], '#25: mirror + symlink copies fold; different-content same-name both survive');
+    assert.deepStrictEqual([...deduped], ['/a/notes/DIS-1842.md', '/b/notes/DIS-1842.md', '/c/DIS-1842.md'], '#25: exact paths and aliases fold; distinct same-size files survive');
     // Unknown-size hits dedupe only by path/realpath (never collapse two same-name unknown-size files).
     const unknown = api.dedupeFileSearchResults([
       {path: '/x/a.md', realpath: '/x/a.md'},
@@ -9055,7 +9063,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/openFileInEditor\(resolved, basenameOf\(resolved\), \{[\s\S]*?viewMode: editorPreviewModeAvailable\(resolved\) \? 'preview' : 'edit'/.test(src), '#133: preview-capable file links open in preview (md/html), else edit');
     assert.ok(/t\('preview\.openFailed'/.test(src), "#133: a failed open surfaces a toast");
     // The handler is wired ONLY to the file-editor preview (path provided), not to yoagent bodies.
-    assert.ok(/renderMarkdownPreviewInto\(container, text, path, \{context, readOnly: state\?\.historical === true(?:, snapshot)?\}\)/.test(src), '#133: the file-editor preview strategy threads the owning path, preview context, and historical read-only state; yoagent bodies pass no path');
+    assert.ok(/renderMarkdownPreviewInto\(container, text, path, \{context, readOnly: state \? !fileEditorStateWritable\(state\) : false(?:, snapshot)?\}\)/.test(src), '#133: the file-editor preview strategy threads the owning path, preview context, and historical read-only state; yoagent bodies pass no path');
   });
 
   test('theme preference radios localize and select one value', () => {
@@ -9080,27 +9088,29 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   });
 
   test('preview and editor font preferences render and apply', () => {
-    // Preview font size is independently configurable when global synchronization is disabled.
+    // Editor and preview font sizes stay paired even when global synchronization is disabled.
     const api = loadYomux('', ['1']);
     api.setActiveLocaleForTest('en');
     api.setClientSettingsPayloadPatchForTest({localeKeyOverrides: {'appearance.preview_font_size': {label: 'common.previewFontSize'}}});
-    api.setClientSettingsPatchForTest({appearance: {sync_font_sizes: false}});
+    api.setClientSettingsPatchForTest({appearance: {sync_font_sizes: false, editor_font_size: 18, preview_font_size: 19}});
     const html = api.preferencesPanelHtmlForTest('');
     assert.ok(/data-preference-section="sizes"[\s\S]*data-setting-path="appearance\.preview_font_size"/.test(html), 'preview font size renders in Sizes preferences');
     assert.ok(html.includes('Preview font size'), 'preview font size preference has a label');
+    assert.ok(/data-setting-path="appearance\.editor_font_size"[^>]*value="18"/.test(html), 'editor font size renders its configured value');
+    assert.ok(/data-setting-path="appearance\.preview_font_size"[^>]*value="18"/.test(html), 'preview font size follows the editor value when stored values differ');
     const source = fs.readFileSync('static/yomux.js', 'utf8');
-    assert.ok(source.includes("let editorPreviewFontSize = initialSetting('appearance.preview_font_size', 14);"), 'preview font size defaults to 14px during bootstrap');
+    assert.ok(source.includes("setEditorAndPreviewFontSizes(numberSetting('appearance.editor_font_size', 14));"), 'editor and preview font sizes share their settings-load owner');
     assert.ok(source.includes("root.setProperty('--editor-preview-font-size'"), 'preview font size writes its own CSS variable');
-    assert.ok(source.includes("numberSetting('appearance.preview_font_size', 14)"), 'preview font size reload preserves the 14px fallback');
     assert.ok(source.includes('class="file-editor-preview-font-panel"'), 'preview toolbar includes a font-size control group');
     assert.ok(source.includes('data-editor-preview-font-step="-1"'), 'preview toolbar includes a decrease button');
     assert.ok(source.includes('data-editor-preview-font-step="1"'), 'preview toolbar includes an increase button');
-    assert.ok(source.includes("saveSettingsPatch(settingPatch('appearance.preview_font_size', next))"), 'preview font toolbar persists the setting');
+    assert.ok(source.includes("saveSettingsPatch(settingPatchForPath('appearance.preview_font_size', next))"), 'preview font toolbar persists both paired settings');
+    assert.ok(/step < 0 && value <= 6\) \|\| \(step > 0 && value >= 28/.test(source), 'preview font controls use the editor font range');
     const css = fs.readFileSync('static/yomux.css', 'utf8');
     assert.ok(/\.file-editor-preview-pane,\s*\n\.file-editor-preview-pane-panel\s*\{[^}]*font-size:\s*var\(--editor-preview-font-size\)/.test(css), 'rendered and split preview panes share the preview font variable owner');
     assert.ok(/\.file-editor-raw-panel\s*\{[^}]*font-size:\s*var\(--editor-font-size\)/.test(css), 'raw editor pane keeps the editor font variable');
     assert.equal(serverSettingsSchema.DEFAULT_SETTINGS.appearance.preview_font_size, 14, 'preview font size default is 14');
-    assert.deepEqual(serverSettingsSchema.SETTING_LIMITS['appearance.preview_font_size'], [6, 32], 'preview font size has server-side limits');
+    assert.deepEqual(serverSettingsSchema.SETTING_LIMITS['appearance.preview_font_size'], [6, 28], 'preview font size has the same limit as editor font size');
   });
 
   test('locale resolution and runtime relocalization stay complete', () => {
@@ -9722,7 +9732,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         'Terminal scrollback',
         'Startup Tips',
         'Show one small Tip',
-        'Theme color',
+        'Global theme color',
         'Deep ocean blue',
         'Envy green',
         'Blood orange',
@@ -9809,7 +9819,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setClientSettingsPatchForTest({file_explorer: {index_exclude_dir_names: ['node_modules', 'backup'], index_exclude_paths: ['glob:**/.uploads/**']}});
     const html = api.preferencesPanelHtmlForTest('');
     const sectionOrder = [...html.matchAll(/data-preference-section="([^"]+)"/g)].map(match => match[1]);
-    const expectedOrder = ['general', 'colors', 'sizes', 'terminal', 'editor_options', 'notifications', 'file_explorer', 'uploads', 'yoagent', 'performance', 'chat', 'github', 'cost', 'yolo'];
+    const expectedOrder = ['general', 'colors', 'sizes', 'terminal', 'editor_options', 'notifications', 'file_explorer', 'uploads', 'yoagent', 'performance', 'chat', 'github', 'cost', 'yolo', 'experimental'];
     assert.deepStrictEqual(sectionOrder, expectedOrder, 'Preferences sections follow the shared File-menu panel order where a matching section exists');
     assert.ok(bootstrapSource.includes('const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([') && bootstrapSource.includes('const FILE_MENU_PREFERENCE_SECTION_ORDER = Object.freeze(['), 'File and Preferences ordering have one shared definition owner');
     const sectionHtml = title => {
@@ -9836,7 +9846,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(fileExplorerHtml.includes('data-setting-path="file_explorer.index_exclude_dir_names"'), false, 'Finder Preferences combines directory names and advanced rules into one control');
     assert.ok(fileExplorerHtml.includes('node_modules\nbackup\nglob:**/.uploads/**'), 'the combined Quick Open control renders directory names and advanced rules in one list');
     assert.ok(/data-setting-path="file_explorer\.index_exclude_paths"[^>]*data-setting-type="list"/.test(fileExplorerHtml), 'Quick Open exclusions use the shared multiline list control');
-    assert.ok(fileExplorerHtml.includes('bare directory name') && fileExplorerHtml.includes('glob:&lt;root-relative glob&gt;') && fileExplorerHtml.includes('regex:&lt;regular expression&gt;'), 'Quick Open exclusion help documents bare directory names plus glob and regex rules');
+    assert.ok(fileExplorerHtml.includes('names, paths') && fileExplorerHtml.includes('glob:&lt;root-relative glob&gt;') && fileExplorerHtml.includes('regex:&lt;regular expression&gt;'), 'Quick Open exclusion help documents names, paths, glob and regex rules');
     assert.deepStrictEqual(canonical(api.quickOpenExclusionSettingPatchForTest(['node_modules', 'backup', '/tmp/generated', 'glob:**/.uploads/**', 'regex:(^|/)target(?:/|$)', 'backup'])), {
       file_explorer: {
         index_exclude_dir_names: ['node_modules', 'backup'],
@@ -9847,34 +9857,29 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.preferenceItemMatches(excludeItem, 'performance ignore glob'), true, 'Preferences search finds Quick Open exclusions through shared performance/ignore/glob aliases');
     const appearanceHtml = sectionHtml('colors');
     assert.ok(appearanceHtml.includes('Global appearance'), 'Colors shows the renamed Global appearance field');
-    assert.ok(appearanceHtml.includes('Theme color'), 'Colors shows the renamed Theme color field');
+    assert.ok(appearanceHtml.includes('Global theme color'), 'Colors shows the renamed Global theme color field');
+    assert.ok(appearanceHtml.indexOf('data-setting-path="appearance.active_color"') < appearanceHtml.indexOf('data-setting-path="appearance.terminal_theme"') && appearanceHtml.indexOf('data-setting-path="appearance.terminal_theme"') < appearanceHtml.indexOf('data-setting-path="appearance.editor_cursor_color"'), 'Global theme color precedes Terminal color theme and Cursor color');
     assert.ok(appearanceHtml.includes('Envy green'), 'Active color Green is labeled Envy green');
     assert.ok(appearanceHtml.includes('Deep ocean blue'), 'Active color Blue is labeled Deep ocean blue');
     assert.ok(appearanceHtml.includes('Blood orange'), 'Active color Orange is labeled Blood orange');
     assert.ok(appearanceHtml.includes('Solar gold'), 'Active color Yellow is labeled Solar gold');
     assert.ok(appearanceHtml.includes('Royal violet'), 'Active color Purple is labeled Royal violet');
     assert.ok(appearanceHtml.includes('Moon white'), 'Active color White is labeled Moon white');
-    assert.ok(appearanceHtml.includes('Signal green'), 'Cursor color Green is labeled Signal green');
-    assert.ok(appearanceHtml.includes('Laser lime'), 'Cursor color Laser lime is available');
-    assert.ok(appearanceHtml.includes('Neon green'), 'Cursor color Neon green is available');
+    assert.equal(appearanceHtml.includes('Laser lime'), false, 'Laser lime is merged into Neon green');
+    assert.ok(appearanceHtml.includes('Neon green'), 'One bright Neon green cursor choice is available');
     assert.ok(appearanceHtml.includes('Neon cyan'), 'Cursor color Neon cyan is available');
     assert.ok(appearanceHtml.includes('Neon magenta'), 'Cursor color Neon magenta is available');
     assert.ok(appearanceHtml.includes('Neon orange'), 'Cursor color Neon orange is available');
-    assert.ok(appearanceHtml.includes('Electric azure'), 'Cursor color Blue is labeled Electric azure');
-    assert.ok(appearanceHtml.includes('Flare orange'), 'Cursor color Orange is labeled Flare orange');
-    assert.ok(appearanceHtml.includes('Lightning yellow'), 'Cursor color Yellow is labeled Lightning yellow');
-    assert.ok(appearanceHtml.includes('Plasma violet'), 'Cursor color Purple is labeled Plasma violet');
-    assert.ok(appearanceHtml.includes('Starlight white'), 'Cursor color White is labeled Starlight white');
     assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.active_color"/.test(appearanceHtml), 'Active color Blue renders as a radio');
     assert.equal(appearanceHtml.includes('data-setting-path="appearance.yolo_rotate_ms"'), false, 'Active YO rotation is removed from Colors');
-    assert.ok(/data-setting-path="appearance\.editor_cursor_color"[\s\S]*data-setting-path="appearance\.active_color"[\s\S]*data-setting-path="appearance\.separator_color"/.test(appearanceHtml), 'Separator and Cursor color stay with the other Colors settings');
-    assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.editor_cursor_color"/.test(appearanceHtml), 'Cursor color Blue renders as a radio');
+    assert.ok(/data-setting-path="appearance\.active_color"[\s\S]*data-setting-path="appearance\.editor_cursor_color"[\s\S]*data-setting-path="appearance\.separator_color"/.test(appearanceHtml), 'Theme, Cursor, and Separator colors stay in the requested order');
+    assert.ok(/type="radio"[^>]*value="neon-cyan"[^>]*data-setting-path="appearance\.editor_cursor_color"/.test(appearanceHtml), 'Cursor color Neon cyan renders as a radio');
     const preferencesSource = fs.readFileSync('static/yomux.js', 'utf8');
     assert.ok(/function layoutModePreferenceChoices\(\)\s*\{[\s\S]*layoutModeValues\.map\(value => \(\{value, label: t\(`menu\.view\.layout\.\$\{value\}`\)\}\)\)/.test(preferencesSource), 'Default layout choices derive from the shared View layout modes');
     assert.ok(/function activeColorPreferenceChoices\(\)\s*\{[\s\S]*UI_COLOR_CHOICES\.map\(value => activeColorPreferenceChoice\(value, t\(UI_COLOR_PRESETS\[value\]\.labelKey\)\)\)/.test(preferencesSource), 'Active color choices derive labels from the shared UI color parent');
     assert.ok(/function separatorColorPreferenceChoices\(\)[\s\S]*clientSettingsPayload\?\.choices\?\.\['appearance\.separator_color'\][\s\S]*SEPARATOR_COLOR_CHOICES[\s\S]*\.map\(separatorColorPreferenceChoice\)/.test(preferencesSource), 'Separator color choices sync to the backend allowlist with a local fallback');
     assert.ok(/function cursorColorPreferenceChoices\(\)\s*\{[\s\S]*clientSettingsPayload\?\.choices\?\.\['appearance\.editor_cursor_color'\][\s\S]*CURSOR_COLOR_CHOICES[\s\S]*\.map\(cursorColorPreferenceChoice\)/.test(preferencesSource), 'Cursor color choices sync to the backend allowlist with a local fallback');
-    assert.ok(/function cursorColorPreferenceChoice\(value\)\s*\{[\s\S]*preset\?\.cursorLabelKey \? t\(preset\.cursorLabelKey\) : preferenceChoiceLabel\(value\)/.test(preferencesSource), 'Cursor color labels use cursor-specific bright color names from the shared parent');
+    assert.ok(preferencesSource.includes("pref.appearance.editor_cursor_color.dark-${value.replace(/^neon-/, '')}"), 'Cursor labels follow the displayed light-mode palette');
     assert.ok(new RegExp(`preferences-radio-swatches joined[\\s\\S]*--preferences-radio-swatch:#3b82f6[\\s\\S]*--preferences-radio-swatch:${UI_PINS.textSelectionBg}`).test(appearanceHtml), 'Active color Blue radio shows connected actual dark/light accent swatches');
     assert.ok(/data-setting-path="appearance\.pane_ring_opacity"[^>]*data-setting-type="range"[^>]*min="5"[^>]*max="100"/.test(appearanceHtml), 'Pane ring opacity renders as a 5-100 Appearance slider');
     assert.equal(appearanceHtml.includes('data-setting-path="appearance.inactive_pane_gradient"'), false, 'Inactive pane gradient is removed from Appearance');
@@ -9909,7 +9914,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(sectionHtml('general').includes('data-setting-path="general.reload_on_update"'), false, 'Notify on server update no longer lives in General');
     // the GitHub section carries the watched-PRs list field.
     assert.ok(html.includes('data-setting-path="github.watched_prs"'), 'the GitHub section has the watched_prs list field');
-    assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['pref.appearance.pane_ring_opacity.help'], 'Percent, 5–100. This is the ring drawn over the ACTIVE content edge; lower values make the green/red pane ring fainter.', 'Pane ring opacity help describes the ACTIVE content-edge ring');
+    assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['pref.appearance.pane_ring_opacity.help'], 'Opacity of the active pane outline.', 'Pane ring opacity help describes the active outline');
     const settingsRuntimeSource = fs.readFileSync('static_src/js/yomux/50_editor_settings_runtime.js', 'utf8');
     assert.ok(settingsRuntimeSource.includes("Math.max(5, Math.min(100, numberSetting('appearance.pane_ring_opacity', 75)))"), 'Pane ring opacity runtime clamp allows 5%');
     assert.ok(settingsRuntimeSource.includes("root.setProperty('--pane-active-ring-opacity', `${percent}%`)"), 'The active pane ring opacity follows the 5-100% preference');
@@ -10335,7 +10340,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(trackpadApi.autoFocusCanFollowCursorForTest(), true, 'cursor-capable iPads retain passive auto-focus');
   });
 
-  registerTest('open-file identity and in-flight opens stay on the file-state record', () => {
+  test('open-file identity and in-flight opens stay on the file-state record', () => {
     const api = loadYomux('', ['file-state-owner']);
     const path = '/repo/README.md';
     const identity = {file_identity: 'id:readme'};

@@ -822,9 +822,10 @@ class StatsCurrentTranscriptUsageScanner:
             ):
                 try:
                     with path.open("rb") as handle:
-                        record = session_files.transcript_json_record(
-                            handle.readline().rstrip(b"\r\n")
-                        )
+                        raw_line = session_files.read_transcript_line(handle)
+                        if not raw_line.endswith((b"\n", b"\r")):
+                            continue
+                        record = session_files.transcript_json_record(raw_line.rstrip(b"\r\n"))
                 except OSError:
                     continue
                 if not isinstance(record, dict) or record.get("type") != "session_meta":
@@ -1134,7 +1135,7 @@ class StatsCurrentTranscriptUsageScanner:
                         counters.budget_exhausted = True
                         break
                     remaining = current_size - record.offset - read_bytes
-                    raw_line = handle.readline(remaining)
+                    raw_line = session_files.read_transcript_line(handle, maximum_bytes=remaining)
                     if not raw_line:
                         break
                     read_bytes += len(raw_line)

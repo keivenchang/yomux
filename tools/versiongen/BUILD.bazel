@@ -1,16 +1,25 @@
 load("@rules_go//go:def.bzl", "go_binary")
 
-exports_files(["main.go"])
+exports_files([
+    "BUILD.bazel",
+    "main.go",
+])
 
 go_binary(
     name = "versiongen",
     srcs = ["main.go"],
-    deps = ["//internal/productversion:productversion_lib"],
     visibility = ["//visibility:public"],
+    deps = ["//internal/productversion:productversion_lib"],
 )
 
 filegroup(
     name = "qualified_sources",
-    srcs = glob(["**"], exclude = ["**/*.lock", "**/*.log"]),
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.lock",
+            "**/*.log",
+        ],
+    ),
     visibility = ["//:__pkg__"],
 )

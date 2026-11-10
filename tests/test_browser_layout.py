@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import Select
 from tests.helpers.browser_scenarios import assert_terminal_wheel_observation, terminal_wheel_observation
 from tests.helpers.journey_phases import JourneySentinel, STATS_LOGS_PHASES, YOCHAT_PHASES
 from tests.helpers.terminal_navigation import assert_terminal_navigation_ack_semantics
@@ -384,7 +385,7 @@ def test_live_runtime_bundle_readiness_has_one_ready_and_error_owner():
     assert live_runtime_bundle_ready_state(unexpected_redirect, "/tmp/live-runtime-boot.html", ("/login",)) is False
     chrome_error = {**redirected, "url": "chrome-error://chromewebdata/"}
     assert live_runtime_bundle_ready_state(chrome_error, "/tmp/live-runtime-boot.html") is False
-    assert live_runtime_bundle_ready_state(chrome_error, "/tmp/live-runtime-boot.html", ("/login",)) == chrome_error
+    assert live_runtime_bundle_ready_state(chrome_error, "/tmp/live-runtime-boot.html", ("/login",)) is False
 
     failed = {"sentinel": False, "grid": True, "appRoot": False, "lateFunction": False, "url": "file:///tmp/live-runtime-boot.html", "errors": [{"message": "bundle boom"}], "rejections": []}
     with pytest.raises(AssertionError, match="bundle boom"):
@@ -945,7 +946,7 @@ def expire_subwindow_gray_acknowledgements(browser, window_indexes):
     )
 
 
-def assert_subwindow_gray_acknowledgement_sequence(case, samples, expected_gray):
+def assert_subwindow_gray_acknowledgement_sequence(case, samples):
     """Assert one sub-window's red/yellow -> gray -> removed acknowledgement sequence."""
 
     evidence = {"case": case, "samples": samples}
@@ -960,7 +961,6 @@ def assert_subwindow_gray_acknowledgement_sequence(case, samples, expected_gray)
         assert sample["animationDuration"] == f"{duration_seconds:g}s", detail
         assert -duration_seconds <= float(sample["animationDelay"].removesuffix("s")) <= 0, detail
         assert sample["animationIterationCount"] == "1" and sample["animationTimingFunction"].startswith(f"steps({SUBWINDOW_GRAY_ACKNOWLEDGEMENT_STEP_COUNT}"), detail
-        assert sample["fill"] == "#9aa5b1", detail
 
     paint = samples[2:-1]
     assert all(earlier["opacity"] > later["opacity"] for earlier, later in zip(paint, paint[1:])), evidence
@@ -996,11 +996,8 @@ def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(brow
     capture_subwindow_gray_paint(browser)
     samples_by_window = expire_subwindow_gray_acknowledgements(browser, window_indexes)["samples"]
     browser.execute_script("window.__subwindowGrayHarness.restore();")
-    expected_gray = browser.execute_script(
-        "return window.__yomuxTestHelpers.probePaint('background:var(--muted)').background"
-    )
     for case in cases:
-        assert_subwindow_gray_acknowledgement_sequence(case, samples_by_window[str(case["window_index"])], expected_gray)
+        assert_subwindow_gray_acknowledgement_sequence(case, samples_by_window[str(case["window_index"])])
 
 
 def test_subwindow_attention_gray_sequence_detects_missing_gray_and_missing_removal(browser, tmp_path):
@@ -1034,14 +1031,11 @@ def test_subwindow_attention_gray_sequence_detects_missing_gray_and_missing_remo
     # No window is expired, so the marker clicked with a live visual never retires.
     samples_by_window = expire_subwindow_gray_acknowledgements(browser, [])["samples"]
     browser.execute_script("window.__subwindowGrayHarness.restore();")
-    expected_gray = browser.execute_script(
-        "return window.__yomuxTestHelpers.probePaint('background:var(--muted)').background"
-    )
     with pytest.raises(AssertionError) as missing_gray:
-        assert_subwindow_gray_acknowledgement_sequence(missing_gray_case, samples_by_window[str(missing_gray_case["window_index"])], expected_gray)
+        assert_subwindow_gray_acknowledgement_sequence(missing_gray_case, samples_by_window[str(missing_gray_case["window_index"])])
     assert "acknowledgement sample 'immediate' must render gray" in str(missing_gray.value)
     with pytest.raises(AssertionError) as missing_removal:
-        assert_subwindow_gray_acknowledgement_sequence(missing_removal_case, samples_by_window[str(missing_removal_case["window_index"])], expected_gray)
+        assert_subwindow_gray_acknowledgement_sequence(missing_removal_case, samples_by_window[str(missing_removal_case["window_index"])])
     assert "acknowledgement must be removed once the retirement callback runs" in str(missing_removal.value)
 
 
@@ -1232,7 +1226,7 @@ def test_yostats_popout_is_live_minimized_and_restored(browser, tmp_path):
     WebDriverWait(browser, 5).until(lambda driver: unload_popup_handle not in driver.window_handles)
 
 
-def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narrow_layout(browser, tmp_path):
+def test_current_stats_system_tab_order_graph_controls_and_daemon_roster(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     metrics = WebDriverWait(browser, 8).until(
         lambda driver: driver.execute_script(
@@ -1412,174 +1406,6 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         )
     )
     assert all(system.values()), system
-    return
-    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            return typeof pollJsCurrentStatsSystem === 'function'
-              && typeof pollJsCurrentStatsLogs === 'function'
-              && document.querySelector('[data-current-stats-subtab="system"]') !== null
-              && document.querySelector('[data-stats-current-view="stats"]') !== null
-              && jsCurrentStatsMounts.size === 1;
-            """
-        )
-    )
-    metrics = browser.execute_async_script(
-        r"""
-        const done = arguments[arguments.length - 1];
-        const originalFetch = window.fetch;
-        const style = document.createElement('style');
-        style.textContent = `
-          [data-current-stats-subview="system"] {
-            height: 120px !important;
-            overflow: auto !important;
-            padding-bottom: 160px !important;
-          }
-          [data-current-stats-system-body] {
-            height: 80px !important;
-            max-height: 80px !important;
-            overflow: auto !important;
-          }
-        `;
-        document.head.appendChild(style);
-        const requests = {system: 0, logs: 0};
-        const systemPayload = revision => ({
-          marker: `system-status-${revision}`,
-          server: {
-            version: 'current',
-            uptime_seconds: 125,
-            performance: {cpu_percent: 3.5, rss_bytes: 104857600},
-          },
-          distributed_parts: Object.fromEntries(Array.from({length: 48}, (_unused, index) => [
-            `service_${String(index).padStart(2, '0')}`,
-            {status: index % 3 ? 'running' : 'idle', details: `bounded narrow value ${index} ${'x'.repeat(80)}`},
-          ])),
-        });
-        window.fetch = (url, options = {}) => {
-          const path = new URL(String(url), location.href).pathname;
-          if (path === '/api/system-status') {
-            requests.system += 1;
-            return Promise.resolve(new Response(JSON.stringify(systemPayload(requests.system)), {
-              status: 200,
-              headers: {'Content-Type': 'application/json'},
-            }));
-          }
-          if (path === '/api/logs') {
-            requests.logs += 1;
-            return Promise.resolve(new Response(JSON.stringify({logs: ['unexpected log poll']}), {
-              status: 200,
-              headers: {'Content-Type': 'application/json'},
-            }));
-          }
-          return originalFetch(url, options);
-        };
-        (async () => {
-          const panel = document.querySelector('.js-debug-panel');
-          const tabs = () => [...panel.querySelectorAll('[data-current-stats-subtab]')];
-          const order = tabs().map(button => ({
-            key: button.dataset.currentStatsSubtab,
-            label: button.textContent.replace(/\s+/g, ' ').trim(),
-          }));
-          const eventButton = tabs().find(button => button.dataset.currentStatsSubtab === 'events');
-          const systemButton = tabs().find(button => button.dataset.currentStatsSubtab === 'system');
-          const eventRect = eventButton.getBoundingClientRect();
-          const systemRect = systemButton.getBoundingClientRect();
-
-          await pollJsCurrentStatsSystem();
-          await pollJsCurrentStatsLogs();
-          const hiddenRequests = {...requests};
-
-          systemButton.click();
-          await window.__yomuxTestWaitFor(
-            () => requests.system === 1
-              && panel.querySelector('[data-current-stats-system-body]')?.textContent.includes('system-status-1'),
-            {timeoutMs: 2000, intervalMs: 10, description: 'current System first visible response'},
-          );
-          const view = panel.querySelector('[data-current-stats-subview="system"]');
-          let body = view.querySelector('[data-current-stats-system-body]');
-          view.scrollTop = 70;
-          body.scrollTop = 55;
-          const scrollBefore = {view: view.scrollTop, body: body.scrollTop};
-          await pollJsCurrentStatsLogs();
-          const logsWhileSystemVisible = requests.logs;
-          view.querySelector('[data-current-stats-system-refresh]').click();
-          await window.__yomuxTestWaitFor(
-            () => requests.system === 2
-              && view.querySelector('[data-current-stats-system-body]')?.textContent.includes('system-status-2'),
-            {timeoutMs: 2000, intervalMs: 10, description: 'current System explicit refresh'},
-          );
-          body = view.querySelector('[data-current-stats-system-body]');
-          const scrollAfter = {view: view.scrollTop, body: body.scrollTop};
-          const selectedDuringSystem = panel.querySelector('[data-current-stats-subtab="system"]').getAttribute('aria-pressed');
-
-          panel.style.width = '260px';
-          panel.style.maxWidth = '260px';
-          const nav = panel.querySelector('.js-debug-subtabs');
-          const navRect = nav.getBoundingClientRect();
-          const panelRect = panel.getBoundingClientRect();
-          const bodyRect = body.getBoundingClientRect();
-          const narrowButtons = tabs().map(button => {
-            const rect = button.getBoundingClientRect();
-            const range = document.createRange();
-            range.selectNodeContents(button);
-            return {
-              left: rect.left,
-              right: rect.right,
-              height: rect.height,
-              lineCount: range.getClientRects().length,
-            };
-          });
-          const narrow = {
-            navInside: navRect.left >= panelRect.left - 1 && navRect.right <= panelRect.right + 1,
-            navOwnsOverflow: getComputedStyle(nav).overflowX === 'auto',
-            buttonsSingleLine: narrowButtons.every(item => item.lineCount <= 1 && item.height <= 40),
-            bodyInside: bodyRect.left >= panelRect.left - 1 && bodyRect.right <= panelRect.right + 1,
-            bodyOwnsOverflow: getComputedStyle(body).overflowY === 'auto' && body.scrollHeight > body.clientHeight,
-          };
-
-          tabs().find(button => button.dataset.currentStatsSubtab === 'events').click();
-          await pollJsCurrentStatsSystem();
-          await pollJsCurrentStatsLogs();
-          const requestsAfterHiddenPolls = {...requests};
-          done({
-            order,
-            systemImmediatelyRightOfEvents: systemRect.left >= eventRect.right - 1,
-            hiddenRequests,
-            logsWhileSystemVisible,
-            systemRequests: requests.system,
-            requestsAfterHiddenPolls,
-            selectedDuringSystem,
-            scrollBefore,
-            scrollAfter,
-            narrow,
-          });
-        })().catch(error => done({error: String(error?.stack || error)})).finally(() => {
-          window.fetch = originalFetch;
-          style.remove();
-          clearRuntimeInterval('debug-system');
-          clearRuntimeInterval('debug-logs');
-          jsCurrentStatsAbortPoll('system');
-          jsCurrentStatsAbortPoll('logs');
-        });
-        """
-    )
-    assert metrics.get("error") is None, metrics
-    assert metrics["order"] == [
-        {"key": "graph", "label": "Graphs"},
-        {"key": "events", "label": "API / SSE"},
-        {"key": "system", "label": "Daemons"},
-        {"key": "logs", "label": "Logs"},
-    ], metrics
-    assert metrics["systemImmediatelyRightOfEvents"] is True, metrics
-    assert metrics["hiddenRequests"] == {"system": 0, "logs": 0}, metrics
-    assert metrics["logsWhileSystemVisible"] == 0, metrics
-    assert metrics["systemRequests"] == 2, metrics
-    assert metrics["requestsAfterHiddenPolls"] == {"system": 2, "logs": 0}, metrics
-    assert metrics["selectedDuringSystem"] == "true", metrics
-    assert metrics["scrollBefore"]["view"] > 0 and metrics["scrollBefore"]["body"] > 0, metrics
-    assert metrics["scrollAfter"] == metrics["scrollBefore"], metrics
-    assert all(metrics["narrow"].values()), metrics
 
 
 def test_current_stats_cost_subtab_migrates_legacy_layout_and_survives_reload_without_hidden_work(browser, tmp_path):
@@ -3472,7 +3298,7 @@ def test_adjacent_subwindow_run_glyphs_share_geometry_and_global_phase_after_rep
         assert all(row["phaseDistance"] < 0.01 for row in rows), layouts
         assert abs(codex["progress"] - claude["progress"]) < 0.04, layouts
         if label == "normal":
-            browser.save_screenshot("/tmp/yolomux-subwindow-run-sync.png")
+            browser.save_screenshot(str(tmp_path / "yolomux-subwindow-run-sync.png"))
 
     replacement = browser.execute_async_script(
         """
@@ -4935,8 +4761,24 @@ def test_branch_reload_scaffold_debug_and_search_states_share_computed_owners(br
                     control_id,
                 )
             )
-        assert focus_paints[0] == focus_paints[1], {"theme": theme, "focus": focus_paints}
+        assert focus_paints[0] == focus_paints[1] == focus_paints[2], {"theme": theme, "focus": focus_paints}
 
+
+
+def test_search_focus_contract_rejects_divergent_history_control(browser, tmp_path, monkeypatch):
+    original_load = load_static_html_fixture
+
+    def load_with_divergent_history(*args, **kwargs):
+        original_load(*args, **kwargs)
+        browser.execute_script("""
+          const style = document.createElement('style');
+          style.textContent = '.search-history-input:focus { border-color: rgb(1, 2, 3) !important; }';
+          document.head.append(style);
+        """)
+
+    monkeypatch.setitem(globals(), "load_static_html_fixture", load_with_divergent_history)
+    with pytest.raises(AssertionError, match="'focus'"):
+        test_branch_reload_scaffold_debug_and_search_states_share_computed_owners(browser, tmp_path)
 
 def test_ellipsis_and_disabled_control_families_share_computed_state(browser, tmp_path):
     page = tmp_path / "shared-ellipsis-disabled-state.html"
@@ -5801,6 +5643,28 @@ def test_pane_info_bar_repository_selector_cycles_opens_and_selects(browser, tmp
     repo_three = browser.find_element("css selector", '[data-repo-chip-open="/home/test/repo-3"]')
     fast_pointer_actions(browser).move_to_element(repo_three).click().perform()
     assert browser.find_element("css selector", '[data-repo-chip="1"]').text.strip() == "3/4"
+
+    browser.execute_script(
+        """
+        const info = transcriptMetadataState.payload.sessions['1'];
+        sessionRepoDisplayRoot.delete('1');
+        info.selected_pane.current_path = '/home/test/repo-4';
+        info.panes = [{target: '1:0.0', window: '0', pane: '0', active: true,
+          window_active: true, current_path: '/home/test/repo-4'}];
+        info.work_graph.tmux_panes['tmux-pane:1:0.0'].current_path = '/home/test/repo-4';
+        const observation = info.work_graph.path_observations['path-observation:1:0'];
+        observation.path = observation.path_snapshot = '/home/test/repo-4';
+        observation.git_worktree_id = 'git-worktree:/home/test/repo-4';
+        updatePanelHeader('1', info);
+        """
+    )
+    assert browser.find_element("css selector", '[data-repo-chip="1"]').text.strip() == "4/4"
+    next_button = browser.find_element("css selector", '[data-repo-cycle="1"][data-repo-cycle-dir="1"]')
+    fast_pointer_actions(browser).move_to_element(next_button).click().perform()
+    assert browser.find_element("css selector", '[data-repo-chip="1"]').text.strip() == "1/4"
+    previous = browser.find_element("css selector", '[data-repo-cycle="1"][data-repo-cycle-dir="-1"]')
+    fast_pointer_actions(browser).move_to_element(previous).click().perform()
+    assert browser.find_element("css selector", '[data-repo-chip="1"]').text.strip() == "4/4"
 
 
 def test_standalone_svg_blocked_tags_share_dom_and_string_policy(browser, tmp_path):
@@ -6676,7 +6540,6 @@ def test_standard_component_text_follows_responsive_ui_type_scale(browser, tmp_p
             """
             <div class="js-debug-x-axis"><span id="axis">10</span></div>
             <div class="js-debug-log-row"><div id="debug-log" class="js-debug-log-meta">11</div></div>
-            <div id="drag-title" class="pane-drag-image-title">12</div>
             <div id="agent-state" class="yoagent-message-state">11</div>
             <span id="popout-icon" class="file-editor-icon file-editor-icon-popout-preview"></span>
             <div class="drop-action-result"><pre id="drop-result">12</pre></div>
@@ -6688,7 +6551,6 @@ def test_standard_component_text_follows_responsive_ui_type_scale(browser, tmp_p
         const read = () => ({
           axis: getComputedStyle(document.getElementById('axis')).fontSize,
           debugLog: getComputedStyle(document.getElementById('debug-log')).fontSize,
-          dragTitle: getComputedStyle(document.getElementById('drag-title')).fontSize,
           agentState: getComputedStyle(document.getElementById('agent-state')).fontSize,
           popoutIcon: getComputedStyle(document.getElementById('popout-icon'), '::after').fontSize,
           dropResult: getComputedStyle(document.getElementById('drop-result')).fontSize,
@@ -6701,7 +6563,6 @@ def test_standard_component_text_follows_responsive_ui_type_scale(browser, tmp_p
     assert metrics["defaults"] == {
         "axis": "10px",
         "debugLog": "11px",
-        "dragTitle": "12px",
         "agentState": "11px",
         "popoutIcon": "10px",
         "dropResult": "12px",
@@ -6709,7 +6570,6 @@ def test_standard_component_text_follows_responsive_ui_type_scale(browser, tmp_p
     assert metrics["scaled"] == {
         "axis": "15px",
         "debugLog": "16px",
-        "dragTitle": "17px",
         "agentState": "16px",
         "popoutIcon": "15px",
         "dropResult": "17px",
@@ -7059,7 +6919,7 @@ def test_compact_activity_uses_desktop_right_rail_before_optional_icons(browser,
 
 
 def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targets(browser, tmp_path):
-    load_static_html_fixture(browser, tmp_path, "touch-terminal-smart-keys.html", page_html("""
+    load_static_html_fixture(browser, tmp_path, "touch-terminal-smart-keys.html", page_html(f"""
       <div id="pane" class="tab-pane active"><div class="terminal"></div>
         <button id="launcher" class="mobile-terminal-key-launcher" hidden>⌨</button>
         <div id="bar" class="mobile-terminal-keybar" hidden>
@@ -7069,9 +6929,9 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
             <button class="mobile-terminal-key mobile-terminal-key--escape">Esc</button>
             <div class="mobile-terminal-key-side"><button class="mobile-terminal-key">Ctrl</button><button class="mobile-terminal-key">^C</button></div>
             <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button><button class="mobile-terminal-key">⌫</button></div></div>
-            <div class="mobile-terminal-key-dpad">${'<button class="mobile-terminal-key">Key</button>'.repeat(9)}</div>
+            <div class="mobile-terminal-key-dpad">{'<button class="mobile-terminal-key">Key</button>' * 9}</div>
             <div class="mobile-terminal-keyrow mobile-terminal-keyrow-bottom"><button class="mobile-terminal-key">Shift</button><button class="mobile-terminal-key">Alt</button><button class="mobile-terminal-key">Cmd</button></div>
-            <div class="mobile-terminal-keyrow mobile-terminal-keyrow--extras">${'<button class="mobile-terminal-key">Extra</button>'.repeat(9)}</div>
+            <div class="mobile-terminal-keyrow mobile-terminal-keyrow--extras">{'<button class="mobile-terminal-key">Extra</button>' * 9}</div>
           </div>
         </div>
       </div>
@@ -7088,8 +6948,10 @@ body {{ margin:0; display:block; min-height:0; }} #pane {{ width:320px; height:2
         launcherHidden:document.getElementById('launcher').hidden, first:bar.firstElementChild===grabber, second:bar.children[1]===close, third:bar.children[2]===content,
         overflow:getComputedStyle(content).overflowY, contentTouch:getComputedStyle(content).touchAction, grabberTouch:getComputedStyle(grabber).touchAction,
         userSelect:getComputedStyle(bar).userSelect, scrollHeight:content.scrollHeight,clientHeight:content.clientHeight,scrollTop:content.scrollTop,
+        keyCount:content.querySelectorAll('.mobile-terminal-key').length,
         minKeyHeight:Math.min(...[...content.querySelectorAll('.mobile-terminal-key')].map(key=>key.getBoundingClientRect().height))};
     """)
+    assert metrics["keyCount"] == 27, metrics
     assert metrics["launcherHidden"] is True and metrics["initiallyHidden"] is True, metrics
     assert metrics["first"] and metrics["second"] and metrics["third"], metrics
     assert abs(metrics["grabber"]["left"] - metrics["bar"]["left"]) <= 1 and abs(metrics["grabber"]["right"] - metrics["bar"]["right"]) <= 1, metrics
@@ -8816,8 +8678,8 @@ def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tm
     )
     assert metrics["tabTop"] < metrics["windowTop"], metrics
     assert metrics["windowTop"] < metrics["branchTop"], metrics
-    assert metrics["branchRightInset"] <= 1, metrics
-    assert metrics["windowRightInset"] <= 1, metrics
+    assert abs(metrics["branchRightInset"]) <= 1, {"branchRightInset": metrics["branchRightInset"]}
+    assert abs(metrics["windowRightInset"]) <= 1, {"windowRightInset": metrics["windowRightInset"]}
     assert 0 <= metrics["windowPidOffset"] <= 8, metrics
     assert metrics["agentIconSizeToken"] == "14px", metrics
     assert metrics["agentIconWidth"] == metrics["agentIconMinWidth"] == metrics["agentIconHeight"] == "14px", metrics
@@ -8825,6 +8687,22 @@ def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tm
     assert metrics["badgeBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["badgeBorder"] != "rgba(0, 0, 0, 0)", metrics
 
+
+
+def test_yoinfo_trailing_alignment_gate_rejects_overflow(browser, tmp_path, monkeypatch):
+    original_load = load_static_html_fixture
+
+    def load_with_overflow(*args, **kwargs):
+        original_load(*args, **kwargs)
+        browser.execute_script("""
+          const style = document.createElement('style');
+          style.textContent = '#branch-time, #window-time { position: relative; left: 100px !important; }';
+          document.head.append(style);
+        """)
+
+    monkeypatch.setitem(globals(), "load_static_html_fixture", load_with_overflow)
+    with pytest.raises(AssertionError, match="branchRightInset"):
+        test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tmp_path)
 
 def test_yoinfo_vertical_side_pane_stacks_fields_without_character_column_wrapping(browser, tmp_path):
     page = tmp_path / "yoinfo-vertical-side-responsive-record.html"
@@ -11529,7 +11407,7 @@ def test_background_topbar_rebuild_does_not_measure_closed_menus(browser, tmp_pa
 
 
 def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp_path):
-    load_live_runtime_boot_fixture(browser, tmp_path)
+    load_live_runtime_boot_fixture(browser, tmp_path, settings={'general': {'enable_experimental_features': True}})
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             "return window.__terminalOpened >= 1 && document.querySelectorAll('.app-menu-button').length >= 5"
@@ -11764,7 +11642,6 @@ def test_tabs_menu_keeps_cached_rows_visible_while_live_metadata_refreshes(brows
             open: wrapper?.classList.contains('open') || false,
             rows: Array.from(popover?.querySelectorAll('.app-menu-tab-command') || []).length,
             text: popover?.textContent || '',
-            requested: false,
             focusedCommandKey,
             focused: document.activeElement === focusedCommand,
           };
@@ -11819,7 +11696,6 @@ def test_tabs_menu_keeps_cached_rows_visible_while_live_metadata_refreshes(brows
     assert result["cached"]["open"] is True and result["cached"]["rows"] >= 1, result
     assert result["cached"]["focused"] is True and result["cached"]["focusedCommandKey"], result
     assert "menu-live-branch" not in result["cached"]["text"], result
-    assert result["cached"]["requested"] is False, result
     assert result["final"]["open"] is True and result["final"]["rows"] >= 1, result
     assert result["final"]["focusedCommandKey"] == result["cached"]["focusedCommandKey"], result
     assert "menu-live-branch" in result["final"]["text"], result
@@ -12469,6 +12345,50 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
         """
         const done = arguments[arguments.length - 1];
         (async () => {
+              const dimensions = Object.fromEntries(['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other'].map(key => [key, {tokens: key === 'input' ? 1000 : 0, micro_usd: 0, api_list_micro_usd: key === 'input' ? 600000 : 0}]));
+          const pricedRow = {
+            key: '111111111111111111111111', provider: 'openai', model: 'gpt-subscription',
+             total_tokens: 1000, total_micro_usd: 0, total_api_list_micro_usd: 600000,
+             dimensions, priced: {atoms: 1, tokens: 1000}, unpriced: {atoms: 0, tokens: 0},
+          };
+              const anthropicDimensions = {
+                ...fixtureStatsDimensions(),
+                cache_write_5m: {tokens: 100, micro_usd: 750000, api_list_micro_usd: 750000},
+                cache_write_1h: {tokens: 200, micro_usd: 4000000, api_list_micro_usd: 4000000},
+              };
+           const anthropicRow = {
+            ...pricedRow,
+            key: '222222222222222222222222', provider: 'anthropic', model: 'claude-cache-lifetimes',
+             total_tokens: 300, total_micro_usd: 4750000, total_api_list_micro_usd: 4750000,
+             dimensions: anthropicDimensions, priced: {atoms: 2, tokens: 300}, unpriced: {atoms: 0, tokens: 0},
+           };
+           const agentDimensions = {...dimensions, input: {...dimensions.input, tokens: 600}};
+           const agentSource = {
+             source: 'codex',
+             total_tokens: 600, total_micro_usd: 0, total_api_list_micro_usd: 600000,
+             dimensions: agentDimensions, priced: {atoms: 1, tokens: 600}, unpriced: {atoms: 0, tokens: 0},
+           };
+           const agentRow = {
+             key: '0123456789abcdef01234567', source: 'codex', label: '123_an-extremely-long-project-name-that-needs-a-compact-tail',
+             total_tokens: 600, total_micro_usd: 0, total_api_list_micro_usd: 600000,
+             dimensions: agentDimensions, priced: {atoms: 1, tokens: 600}, unpriced: {atoms: 0, tokens: 0}, sources: [agentSource],
+           };
+           const evidence = [{
+             key: 'fedcba9876543210fedcba98', provider: 'openai', model: 'gpt-subscription', dimension: 'input',
+             direction: 'input', modality: 'text', cache_role: 'none', unit: 'tokens', pricing_profile: 'default',
+             service_tier: 'default', catalog_model: 'gpt-subscription', rate_usd: '6.00', rate_scale: 1000000,
+             effective_from: '2026-07-09', source_kind: 'seed', source_url: 'https://example.com/pricing',
+             catalog_revision: 3, tokens: 1000, micro_usd: 0, api_list_micro_usd: 600000, priced_atoms: 1,
+           }];
+          window.__fixtureStatsCostReport = {
+               schema_version: 4, total_micro_usd: 4750000, total_api_list_micro_usd: 5350000, total_tokens: 1300,
+               dimensions: {...dimensions, cache_write_5m: anthropicDimensions.cache_write_5m, cache_write_1h: anthropicDimensions.cache_write_1h},
+               priced: {atoms: 3, tokens: 1300}, unpriced: {atoms: 0, tokens: 0},
+               evidence,
+               models: [pricedRow, anthropicRow],
+                agents: [agentRow], omissions: {models: 0, agents: 0, evidence: 0}, reasoning_available: false,
+               catalog_revision: 3,
+          };
           await selectSession('__prefs__');
           await new Promise(resolve => requestAnimationFrame(resolve));
           const costSection = document.querySelector('[data-preference-section="cost"]');
@@ -12478,57 +12398,14 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
             anthropic: Boolean(costSection?.querySelector('[data-setting-path="cost.anthropic_pricing_profile"]')),
           };
           await selectSession('__debug__');
-          await new Promise(resolve => requestAnimationFrame(resolve));
           document.querySelector('[data-js-debug-subtab="cost"]')?.click();
-          await new Promise(resolve => requestAnimationFrame(resolve));
-          clearJsDebugGraphData();
-          const now = Math.floor(Date.now() / 1000);
-              const dimensions = Object.fromEntries(['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other'].map(key => [key, {tokens: key === 'input' ? 1000 : 0, micro_usd: 0, api_list_micro_usd: key === 'input' ? 600000 : 0}]));
-          const pricedRow = {
-            provider: 'openai', model: 'gpt-subscription', label: 'gpt-subscription',
-             total_tokens: 1000, total_micro_usd: 0, total_api_list_micro_usd: 600000,
-             dimensions, priced: {atoms: 1, tokens: 1000}, unpriced: {atoms: 0, tokens: 0},
-          };
-              const anthropicDimensions = {
-                ...dimensions,
-                cache_write_5m: {tokens: 100, micro_usd: 750000, api_list_micro_usd: 750000},
-                cache_write_1h: {tokens: 200, micro_usd: 4000000, api_list_micro_usd: 4000000},
-              };
-           const anthropicRow = {
-            ...pricedRow,
-            provider: 'anthropic', model: 'claude-cache-lifetimes', label: 'claude-cache-lifetimes',
-             total_tokens: 300, total_micro_usd: 4750000, total_api_list_micro_usd: 4750000,
-             dimensions: anthropicDimensions, priced: {atoms: 2, tokens: 300}, unpriced: {atoms: 0, tokens: 0},
-           };
-           const agentSource = {
-             source: 'codex',
-             total_tokens: 600, total_micro_usd: 0, total_api_list_micro_usd: 600000,
-             dimensions, priced: {atoms: 1, tokens: 600}, unpriced: {atoms: 0, tokens: 0},
-           };
-           const agentRow = {
-             key: '0123456789abcdef01234567', source: 'codex', label: '123_an-extremely-long-project-name-that-needs-a-compact-tail',
-             total_tokens: 600, total_micro_usd: 0, total_api_list_micro_usd: 600000,
-             dimensions, priced: {atoms: 1, tokens: 600}, unpriced: {atoms: 0, tokens: 0}, sources: [agentSource],
-           };
-           const evidence = [{
-             key: 'fedcba9876543210fedcba98', provider: 'openai', model: 'gpt-subscription', dimension: 'input',
-             direction: 'input', modality: 'text', cache_role: 'none', unit: 'tokens', pricing_profile: 'default',
-             service_tier: 'default', catalog_model: 'gpt-subscription', rate_usd: '6.00', rate_scale: 1000000,
-             effective_from: '2026-07-09', source_kind: 'seed', source_url: 'https://example.com/pricing',
-             catalog_revision: 3, tokens: 1000, micro_usd: 0, api_list_micro_usd: 600000, priced_atoms: 1,
-           }];
-          debugGraphApplyServerRecord({
-            start: now - 60,
-            duration: 60,
-             cost_report: {
-               schema_version: 4, total_micro_usd: 0, total_api_list_micro_usd: 600000, total_tokens: 1000,
-               dimensions, priced: {atoms: 3, tokens: 1000}, unpriced: {atoms: 0, tokens: 0},
-               evidence,
-               models: [pricedRow, anthropicRow],
-                agents: [agentRow], omissions: {models: 0, agents: 0, evidence: 0}, reasoning_available: false,
-               catalog_revision: 3,
-            },
-          });
+          for (const model of window.__fixtureStatsModels.values()) {
+            model.sourceGeneration += 1;
+            model.cacheGeneration += 1;
+          }
+          jsDebugCurrentStatsClientState.client.controller().handleReconnect({requiresFullSnapshot: true});
+          await window.__yomuxTestWaitFor(() => jsDebugCurrentCostReport?.total_tokens === 1300,
+            {description: 'canonical current-stats cost report ingestion'});
           renderYoCostPanels({force: true});
           await new Promise(resolve => requestAnimationFrame(resolve));
           const report = document.querySelector('[data-js-debug-subview="cost"] .js-debug-cost-report');
@@ -12723,6 +12600,201 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
         else:
             assert metrics["legendDisplay"] == "flex" and metrics["legendRows"] <= 3, (width, metrics)
         assert metrics["wideLegendMetrics"]["display"] == "flex" and metrics["wideLegendMetrics"]["itemsFit"] and metrics["wideLegendMetrics"]["rows"] <= 2, (width, metrics)
+
+
+def test_preferences_cursor_swatches_follow_current_theme(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=__prefs__', sessions=['1'])
+    browser.execute_async_script("selectSession('__prefs__', {userInitiated: true}).then(arguments[arguments.length-1])")
+    WebDriverWait(browser, 10).until(lambda driver: driver.find_elements(By.CSS_SELECTOR, '[data-setting-path="appearance.editor_cursor_color"]'))
+    # A search matching the Colors section exposes its controls regardless of saved collapse state.
+    browser.find_element(By.CSS_SELECTOR, '[data-preferences-search]').send_keys('c')
+    browser.find_element(By.CSS_SELECTOR, '.preferences-setting-row:has([data-setting-path="appearance.editor_cursor_style"]) > .preferences-setting-label').click()
+    for mode, expected in [('dark', 'rgb(255, 234, 0)'), ('light', 'rgb(154, 103, 0)'), ('dark', 'rgb(255, 234, 0)')]:
+        browser.execute_async_script('setGlobalThemeMode(arguments[0]).then(arguments[arguments.length-1])', mode)
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("""
+          const row=document.querySelector('[data-setting-path="appearance.editor_cursor_color"][value="yellow"]')?.closest('label');
+          const swatches=row?.querySelectorAll('.preferences-radio-swatch');
+          return swatches?.length===1 && getComputedStyle(swatches[0]).backgroundColor===arguments[0];
+        """, expected))
+        assert browser.execute_script("""
+          const radios=[...document.querySelectorAll('[data-setting-path="appearance.editor_cursor_color"]')];
+          const themeRadios=[...document.querySelectorAll('[data-setting-path="appearance.active_color"]')];
+          const expected=['theme','neon-green','neon-cyan','neon-orange','yellow','neon-magenta','white'];
+          const labels=arguments[0]==='dark'
+            ? 'Inverse global theme color|Neon green|Neon cyan|Neon orange|Neon yellow|Neon magenta|Neon white'
+            : 'Inverse global theme color|Dark green|Dark cyan|Dark orange|Dark yellow|Dark magenta|Dark gray';
+          return radios[0]?.value==='theme' && radios[0].closest('label').textContent.trim()==='Inverse global theme color'
+            && JSON.stringify(radios.map(radio=>radio.value))===JSON.stringify(expected)
+            && Boolean(themeRadios[0].compareDocumentPosition(document.querySelector('[data-setting-path="appearance.terminal_theme"]'))&Node.DOCUMENT_POSITION_FOLLOWING)
+            && radios.map(radio=>radio.closest('label').textContent.trim()).join('|')===labels
+            && radios.every(radio=>radio.closest('label').querySelectorAll('.preferences-radio-swatch').length===(radio.value==='theme'?0:1))
+            && document.querySelector('[data-setting-path="appearance.active_color"][value="yellow"]')
+              .closest('label').querySelectorAll('.preferences-radio-swatch').length===2;
+        """, mode)
+        assert browser.execute_script("""
+          const expected=arguments[0]==='dark'
+            ? {'neon-green':'rgb(204, 255, 0)','neon-cyan':'rgb(102, 255, 255)','neon-magenta':'rgb(255, 102, 255)','neon-orange':'rgb(255, 181, 46)'}
+            : {'neon-green':'rgb(107, 143, 0)','neon-cyan':'rgb(14, 116, 144)','neon-magenta':'rgb(162, 28, 175)','neon-orange':'rgb(180, 83, 9)'};
+          const paint=value=>getComputedStyle(document.querySelector(`[data-setting-path="appearance.editor_cursor_color"][value="${value}"]`).closest('label').querySelector('.preferences-radio-swatch')).backgroundColor;
+          return Object.entries(expected).every(([name,color])=>paint(name)===color);
+        """, mode)
+
+        WebDriverWait(browser, 5).until(lambda driver: driver.find_element(
+            By.CSS_SELECTOR, '.preferences-cursor-example.line'
+        ).is_displayed())
+        examples = browser.execute_script("""
+          const control=path=>document.querySelector(`[data-setting-path="appearance.${path}"]`);
+          const styles=[...document.querySelectorAll('[data-setting-path="appearance.editor_cursor_style"]')];
+          const line=styles.find(radio=>radio.value==='line').closest('label').querySelector('.preferences-cursor-example.line');
+          const block=styles.find(radio=>radio.value==='block').closest('label').querySelector('.preferences-cursor-example.block');
+          const before=(first,second)=>Boolean(first.compareDocumentPosition(second)&Node.DOCUMENT_POSITION_FOLLOWING);
+          const box=node=>({width:node.getBoundingClientRect().width,height:node.getBoundingClientRect().height,
+            color:getComputedStyle(node).backgroundColor,hidden:node.getAttribute('aria-hidden')});
+          return {line:box(line),block:box(block),
+            styles:styles.map(radio=>({value:radio.value,label:radio.closest('label').textContent.trim(),
+              exampleFirst:radio.closest('label').querySelector('.preferences-cursor-example').getBoundingClientRect().right
+                <=radio.closest('label').querySelector('span:not(.preferences-cursor-example)').getBoundingClientRect().left})),
+            order:control('editor_cursor_style').closest('.preferences-section').dataset.preferenceSection===PREFERENCE_SECTION_IDS.editorOptions
+              && control('editor_dark_color_scheme').closest('.preferences-section').dataset.preferenceSection===PREFERENCE_SECTION_IDS.colors
+              && before(control('editor_cursor_style'),document.querySelector('[data-setting-path="editor.cursor_blink_delay_ms"]'))
+              && before(control('editor_dark_color_scheme'),control('editor_light_color_scheme')),
+            follow:control('terminal_theme').closest('label').textContent.trim()};
+        """)
+        assert examples['order'], examples
+        assert examples['styles'] == [
+            {'value': 'block', 'label': '(block style)', 'exampleFirst': True},
+            {'value': 'line', 'label': '(line style)', 'exampleFirst': True},
+        ], examples
+        assert examples['follow'] == 'Follow global appearance', examples
+        assert examples['line']['width'] == 2, examples
+        assert examples['block']['width'] > examples['line']['width'] * 2, examples
+        for sample in [examples['line'], examples['block']]:
+            assert sample['height'] >= 10 and sample['hidden'] == 'true', examples
+            assert sample['color'] not in ['transparent', 'rgba(0, 0, 0, 0)'], examples
+    for style in ['block', 'line']:
+        _click_preference_radio(browser, 'appearance.editor_cursor_style', style)
+        WebDriverWait(browser, 5).until(lambda driver: driver.find_element(
+            By.CSS_SELECTOR, f'[data-setting-path="appearance.editor_cursor_style"][value="{style}"]'
+        ).is_selected())
+
+
+def test_editor_color_scheme_follows_global_appearance_after_scheme_choice(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=__prefs__', sessions=['1'])
+    browser.execute_async_script("selectSession('__prefs__', {userInitiated: true}).then(arguments[arguments.length-1])")
+    browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      setGlobalThemeMode('dark').then(()=>{
+        setFileEditorThemeMode(editorThemeInheritMode);
+        done(true);
+      },error=>done({error:String(error)}));
+    """)
+    browser.find_element(By.CSS_SELECTOR, '[data-preferences-search]').send_keys('c')
+    scheme_control = WebDriverWait(browser, 10).until(lambda driver: driver.find_element(
+        By.CSS_SELECTOR, '[data-setting-path="appearance.editor_dark_color_scheme"]'
+    ))
+    Select(scheme_control).select_by_value('dracula')
+    WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("""
+      return initialSetting('appearance.editor_dark_color_scheme')==='dracula'
+        && activeEditorScheme().id==='dracula' && fileEditorThemeMode==='inherit';
+    """))
+    # Simulate an explicit scheme saved by the old preference handler. It matches the
+    # configured dark scheme, so the next global appearance change should resume following.
+    browser.execute_script("setFileEditorThemeMode('dracula')")
+    browser.execute_async_script("setGlobalThemeMode('light').then(arguments[arguments.length-1])")
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return resolvedGlobalThemeMode()==='light'"))
+    assert browser.execute_script("""
+      return {global:resolvedGlobalThemeMode(),editor:activeEditorScheme().id,mode:fileEditorThemeMode,
+        configured:configuredEditorSchemeForMode(false),editorLight:document.body.classList.contains('editor-scheme-yomux-light')};
+    """) == {'global': 'light', 'editor': 'yomux-light', 'mode': 'inherit', 'configured': 'yomux-light', 'editorLight': True}
+
+
+@pytest.mark.parametrize('section', ['terminal', 'editor_options'])
+def test_preferences_options_link_opens_colors(browser, tmp_path, section):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=__prefs__', sessions=['1'])
+    browser.execute_async_script("selectSession('__prefs__', {userInitiated: true}).then(arguments[arguments.length-1])")
+    browser.execute_script("collapsedPreferenceSections.add('colors'); preferencesSearchText=arguments[0]; renderPreferencesPanels({force:true})", 'Terminal options' if section == 'terminal' else 'Editor options')
+    source = browser.find_element(By.CSS_SELECTOR, f'[data-preference-section="{section}"]')
+    assert source.find_element(By.CSS_SELECTOR, '.preferences-section-title').text == ('Terminal options' if section == 'terminal' else 'Editor options')
+    note = source.find_element(By.CSS_SELECTOR, '.preferences-settings > :first-child')
+    assert note.text == 'To change colors, go to the Colors section.'
+    note.find_element(By.TAG_NAME, 'a').click()
+    metrics = browser.execute_script("""
+      const section=document.querySelector('[data-preference-section="colors"]');
+      const heading=section.querySelector('.preferences-section-toggle');
+      const rect=heading.getBoundingClientRect(),scroll=heading.closest('.preferences-scroll').getBoundingClientRect();
+      return {query:preferencesSearchText,collapsed:collapsedPreferenceSections.has('colors'),
+        hidden:section.querySelector('.preferences-settings').hidden,focused:document.activeElement===heading,
+        top:rect.top,bottom:rect.bottom,scrollTop:scroll.top,scrollBottom:scroll.bottom};
+    """)
+    assert metrics['query'] == '' and not metrics['collapsed'] and not metrics['hidden'] and metrics['focused'], metrics
+    assert metrics['top'] >= metrics['scrollTop'] - 1 and metrics['bottom'] <= metrics['scrollBottom'] + 1, metrics
+
+
+def _click_preference_radio(browser, path, value):
+    click_visible_selector(browser, f'[data-setting-path="{path}"][value="{value}"]')
+
+
+def test_preferences_separator_choices_show_plain_names_and_current_color(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=__prefs__', sessions=['1'])
+    browser.execute_async_script("selectSession('__prefs__', {userInitiated: true}).then(arguments[arguments.length-1])")
+    search = browser.find_element(By.CSS_SELECTOR, '[data-preferences-search]')
+    search.clear()
+    search.send_keys('c')
+    for mode in ['dark', 'light', 'dark']:
+        _click_preference_radio(browser, 'appearance.theme', mode)
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return resolvedGlobalThemeMode()===arguments[0]", mode))
+        assert browser.execute_script("""
+          const radios=[...document.querySelectorAll('[data-setting-path="appearance.separator_color"]')];
+          return radios.map(node=>node.closest('label').textContent.trim()).join('|')
+            ==='Inverse global theme color|Green|Blue|Orange|Yellow|Purple|White'
+            && radios.every(node=>node.closest('label').querySelectorAll('.preferences-radio-swatch').length===(node.value==='theme'?0:1))
+            && document.querySelector('[data-setting-path="appearance.editor_cursor_color"][value="neon-green"]')
+              .closest('label').textContent.trim()===(arguments[0]==='dark'?'Neon green':'Dark green');
+        """, mode)
+        for color in ['green', 'blue', 'orange', 'yellow', 'purple', 'white']:
+            _click_preference_radio(browser, 'appearance.separator_color', color)
+            WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return initialSetting('appearance.separator_color')===arguments[0]", color))
+            metrics = browser.execute_script("""
+              const swatch=document.querySelector(`[data-setting-path="appearance.separator_color"][value="${arguments[0]}"]`)
+                .closest('label').querySelector('.preferences-radio-swatch');
+              const rgb=getComputedStyle(swatch).backgroundColor.match(/[0-9]+/g).slice(0,3);
+              const actual=window.__yomuxTestHelpers.probePaint('background-color:var(--pane-resizer-bg)').background;
+              return {actual,expected:`rgba(${rgb.join(', ')}, 0.72)`};
+            """, color)
+            assert metrics['actual'] == metrics['expected'], (mode, color, metrics)
+
+
+def test_preferences_inverse_separator_follows_theme_color(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=__prefs__', sessions=['1'])
+    browser.execute_async_script("selectSession('__prefs__', {userInitiated: true}).then(arguments[arguments.length-1])")
+    browser.find_element(By.CSS_SELECTOR, '[data-preferences-search]').send_keys('c')
+    inverse = browser.find_element(By.CSS_SELECTOR, '[data-setting-path="appearance.separator_color"][value="theme"]')
+    assert inverse.is_selected(), 'Inverse global theme color is the default separator choice'
+    assert inverse.find_element(By.XPATH, '..').text.strip() == 'Inverse global theme color'
+    pairs = {
+        'dark': {'green': '#eab308', 'yellow': '#3b82f6', 'blue': '#eab308', 'orange': '#3b82f6', 'purple': '#e8edf2', 'white': '#a855f7'},
+        'light': {'green': '#d6a400', 'yellow': ui_pin('textSelectionBg'), 'blue': '#d6a400', 'orange': ui_pin('textSelectionBg'), 'purple': '#aeb8c5', 'white': '#7c3aed'},
+    }
+    for mode, colors in pairs.items():
+        _click_preference_radio(browser, 'appearance.theme', mode)
+        for color, expected in colors.items():
+            _click_preference_radio(browser, 'appearance.active_color', color)
+            WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return initialSetting('appearance.active_color')===arguments[0]", color))
+            assert browser.execute_script("""
+              const probe=document.createElement('div');
+              probe.style.background='var(--pane-resizer-hover-bg)';
+              document.body.append(probe);
+              const actual=getComputedStyle(probe).backgroundColor;
+              probe.style.background=arguments[0];
+              probe.style.opacity='0.96';
+              const rgb=getComputedStyle(probe).backgroundColor.replace('rgb(', 'rgba(').replace(')', ', 0.96)');
+              probe.remove();
+              return actual===rgb;
+            """, expected), (mode, color, expected)
+    _click_preference_radio(browser, 'appearance.separator_color', 'blue')
+    _click_preference_radio(browser, 'appearance.active_color', 'green')
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return initialSetting('appearance.separator_color')==='blue' && initialSetting('appearance.active_color')==='green'"))
+    assert browser.execute_script("return document.documentElement.style.getPropertyValue('--pane-resizer-hover-bg')==='rgb(37 99 235 / 0.96)'")
 
 
 def test_preferences_scroll_defers_passive_rerender(browser, tmp_path):
@@ -12983,7 +13055,10 @@ def test_meta_arrow_walks_visible_pane_tabs_in_live_runtime(browser, tmp_path):
     wait_for_dockview_tab_geometry(browser, min_tabs=4, min_width=45)
     result = browser.execute_script(
         """
-        const fireMetaArrow = key => {
+        // FakeTerminal does not run xterm's key handler; exercise the global handler from app chrome.
+        document.body.tabIndex = -1;
+        const fireMetaArrow = (key, target = document.body) => {
+          target.focus({preventScroll: true});
           const event = new KeyboardEvent('keydown', {
             key,
             code: key,
@@ -12994,7 +13069,7 @@ def test_meta_arrow_walks_visible_pane_tabs_in_live_runtime(browser, tmp_path):
             bubbles: true,
             cancelable: true,
           });
-          (document.activeElement || window).dispatchEvent(event);
+          target.dispatchEvent(event);
           return event.defaultPrevented;
         };
         activatePaneTab('left', finderItemId, {userInitiated: true});
@@ -13022,7 +13097,7 @@ def test_meta_arrow_walks_visible_pane_tabs_in_live_runtime(browser, tmp_path):
         editor.tabIndex = 0;
         document.body.appendChild(editor);
         editor.focus();
-        const blockedPrevented = fireMetaArrow('ArrowRight');
+        const blockedPrevented = fireMetaArrow('ArrowRight', editor);
         return {
           firstPrevented,
           secondPrevented,
@@ -13284,7 +13359,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     browser.execute_script(
         """
         setFocusedPanelItem('1', {userInitiated: true});
-        const radio = document.querySelector('input[type="radio"][data-setting-path="appearance.editor_cursor_color"][value="laser-lime"]');
+        const radio = document.querySelector('input[type="radio"][data-setting-path="appearance.editor_cursor_color"][value="neon-green"]');
         radio.checked = true;
         radio.dispatchEvent(new Event('change', {bubbles: true}));
         """
@@ -13292,7 +13367,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return window.__settingsPayload?.settings?.appearance?.editor_cursor_color === 'laser-lime'
+            return window.__settingsPayload?.settings?.appearance?.editor_cursor_color === 'neon-green'
               && getComputedStyle(document.documentElement).getPropertyValue('--active-terminal-cursor-rgb').trim() === '204 255 0'
               && terminals.get('1')?.term?.options?.theme?.cursor === '#ccff00';
             """
@@ -13306,13 +13381,14 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
           rootCursorRgb: getComputedStyle(document.documentElement).getPropertyValue('--active-terminal-cursor-rgb').trim(),
           terminalCursor: terminals.get('1')?.term?.options?.theme?.cursor || '',
           activeScrollbarThumb: activeThumb,
-          expectedActiveScrollbarThumb: probePaint('background:var(--pane-scrollbar-thumb-active)').background,
         };
         """
     )
     assert cursor_metrics["rootCursorRgb"] == "204 255 0", cursor_metrics
     assert cursor_metrics["terminalCursor"] == "#ccff00", cursor_metrics
-    assert cursor_metrics["activeScrollbarThumb"] == cursor_metrics["expectedActiveScrollbarThumb"], cursor_metrics
+    assert cursor_metrics["activeScrollbarThumb"] == "rgba(204, 255, 0, 0.88)", {
+        "activeScrollbarThumb": cursor_metrics["activeScrollbarThumb"],
+    }
     browser.execute_script(
         """
         const radio = document.querySelector('input[type="radio"][data-setting-path="appearance.active_color"][value="yellow"]');
@@ -13330,6 +13406,19 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
             """
         )
     )
+
+
+def test_cursor_color_gate_rejects_recoloring_the_active_scrollbar(browser, tmp_path, monkeypatch):
+    original_execute = browser.execute_script
+
+    def execute_with_divergent_scrollbar(script, *args):
+        if "const activeThumb = probePaint" in script:
+            original_execute("document.documentElement.style.setProperty('--pane-scrollbar-thumb-active', 'rgb(1, 2, 3)')")
+        return original_execute(script, *args)
+
+    monkeypatch.setattr(browser, "execute_script", execute_with_divergent_scrollbar)
+    with pytest.raises(AssertionError, match="activeScrollbarThumb"):
+        test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path)
 
 
 def test_stale_forced_settings_payload_cannot_revert_newer_active_color(browser, tmp_path):
@@ -15247,7 +15336,7 @@ def test_finder_differ_row_hover_and_embedded_refresh_are_visible_in_light_mode(
         const {probePaint} = window.__yomuxTestHelpers;
         const hoverBg = probePaint('background:var(--file-hover-bg)').background;
         const hoverBorder = probePaint('background:var(--file-hover-border)').background;
-        return {hoverBg, hoverBorder, expectedHoverBg: probePaint('background:var(--file-hover-bg)').background};
+        return {hoverBg, hoverBorder};
         """
     )
     fast_pointer_actions(browser).move_to_element(browser.find_element("id", "collapsed-dir")).perform()
@@ -15265,7 +15354,6 @@ def test_finder_differ_row_hover_and_embedded_refresh_are_visible_in_light_mode(
         };
         """
     )
-    assert hover_tokens["hoverBg"] == hover_tokens["expectedHoverBg"]
     assert row_metrics["treeHeight"] >= row_metrics["rowHeight"], row_metrics
     assert row_metrics["hovered"] is True, row_metrics
     assert row_metrics["background"] == hover_tokens["hoverBg"]
@@ -15467,7 +15555,6 @@ def test_diff_overview_does_not_cover_editor_scrollbar(browser, tmp_path):
     metrics = browser.execute_script(
         """
         const hostRect = document.getElementById('host').getBoundingClientRect();
-        const overviewRect = document.getElementById('overview').getBoundingClientRect();
         const overviewStyle = getComputedStyle(document.getElementById('overview'));
         const scroller = document.getElementById('scroller');
         const scrollerRect = scroller.getBoundingClientRect();

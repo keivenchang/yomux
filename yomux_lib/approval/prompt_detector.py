@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import re
-import shlex
 import time
 
 from . import yolo_rules
+from ..infra.numeric import is_finite_number
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -177,14 +177,6 @@ def _is_codex_command_prompt_line(line: str) -> bool:
     return _CODEX_COMMAND_PROMPT_PREFIX in str(line or "").lower()
 
 
-def _shell_text_complete(cmd_line: str) -> bool:
-    try:
-        shlex.split(cmd_line, posix=True)
-        return True
-    except ValueError:
-        return False
-
-
 def _codex_command_stop_line(line: str) -> bool:
     stripped = line.strip()
     return (
@@ -229,9 +221,6 @@ def extract_command(pane_text: str) -> str | None:
                 # Codex prefixes the command with "$ " after leading box whitespace.
                 if stripped.startswith("$ "):
                     cmd = stripped[2:].strip()
-                    # Heredocs span their own delimited body; keep the existing single-line handling.
-                    if "<<" in cmd:
-                        return cmd or None
                     # do NOT early-return on the first shlex-complete prefix — a wrapped
                     # command (e.g. `$ git push` continuing with `--force-with-lease`) would classify
                     # on the safe-looking prefix and auto-approve the dangerous tail. ALWAYS gather every
@@ -453,12 +442,6 @@ def _default_yes_choice_index(lines: list[str], prompt_index: int) -> int:
     return -1
 
 
-def _approval_prompt_defaults_to_yes(pane_text: str) -> bool:
-    lines = pane_text.splitlines()
-    prompt_index = _last_approval_prompt_index(lines)
-    return prompt_index >= 0 and _default_yes_choice_index(lines, prompt_index) >= 0
-
-
 def yes_is_selected(pane_text: str) -> bool:
     """Check that the first option is currently highlighted by an ACTUAL selector glyph (❯/›/>).
 
@@ -473,7 +456,7 @@ def selected_prompt_option(pane_text: str) -> int:
     # #67: only a visible selector glyph counts as a selection — no positional default-to-yes.
     matches = list(_SELECTED_CHOICE_NUMBER_RE.finditer(normalize_capture_text(pane_text)))
     if matches:
-        return int(matches[-1].group(1))
+        return _finite_integer(matches[-1].group(1)) or 0
     return 0
 
 
@@ -720,18 +703,22 @@ def _prompt_options(visible_text: str) -> list[dict[str, object]]:
                 label_start = inline_match.end()
                 label_end = inline_matches[inline_index + 1].start() if inline_index + 1 < len(inline_matches) else len(line)
                 label = line[label_start:label_end].strip()
-                if label:
+                number = _finite_integer(inline_match.group(2))
+                if label and number is not None:
                     current_group.append({
-                        "index": int(inline_match.group(2)),
+                        "index": number,
                         "label": re.sub(r"\s+", " ", label).strip(),
                         "selected": bool(inline_match.group(1)),
                     })
             continue
         menu_prefix, marker, number, label = match.groups()
+        number = _finite_integer(number)
+        if number is None:
+            continue
         if menu_prefix or ask_question_mode:
             label = re.split(r"\s+[—-]\s+", label, maxsplit=1)[0]
         current_group.append({
-            "index": int(number),
+            "index": number,
             "label": re.sub(r"\s+", " ", label).strip(),
             "selected": bool(marker),
         })
@@ -866,6 +853,14 @@ def _hash_prompt_parts(*parts: object) -> str:
     return hashlib.md5("\n".join(normalized).encode()).hexdigest()
 
 
+def _finite_integer(value: str | float) -> int | None:
+    try:
+        number = int(value)
+    except (ValueError, OverflowError):
+        return None
+    return number if is_finite_number(number) else None
+
+
 def _parse_duration_seconds(text: str) -> float | None:
     total = 0.0
     seen = False
@@ -879,7 +874,7 @@ def _parse_duration_seconds(text: str) -> float | None:
             total += value * 60
         else:
             total += value
-    return total if seen else None
+    return total if seen and is_finite_number(total) else None
 
 
 def _parse_status_duration_seconds(line: str) -> float | None:
@@ -936,14 +931,14 @@ def _parse_status_token_count(line: str) -> int | None:
         count *= 1000
     elif suffix == "m":
         count *= 1000000
-    return int(count)
+    return _finite_integer(count)
 
 
 def _parse_status_tool_uses(line: str) -> int | None:
     matches = list(_STATUS_COUNTER_TOOL_USE_RE.finditer(line))
     if not matches:
         return None
-    return int(matches[-1].group("count"))
+    return _finite_integer(matches[-1].group("count"))
 
 
 def _status_counter_identity(line: str) -> str:
@@ -1972,7 +1967,6 @@ def _opencode_visible_screen_state(
             )
         return _opencode_idle_state("unrecognized OpenCode screen shape")
     composer_start, composer_end, build_index = bounds
-    prompt_lines = [line.strip().strip("│┃").strip() for line in lines[composer_start + 1:composer_end]]
     idle_indices = [
         index
         for index in range(composer_start, len(lines))
@@ -2160,6 +2154,7 @@ def approval_prompt_state(visible_text: str, pane_text: str | None = None) -> di
 
     question = prompt_text(visible_text, prompt_type) if prompt_type is not None else ""
     options = _prompt_options(visible_text) if prompt_type is not None else []
+    signature = prompt_hash(visible_text) if prompt_type is not None else ""
     state: dict[str, object] = {
         "visible": prompt_type is not None,
         "type": prompt_type or "",
@@ -2169,8 +2164,8 @@ def approval_prompt_state(visible_text: str, pane_text: str | None = None) -> di
         "action": None,
         "command": None,
         "dangerous": False,
-        "hash": prompt_hash(visible_text) if prompt_type is not None else "",
-        "signature": prompt_hash(visible_text) if prompt_type is not None else "",
+        "hash": signature,
+        "signature": signature,
         "agent": _infer_agent(visible_text, prompt_type) if prompt_type is not None else "unknown",
         "prompt_kind": _prompt_kind(prompt_type),
         "question_text": question,

@@ -89,7 +89,7 @@ function clientEventRepairChannels(resources = []) {
   const channels = new Set();
   for (const rawResource of resources) {
     const resource = String(rawResource || '');
-    if (/^(?:files_changed|fs_changed|roots_changed|session_files_ready)/.test(resource)) channels.add('files');
+    if (/^(?:files_changed|file_relocated|fs_changed|roots_changed|session_files_ready)/.test(resource)) channels.add('files');
     else if (/^(?:auto_approve_changed|attention_acks_changed|tmux_signals_changed)/.test(resource)) channels.add('status');
     else if (/^event_log_changed/.test(resource)) channels.add('events');
     else if (/^(?:transcripts_changed|context_changed|context_items_ready)/.test(resource)) channels.add('transcripts');
@@ -301,22 +301,39 @@ function updateActionButton(label, onClick) {
   return button;
 }
 
+let updateStatusRevision = 0;
+let updateStatusReadSequence = 0;
+
+async function readCurrentUpdateStatus(url = '/api/update-status', options = {}) {
+  const sequence = ++updateStatusReadSequence;
+  const revision = updateStatusRevision;
+  const status = await apiFetchJson(url, options);
+  return {status, isCurrent: () => sequence === updateStatusReadSequence && revision === updateStatusRevision};
+}
+
 async function triggerSelfUpdate(_event = null, ownerToast = null) {
   const dry = updateDryRunEnabled();
-  const confirmed = window.confirm(dry
-    ? t('update.confirmDryRun')
-    : t('update.confirmInstall'));
-  if (!confirmed) return;
-  const target = String(ownerToast?.dataset?.updateTarget || selfUpdateAvailableTarget || '').trim();
-  dismissUpdateAvailableToasts(ownerToast);
-  hideUpdateBadge();
   try {
-    const data = await apiFetchJson(`/api/self-update${dry ? '?dryrun=1' : ''}`, {method: 'POST'});
-    const title = data.ok ? (data.restarting ? t('update.installing') : t('update.softwareTitle')) : t('update.failed');
-    emitNotification('update', {title, lines: [userMessageText(data, t(data.ok ? 'state.done' : 'update.seeServerLogs'))], coalesceKey: 'self-update-result'});
-    if (data.ok && data.restarting) {
-      startSelfUpdateReloadPolling(data.target || data.version || target, data.instance_id || '');
+    const {status, isCurrent} = await readCurrentUpdateStatus('/api/update-status', {cache: 'no-store'});
+    if (!isCurrent()) return;
+    applyUpdateAvailable(status);
+    if (readOnlyMode || !status?.available || status.build_state !== 'ready') {
+      if (!status?.available) emitNotification('update', {title: t('update.softwareTitle'), lines: [t('update.notReady')], coalesceKey: 'self-update-result'});
+      return;
     }
+    const confirmed = window.confirm(dry ? t('update.confirmDryRun') : t('update.confirmInstall'));
+    if (!confirmed) return;
+    const target = String(status.target || '').trim();
+    const data = await apiFetchJson(`/api/self-update${dry ? '?dryrun=1' : ''}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({target_sha: status.target_sha}),
+    });
+    if (data.ok) {
+      dismissUpdateAvailableToasts(ownerToast);
+      hideUpdateBadge();
+    }
+    const title = data.ok ? (data.restarting ? t('update.installing') : t('update.softwareTitle')) : t('update.failed');
+    emitNotification('update', {title, lines: [data.job?.progress || userMessageText(data, t(data.ok ? 'state.done' : 'update.seeServerLogs'))], coalesceKey: 'self-update-result'});
+    if (data.ok && data.restarting) startSelfUpdateReloadPolling(data.target || data.version || target, data.instance_id || '');
   } catch (error) {
     emitNotification('update', {title: t('update.failed'), lines: [userMessageText(error, t('update.seeServerLogs'))], coalesceKey: 'self-update-result'});
   }
@@ -324,13 +341,25 @@ async function triggerSelfUpdate(_event = null, ownerToast = null) {
 
 // Non-intrusive "a newer version exists" cue: unhide the topbar badge and show one dismissible toast
 // with an "Update Now" action (admin-only; the endpoint rejects readonly).
-function applyUpdateAvailable(status) {
+function updateBuildStatusText(state, error = '') {
+  if (state === 'ready') return t('update.buildReady');
+  if (state === 'failed') return t('update.buildFailed', {error: error || t('update.seeServerLogs')});
+  return t('update.buildChecking');
+}
+
+function applyUpdateAvailable(status, revision = null) {
+  if (revision !== null && revision !== updateStatusRevision) return;
+  if (revision === null) updateStatusRevision += 1;
   if (!status || !status.available) return;
   if (status.notify === false) return;
   const target = String(status.target || '').trim();
+  const ready = status.build_state === 'ready';
+  const detail = updateBuildStatusText(status.build_state, status.build_error);
   selfUpdateAvailableTarget = target;
   const badge = document.querySelector('[data-update-badge]');
   if (badge) {
+    badge.dataset.updateBuildState = status.build_state || 'checking';
+    badge.dataset.updateBuildError = status.build_error || '';
     badge.hidden = false;
     if (target) badge.dataset.updateTarget = target;
     else delete badge.dataset.updateTarget;
@@ -338,8 +367,8 @@ function applyUpdateAvailable(status) {
   }
   const node = emitNotification('update', {
     title: t('update.availableTitle'),
-    lines: [t('update.availableBody', {target: status.target ? ` (${status.target})` : ''})],
-    actions: readOnlyMode ? [] : [updateActionButton(t('update.now'), triggerSelfUpdate)],
+    lines: [t('update.availableBody', {target: target ? ` (${target})` : ''}), detail],
+    actions: readOnlyMode || !ready ? [] : [updateActionButton(t('update.now'), triggerSelfUpdate)],
     countdownMs: 4 * 60 * 60 * 1000,  // keep the update cue up for 4 hours, not the default ~10s
     className: 'attention-alert toast toast-update',  // solid (opaque) background, not the translucent default
     coalesceKey: 'update-available',
@@ -349,8 +378,8 @@ function applyUpdateAvailable(status) {
 
 async function checkForUpdateOnce() {
   try {
-    const status = await apiFetchJson(`/api/update-status${updateDryRunEnabled() ? '?dryrun=1' : ''}`);
-    if (status && status.available) applyUpdateAvailable(status);
+    const {status, isCurrent} = await readCurrentUpdateStatus(`/api/update-status${updateDryRunEnabled() ? '?dryrun=1' : ''}`);
+    if (isCurrent()) applyUpdateAvailable(status);
   } catch (_error) { /* offline / transient — the hourly push will retry */ }
 }
 
@@ -451,9 +480,9 @@ function clientPushEventSessionKey(payload = {}) {
 // so they cannot be mistaken for an EventSource type with no server producer.
 const clientServerPushEventTypes = Object.freeze([
   'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
-  'backend_health_changed',
+  'backend_health_changed', 'stats_collector_health',
   'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
-  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed', 'tmux_roster_changed',
+  'watched_prs_changed', 'files_changed', 'file_relocated', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed', 'tmux_roster_changed',
   'operation_terminal',
   'context_changed', 'context_items_ready', 'activity_summary_ready', 'event_log_changed', 'update_available',
   'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta',
@@ -464,7 +493,7 @@ const clientPushEventTypes = Object.freeze([...clientServerPushEventTypes, ...cl
 
 const clientPushEventQueueLimit = 256;
 const clientPushOrderedEventTypes = new Set([
-  'files_changed', 'fs_changed', 'attention_acks_changed', 'event_log_changed', 'stats_sample', 'yoagent_stream_delta',
+  'files_changed', 'file_relocated', 'fs_changed', 'attention_acks_changed', 'event_log_changed', 'stats_sample', 'yoagent_stream_delta',
 ]);
 
 function clientPushEventRequiresOrder(type, payload = {}) {
@@ -515,6 +544,7 @@ function queueClientPushEvent(type, payload = {}, envelope = {}) {
     epoch: String(envelope?.epoch || ''),
     serverEvent: clientServerPushEventTypes.includes(type),
     epochGeneration: clientEventTransportState.epochGeneration,
+    updateRevision: type === 'update_available' ? updateStatusRevision : null,
   });
   // Chrome pauses requestAnimationFrame in background tabs. Status events still have to update
   // notification state there, otherwise a complete green->red/yellow transition can be missed
@@ -550,7 +580,7 @@ function flushQueuedClientPushEvents() {
   recordClientPerfCounter('sseEvent', 0, {nodes: events.length});
   for (const event of events) {
     if (event.serverEvent && event.epochGeneration !== clientEventTransportState.epochGeneration) continue;
-    handleClientPushEventNow(event.type, event.payload, event.envelope);
+    handleClientPushEventNow(event.type, event.payload, event.envelope, event.updateRevision);
   }
 }
 
@@ -574,11 +604,12 @@ function handleClientPushEvent(type, payload = {}, envelope = {}) {
   repairClientEventResources(repairResources, envelope);
   if (payload?.patch === true && repairResources.includes(String(envelope.resource || ''))) return false;
   if (!clientEventEnvelopeIsCurrent(envelope, payload)) return false;
+  if (type === 'update_available') updateStatusRevision += 1;
   queueClientPushEvent(type, clientPushEventPayloadWithVerifiedIdentity(type, payload, envelope), envelope);
   return true;
 }
 
-function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
+function handleClientPushEventNowByType(type, payload = {}, envelope = {}, updateRevision = null) {
   if (type === 'operation_terminal') {
     applyApiOperationTerminal(payload);
     return;
@@ -589,7 +620,7 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
     return;
   }
   if (type === 'update_available') {
-    applyUpdateAvailable(payload && payload.available !== undefined ? payload : (payload.data || {}));
+    applyUpdateAvailable(payload && payload.available !== undefined ? payload : (payload.data || {}), updateRevision);
     return;
   }
   if (type === 'settings_changed') {
@@ -608,7 +639,7 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
   }
   if (type === 'auto_approve_changed') {
     if (payload.refresh) {
-      refreshAutoStatuses().catch(() => {});
+      refreshAutoStatuses({force: true}).catch(error => console.warn('agent status refresh failed', error));
       return;
     }
     if (payload.data) applyAutoApprovePayload(payload.data);
@@ -617,6 +648,10 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
   }
   if (type === 'attention_acks_changed') {
     applyAttentionAcknowledgementResponse(payload);
+    return;
+  }
+  if (type === 'stats_collector_health') {
+    applyStatsCollectorHealth(payload);
     return;
   }
   if (type === 'backend_health_changed') {
@@ -743,6 +778,10 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
     }
     return;
   }
+  if (type === 'file_relocated') {
+    applyOpenFileRelocation(payload);
+    return;
+  }
   if (type === 'fs_changed') {
     if (typeof refreshFileExplorerFromPush === 'function') {
       refreshFileExplorerFromPush(payload).catch(error => console.warn('client fs push refresh failed', error));
@@ -767,12 +806,12 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
 }
 
 const clientPushEventHandlers = Object.freeze(Object.fromEntries(
-  clientPushEventTypes.map(type => [type, (payload, envelope) => handleClientPushEventNowByType(type, payload, envelope)])
+  clientPushEventTypes.map(type => [type, (payload, envelope, updateRevision) => handleClientPushEventNowByType(type, payload, envelope, updateRevision)])
 ));
 
-function handleClientPushEventNow(type, payload = {}, envelope = {}) {
+function handleClientPushEventNow(type, payload = {}, envelope = {}, updateRevision = null) {
   const handler = clientPushEventHandlers[type];
-  if (handler) handler(payload, envelope);
+  if (handler) handler(payload, envelope, updateRevision);
 }
 
 function clientEventDemandDescriptor() {
@@ -1193,16 +1232,21 @@ function disposeClientEventTransportLifecycle(reason = 'disposed') {
 }
 
 registerTerminalAuthenticationRetirement('long-lived-browser-transports', () => {
-  clearRuntimeInterval('latency');
-  clearRuntimeInterval('debug-stats');
-  jsDebugCurrentStatsClientState.client?.stop?.();
   jsDebugCurrentStatsClientState.startPromise = null;
   clientEventTransportState.enabled = false;
-  disposeClientEventTransportLifecycle('authentication_required');
-  stopAllTmuxSessionStreamScopes(summaryLifecycleScopes, 'authentication_required');
-  stopAllTmuxSessionStreamScopes(transcriptLifecycleScopes, 'authentication_required');
-  devAutoReloadSource?.close?.();
+  const reloadSource = devAutoReloadSource;
   devAutoReloadSource = null;
+  const cleanup = createLifecycleScope();
+  for (const retire of [
+    () => clearRuntimeInterval('latency'),
+    () => clearRuntimeInterval('debug-stats'),
+    () => jsDebugCurrentStatsClientState.client?.stop?.(),
+    () => disposeClientEventTransportLifecycle('authentication_required'),
+    () => stopAllTmuxSessionStreamScopes(summaryLifecycleScopes, 'authentication_required'),
+    () => stopAllTmuxSessionStreamScopes(transcriptLifecycleScopes, 'authentication_required'),
+    () => reloadSource?.close?.(),
+  ].reverse()) cleanup.replace(retire, retire, dispose => dispose());
+  cleanup.dispose('authentication_required');
 });
 
 if (typeof window !== 'undefined' && window?.addEventListener) {

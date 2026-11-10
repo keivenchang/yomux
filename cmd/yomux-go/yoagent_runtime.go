@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/keivenchang/yomux/internal/chat"
+	"github.com/keivenchang/yomux/internal/work"
 	"github.com/keivenchang/yomux/internal/yoagent"
 )
 
@@ -49,7 +50,7 @@ type nativeYOAgent struct {
 	publish   func(string, map[string]any) error
 
 	mu         sync.Mutex
-	providerMu sync.Mutex
+	providerMu work.ContextMutex
 	active     map[string]context.CancelFunc
 	lifecycle  sync.RWMutex
 	resetting  bool
@@ -238,7 +239,9 @@ func (agent *nativeYOAgent) AnswerWithSessions(ctx context.Context, question, lo
 	// The conversation and provider session are one mutable conversation cursor.
 	// Serialize load, append, resume, and save so concurrent requests cannot
 	// prompt from the same stale history or overwrite provider session state.
-	agent.providerMu.Lock()
+	if err := agent.providerMu.LockContext(requestCtx, nil); err != nil {
+		return "", nil, err
+	}
 	defer agent.providerMu.Unlock()
 	if err := agent.publishStream(streamID, "", "", "started", false, false, false); err != nil {
 		return "", nil, fmt.Errorf("publish YO!agent stream start: %w", err)

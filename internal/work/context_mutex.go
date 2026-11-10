@@ -20,6 +20,17 @@ func (mutex *ContextMutex) Lock() {
 	_ = mutex.LockContext(context.Background(), nil)
 }
 
+// TryLock skips work when another operation already owns the mutex.
+func (mutex *ContextMutex) TryLock() bool {
+	mutex.initOnce.Do(func() { mutex.token = make(chan struct{}, 1) })
+	select {
+	case mutex.token <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
 func (mutex *ContextMutex) LockContext(ctx context.Context, abort <-chan struct{}) error {
 	if err := ctx.Err(); err != nil {
 		return err

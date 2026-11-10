@@ -41,6 +41,31 @@ const {EventEmitter} = require('node:events');
 const {PassThrough} = require('node:stream');
 const {runSuite} = require('./layout_url.test.js');
 
+test('Differ retains committed deletion rows while Finder suppresses disk tombstones', () => {
+  for (const differMode of [false, true]) {
+    const api = loadYomux('', ['1']);
+    const tree = new TestElement('deleted-row-tree');
+    api.markFileExplorerDeletedPathsForTest(['/repo/deleted.py']);
+    api.renderTreeChildrenForTest(tree, '/repo', [{name: 'deleted.py', kind: 'file', deleted: true}], 0, [], {
+      differMode, view: differMode ? 'differ' : 'finder', sessionFilesMap: new Map(),
+    });
+    assert.equal(tree.querySelectorAll('.file-tree-row').length, differMode ? 1 : 0);
+  }
+});
+
+function installSessionFilesPreparedRows(context) {
+  for (const [path, names] of [
+    ['40_file_explorer_files.js', ['sessionFileAbsolutePath', 'indexSessionFileIntoPathMap', 'indexSessionFilesByPath']],
+    ['86_changes_10_session_files.js', ['sessionFilesPreparedRows']],
+  ]) {
+    const source = fs.readFileSync(`static_src/js/yomux/${path}`, 'utf8');
+    for (const name of names) {
+      const start = source.indexOf(`function ${name}(`);
+      vm.runInContext(source.slice(start, source.indexOf('\nfunction ', start + 1)), context);
+    }
+  }
+}
+
 function installTreePublicationHelpers(context) {
   for (const [path, names] of [
     ['10_core_utils.js', ['setAttributeIfChanged', 'setStylePropertyIfChanged', 'setInnerHtmlIfChanged', 'clientElementIsVisible']],
@@ -55,6 +80,90 @@ function installTreePublicationHelpers(context) {
     }
   }
 }
+
+test('global tab recency reconciles closure, batches, copies, renames, and moves', () => {
+  const source = fs.readFileSync('static_src/js/yomux/87_editor_nav.js', 'utf8');
+  const context = {
+    editorNav: {stack: ['A', 'B', 'C'], index: 1, focusedItem: 'B', liveItems: new Set(['A', 'B', 'C'])},
+    tabberIsAdvanced: () => true,
+    layoutItems: ['A', 'C'],
+    focusedPanelItem: 'B', tabSwitchHighlightGeneration: 0, panelNodes: new Map(),
+    layoutSlots: {left: {tabs: ['A', 'C'], active: 'A'}},
+    paneItems: slots => Object.values(slots).flatMap(pane => pane.tabs),
+    activePaneItems: () => Object.values(context.layoutSlots).map(pane => pane.active),
+    slotForItem: item => Object.keys(context.layoutSlots).find(side => context.layoutSlots[side].tabs.includes(item)),
+    itemInLayout: item => Boolean(context.slotForItem(item)),
+    itemIsActivePaneTab: item => context.layoutSlots[context.slotForItem(item)]?.active === item,
+    nextTabSwitchHighlightGeneration: () => ++context.tabSwitchHighlightGeneration,
+    scheduleTabSwitchPhaseTwo() {}, document: {getElementById: () => null},
+    setFocusedPanelItem: item => { context.focusedPanelItem = item; },
+    focusPanel: item => { context.domFocus = item; },
+    activatePaneTab: (side, item) => { context.layoutSlots[side].active = item; },
+  };
+  vm.createContext(context);
+  vm.runInContext(source, context);
+  assert.equal(context.reconcileEditorNav(), 'C', 'closing B after Back chooses MRU C');
+  context.finishEditorNavFocus();
+  assert.equal(context.domFocus, 'C');
+  assert.deepEqual([...context.editorNav.stack], ['A', 'C']);
+  context.layoutSlots.left.tabs = ['C'];
+  context.layoutItems = ['C'];
+  assert.equal(context.reconcileEditorNav(), null, 'background close preserves C');
+  assert.equal(context.focusedPanelItem, 'C');
+  context.editorNav.stack = ['A', 'B', 'C', 'file:x', 'file:x:copy'];
+  context.editorNav.index = 2;
+  context.focusedPanelItem = 'C';
+  context.layoutSlots = {right: {tabs: ['file:x', 'file:x:copy'], active: 'file:x'}};
+  context.layoutItems = ['file:x', 'file:x:copy'];
+  assert.equal(context.reconcileEditorNav(), 'file:x:copy', 'batch removes all closed tabs before choosing');
+  assert.deepEqual([...context.editorNav.stack], ['file:x', 'file:x:copy']);
+  context.finishEditorNavFocus();
+  context.replaceEditorNavItems(new Map([['file:x:copy', 'file:y:copy']]));
+  context.layoutSlots.right = {tabs: ['file:x', 'file:y:copy'], active: 'file:y:copy'};
+  context.layoutItems = ['file:x', 'file:y:copy'];
+  assert.equal(context.reconcileEditorNav(), null, 'rename preserves focus and cursor');
+  assert.equal(context.focusedPanelItem, 'file:y:copy');
+  assert.deepEqual([...context.editorNav.stack], ['file:x', 'file:y:copy']);
+  context.layoutSlots = {left: {tabs: ['file:y:copy'], active: 'file:y:copy'}, right: {tabs: ['file:x'], active: 'file:x'}};
+  context.reconcileEditorNav();
+  assert.deepEqual([...context.editorNav.stack], ['file:x', 'file:y:copy'], 'moving preserves order');
+  context.layoutSlots.left.tabs = [];
+  context.reconcileEditorNav();
+  context.nextTabSwitchHighlightGeneration();
+  context.domFocus = 'newer-click';
+  context.finishEditorNavFocus();
+  assert.equal(context.domFocus, 'newer-click', 'delayed closure cannot steal newer focus');
+  context.focusedPanelItem = 'file:x';
+  context.editorNav.focusedItem = 'file:x';
+  context.layoutSlots.right.tabs.push('unvisited');
+  context.reconcileEditorNav();
+  context.panelNodes.set('file:x', {contains: () => true});
+  context.layoutSlots.right.tabs.pop();
+  context.reconcileEditorNav();
+  assert.equal(context.editorNav.pendingFocus.item, 'file:x', 'unvisited background removal preserves content focus through remount');
+
+  context.editorNav.stack = ['survivor', 'finder:preview'];
+  context.editorNav.index = 1;
+  context.editorNav.liveItems = new Set(['survivor', 'finder:preview']);
+  context.editorNav.focusedItem = null;
+  context.focusedPanelItem = null;
+  context.layoutSlots = {left: {tabs: ['survivor'], active: 'survivor'}};
+  context.layoutItems = ['survivor'];
+  assert.equal(context.reconcileEditorNav('finder:preview'), 'survivor', 'file teardown uses the pre-teardown focus snapshot');
+  assert.deepEqual([...context.editorNav.stack], ['survivor']);
+
+  context.editorNav.stack = ['tabber', 'survivor', 'closing-file'];
+  context.tabberIsAdvanced = () => false;
+  context.editorNav.index = 2;
+  context.editorNav.liveItems = new Set(context.editorNav.stack);
+  context.editorNav.focusedItem = 'closing-file';
+  context.focusedPanelItem = 'closing-file';
+  context.layoutSlots = {left: {tabs: ['tabber'], active: 'tabber'}};
+  context.layoutItems = ['tabber', 'survivor', 'closing-file'];
+  assert.equal(context.reconcileEditorNav('closing-file', ['closing-file']), 'survivor', 'explicit closure prunes stale registry entries');
+  assert.deepEqual([...context.editorNav.stack], ['tabber', 'survivor']);
+
+});
 
 test('directory expansion settlement cannot resurrect children on a reused file row', () => {
   const source = fs.readFileSync('static_src/js/yomux/60_popovers_tabs.js', 'utf8');
@@ -103,6 +212,29 @@ test('shared tree dataset updates preserve values without repeating DOM writes',
   }
 });
 
+test('shared child reconciliation retires obsolete siblings without moving retained controls', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const context = vm.createContext({});
+  vm.runInContext(source.slice(source.indexOf('function reconcileChildNodes('), source.indexOf('function setClassNameIfChanged(')), context);
+  for (const locked of [false, true]) {
+    const parent = new TestElement(), obsolete = new TestElement(), control = new TestElement(), sibling = new TestElement();
+    parent.append(obsolete, control, sibling);
+    const insert = parent.insertBefore.bind(parent);
+    parent.insertBefore = (node, before) => {
+      assert.notEqual(node, control, 'the retained control must stay connected');
+      return insert(node, before);
+    };
+    const next = locked ? [sibling, control] : [control];
+    context.reconcileChildNodes(parent, next, locked ? {lockedNodes: [control]} : {});
+    assert.deepEqual(parent.children, next);
+    assert.equal(control.parentElement, parent);
+  }
+  const parent = new TestElement(), first = new TestElement(), second = new TestElement();
+  parent.append(first, second);
+  context.reconcileChildNodes(parent, [second, first]);
+  assert.deepEqual(parent.children, [second, first], 'an explicit order change still applies');
+});
+
 test('Differ static summaries retain the mounted tree without moving its rows', () => {
   const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
   const treeSource = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
@@ -128,6 +260,65 @@ test('Differ static summaries retain the mounted tree without moving its rows', 
   assert.equal(groups.children.length, 300);
 });
 
+test('forced Differ freshness does not replace an unchanged mounted header', () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+  const groups = {}, root = {__changesStaticHtml: 'same shell', querySelector: () => groups};
+  let replacements = 0, renders = 0;
+  const context = vm.createContext({
+    activeChangesControl: () => null,
+    replaceChangesStaticHtml: () => { replacements++; },
+    renderChangesGroups: () => { renders++; },
+  });
+  const start = source.indexOf('function renderChangesRoot(');
+  vm.runInContext(source.slice(start, source.indexOf('\nfunction ', start + 1)), context);
+  for (let i = 0; i < 3; i++) context.renderChangesRoot(root, 'same shell', [], {}, {force: true});
+  assert.equal(replacements, 0, 'fresh server data must not detach an unchanged summary or toolbar');
+  assert.equal(renders, 3, 'freshness still reconciles repository data');
+  context.renderChangesRoot(root, 'changed shell', [], {}, {force: true});
+  assert.equal(replacements, 1, 'actual shell changes remain eligible');
+});
+
+test('history catch-up owns one fenced timer per destination and stops on completion', () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_10_session_files.js', 'utf8');
+  const states = new Map(['finder', 'differ'].map(destination => [destination, {preparationTimer: null}]));
+  const timers = new Map(), requests = [];
+  let sequence = 0;
+  const context = vm.createContext({
+    sessionFilesStateForDestination: destination => states.get(destination),
+    setTimeout: callback => { timers.set(++sequence, callback); return sequence; },
+    clearTimeout: id => timers.delete(id),
+    sessionFilesSurfaceDescriptor: () => ({visible: true, session: '1'}),
+    sessionFilesRequestIsActiveForDestination: () => false,
+    fetchSessionFiles: options => { requests.push(options); return Promise.resolve(); },
+    statusErr: message => { throw new Error(message); },
+  });
+  const start = source.indexOf('function scheduleSessionFilesPreparationRefresh(');
+  vm.runInContext(source.slice(start, source.indexOf('\nfunction ', start + 1)), context);
+  const stale = [];
+  for (const [destination, state] of states) {
+    state.payload = {session: '1', loaded: true, preparation: {partial: true}};
+    context.scheduleSessionFilesPreparationRefresh(destination, state.payload);
+    stale.push(timers.get(state.preparationTimer));
+    context.scheduleSessionFilesPreparationRefresh(destination, state.payload);
+  }
+  assert.equal(timers.size, 2, 'repeated publications keep one timer for each independent consumer');
+  stale.forEach(callback => callback());
+  assert.equal(requests.length, 0, 'retired callbacks cannot request duplicate work');
+  for (const [destination, state] of states) {
+    const callback = timers.get(state.preparationTimer);
+    timers.delete(state.preparationTimer);
+    callback();
+    assert.equal(requests.at(-1).destination, destination);
+    assert.equal(requests.at(-1).force, undefined, 'catch-up uses shared cache admission and coalescing');
+    assert.equal(requests.at(-1).freshGit, undefined, 'index catch-up does not force a fresh Git generation');
+    state.payload = {...state.payload, preparation: {partial: false}};
+    context.scheduleSessionFilesPreparationRefresh(destination, state.payload);
+    assert.equal(state.preparationTimer, null);
+  }
+  assert.equal(timers.size, 0);
+  assert.equal(requests.length, 2);
+});
+
 test('Differ preparation yields before publication and preserves repository order without sorting every file', () => {
   const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
   const sortSource = fs.readFileSync('static_src/js/yomux/86_changes_10_session_files.js', 'utf8');
@@ -147,7 +338,8 @@ test('Differ preparation yields before publication and preserves repository orde
     + source.slice(source.indexOf('function* renderChangesGroupsSteps('), source.indexOf('function renderChangedChangesRepo(')), context);
   const files = Array.from({length: 10000}, (_, index) => ({path: `${10000 - index}.js`, repo: index % 2 ? '/b' : '/a'}));
   files.push({path: '0.js', repo: '/b'});
-  const steps = context.renderChangesGroupsSteps(new TestElement(), files, {isCurrent: () => true});
+  const groups = new TestElement();
+  const steps = context.renderChangesGroupsSteps(groups, files, {isCurrent: () => true});
   for (let index = 0; index < files.length; index += 1) {
     assert.equal(steps.next().done, false);
     assert.equal(rendered.length, 0, 'input can interrupt grouping before any rows publish');
@@ -155,6 +347,17 @@ test('Differ preparation yields before publication and preserves repository orde
   let step = steps.next();
   while (!step.done) step = steps.next();
   assert.deepEqual(rendered, [['/b', 5001], ['/a', 5000]], 'minimum file representatives retain the old global-sort repository order');
+  let moves = 0;
+  const insertBefore = groups.insertBefore.bind(groups);
+  groups.insertBefore = (...args) => { moves++; return insertBefore(...args); };
+  for (const changedRepo of [{repo: '/a'}, undefined]) {
+    rendered.length = 0;
+    const refresh = context.renderChangesGroupsSteps(groups, files, {isCurrent: () => true, changedRepo});
+    let next = refresh.next();
+    while (!next.done) next = refresh.next();
+    assert.deepEqual(rendered, [['/b', 5001], ['/a', 5000]], 'interrupted repository fallback and completion use the same ordering');
+    assert.equal(moves, 0, 'unchanged repository sections must not move during fallback or completion');
+  }
 });
 
 test('visible Differ filtering yields and stops reading files after its render owner is retired', () => {
@@ -186,8 +389,9 @@ test('visible Differ filtering yields and stops reading files after its render o
 
 test('visible Differ restarts iterate streamed repos without invoking the flattening files getter', () => {
   const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+  const rendered = [];
   let flattenReads = 0;
-  const payload = {session: '1', loaded: false, repos: []};
+  const payload = {session: '1', loaded: false, repos: [], preparation: {partial: true}};
   Object.defineProperty(payload, 'files', {get() {flattenReads += 1; return [{repo: '/repo', path: 'file.txt'}];}});
   const context = {
     fileExplorerSessionFilesState: {payload, streamRepos: null},
@@ -198,18 +402,29 @@ test('visible Differ restarts iterate streamed repos without invoking the flatte
     sessionFilesPanelIsLoading: () => false,
     repoPayloadHasRenderableSection: () => true,
     reconcileChildNodes() {}, document: {createElement: () => new TestElement()},
-    *renderChangesRepoSectionSteps() {},
+    *renderChangesRepoSectionSteps(_section, _repo, files) {rendered.push(...files.map(file => file.path));},
+    normalizeDirectoryPath: value => value,
     drainFileTreeRenderStepsWithInput: steps => steps,
   };
   vm.createContext(context);
-  context.fileExplorerSessionFilesState.streamRepos = vm.runInContext("new Map([['/repo', {files: [{repo: '/repo', path: 'file.txt'}]}]])", context);
+  installSessionFilesPreparedRows(context);
+  context.fileExplorerSessionFilesState.streamRepos = vm.runInContext("new Map([['/repo', {files: [{repo: '/repo', path: 'fresh.txt', abs_path: '/repo/fresh.txt'}], savedFiles: [{repo: '/repo', path: 'saved-only.txt', abs_path: '/repo/saved-only.txt'}]}]])", context);
   vm.runInContext(source.slice(source.indexOf('const changesRepoSectionsByGroups'), source.indexOf('function renderChangedChangesRepo(')), context);
-  const steps = context.renderChangesGroups(new TestElement(), [], {
+  const groups = new TestElement();
+  const steps = context.renderChangesGroups(groups, [], {
     payload, view: 'differ', yieldToInput: true, deferPreparation: true,
   });
   assert.equal(flattenReads, 0, 'constructing the visible update never reads the compatibility getter');
   assert.equal(steps.next().done, false, 'stream file iteration starts through the yielding renderer');
   assert.equal(flattenReads, 0, 'the first yielded stream file also avoids flattening');
+  const replacement = context.renderChangesGroups(groups, [], {
+    payload, view: 'differ', yieldToInput: true, changedRepo: {repo: '/repo'},
+  });
+  let next = replacement.next();
+  while (!next.done) next = replacement.next();
+  assert.deepEqual(rendered.sort(), ['fresh.txt', 'saved-only.txt'], 'a new chunk superseding an incomplete render retains the partial baseline');
+  assert.equal(steps.next().value, false, 'superseded renderer retires without publishing');
+  assert.equal(flattenReads, 0);
 });
 
 test('deferred Differ loading checks visible files after tombstones are filtered', () => {
@@ -794,6 +1009,7 @@ test('Finder metadata never replaces Differ or repository diff status, including
         const timers = new Map();
         let timerId = 0;
         const context = {
+        fileExplorerPermissionsVisible: () => false,
           document: {querySelectorAll: () => [finder, differ]}, performance: {now: () => 0}, fileTreeInputSliceMs: 1,
           setTimeout(callback) {timers.set(++timerId, callback); return timerId;}, clearTimeout: id => timers.delete(id),
           fileExplorerFinderSessionFilesState: {payload}, fileExplorerRootMode: 'sync',
@@ -1223,6 +1439,7 @@ function summarizedHangingShard(closeOnSignal) {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
+  child.unref = () => {};
   child.kill = signal => {
     signals.push(signal);
     if (signal === closeOnSignal) setImmediate(() => child.emit('close', null, signal));
@@ -1243,6 +1460,136 @@ async function completeRenderFrames(rendering, frames) {
 }
 
 async function runLayoutAsyncSuite() {
+  await testAsync('Normal tab history reveals registered tabs without changing visit order', async () => {
+    const api = loadYomux('', ['1', '2', '3']);
+    api.setTabberModeForTest('normal');
+    api.setTabberNormalSelectionsForTest(['2']);
+    await api.applyTabberNormalSelectionsForTest('2');
+    api.editorNav.stack = [];
+    api.editorNav.index = -1;
+    api.recordEditorNav('1');
+    api.recordEditorNav('2');
+    await api.editorNavBackForTest();
+    assert.deepEqual(api.tabberNormalSelectionsForTest(), ['1']);
+    assert.equal(api.itemInLayout('1'), true);
+    await api.editorNavForwardForTest();
+    assert.deepEqual(api.tabberNormalSelectionsForTest(), ['2']);
+    assert.deepEqual([...api.editorNav.stack], ['1', '2']);
+    assert.equal(api.editorNav.index, 1);
+  });
+
+  await testAsync('chat bootstrap follows unread continuation to its observed room revision', async () => {
+    for (const total of [50, 55, 450]) {
+      const api = loadYomux('', [], 'http:', 'Linux x86_64', 'admin', {authUsername: 'alice'});
+      const calls = [];
+      const rows = (after, count) => Array.from({length: count}, (_, index) => ({id: after + index + 1, body: 'fixture', username: 'bob'}));
+      api.setApiFetchJsonForTest(async url => {
+        calls.push(url);
+        if (url.startsWith('/api/chat/bootstrap')) return {revision: total, newer_cursor: 'after-50',
+          messages: rows(0, 50), read_up_to_id: 0, typing: []};
+        const after = Number(new URL(url, 'http://fixture').searchParams.get('after').slice(6));
+        const count = Math.min(200, total - after);
+        return {revision: after + count, newer_cursor: `after-${after + count}`, messages: rows(after, count)};
+      });
+      assert.equal(await api.loadChatDeltaForTest(), true);
+      assert.deepEqual([...api.chatRequestStateForTest().messageIds], Array.from({length: total}, (_, index) => index + 1));
+      assert.equal(calls.length, 1 + Math.ceil((total - 50) / 200), 'catch-up needs no unrelated event and stops at the observed tail');
+    }
+  });
+
+  await testAsync('chat continuation yields to newer refreshes and stops when no progress is possible', async () => {
+    for (const empty of [false, true]) {
+      const api = loadYomux('', [], 'http:', 'Linux x86_64', 'admin', {authUsername: 'alice'});
+      let release;
+      let deltas = 0;
+      api.setApiFetchJsonForTest(async url => {
+        if (url.startsWith('/api/chat/bootstrap')) return {revision: 2, newer_cursor: 'after-1',
+          messages: [{id: 1, body: 'first'}], read_up_to_id: 0, typing: []};
+        deltas++;
+        if (empty) return {revision: 1, newer_cursor: 'after-1', messages: []};
+        if (deltas === 1) return new Promise(resolve => { release = resolve; });
+        return {revision: 2, newer_cursor: 'after-2', messages: [{id: 2, body: 'current'}]};
+      });
+      const initial = api.loadChatDeltaForTest();
+      await new Promise(setImmediate);
+      if (empty) {
+        assert.equal(await initial, true);
+        assert.equal(deltas, 1);
+      } else {
+        assert.equal(await api.loadChatDeltaForTest(), true);
+        release({revision: 99, newer_cursor: 'after-99', messages: [{id: 99, body: 'stale'}]});
+        assert.equal(await initial, false);
+        assert.deepEqual([...api.chatRequestStateForTest().messageIds], [1, 2]);
+      }
+    }
+  });
+
+  await testAsync('loaded chat drains a coalesced delta burst without another invalidation', async () => {
+    for (const target of [null, 450]) {
+      const api = loadYomux('', [], 'http:', 'Linux x86_64', 'admin', {authUsername: 'alice'});
+      let total = 50;
+      const rows = (after, count) => Array.from({length: count}, (_, index) => ({id: after + index + 1, body: 'fixture', username: 'bob'}));
+      api.setApiFetchJsonForTest(async url => {
+        if (url.startsWith('/api/chat/bootstrap')) return {revision: total, newer_cursor: 'after-50',
+          messages: rows(0, 50), read_up_to_id: 0, typing: []};
+        const after = Number(new URL(url, 'http://fixture').searchParams.get('after').slice(6));
+        const count = Math.min(200, total - after);
+        return {revision: after + count, newer_cursor: `after-${after + count}`, messages: rows(after, count)};
+      });
+      assert.equal(await api.loadChatDeltaForTest(), true);
+      total = 450;
+      assert.equal(await api.loadChatDeltaForTest(target), true);
+      assert.deepEqual([...api.chatRequestStateForTest().messageIds], Array.from({length: total}, (_, index) => index + 1));
+    }
+  });
+  await testAsync('Back and Forward traverse without changing global recency or reopening tabs', async () => {
+  const api = loadYomux('', ['1', '2', '3']);
+  const slots = api.emptyLayoutSlots();
+  slots.left = api.paneStateWithTabs(['1', '2', '3'], '3');
+  slots[api.layoutTreeKey] = api.leafNode('left');
+  api.setLayoutSlotsForTest(slots);
+  api.setFocusedPanelItem('3');
+  api.editorNav.stack = ['1', '2', '3'];
+  api.editorNav.index = 2;
+  await api.editorNavBackForTest();
+  assert.equal(api.currentSessionActionTarget(), '2');
+  await api.editorNavBackForTest();
+  assert.equal(api.currentSessionActionTarget(), '1');
+  await api.editorNavForwardForTest();
+  assert.equal(api.currentSessionActionTarget(), '2');
+  assert.deepEqual(api.editorNav.stack, ['1', '2', '3']);
+  api.recordEditorNav('1');
+  assert.deepEqual(api.editorNav.stack, ['2', '3', '1']);
+  assert.equal(api.editorNav.index, 2);
+});
+
+  test('Get Info requires complete metadata before enabling permissions', () => {
+    const source = fs.readFileSync('static_src/js/yomux/45_file_explorer_actions.js', 'utf8');
+    const start = source.indexOf('function fileGetInfoMetadataAvailable(');
+    const context = vm.createContext({});
+    vm.runInContext(source.slice(start, source.indexOf('\nasync function ', start)), context);
+    const available = context.fileGetInfoMetadataAvailable;
+    const metadata = {owner: null, owner_id: 0, group: null, group_id: 0, created: null, accessed: null,
+      allocated_size: null, mode: 0, permissions: '----------', octal_mode: '0000', metadata_identity: 'inode', permission_edit_reason: ''};
+    assert.strictEqual(available(metadata), true, 'nullable OS metadata and mode zero are valid');
+    assert.strictEqual(available(null), false);
+    for (const key of Object.keys(metadata)) {
+      const incomplete = {...metadata};
+      delete incomplete[key];
+      assert.strictEqual(available(incomplete), false, `missing ${key} must disable editing`);
+    }
+    for (const mode of [-1, 0o10000, '0644', NaN, 1.5]) assert.strictEqual(available({...metadata, mode}), false);
+    for (const field of ['permissions', 'octal_mode', 'metadata_identity', 'permission_edit_reason']) {
+      assert.strictEqual(available({...metadata, [field]: null}), false, `null ${field}`);
+    }
+    const sizeStart = source.indexOf('function formatFileSize(');
+    const sizeContext = vm.createContext({});
+    vm.runInContext(source.slice(sizeStart, source.indexOf('\nfunction ', sizeStart + 1)), sizeContext);
+    assert.strictEqual(sizeContext.formatFileSize(267323707392), '249 GB');
+    assert.strictEqual(sizeContext.formatFileSize(1024 ** 5), '1.0 PB');
+    assert.strictEqual(sizeContext.formatFileSize(1024 ** 6), '1.0 EB');
+  });
+
   await testAsync('a delayed settings save preserves navigation admitted after its request', async () => {
     for (const mode of ['normal', 'advanced']) {
       const api = loadYomux('', ['1']);
@@ -1628,6 +1975,7 @@ await testAsync('Differ preserves earlier repository publications at held row an
     };
     vm.createContext(context);
     installTreePublicationHelpers(context);
+    installSessionFilesPreparedRows(context);
     vm.runInContext(treeSource.slice(treeSource.indexOf('function drainFileTreeRenderSteps('), treeSource.indexOf('function renderTreeChildren('))
       + source.slice(source.indexOf('const changesRepoSectionsByGroups ='), source.indexOf('// Returns the static toolbar/header HTML')), context);
     const groups = new TestElement();
@@ -1658,8 +2006,8 @@ await testAsync('Differ preserves earlier repository publications at held row an
     const second = context.renderChangesGroups(groups, [], {payload, yieldToInput: true, changedRepo: {repo: '/second', files: [secondFile], repos: payload.repos}});
     await completeRenderFrames(second, frames);
     await first;
-    assert.deepEqual(groups.children.map(node => node.dataset.changesRepo), ['/first', '/second'], hold);
-    assert.equal(groups.children[0], section, hold);
+    assert.deepEqual(groups.children.map(node => node.dataset.changesRepo), hold === 'last-row' ? ['/second', '/first'] : ['/first', '/second'], hold);
+    assert.ok(groups.children.includes(section), `${hold}: the earlier repository publication retains its mounted node`);
     assert.equal(writes, 0, `${hold}: unrelated chunk cannot rewrite earlier repository chrome or leaf publication`);
   }
 });
@@ -1687,6 +2035,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     fileExplorerSessionFilesState: {payload: {}, streamRepos: new Map()},
   };
   vm.createContext(context);
+  installSessionFilesPreparedRows(context);
   vm.runInContext(treeSource.slice(treeSource.indexOf('function drainFileTreeRenderSteps('), treeSource.indexOf('function renderTreeChildren('))
     + source.slice(source.indexOf('const changesRepoSectionsByGroups ='), source.indexOf('function* renderChangesRepoSectionSteps(')), context);
   const groups = new TestElement();
@@ -2382,7 +2731,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     const row = api.gitDiffCommitRowForTest(item, {
       sha: 'a'.repeat(40), short: 'a'.repeat(9), authored_at: 1786931640,
       files: 3, added: 42, removed: 11, binary_files: 0,
-      signature_status: 'U', decorations: 'HEAD -> go_release, tag: v0.9.1',
+      signature_status: 'U',
       author: 'Keiven Chang', subject: 'Record release evidence #123', parents: ['b'.repeat(40)],
       decorations: ['HEAD -> yo7110', 'tag: v0.8.8', 'origin/main'],
     });
@@ -2554,8 +2903,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     ]);
     assert.deepEqual(fileEntries.map(entry => entry.querySelector('.file-tree-git-status')?.textContent), ['M', '?']);
     assert.deepEqual(fileEntries.map(entry => [...entry.children].map(child => child.className)), [
-      ['file-tree-icon file-icon-code', 'file-tree-name', 'file-tree-agent', 'file-tree-diff', 'file-tree-dir-count', 'file-tree-git-status', 'file-tree-date'],
-      ['file-tree-icon file-icon-doc', 'file-tree-name', 'file-tree-agent', 'file-tree-diff', 'file-tree-dir-count', 'file-tree-git-status file-tree-git-status-unknown', 'file-tree-date'],
+      ['file-tree-icon file-icon-code', 'file-tree-name', 'file-tree-agent', 'file-tree-diff', 'file-tree-dir-count', 'file-tree-git-status', 'file-tree-date', 'file-tree-permissions', 'file-tree-size'],
+      ['file-tree-icon file-icon-doc', 'file-tree-name', 'file-tree-agent', 'file-tree-diff', 'file-tree-dir-count', 'file-tree-git-status file-tree-git-status-unknown', 'file-tree-date', 'file-tree-permissions', 'file-tree-size'],
     ], 'dirty file rows reuse the normal Differ file-tree columns');
     const entries = allEntries;
     assert.equal(node.querySelector('.git-diff-worktree-entries')?.getAttribute('role'), 'tree', 'dirty files own a tree for shared keyboard interaction');
@@ -3096,6 +3445,21 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.deepStrictEqual(signals, ['SIGTERM', 'SIGKILL'], 'the bounded launcher escalates only after its graceful-termination window');
   });
 
+  await testAsync('node shard watchdog settles when an exited leader leaves its output pipes open', async () => {
+    const {child, signals} = summarizedHangingShard(null);
+    let spawnOptions;
+    const result = await runSuite('exited-leader-pipe-holder', (_command, _args, options) => {
+      spawnOptions = options;
+      return child;
+    }, {timeoutMs: 20, terminateGraceMs: 20});
+
+    assert.equal(result.status, 1, 'a descendant holding output cannot keep the watchdog pending');
+    assert.ok(result.output.includes('watchdog after printing a suite summary'));
+    assert.deepStrictEqual(signals, ['SIGTERM', 'SIGKILL']);
+    assert.equal(spawnOptions.detached, true, 'real shards own a private group for descendant cleanup');
+    assert.ok(child.stdout.destroyed && child.stderr.destroyed, 'timeout retirement closes both pipe readers');
+  });
+
   await testAsync('session metadata distinguishes fetch failure from a client apply failure', async () => {
     const api = loadYomux('', ['1']);
     const fetchFailure = await api.fetchAndApplySessionMetadataForTest(
@@ -3509,6 +3873,117 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.deepStrictEqual([...api.fileExplorerSessionFilesStateForTest().payload.files.map(file => file.abs_path)], newerFiles, 'the current repository map remains available after stale completion');
   });
 
+  await testAsync('Differ partial attribution retains saved rows until the completed stream authorizes removals', async () => {
+    const cases = [
+      {startPartial: true, finalPartial: true},
+      {startPartial: true, finalPartial: false},
+      {startPartial: false, finalPartial: true},
+      {startPartial: false, finalPartial: false},
+      {startPartial: false, chunkPartial: true, finalPartial: true},
+      {startPartial: true, chunkPartial: false, finalPartial: false},
+      {startPartial: true, finalPartial: true, mismatch: 'session'},
+      {startPartial: true, finalPartial: true, mismatch: 'comparison'},
+    ];
+    for (const scenario of cases) {
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+      const slots = api.emptyLayoutSlots();
+      slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+      slots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
+      slots.right = api.paneStateWithTabs(['1'], '1');
+      api.setLayoutSlotsForTest(slots);
+      api.setFileExplorerChangesSelectedSessionForTest('1');
+      const repo = {repo: '/repo/app', count: 2, added: 0, removed: 0};
+      const row = (path, added) => ({repo: repo.repo, path, abs_path: `${repo.repo}/${path}`, status: 'T', added});
+      api.setSessionFilesPayloadForTest({session: scenario.mismatch === 'session' ? 'other' : '1', loaded: true,
+        from_ref: scenario.mismatch === 'comparison' ? 'older' : 'HEAD', to_ref: 'current',
+        repos: [repo, {repo: '/repo/sibling'}], files: [row('kept.py', 1), row('saved-only.py', 2),
+          {repo: '/repo/sibling', path: 'sibling.py', abs_path: '/repo/sibling/sibling.py', status: 'T'}],
+        errors: [], refs_by_repo: {}});
+      const stream = controllableSseResponse();
+      api.setFetchForTest((url, options = {}) => {
+        assert.ok(String(url).startsWith('/api/session-files-stream'));
+        stream.bindSignal(options.signal);
+        return Promise.resolve(stream.response);
+      });
+      const request = api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, background: true});
+      const state = () => api.fileExplorerSessionFilesStateForTest().payload;
+      stream.push(sseFrame('start', {session: '1', preparation: {partial: scenario.startPartial}}));
+      await flushAsyncWork();
+      const chunk = {session: '1', repos: [{...repo, added: 99}], files: [row('kept.py', 9), row('new.py', 3)], attribution_complete: true};
+      if (scenario.chunkPartial !== undefined) chunk.preparation = {partial: scenario.chunkPartial};
+      for (let repeat = 0; repeat < 2; repeat++) {
+        stream.push(sseFrame('repo', chunk));
+        await flushAsyncWork();
+        const files = [...state().files].filter(file => file.repo === repo.repo);
+        const effectivePartial = scenario.chunkPartial ?? scenario.startPartial;
+        assert.deepStrictEqual(files.map(file => file.path).sort(),
+          effectivePartial && !scenario.mismatch ? ['kept.py', 'new.py', 'saved-only.py'] : ['kept.py', 'new.py'], JSON.stringify(scenario));
+        assert.equal(files.find(file => file.path === 'kept.py').added, 9, 'incoming same-path metadata wins');
+        assert.equal(state().repos.find(item => item.repo === repo.repo).added, 99, 'incoming repository counts remain current');
+      }
+      stream.push(sseFrame('done', {session: '1', loaded: true, preparation: {partial: scenario.finalPartial}, repo_paths: [repo.repo], errors: []}));
+      stream.close();
+      await request;
+      const expected = ['kept.py', 'new.py'];
+      if (scenario.finalPartial && !scenario.mismatch) expected.push('saved-only.py', 'sibling.py');
+      assert.deepStrictEqual([...state().files].map(file => file.path).sort(), expected.sort(), JSON.stringify(scenario));
+      assert.equal(state().files.find(file => file.path === 'kept.py').added, 9);
+    }
+  });
+
+  await testAsync('partial JSON fallback cache and push publications retain matching client rows without a server cache', async () => {
+    for (const route of ['json', 'fallback', 'cache', 'push']) {
+      for (const mismatch of ['', 'session', 'comparison']) {
+        const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: route === 'json' ? 'Python test' : 'Go test'}});
+        const slots = api.emptyLayoutSlots();
+        slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+        slots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
+        slots.right = api.paneStateWithTabs(['1'], '1');
+        api.setLayoutSlotsForTest(slots);
+        api.setFileExplorerChangesSelectedSessionForTest('1');
+        const repo = {repo: '/repo/app', count: 1, added: 2, removed: 0};
+        const row = (path, added) => ({repo: repo.repo, path, abs_path: `${repo.repo}/${path}`, status: 'T', added});
+        api.setSessionFilesPayloadForTest({session: mismatch === 'session' ? 'other' : '1', loaded: true,
+          from_ref: mismatch === 'comparison' ? 'older' : 'HEAD', to_ref: 'current', repos: [repo],
+          files: [row('kept.py', 1), row('saved-only.py', 2)], errors: [], refs_by_repo: {}});
+        const payload = {session: '1', loaded: true, from_ref: 'HEAD', to_ref: 'current', repos: [{...repo, added: 99}],
+          files: [row('kept.py', 9), row('new.py', 3)], preparation: {partial: true}, errors: [], refs_by_repo: {}};
+        api.setFetchForTest(url => String(url).startsWith('/api/session-files-stream')
+          ? Promise.resolve(jsonResponse({}, 404)) : Promise.resolve(jsonResponse(payload)));
+        const request = api.sessionFilesRequestForDestinationForTest('differ', '1');
+        for (let repeat = 0; repeat < 2; repeat++) {
+          if (route === 'push') api.applySessionFilesPayloadFromPushForTest(payload, request);
+          else await api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, background: true, cacheOnly: route === 'cache'});
+          const files = api.fileExplorerSessionFilesStateForTest().payload.files;
+          assert.deepStrictEqual([...files].map(file => file.path).sort(), mismatch ? ['kept.py', 'new.py'] : ['kept.py', 'new.py', 'saved-only.py'], `${route}/${mismatch}`);
+          assert.equal(files.find(file => file.path === 'kept.py').added, 9);
+        }
+        api.applySessionFilesPayloadFromPushForTest({...payload, preparation: {partial: false}}, request);
+        assert.deepStrictEqual([...api.fileExplorerSessionFilesStateForTest().payload.files].map(file => file.path).sort(), ['kept.py', 'new.py'], 'complete publication removes saved-only rows');
+      }
+    }
+  });
+
+  test('partial repository totals count visible saved rows without adding stale Git totals', () => {
+    const source = fs.readFileSync('static_src/js/yomux/86_changes_10_session_files.js', 'utf8');
+    const start = source.indexOf('function changesRepoTotals(');
+    const context = vm.createContext({repoAggregateNumber: (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback,
+      changeFileTotals: () => ({added: 500, removed: 400})});
+    vm.runInContext(source.slice(start, source.indexOf('\nfunction ', start + 1)), context);
+    const entries = [{}, {}, {}], repo = {count: 2, added: 99, removed: 7};
+    assert.deepStrictEqual(canonical(context.changesRepoTotals(repo, entries, {partial: true})), {count: 3, added: 99, removed: 7});
+    assert.deepStrictEqual(canonical(context.changesRepoTotals(repo, entries, {partial: false})), {count: 2, added: 99, removed: 7});
+    context.esc = String;
+    context.t = key => key;
+    context.tPlural = (key, count) => `${count} files`;
+    const htmlStart = source.indexOf('function changesRepoTotalsHtml(');
+    vm.runInContext(source.slice(htmlStart, source.indexOf('\nfunction ', htmlStart + 1)), context);
+    assert.ok(context.changesRepoTotalsHtml({missing: true, touched_count: 1}, entries, {partial: true}).includes('3 files'), 'partial missing repositories retain known saved file counts');
+    assert.ok(context.changesRepoTotalsHtml({missing: true, touched_count: 1}, entries, {partial: false}).includes('1 files'), 'complete missing repository totals remain authoritative');
+    const renderSource = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+    assert.ok(renderSource.includes('changesRepoTotalsHtml(repoInfo, repoFiles, {partial: payload.preparation?.partial === true})'), 'the mounted repository header supplies preparation state to the shared totals owner');
+  });
+
   await testAsync('cached Go streams retain the current target until the first repository arrives', async () => {
     const cases = ['finder', 'differ'].flatMap(destination => ['repository', 'empty', 'cold', 'fallback404', 'fallback501', 'superseded']
       .map(route => ({destination, route})));
@@ -3556,8 +4031,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         if (route === 'repository' || route === 'superseded') {
           stream.push(sseFrame('repo', {...fresh, loaded: false}));
           await flushAsyncWork();
-          assert.deepEqual([...state().payload.files.map(file => file.abs_path)], ['/repo/app/new.txt'], 'the first authoritative repository starts a fresh stream without cached duplicates');
-          assert.deepEqual([...state().payload.repos.map(repo => repo.repo)], ['/repo/app'], 'repositories missing from the new stream do not survive its initialization');
+          assert.deepEqual([...state().payload.files.map(file => file.abs_path)].sort(), route === 'superseded' ? ['/repo/app/new.txt'] : ['/repo/app/new.txt', '/repo/removed/old.txt'], `a refreshed repository replaces its saved rows while other saved repositories remain visible: ${destination}/${route} ${JSON.stringify(state().payload.files.map(file => file.abs_path))}`);
+          assert.deepEqual([...state().payload.repos.map(repo => repo.repo)].sort(), route === 'superseded' ? ['/repo/app'] : ['/repo/app', '/repo/removed'], 'saved sections remain visible until the completed stream establishes its final inventory');
           if (route === 'superseded') assert.equal(state().payload.session, '2', 'the retired callback cannot initialize over the newer target');
         }
       } finally {
@@ -3570,10 +4045,107 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       }
       const expectedFinalPaths = route === 'empty' ? cached.files.map(file => file.abs_path)
         : route === 'cold' ? [] : ['/repo/app/new.txt'];
-      assert.deepEqual([...state().payload.files.map(file => file.abs_path)], expectedFinalPaths, `${destination}/${route} finalizes through the existing background preservation policy`);
+      assert.deepEqual([...state().payload.files.map(file => file.abs_path)], expectedFinalPaths, `${destination}/${route} finalizes through the existing background preservation policy: ${JSON.stringify(state().payload.files.map(file => file.abs_path))}`);
       assert.equal(state().payload.loaded, true, 'a completed cold or cached stream has a terminal payload');
       if (route === 'superseded') assert.equal(state().payload.session, '2', 'the stale done event cannot replace the newer target');
     }
+  });
+
+  for (const transport of ['stream', 'fallback', 'cache']) {
+    await testAsync(`Differ preserves repository comparison refs when clearing old rows (${transport})`, async () => {
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+      const slots = api.emptyLayoutSlots();
+      slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+      slots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
+      slots.right = api.paneStateWithTabs(['1'], '1');
+      api.setLayoutSlotsForTest(slots);
+      api.setFileExplorerChangesSelectedSessionForTest('1');
+      const repo = '/repo/app';
+      api.setSessionFilesPayloadForTest({session: '1', loaded: true, from_ref: 'HEAD', to_ref: 'current',
+        repos: [{repo}, {repo: '/repo/sibling'}], files: [], errors: []});
+      api.setDiffRefsByRepoForTest(repo, {from: 'b4eef83', to: 'current'});
+      api.setDiffRefsByRepoForTest('/repo/sibling', {from: 'v1', to: 'current'});
+      api.setDiffRefsByRepoForTest('/repo/retired', {from: 'v0', to: 'current'});
+      const expectedRefs = {[repo]: {from: 'b4eef83', to: 'current'}, '/repo/sibling': {from: 'v1', to: 'current'}};
+      const payload = {session: '1', loaded: true, from_ref: 'HEAD', to_ref: 'current',
+        repos: [{repo, comparison_from_ref: 'b4eef83', comparison_to_ref: 'current'}],
+        files: [{repo, path: 'changed.txt', abs_path: `${repo}/changed.txt`, status: 'M'}], errors: []};
+      const calls = [];
+      const record = url => {
+        const parsed = new URL(String(url), 'https://localhost');
+        calls.push(parsed.pathname);
+        assert.deepStrictEqual(JSON.parse(parsed.searchParams.get('refs')), expectedRefs);
+        assert.equal(parsed.searchParams.get('from'), 'HEAD', 'the global default stays independent');
+      };
+      const stream = controllableSseResponse();
+      api.setFetchForTest((url, options = {}) => {
+        record(url);
+        if (transport === 'fallback') return Promise.resolve(jsonResponse({}, 404));
+        stream.bindSignal(options.signal);
+        return Promise.resolve(stream.response);
+      });
+      api.setApiFetchJsonForTest(async url => { record(url); return payload; });
+      const pending = api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true,
+        force: true, cacheOnly: transport === 'cache'});
+      await flushAsyncWork();
+      if (transport === 'stream') {
+        stream.push(sseFrame('done', payload));
+        stream.close();
+      }
+      await pending;
+      assert.deepStrictEqual(calls, transport === 'stream' ? ['/api/session-files-stream']
+        : transport === 'fallback' ? ['/api/session-files-stream', '/api/session-files'] : ['/api/session-files']);
+      const result = api.fileExplorerSessionFilesStateForTest().payload;
+      assert.deepStrictEqual(JSON.parse(result.request_key).repo_refs, expectedRefs, 'cache identity matches the comparison sent');
+      assert.equal(result.files[0].path, 'changed.txt');
+    });
+  }
+
+  await testAsync('Differ retains comparison scope for newer selections during a pending stream', async () => {
+    const api = loadYomux('', ['1', '2'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerChangesSelectedSessionForTest('1');
+    api.setSessionFilesPayloadForTest({session: '1', loaded: true, from_ref: 'HEAD', to_ref: 'current',
+      repos: [{repo: '/repo/first'}, {repo: '/repo/second'}], files: [], errors: []});
+    api.setDiffRefsByRepoForTest('/repo/first', {from: 'b4eef83', to: 'current'});
+    const streams = [controllableSseResponse(), controllableSseResponse()];
+    const requests = [];
+    api.setFetchForTest((url, options = {}) => {
+      const params = new URL(String(url), 'https://localhost').searchParams;
+      requests.push(JSON.parse(params.get('refs')));
+      const stream = streams[requests.length - 1];
+      stream.bindSignal(options.signal);
+      return Promise.resolve(stream.response);
+    });
+    const first = api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true});
+    await flushAsyncWork();
+    api.setDiffRefsByRepoForTest('/repo/second', {from: 'next-base', to: 'current'});
+    assert.deepStrictEqual(canonical(api.sessionFilesRequestForDestinationForTest('differ', '1').repo_refs), {
+      '/repo/first': {from: 'b4eef83', to: 'current'}, '/repo/second': {from: 'next-base', to: 'current'},
+    }, 'watch and completion descriptors retain the pending comparison scope and latest choices');
+    const second = api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true});
+    await flushAsyncWork();
+    assert.deepStrictEqual(requests[1], {
+      '/repo/first': {from: 'b4eef83', to: 'current'}, '/repo/second': {from: 'next-base', to: 'current'},
+    });
+    streams[1].push(sseFrame('done', {session: '1', loaded: true, repos: [{repo: '/repo/second'}], files: [], errors: []}));
+    streams[1].close();
+    await second;
+    streams[0].close();
+    await first;
+    assert.deepStrictEqual(canonical(api.sessionFilesRequestForDestinationForTest('differ', '1').repo_refs), {
+      '/repo/second': {from: 'next-base', to: 'current'},
+    }, 'a complete repository inventory prunes removed repository overrides');
+    api.setSessionFilesPayloadForTest({session: '1', loaded: true, repos: [], files: [], errors: ['temporary failure']});
+    assert.ok(api.sessionFilesRequestForDestinationForTest('differ', '1').repo_refs['/repo/second'], 'failed retries retain scope');
+    api.setSessionFilesPayloadForTest({session: '1', loaded: true, repos: [], files: [], errors: []});
+    assert.equal(api.sessionFilesRequestForDestinationForTest('differ', '1').repo_refs, null, 'a successful empty inventory retires scope');
+    api.setSessionFilesPayloadForTest({session: '2', loaded: true, repos: [{repo: '/repo/second'}], files: [], errors: []});
+    assert.equal(api.sessionFilesRequestForDestinationForTest('differ', '1').repo_refs, null, 'another session cannot supply the selected session scope');
   });
 
   await testAsync('Go Differ can supersede a partially painted repository stream', async () => {
@@ -3608,6 +4180,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
 
     let supersededError;
     const second = api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: false, force: true});
+    assert.deepStrictEqual([...api.fileExplorerSessionFilesStateForTest().payload.files.map(file => file.abs_path)], ['/repos/project/partial.txt'], 'refresh preserves usable rows even before the previous stream completes');
     second.catch(error => { supersededError = error; });
     await flushAsyncWork();
     assert.deepStrictEqual(calls, ['/api/session-files-stream', '/api/session-files-stream'], 'the replacement reaches its stream request');
@@ -5660,7 +6233,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(await first, true);
     await flushAsyncWork();
     assert.equal(receipts.length, 2, `the newest dirty buffer starts one trailing save; got ${receipts.length} requests`);
-    assert.deepStrictEqual(writes[1], {path, content: 'second\n', expected_mtime: 11});
+    assert.deepStrictEqual(writes[1], {path, content: 'second\n', expected_mtime: 11, expected_file_id: 'dev:1:ino:2'});
     assert.equal(api.currentFileStateForTest(path).original, 'first\n', 'the first completion records only the content it sent');
     assert.equal(api.currentFileStateForTest(path).dirty, true, 'newer content stays dirty until its own write completes');
 
@@ -5671,6 +6244,59 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(api.currentFileStateForTest(path).dirty, false);
     assert.equal(api.apiOperationStateForTest().pending, 0);
     assert.equal(api.apiOperationStateForTest().waiters, 0);
+  });
+
+  await testAsync('an older permission lookup cannot re-enable a newly read-only editor', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/permission-order.md';
+    const pending = [];
+    api.setApiFetchJsonForTest(url => {
+      if (String(url).startsWith('/api/fs/info?')) return new Promise(resolve => pending.push(resolve));
+      return Promise.resolve({});
+    });
+    api.setOpenFileStateForTest(path, {kind: 'text', mode: 0o600, writable: true, mtime: 10, size: 5,
+      original: 'base\n', content: 'base\n', dirty: false});
+    const state = api.fileEditorStateForItemForTest(path, api.fileEditorItemFor(path));
+    const entry = {kind: 'file', name: 'permission-order.md', mtime_ns: 10, size: 5};
+    const older = api.refreshOpenFileFromFetchedStatusForTest(path, state, {entry: {...entry, mode: 0o644}});
+    const newer = api.refreshOpenFileFromFetchedStatusForTest(path, state, {entry: {...entry, mode: 0o444}});
+    assert.equal(pending.length, 2);
+    pending[1]({...entry, mode: 0o444, writable: false, write_reason: 'File is read-only'});
+    await newer;
+    pending[0]({...entry, mode: 0o644, writable: true, write_reason: ''});
+    await older;
+    assert.equal(state.mode, 0o444, 'late writable metadata cannot replace the newer read-only mode');
+    assert.equal(state.writable, false);
+    assert.equal(api.openFileStatus(state).message, 'File is read-only');
+    assert.equal(state.content, 'base\n');
+  });
+
+  await testAsync('a failed permission lookup retries on the next unchanged-mode signature', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/permission-retry.md';
+    const pending = [];
+    api.setApiFetchJsonForTest(url => {
+      if (String(url).startsWith('/api/fs/info?')) return new Promise((resolve, reject) => pending.push({resolve, reject}));
+      return Promise.resolve({});
+    });
+    api.setOpenFileStateForTest(path, {kind: 'text', mode: 0o444, writable: false, mtime: 10, size: 5,
+      original: 'base\n', content: 'base\n', dirty: false});
+    const state = api.fileEditorStateForItemForTest(path, api.fileEditorItemFor(path));
+    const entry = {kind: 'file', name: 'permission-retry.md', mode: 0o644, mtime_ns: 10, size: 5};
+    const failed = api.refreshOpenFileFromFetchedStatusForTest(path, state, {entry});
+    assert.equal(pending.length, 1);
+    pending[0].reject(new Error('temporary permission lookup failure'));
+    await failed;
+    assert.equal(state.mode, 0o644);
+    assert.equal(state.writable, false, 'a failed permission check keeps editing disabled');
+    assert.equal(state.writeAccessUnavailable, true);
+    const retry = api.refreshOpenFileFromFetchedStatusForTest(path, state, {entry});
+    assert.equal(pending.length, 2, 'the same mode must still trigger an authoritative retry');
+    pending[1].resolve({...entry, writable: true, write_reason: ''});
+    await retry;
+    assert.equal(state.writable, true);
+    assert.equal(state.writeAccessUnavailable, false);
+    assert.equal(state.content, 'base\n');
   });
 
   await testAsync('editor acknowledges an in-flight zero-byte self-write before its response', async () => {
@@ -5698,6 +6324,422 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     release();
     assert.equal(await save, true);
     assert.equal(api.currentFileStateForTest(path).dirty, false);
+  });
+
+  await testAsync('open file tracking follows clean background copies and preserves conflicting dirty buffers', async () => {
+    const api = loadYomux('', ['1']);
+    const oldPath = '/repo/background.md';
+    const newPath = '/repo/renamed.md';
+    api.setOpenFileStateForTest(oldPath, {kind: 'text', fileId: 'dev:1:ino:9', mtime: 10,
+      original: 'disk\n', content: 'local\n', dirty: true});
+    api.registerFileEditorLayoutItemForTest(oldPath);
+    const copy = api.fileEditorCopyItemFor(oldPath);
+    api.registerFileEditorLayoutItemForTest(oldPath, {item: copy});
+    api.currentFileStateForTest(oldPath).viewMode.set(copy, 'preview');
+    api.setPinnedTabsForTest([api.fileEditorItemFor(oldPath), copy]);
+    const registered = api.clientServerWatchStateForTest().open_files;
+    assert.equal(registered.find(file => file.path === oldPath).file_id, 'dev:1:ino:9');
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: oldPath, new_path: newPath,
+      tracking_id: 'tracked', revision: 1, file_id: 'dev:1:ino:9'}), true);
+    const moved = api.currentFileStateForTest(newPath);
+    assert.equal(moved.content, 'local\n');
+    assert.equal(moved.original, 'disk\n');
+    assert.equal(moved.dirty, true);
+    const movedCopy = copy.slice(0, -oldPath.length) + newPath;
+    assert.ok(moved.editorTabItems.has(movedCopy), 'copied tabs follow the same document');
+    assert.equal(moved.viewMode.get(movedCopy), 'preview');
+    assert.deepEqual([...api.pinnedTabsForTest()], [api.fileEditorItemFor(newPath), movedCopy], 'pins follow primary and copied tabs');
+    assert.equal(moved.relocationRevision, 1);
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: newPath, new_path: oldPath,
+      tracking_id: 'tracked', revision: 1, file_id: 'dev:1:ino:9'}), false, 'stale relocation cannot move the file backwards');
+    api.setOpenFileStateForTest(oldPath, {kind: 'text', original: 'other', content: 'other dirty', dirty: true});
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: newPath, new_path: oldPath,
+      tracking_id: 'tracked', revision: 2, file_id: 'dev:1:ino:9'}), false);
+    assert.equal(api.currentFileStateForTest(newPath).content, 'local\n');
+    assert.equal(api.currentFileStateForTest(oldPath).content, 'other dirty');
+  });
+
+  await testAsync('watch snapshots respect successful local saves without blocking remote identity rotation', async () => {
+    for (const outcome of ['stale-save', 'matching-save', 'remote-save', 'relocated-save']) {
+      const api = loadYomux('', ['1']);
+      const path = '/repo/watch-save.md', moved = '/repo/relocated-watch-save.md';
+      api.setClientEventsSourceForTest({readyState: 1});
+      api.setFilesystemWatchTokenForTest('existing');
+      api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'old-inode', trackingId: 'tracked',
+        trackingRevision: 2, mtime: 1, size: 4, original: 'base', content: 'first', dirty: true});
+      api.registerFileEditorLayoutItemForTest(path);
+      let releaseWatch;
+      const writes = [];
+      const localSave = outcome !== 'remote-save';
+      const snapshotId = outcome === 'stale-save' ? 'old-inode' : 'new-inode';
+      const snapshotPath = outcome === 'relocated-save' ? moved : path;
+      api.setApiFetchJsonForTest((url, options) => {
+        if (url === '/api/watch/roots') return new Promise(resolve => {
+          releaseWatch = () => resolve({open_files: [{old_path: path, path: snapshotPath,
+            tracking_id: 'tracked', revision: outcome === 'relocated-save' ? 3 : 2, file_id: snapshotId}]});
+        });
+        if (url === '/api/fs/write') {
+          writes.push(JSON.parse(options.body));
+          return Promise.resolve({path, mtime_ns: 2, size: 5, file_id: 'new-inode'});
+        }
+        return Promise.resolve({});
+      });
+      const watch = api.syncServerWatchRootsNowForTest({force: true});
+      await flushAsyncWork();
+      if (localSave) assert.equal(await api.saveFileEditorForTest(path, null), true);
+      releaseWatch();
+      await watch;
+      const state = api.currentFileStateForTest(snapshotPath);
+      assert.equal(state.fileId, 'new-inode', `${outcome}: snapshots cannot restore an obsolete save identity`);
+      assert.equal(state.content, 'first');
+      assert.equal(state.original, localSave ? 'first' : 'base');
+      assert.equal(state.dirty, !localSave);
+      if (localSave) {
+        api.patchOpenFileStateForTest(snapshotPath, {content: 'second', dirty: true});
+        assert.equal(await api.saveFileEditorForTest(snapshotPath, null), true);
+        assert.equal(writes[1].path, snapshotPath);
+        assert.equal(writes[1].expected_file_id, 'new-inode', 'the next guarded save uses the current inode');
+      }
+    }
+  });
+
+  await testAsync('held watch snapshots cannot reclaim closed moved or replaced documents', async () => {
+    for (const action of ['close', 'move', 'replace']) {
+      const api = loadYomux('', ['1']);
+      const path = '/repo/held-watch.md', moved = '/repo/moved-held-watch.md';
+      api.setClientEventsSourceForTest({readyState: 1});
+      api.setFilesystemWatchTokenForTest('existing');
+      api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'inode', trackingId: 'tracked',
+        trackingRevision: 2, original: 'original', content: 'original', dirty: false});
+      api.registerFileEditorLayoutItemForTest(path);
+      let releaseWatch;
+      api.setApiFetchJsonForTest(url => {
+        if (url === '/api/watch/roots') return new Promise(resolve => {
+          releaseWatch = () => resolve({open_files: [{old_path: path, path,
+            tracking_id: 'tracked', revision: 2, file_id: 'stale-inode'}]});
+        });
+        return Promise.resolve({});
+      });
+      const watch = api.syncServerWatchRootsNowForTest({force: true});
+      await flushAsyncWork();
+      if (action === 'close') await api.closeFileTabForTest(path);
+      else if (action === 'move') api.renameOpenFilePathForTest(path, moved);
+      else api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'inode', trackingId: 'tracked',
+        trackingRevision: 2, original: 'replacement', content: 'replacement', dirty: false});
+      releaseWatch();
+      await watch;
+      if (action === 'replace') {
+        assert.equal(api.currentFileStateForTest(path).fileId, 'inode', 'a new document at the same path does not inherit an old snapshot');
+        assert.equal(api.currentFileStateForTest(path).content, 'replacement');
+      } else {
+        assert.equal(api.currentFileStateForTest(path), null, `${action}: the old path remains absent`);
+        if (action === 'move') assert.equal(api.currentFileStateForTest(moved).fileId, 'inode');
+      }
+    }
+  });
+
+  await testAsync('relocation retires the initial open promise so copies and failed reads can retry', async () => {
+    for (const failedRead of [false, true]) {
+      const api = loadYomux('', ['1']);
+      const oldPath = '/repo/opening.md', newPath = '/repo/moved-opening.md';
+      let releaseOldRead;
+      let newReads = 0;
+      api.setApiFetchJsonForTest(url => {
+        if (url.startsWith(`/api/fs/read?path=${encodeURIComponent(oldPath)}`)) return new Promise(resolve => {
+          releaseOldRead = () => resolve({path: oldPath, content: 'obsolete', mtime_ns: 1, size: 8, file_id: 'inode'});
+        });
+        if (url.startsWith(`/api/fs/read?path=${encodeURIComponent(newPath)}`)) {
+          newReads += 1;
+          if (failedRead && newReads === 1) return Promise.reject(Object.assign(new Error('temporarily unavailable'), {status: 503}));
+          return Promise.resolve({path: newPath, content: 'current', mtime_ns: 1, size: 7, file_id: 'inode'});
+        }
+        return Promise.resolve({});
+      });
+      const opening = api.openFileInEditorForTest(oldPath, {name: 'opening.md', file_id: 'inode', mtime_ns: 1, size: 7});
+      await flushAsyncWork();
+      assert.ok(api.fileOpenPromiseForTest(oldPath));
+      api.renameOpenFilePathForTest(oldPath, newPath);
+      api.loadFileEditorStateForTest(newPath, null, api.fileEditorItemFor(newPath));
+      await api.currentFileStateForTest(newPath).loadingPromise;
+      releaseOldRead();
+      await opening;
+      assert.equal(Boolean(api.fileOpenPromiseForTest(newPath)), false, 'the old path cannot own the new path open lifecycle');
+      if (failedRead) {
+        assert.equal(api.currentFileStateForTest(newPath).kind, 'error');
+        assert.ok(await api.openFileInEditorForTest(newPath, 'moved-opening.md'), 'the retried read publishes its completion');
+        assert.equal(newReads, 2, 'reopening a failed relocated read starts a new request');
+      }
+      assert.equal(api.currentFileStateForTest(newPath).content, 'current', `failedRead=${failedRead}: the relocated read completes before a copy opens`);
+      const copy = await api.openFileInAdditionalEditorTabForTest(newPath, 'moved-opening.md');
+      assert.ok(copy, 'opening an additional tab succeeds');
+      assert.notEqual(copy, api.fileEditorItemFor(newPath));
+      assert.equal(api.filePanelItemsForPath(newPath).length, 2);
+      assert.equal(api.currentFileStateForTest(newPath).content, 'current', `failedRead=${failedRead}: the relocated read remains current`);
+    }
+  });
+
+  await testAsync('relocation keeps historical ownership at its original path and releases closed live files', async () => {
+    for (const historyFirst of [true, false]) {
+      const api = loadYomux('', ['1']);
+      const path = '/repo/history-owner.md', moved = '/repo/moved-owner.md';
+      const live = api.fileEditorItemFor(path);
+      const history = api.historicalFileEditorItemFor(path, 'abc', 'def');
+      api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'inode', content: 'live', original: 'live', dirty: false});
+      const state = api.currentFileStateForTest(path);
+      state.editorTabItems.add(live);
+      state.editorTabItems.add(history);
+      state.viewMode.set(history, 'diff');
+      api.setHistoricalFileStateForTest(history, {kind: 'text', content: 'historical', original: 'historical', dirty: false});
+      assert.equal(api.renameOpenFilePathForTest(path, moved), true);
+      assert.deepStrictEqual([...api.filePanelItemsForPath(path)], [history]);
+      assert.equal(api.currentFileStateForTest(path).viewMode.get(history), 'diff');
+      const closeHistory = () => api.closeFileTabForTest(path, {item: history, render: false});
+      const closeLive = () => api.closeFileTabForTest(moved, {item: api.fileEditorItemFor(moved), render: false});
+      assert.equal(await (historyFirst ? closeHistory() : closeLive()), true);
+      assert.equal(await (historyFirst ? closeLive() : closeHistory()), true);
+      assert.equal(api.currentFileStateForTest(path), null);
+      assert.equal(api.currentFileStateForTest(moved), null);
+      assert.equal(api.clientServerWatchStateForTest().open_files.length, 0);
+    }
+  });
+
+  test('relocation normalizes pins after registering renamed layout items', () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/pinned.md', moved = '/repo/pinned-destination.md';
+    for (const name of [path, moved]) {
+      api.setOpenFileStateForTest(name, {kind: 'text', fileId: 'same-inode', content: 'base', original: 'base', dirty: false});
+      api.registerFileEditorLayoutItemForTest(name);
+    }
+    const original = api.fileEditorItemFor(path), destination = api.fileEditorItemFor(moved);
+    api.setPinnedTabsForTest([original, destination]);
+    assert.equal(api.pinnedTabsForTest().length, 2);
+    assert.equal(api.renameOpenFilePathForTest(path, moved), true);
+    assert.deepStrictEqual([...api.pinnedTabsForTest()], [destination]);
+  });
+
+  await testAsync('relocation retains the registered image viewer and its zoom', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/image.png', movedPath = '/repo/renamed-image.png';
+    api.setOpenFileStateForTest(path, {kind: 'image', fileId: 'image-inode', original: '', content: '', dirty: false});
+    const item = api.registerImageViewerLayoutItem(path);
+    api.currentFileStateForTest(path).previewZoom.set(item, 1.5);
+    const slots = api.emptyLayoutSlots();
+    slots.left = api.paneStateWithTabs([item], item);
+    api.setLayoutSlotsForTest(slots);
+    api.renameOpenFilePathForTest(path, movedPath);
+    const movedItem = item.slice(0, -path.length) + movedPath;
+    assert.equal(api.paneTabs('left')[0], movedItem);
+    assert.equal(api.currentFileStateForTest(movedPath).kind, 'image');
+    assert.equal(api.currentFileStateForTest(movedPath).previewZoom.get(movedItem), 1.5);
+    assert.equal(api.currentFileStateForTest(path), undefined);
+  });
+
+  await testAsync('relocation retains real pane membership for editor and preview copies', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/panes.md';
+    api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'dev:1:ino:3',
+      original: 'disk', content: 'dirty', dirty: true});
+    const editor = api.registerFileEditorLayoutItemForTest(path);
+    const copy = api.fileEditorCopyItemFor(path);
+    api.registerFileEditorLayoutItemForTest(path, {item: copy});
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([editor], editor);
+    slots.right = api.paneStateWithTabs([copy], copy);
+    api.setLayoutSlotsForTest(slots);
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({})));
+    api.renameOpenFilePathForTest(path, '/repo/moved.md');
+    assert.equal(api.paneTabs('left')[0], api.fileEditorItemFor('/repo/moved.md'));
+    assert.equal(api.paneTabs('right')[0], copy.slice(0, -path.length) + '/repo/moved.md');
+  });
+
+  await testAsync('authoritative replacement reload detaches old tracking and rejects its late snapshot', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/replacement.md';
+    api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'old-inode', trackingId: 'old-track',
+      trackingRevision: 1, mtime: 1, original: 'old', content: 'old', dirty: false});
+    api.registerFileEditorLayoutItemForTest(path);
+    api.setFetchForTest(url => Promise.resolve(jsonResponse(String(url).startsWith('/api/fs/read')
+      ? {path, content: 'replacement', size: 11, mtime_ns: 2, file_id: 'new-inode'}
+      : {path, kind: 'file', size: 11, mtime_ns: 2, file_id: 'new-inode'})));
+    assert.equal(await api.reloadOpenFileFromDiskForTest(path, {force: true}), true);
+    const state = api.currentFileStateForTest(path);
+    assert.equal(state.fileId, 'new-inode');
+    assert.equal(state.trackingId, '');
+    assert.equal(state.trackingRevision, 0);
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: path, path, tracking_id: 'old-track',
+      revision: 1, file_id: 'old-inode'}, true), false);
+    assert.equal(api.currentFileStateForTest(path).fileId, 'new-inode');
+  });
+
+  await testAsync('an old path status response cannot mark a relocated dirty document changed', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/status.md';
+    api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'original-inode', mtime: 1,
+      size: 4, original: 'base', content: 'edit', dirty: true});
+    api.registerFileEditorLayoutItemForTest(path);
+    let release;
+    api.setFetchForTest(() => new Promise(resolve => {release = () => resolve(jsonResponse({path,
+      kind: 'file', size: 11, mtime_ns: 2, file_id: 'replacement-inode'}));}));
+    const pending = api.refreshOpenFilesIfChangedForTest({paths: [path]});
+    await flushAsyncWork();
+    api.renameOpenFilePathForTest(path, '/repo/moved-status.md');
+    release();
+    await pending;
+    assert.equal(api.currentFileStateForTest('/repo/moved-status.md').externalChanged, undefined);
+  });
+
+  await testAsync('restart snapshots reanchor only the same physical file under a new tracking ID', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/restarted.md';
+    api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'same-inode', trackingId: 'prior-server',
+      trackingRevision: 9, original: 'disk', content: 'dirty', dirty: true});
+    api.registerFileEditorLayoutItemForTest(path);
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: path, path, tracking_id: 'new-server',
+      revision: 1, file_id: 'wrong-inode'}, true), false);
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: path, path, tracking_id: 'new-server',
+      revision: 1, file_id: 'same-inode'}), false, 'live events cannot adopt another tracking ID');
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: path, path, tracking_id: 'new-server',
+      revision: 1, file_id: 'same-inode'}, true), true);
+    assert.equal(api.currentFileStateForTest(path).trackingId, 'new-server');
+    assert.equal(api.currentFileStateForTest(path).trackingRevision, 1);
+    assert.equal(api.currentFileStateForTest(path).content, 'dirty');
+  });
+
+  await testAsync('an equal-revision registration snapshot cannot roll a local Finder rename backwards', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/finder-a.md';
+    const moved = '/repo/finder-b.md';
+    api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'same-inode', trackingId: 'tracking',
+      trackingRevision: 1, original: 'disk', content: 'dirty', dirty: true});
+    api.registerFileEditorLayoutItemForTest(path);
+    api.renameOpenFilePathForTest(path, moved);
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: moved, path, tracking_id: 'tracking',
+      revision: 1, file_id: 'same-inode'}, true), false);
+    assert.equal(api.currentFileStateForTest(path), null);
+    assert.equal(api.currentFileStateForTest(moved).content, 'dirty');
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: moved, path: moved, tracking_id: 'tracking',
+      revision: 1, file_id: 'rotated-inode'}, true), true, 'same-path snapshots still report atomic-save identity rotation');
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: moved, path: '/repo/finder-c.md', tracking_id: 'tracking',
+      revision: 2, file_id: 'rotated-inode'}, true), true, 'a newer snapshot still converges a missed relocation');
+  });
+
+  await testAsync('a queued old-path save conflict settles without reading the relocated document from its old path', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/queued.md';
+    const moved = '/repo/moved-queued.md';
+    api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'same-inode', mtime: 1,
+      original: 'disk', content: 'dirty', dirty: true});
+    let release;
+    const requests = [];
+    api.setFetchForTest((url, options) => {
+      requests.push(String(url));
+      assert.equal(String(url), '/api/fs/write');
+      assert.equal(JSON.parse(options.body).expected_file_id, 'same-inode');
+      return new Promise(resolve => {release = () => resolve(jsonResponse({error: 'missing write target'}, 409));});
+    });
+    const save = api.saveFileEditorForTest(path, null);
+    await flushAsyncWork();
+    api.renameOpenFilePathForTest(path, moved);
+    release();
+    assert.equal(await save, false);
+    assert.deepStrictEqual(requests, ['/api/fs/write']);
+    assert.equal(api.currentFileStateForTest(moved).content, 'dirty');
+    assert.equal(api.currentFileStateForTest(moved).original, 'disk');
+    assert.equal(api.currentFileStateForTest(moved).dirty, true);
+  });
+
+  await testAsync('a missing clean loaded document retains its buffer and baseline through relocation or deletion', async () => {
+    for (const relocated of [false, true]) {
+      const api = loadYomux('', ['1']);
+      const path = '/repo/clean-missing.md';
+      api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'same-inode',
+        original: 'retained disk bytes', content: 'retained disk bytes', dirty: false});
+      api.registerFileEditorLayoutItemForTest(path);
+      api.markOpenFileMissingForTest(path);
+      assert.equal(api.currentFileStateForTest(path).content, 'retained disk bytes');
+      assert.equal(api.currentFileStateForTest(path).original, 'retained disk bytes');
+      assert.equal(api.currentFileStateForTest(path).externalMissing, true);
+      assert.equal(api.currentFileStateForTest(path).kind, 'text');
+      if (relocated) {
+        api.applyOpenFileRelocationForTest({old_path: path, new_path: '/repo/found.md',
+          tracking_id: 'found', revision: 1, file_id: 'same-inode'});
+        assert.equal(api.currentFileStateForTest('/repo/found.md').content, 'retained disk bytes');
+        assert.equal(api.currentFileStateForTest('/repo/found.md').original, 'retained disk bytes');
+        assert.equal(api.currentFileStateForTest('/repo/found.md').dirty, false);
+        assert.equal(api.currentFileStateForTest('/repo/found.md').externalMissing, undefined);
+      }
+    }
+  });
+
+  await testAsync('missed relocation resources use the existing filesystem snapshot repair channel', async () => {
+    const api = loadYomux('', ['1']);
+    assert.deepStrictEqual([...api.clientEventRepairChannelsForTest(['file_relocated'])], ['files']);
+    assert.deepStrictEqual([...api.clientEventRepairChannelsForTest(['file_relocated:tracked-document'])], ['files']);
+  });
+
+  await testAsync('relocation delayed autofocus preserves an unrelated typing surface and follows its own focused copy', async () => {
+    for (const focusedSource of [false, true]) {
+      const timers = [];
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        setTimeout: (fn, ms) => {timers.push({fn, ms}); return timers.length;},
+      });
+      api.setAutoFocusEnabledForTest(true);
+      for (const path of ['/repo/focus-a.md', '/repo/unrelated.md']) {
+        api.setOpenFileStateForTest(path, {kind: 'text', fileId: path, mtime: 1,
+          original: 'base', content: 'base', dirty: false});
+        api.registerFileEditorLayoutItemForTest(path);
+      }
+      const oldItem = api.fileEditorItemFor('/repo/focus-a.md');
+      const unrelated = api.fileEditorItemFor('/repo/unrelated.md');
+      const slots = api.emptyLayoutSlots();
+      slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+      slots.left = api.paneStateWithTabs([oldItem], oldItem);
+      slots.right = api.paneStateWithTabs([unrelated], unrelated);
+      api.setLayoutSlotsForTest(slots);
+      api.setFocusedPanelItemValueForTest(focusedSource ? oldItem : unrelated);
+      api.setFetchForTest(() => Promise.resolve(jsonResponse({})));
+      timers.length = 0;
+      api.renameOpenFilePathForTest('/repo/focus-a.md', '/repo/focus-b.md');
+      for (const timer of timers.filter(timer => timer.ms === 80)) timer.fn();
+      assert.equal(api.focusedPanelItemForTest(), focusedSource ? api.fileEditorItemFor('/repo/focus-b.md') : unrelated);
+    }
+  });
+
+  await testAsync('rapid Finder renames cannot consume a later server relocation revision', async () => {
+    const api = loadYomux('', ['1']);
+    const original = '/repo/a.md';
+    api.setOpenFileStateForTest(original, {kind: 'text', fileId: 'dev:1:ino:7',
+      original: 'disk', content: 'local', dirty: true});
+    api.registerFileEditorLayoutItemForTest(original);
+    api.applyOpenFileRelocationForTest({old_path: original, path: original,
+      tracking_id: 'rapid-renames', revision: 1, file_id: 'dev:1:ino:7'}, true);
+    api.renameOpenFilePathForTest(original, '/repo/b.md');
+    api.renameOpenFilePathForTest('/repo/b.md', '/repo/c.md');
+    // The server's once-per-second pass coalesces A -> B -> C into revision 2.
+    api.applyOpenFileRelocationForTest({old_path: original, new_path: '/repo/c.md',
+      tracking_id: 'rapid-renames', revision: 2, file_id: 'dev:1:ino:7'});
+    assert.equal(api.applyOpenFileRelocationForTest({old_path: '/repo/c.md', new_path: '/repo/d.md',
+      tracking_id: 'rapid-renames', revision: 3, file_id: 'dev:1:ino:7'}), true);
+    const state = api.currentFileStateForTest('/repo/d.md');
+    assert.equal(state.content, 'local');
+    assert.equal(state.original, 'disk');
+    assert.equal(state.trackingRevision, 3);
+    assert.equal(api.clientServerWatchStateForTest().open_files[0].revision, 3);
+  });
+
+  await testAsync('existing file saves carry physical identity even for explicit overwrite', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/guarded.md';
+    api.setOpenFileStateForTest(path, {kind: 'text', fileId: 'dev:1:ino:42', mtime: 1,
+      original: 'old', content: 'new', dirty: true});
+    let write;
+    api.setFetchForTest((url, options) => {
+      write = JSON.parse(options.body);
+      return Promise.resolve(jsonResponse({path, size: 3, mtime_ns: 2, file_id: 'dev:1:ino:43'}));
+    });
+    assert.equal(await api.saveFileEditorForTest(path, null, {force: true}), true);
+    assert.equal(write.expected_file_id, 'dev:1:ino:42');
   });
 
   await testAsync('editor moves pending saves to a renamed path without changing the active request', async () => {
@@ -5746,7 +6788,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       api.applySettingsPayloadForTest({...settings, settings:{...settings.settings,editor:{...settings.settings.editor,autosave:false}},mtime_ns:2});
       const path = '/repo/reopened-save.md';
       let release;
-      api.setFetchForTest(() => new Promise(resolve => {release = resolve;}));
+      api.setFetchForTest(url => String(url).startsWith('/api/fs/write')
+        ? new Promise(resolve => {release = resolve;})
+        : Promise.resolve(jsonResponse({kind:'text',content:'old saved',mtime:2,size:9})));
       api.setOpenFileStateForTest(path,{kind:'text',mtime:1,size:4,original:'base',content:'old saved',dirty:true});
       const saving = api.saveFileEditorForTest(path,null);
       await flushAsyncWork();
@@ -5758,10 +6802,10 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(await saving,true,'a retired successful write still reports its actual disk commit');
       assert.equal(api.fileEditorSelfWritePendingForTest(path),false,'the old final acknowledgement cannot mask the new incarnation');
       assert.equal(api.fileEditorSelfWriteAcknowledgedForTest(path,{mtime:2,size:9}),false);
-      assert.equal(api.currentFileStateForTest(path).content,fresh.content);
-      assert.equal(api.currentFileStateForTest(path).original,'base');
+      assert.equal(api.currentFileStateForTest(path).content,dirty ? fresh.content : 'old saved');
+      assert.equal(api.currentFileStateForTest(path).original,dirty ? 'base' : 'old saved');
       assert.equal(api.currentFileStateForTest(path).dirty,dirty);
-      assert.equal(api.currentFileStateForTest(path).mtime,1);
+      assert.equal(api.currentFileStateForTest(path).mtime,dirty ? 1 : 2);
     }
   });
 
@@ -6454,6 +7498,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     api.setFileExplorerIndexedDirsForTest(['/repo']);
     const row = new TestElement('finder-index-row');
     row.dataset.path = '/repo';
+    row.dataset.kind = 'dir';
     const badge = new TestElement('finder-index-badge');
     row.querySelector = selector => selector.includes('.file-tree-git-status') ? badge : null;
     api.setDocumentQuerySelectorAllForTest(selector =>
@@ -7741,13 +8786,13 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(records[0].value.marker, 'retry');
   });
 
-  {
+  test("Finder list/info resource state has one record-map owner", () => {
     const source = fs.readFileSync('static/yomux.js', 'utf8');
     assert.equal((source.match(/const fileExplorerFsResourceRecords = new Map\(\);/g) || []).length, 1, 'Finder list/info resource state has one record-map owner');
     for (const retired of ['fileExplorerDirListingCache', 'fileExplorerDirListingInflight', 'fileExplorerPathInfoCache', 'fileExplorerPathInfoInflight']) {
       assert.ok(!source.includes(retired), `${retired} retired after list/info state moved into one resource record`);
     }
-  }
+  });
 
   await testAsync('bounded read pending is a typed retry instead of an invalid response contract', async () => {
     const api = loadYomux('', ['1']);
@@ -8701,6 +9746,29 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(stale.staleRequest, true, 'the older response is classified as stale work');
     assert.equal(api.autoStatusRequestActiveForTest(), false, 'the newest request releases the shared active handle');
     assert.deepStrictEqual(api.vmConsoleErrorsForTest(), [], 'stale status work emits no diagnostic');
+  });
+
+  await testAsync('agent status refresh event supersedes an older in-flight snapshot', async () => {
+    const pending = [];
+    const api = loadYomux('', ['1']);
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/auto-approve');
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+
+    const stale = api.loadAutoStatusesForTest({render: false});
+    assert.equal(pending.length, 1);
+    api.handleClientPushEventNowForTest('auto_approve_changed', {refresh: true});
+    assert.equal(pending.length, 2, 'a refresh event starts a new request instead of reusing the older snapshot');
+
+    pending[1].resolve(jsonResponse({session_order: ['1'], sessions: {'1': {target: '1', state: 'working', marker: 'fresh'}}}));
+    await flushAsyncWork();
+    pending[0].resolve(jsonResponse({session_order: ['1'], sessions: {'1': {target: '1', state: 'idle', marker: 'stale'}}}));
+    await stale;
+    await flushAsyncWork();
+    assert.equal(api.autoApproveStateForTest('1')?.marker, 'fresh', 'the earlier request cannot restore its stale Play state');
   });
 
   await testAsync('metadata and auto-status snapshots reject topology epochs crossed by same-name recreation', async () => {
@@ -12230,6 +13298,41 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(api.fileExplorerFinderSessionFilesStateForTest().payload.repos[0].repo, '/newer', 'the completion view replaces the older ordinary response');
   });
 
+  await testAsync('session-files completion waits survive a forced ordinary request replacement', async () => {
+    const api = loadYomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('diff');
+    api.setFileExplorerFinderSelectedSessionForTest('1');
+    const pending = [];
+    api.setFetchForTest(url => new Promise(resolve => pending.push({url: String(url), resolve})));
+    const first = api.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true});
+    await flushAsyncWork();
+    api.handleClientPushEventNowForTest('background_refresh_done', {
+      role: 'session-files', session: '1', cache_key_hash: 'replacement', cache_view_id: 'c'.repeat(64),
+      request_descriptor: '2fc357e15260b25bb94dbee3151934bb8e25b2a7beadd9192701f9070013c88e',
+    });
+    await flushAsyncWork();
+    const second = api.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true});
+    await flushAsyncWork();
+    assert.equal(pending.length, 2);
+    const payload = repo => jsonResponse({session: '1', loaded: true, repos: [{repo}], files: [], errors: [], from_ref: 'HEAD', to_ref: 'current'});
+    pending[0].resolve(payload('/first'));
+    await first;
+    await flushAsyncWork();
+    assert.equal(pending.length, 2, 'the completion must wait for the replacement ordinary request too');
+    pending[1].resolve(payload('/second'));
+    await second;
+    await flushAsyncWork();
+    assert.equal(pending.length, 3, 'retiring the first waiter must not strand the completion forever');
+    pending[2].resolve(payload('/completed'));
+    await flushAsyncWork();
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().payload.repos[0].repo, '/completed');
+  });
+
   await testAsync('a hidden session-files surface ignores a redacted completion without opening a cache view', async () => {
     const api = loadYomux('', ['1']);
     let fetches = 0;
@@ -12600,7 +13703,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(query.get('to'), 'current', 'the changed-file opener uses the effective TO ref behind the base label');
     });
 
-    {
+    await testAsync("YO!agent transcript row renders a copy button", async () => {
       const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin');
       const transcriptPath = '/home/test/.local/state/yolomux/yoagent/conversation.jsonl';
       api.applyYoagentConversationPayloadForTest({
@@ -12629,9 +13732,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(clickEvent.defaultPrevented, true, 'shared path-copy handler claims the YO!agent copy click');
       assert.equal(api.clipboardTextForTest(), transcriptPath, 'YO!agent transcript copy writes the transcript path');
       assert.ok(api.statusHtmlForTest().includes('copied'), 'YO!agent transcript copy reports success');
-    }
+    });
 
-    {
+    await testAsync("adjacent watch-root syncs coalesce into one POST", async () => {
       const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [300]});
       const calls = [];
       api.setClientEventsSourceForTest({readyState: 1});
@@ -12649,7 +13752,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const watchCalls = calls.filter(call => call.url === '/api/watch/roots');
       assert.equal(watchCalls.length, 1, 'adjacent watch-root syncs coalesce into one POST');
       assert.equal(watchCalls[0].method, 'POST', 'watch-root sync still sends the server registration');
-    }
+    });
 
     await testAsync('unchanged watch-root descriptors do not retain debounce work', async () => {
       const timers = [];
@@ -13256,7 +14359,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       for (const owner of ["'client-events-ready'", "'roots-changed'"]) {
         assert.ok(transport.includes(owner), `${owner} supplies an explicit watch-root force owner`);
       }
-      assert.ok(transport.includes('handleClientPushEventNowByType(type, payload, envelope)'), 'queued roots-changed delivery preserves its source-generation envelope');
+      assert.ok(transport.includes('handleClientPushEventNowByType(type, payload, envelope, updateRevision)'), 'queued roots-changed delivery preserves its source-generation envelope');
       assert.equal(fs.readFileSync('static_src/js/yomux/50_editor_settings_runtime.js', 'utf8').includes("'server-watch-renew'"), false, 'the browser renewal interval is retired in favor of SSE lifecycle cleanup');
     });
 
@@ -13340,7 +14443,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(Object.prototype.hasOwnProperty.call(tabberState, 'session_files'), false, 'visible Tabber does not register session-files work');
     });
 
-    {
+    await testAsync("a cold reload marks a restored directory as pending", async () => {
       const api = loadYomux('', ['1']);
       const slots = api.emptyLayoutSlots();
       slots[api.layoutTreeKey] = api.leafNode('left');
@@ -13365,9 +14468,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(row.classList.contains('loading-children'), false, 'a denied restored listing stops the expansion spinner');
       assert.match(tree.querySelector('.file-tree-status-error')?.textContent || '', /permission denied/, 'the failed expansion shows its listing error');
       assert.equal(api.fileExplorerExpandedForTest().includes('/repo/bin'), false, 'failed paths are removed from saved expansion state');
-    }
+    });
 
-    {
+    await testAsync("an authoritative full SSE frame advances the watch-diff baseline", async () => {
       const api = loadYomux('', ['1']);
       api.setFileExplorerRootForTest('/repo');
       api.setFilesystemWatchTokenForTest('old-token');
@@ -13384,9 +14487,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       });
 
       assert.equal(api.filesystemWatchTokenForTest(), 'full-sse-token', 'an authoritative full SSE frame advances the watch-diff baseline');
-    }
+    });
 
-    {
+    await testAsync("a full frame sharing the prior compact token still advances the watch cursor", async () => {
       const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
@@ -13410,9 +14513,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(api.filesystemWatchTokenForTest(), 'shared-token', 'a full frame sharing the prior compact token still advances the watch cursor');
       assert.equal(calls.length, 0, 'compact then full same-token delivery does not request a watch diff');
       assert.equal(secondRecord.generation, firstRecord.generation, 'push dedupe prevents duplicate rendering after cursor advancement');
-    }
+    });
 
-    {
+    await testAsync("compact fs_changed performs one stateless watch-diff request", async () => {
       const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
@@ -13446,7 +14549,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const watchDiffCalls = calls.filter(url => new URL(url, 'https://yolomux.test').pathname === '/api/fs/watch-diff');
       assert.equal(watchDiffCalls.length, 1, 'compact fs_changed performs one stateless watch-diff request');
       assert.equal(api.filesystemWatchTokenForTest(), 'new-token', 'watch-diff response advances the client baseline token');
-    }
+    });
 
     for (const native of [false, true]) {
       await testAsync(`an out-of-order ${native ? 'native' : 'legacy'} watch-diff response cannot regress a newer full keyframe cursor`, async () => {
@@ -13654,7 +14757,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(api.filesystemWatchTokenForTest(), 'new-token', 'the empty terminal result advances the client baseline token');
     });
 
-    {
+    await testAsync("manual filesystem refresh uses one forced watch-diff request", async () => {
       const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
@@ -13676,9 +14779,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const watchDiffCalls = calls.filter(url => new URL(url, 'https://yolomux.test').pathname === '/api/fs/watch-diff');
       assert.equal(watchDiffCalls.length, 1, 'manual filesystem refresh uses one forced watch-diff request');
       assert.equal(api.filesystemWatchTokenForTest(), 'full-token', 'full refresh response advances the client baseline token');
-    }
+    });
 
-    {
+    test("tmux signal patches merge into the existing window snapshot", () => {
       const api = loadYomux('', ['1']);
       api.applyTmuxSignalsPayloadForTest({data: {ok: true, windows: [
         {session: '1', window_index: 0, active: true},
@@ -13697,9 +14800,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       });
 
       assert.equal(String(api.activeTmuxSignalWindowForSessionForTest('1').window_index), '1', 'tmux signal patches merge into the existing window snapshot');
-    }
+    });
 
-    {
+    test("Tabber touched-path lookback defaults to 24 hours", () => {
       const api = loadYomux('', ['1']);
       const calls = [];
       api.setFetchForTest(url => {
@@ -13746,9 +14849,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         const parsed = new URL(url, 'http://localhost');
         return parsed.pathname === '/api/activity' && parsed.searchParams.get('hours') === '48';
       }), 'Tabber lookback change handler reloads cached activity paths immediately');
-    }
+    });
 
-    {
+    await testAsync("Search & Runs fetches compact history and search query endpoints", async () => {
       const api = loadYomux('', ['1']);
       const calls = [];
       api.setFetchForTest(url => {
@@ -13772,9 +14875,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const html = api.searchHistoryPanelHtmlForTest();
       assert.ok(html.includes('beta status summary'), 'Search & Runs renders API search results after submit');
       assert.ok(html.includes('history prompt'), 'Search & Runs renders API run history rows after refresh');
-    }
+    });
 
-    {
+    await testAsync("default save succeeds", async () => {
       const api = loadYomux('', ['1']);
       const writes = [];
       api.setFetchForTest((url, options = {}) => {
@@ -13797,9 +14900,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(writes[1].content, 'base\nnext\n', 'opt-in save trims trailing whitespace and adds a final newline');
       assert.equal(api.openFileStateForTest(hygienePath).dirty, false, 'hygiene save leaves the normalized buffer clean');
       assert.equal(api.openFileStateForTest(hygienePath).original, 'base\nnext\n');
-    }
+    });
 
-    {
+    await testAsync("dirty reload cancels when the user rejects the warning", async () => {
       const api = loadYomux('', ['1']);
       const path = '/home/test/reload.txt';
       let fetchCount = 0;
@@ -13841,9 +14944,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(fetchCount, 1, 'confirmed reload reads the disk copy');
       assert.equal(api.openFileStateForTest(path).content, 'fresh disk\n', 'confirmed reload replaces the buffer with disk content');
       assert.equal(api.openFileStateForTest(path).dirty, false, 'confirmed reload leaves the disk copy clean');
-    }
+    });
 
-    {
+    await testAsync("clicking the green Tabber session row opens Tab 2 before Back", async () => {
       const api = loadYomux('', ['1', '2']);
       api.setFileExplorerModeForTest('tabber');
       const slots = api.emptyLayoutSlots();
@@ -13876,9 +14979,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(api.currentSessionActionTarget(), '2', 'clicking the green Tabber session row opens Tab 2 before Back');
       await api.editorNavBackForTest();
       assert.equal(api.currentSessionActionTarget(), '1', 'Back returns to the previously active tab after a green Tabber session row click');
-    }
+    });
 
-    {
+    await testAsync("Differ reopen keeps the moved filediff tab in its current pane", async () => {
       const api = loadYomux('', ['1']);
       const path = '/repo/app/src/main.py';
       const item = api.fileEditorDiffPreviewItemFor(path);
@@ -13936,9 +15039,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         slot1: {tabs: [item], active: item},
       });
       assert.equal(api.editorViewModeFor(path, item), 'diff', 'Differ reopen leaves the moved filediff tab in Diff mode');
-    }
+    });
 
-    {
+    await testAsync("first Differ row uses the reusable Differ preview tab", async () => {
       const api = loadYomux('', ['1']);
       const firstPath = '/repo/app/src/first.py';
       const secondPath = '/repo/app/src/second.py';
@@ -13982,9 +15085,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.deepStrictEqual(canonical(api.filePanelItemsForPath(firstPath)), [], 'second Differ row removes the old preview owner');
       assert.deepStrictEqual(canonical(api.filePanelItemsForPath(secondPath)), [secondItem], 'second Differ row owns the preview tab under the new path');
       assert.equal(api.editorViewModeFor(secondPath, secondItem), 'diff', 'second Differ row opens the next file in Diff mode, not Edit mode');
-    }
+    });
 
-    {
+    await testAsync("Differ row reopen keeps the existing editor tab in its pane", async () => {
       const api = loadYomux('', ['1']);
       const path = '/repo/app/src/main.py';
       const existingItem = api.fileEditorItemFor(path);
@@ -14046,9 +15149,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
 
       assert.equal(api.slotForSession(existingItem), 'slot1', 'Differ row reopen keeps the existing editor tab in its pane');
       assert.equal(api.editorViewModeFor(path, existingItem), 'diff', 'a repeated Differ row click forces the actual existing tab back to Diff mode');
-    }
+    });
 
-    {
+    await testAsync("opening a symlink alias focuses the existing physical-file editor item", async () => {
       const api = loadYomux('', ['1']);
       const realPath = '/repo/app/src/main.py';
       const linkPath = '/repo/app/link-main.py';
@@ -14094,9 +15197,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const metadataCalls = calls.filter(url => url.startsWith('/api/fs/info') && url.includes('include_git=1'));
       assert.equal(readCalls.length, 1, 'entry identity avoids a second base read before focusing the existing editor');
       assert.equal(metadataCalls.length, 1, 'the one deferred Git operation follows the already-painted base content without rereading bytes');
-    }
+    });
 
-    {
+    await testAsync("the initial explicit Preview action selects Preview", async () => {
       const api = loadYomux('', ['1']);
       const path = '/repo/app/keep-preview.md';
       const aliasPath = '/repo/app/keep-preview-alias.md';
@@ -14128,9 +15231,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(await api.openFileInEditorForTest(path, {name: 'keep-preview.md', realpath: path, file_id: 'dev:10:ino:22'}, {viewMode: 'edit'}), item, 'an explicit reopen still focuses the existing tab');
       assert.equal(api.editorViewModeFor(path, item), 'edit', 'an explicit view action still overrides the preserved mode');
       assert.equal(calls.filter(url => url.startsWith('/api/fs/read?') && !url.includes('include_git=1')).length, 1, 'reopens and aliases do not start another base read');
-    }
+    });
 
-    {
+    await testAsync("base content paints before deferred Git metadata resolves", async () => {
       const api = loadYomux('', ['1']);
       const path = '/repo/app/src/stale-git.md';
       const deferredGit = deferredFetch();
@@ -14172,8 +15275,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       await flushAsyncWork();
       assert.equal(api.currentFileStateForTest(path).content, '# newer state\n', 'a stale deferred Git result never replaces newer editor content');
       assert.equal(api.currentFileStateForTest(path).gitRoot, '/newer/repo', 'a stale deferred Git result never clobbers newer Git state');
-    }
+    });
 
+    await testAsync("the immediate tab is Loading before a delayed base read completes", async () => {
     for (const response of [
       () => jsonResponse({path: '/repo/app/src/closed.md', content: '# closed\n', size: 9, mtime: 1, mtime_ns: 1}),
       () => jsonResponse({error: 'path not found: /repo/app/src/closed.md', status: 404}, 404),
@@ -14191,8 +15295,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(api.currentFileStateForTest(path), null, 'neither a delayed success nor a delayed error resurrects a closed tab');
       assert.deepEqual(canonical(api.filePanelItemsForPath(path)), [], 'a delayed base read never recreates closed tab ownership');
     }
+    });
 
-    {
+    await testAsync("opening the moved full path does not focus the stale missing editor tab", async () => {
       const api = loadYomux('', ['1']);
       const oldPath = '/repo/app/something.md';
       const newPath = '/repo/app/blah/something.md';
@@ -14242,9 +15347,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const newPathMetadataCalls = calls.filter(url => url.startsWith('/api/fs/info') && url.includes('include_git=1'));
       assert.deepStrictEqual(newPathReadCalls.map(url => decodeURIComponent((url.match(/path=([^&]+)/) || [])[1] || '')), [newPath], 'new full path forces one base content read');
       assert.equal(newPathMetadataCalls.length, 1, 'the deferred new-path Git operation does not reread content');
-    }
+    });
 
-    {
+    await testAsync("concurrent same-path editor opens share one in-flight read", async () => {
       const api = loadYomux('', ['1']);
       const path = '/repo/app/src/main.py';
       const readResolvers = [];
@@ -14285,9 +15390,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const samePathMetadataCalls = calls.filter(url => url.startsWith('/api/fs/info') && url.includes('include_git=1'));
       assert.equal(samePathReadCalls.length, 1, 'same-path opens share one base read');
       assert.equal(samePathMetadataCalls.length, 1, 'the shared open emits one metadata-only Git request');
-    }
+    });
 
-    {
+    await testAsync("Finder mode actions retain one canonical working-tree item", async () => {
       const api = loadYomux('', ['1']);
       const path = '/repo/app/src/canonical.md';
       api.setFetchForTest(url => {
@@ -14330,9 +15435,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.deepStrictEqual(canonical(api.openFileEditorItems()), [first], 'Finder mode actions retain one canonical working-tree item');
       assert.equal(api.openFileStateForTest(path).content, '# dirty\n', 'Finder mode changes preserve the dirty working-tree buffer');
       assert.equal(api.editorViewModeFor(path, first), 'diff', 'the last Finder action changes only the selected mode');
-    }
+    });
 
-    {
+    await testAsync("the same historical tuple activates the exact Editor instance", async () => {
       const api = loadYomux('', ['1']);
       const path = '/repo/app/src/history.js';
       const firstFrom = '1'.repeat(40);
@@ -14368,9 +15473,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(api.fileEditorStateForItemForTest(path, first).content, `${firstTo}\n`, 'layout registration cannot reapply loading defaults over immutable TO content');
       assert.equal(api.fileEditorStateForItemForTest(path, first).readOnly, true);
       assert.equal(api.openFileStateForTest(path).content, 'working\n', 'historical opens never replace dirty working-tree state');
-    }
+    });
 
-    {
+    await testAsync("clicking a commit file activates its historical diff tab", async () => {
       const sessions = Array.from({length: 9}, (_, index) => String(index + 1));
       const api = loadYomux('', sessions);
       const repo = '/repo/app';
@@ -14430,10 +15535,10 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
 
       api.activatePaneTab('left', opened);
       await api.closeFileTabForTest(path, {item: opened});
-      assert.equal(api.layoutSlotsForTest().left.active, repoItem, 'closing the historical diff returns to its originating Diff repo tab');
-    }
+      assert.equal(api.layoutSlotsForTest().left.active, api.editorNav.stack[api.editorNav.index], 'closing the historical diff selects global recency');
+    });
 
-    {
+    test("Differ renders rows before a language change", () => {
       const zhHant = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
       const differApi = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
         strings: {en: JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')), 'zh-Hant': zhHant},
@@ -14457,9 +15562,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.ok(afterLocaleChange.includes('data-open-change-file="/repo/app/README.md"'), 'Differ rows stay visible after a language change');
       assert.ok(afterLocaleChange.includes(zhHant['common.reload']), 'Differ chrome localizes after a language change');
       assert.equal(afterLocaleChange.includes('No Differ results for this session.'), false, 'Differ does not blank to the empty state during locale apply');
-    }
+    });
 
-    {
+    await testAsync("Cmd-P keeps the matching filesystem candidate visible before path-info validation resolves", async () => {
       const staleDoitPath = '/home/test/yolomux.dev1/DOIT.57.md';
       const dirtyMissingPath = '/home/test/yolomux.dev1/unsaved.md';
       const realDoitPath = '/home/test/yolomux.dev2/DOIT.57.md';
@@ -14522,9 +15627,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.ok(recoveredDoitItems.some(item => item.targetItem === validatingDoitItem), 'a recreated clean file tab returns to quick search after shared-state revalidation');
       assert.equal(validatingDoitApi.currentFileStateForTest(staleDoitPath).externalMissing, undefined, 'recreated clean files clear shared missing state');
       assert.equal(validatingDoitApi.currentFileStateForTest(staleDoitPath).content, '# restored\n', 'recreated clean files reload through the normal file-state owner');
-    }
+    });
 
-    {
+    await testAsync("Finder Expand all collects every directory under the current root through the directory listing cache", async () => {
       const treeApi = loadYomux('', ['1']);
       treeApi.setFileExplorerRootMode('fixed', {sync: false});
       treeApi.setFileExplorerRootForTest('/repo');
@@ -14544,9 +15649,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.deepStrictEqual(canonical(treeApi.fileExplorerExpandedForTest()), ['/repo/src', '/repo/src/lib'], 'Finder Expand all flips the full directory expansion state');
       await treeApi.setAllFileTreeDirectoriesExpandedForTest(null, false);
       assert.deepStrictEqual(canonical(treeApi.fileExplorerExpandedForTest()), [], 'Finder Collapse all clears the directory expansion state');
-    }
+    });
 
-    {
+    test("a restored expanded directory points down immediately", () => {
       const restoredApi = loadYomux('', ['1']);
       const container = new TestElement('restored-finder-tree');
       restoredApi.setFileExplorerExpandedForTest(['/repo/dynamo']);
@@ -14569,9 +15674,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const cachedChildren = cachedContainer.children.find(node => node?.dataset?.parent === '/repo/dynamo');
       assert.equal(cachedRow.classList.contains('loading-children'), false, 'a restored Finder directory consumes its retained child listing without a loading turn');
       assert.ok(cachedChildren?.children.some(node => node?.dataset?.path === '/repo/dynamo/cached-child.txt'), 'a restored Finder directory paints its retained nested rows immediately');
-    }
+    });
 
-    {
+    await testAsync("Finder directory shows expanded immediately while the backend listing is pending", async () => {
       const pendingApi = loadYomux('', ['1']);
       const container = new TestElement('finder-tree');
       const longPath = '/repo/this/is/a/very/long/path/that/takes/time';
@@ -14596,9 +15701,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(row.getAttribute('aria-expanded'), 'true', 'Finder directory remains expanded after the backend listing resolves');
       assert.equal(row.classList.contains('loading-children'), false, 'Finder directory clears the pending spinner after the backend listing resolves');
       assert.ok(container.children.some(node => node?.classList?.contains('file-tree-children') && node.dataset.parent === longPath), 'resolved directory listing renders the child container');
-    }
+    });
 
-    {
+    await testAsync("a held listing paints its outstanding expansion state", async () => {
       const supersededApi = loadYomux('', ['1']);
       const container = new TestElement('finder-superseded-tree');
       const path = '/repo/slow';
@@ -14617,9 +15722,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(row.classList.contains('loading-children'), false, `superseded settlement reconciles the stale loading visual: ${JSON.stringify({expanded: supersededApi.fileExplorerExpandedForTest(), aria: row.getAttribute('aria-expanded'), classes: [...row.classList.names]})}`);
       assert.equal(row.getAttribute('aria-expanded'), 'true', 'supersession preserves the still-requested expansion');
       assert.ok(container.children.some(node => node?.classList?.contains('file-tree-children') && node.dataset.parent === path), 'the settled listing is rendered for the still-live expansion');
-    }
+    });
 
-    {
+    await testAsync("Finder Sync Expand opens the selected repository without modified-file directories", async () => {
       const syncTreeApi = loadYomux('', ['1']);
       syncTreeApi.setFileExplorerRootMode('sync', {sync: false});
       syncTreeApi.setFileExplorerRootForTest('/home/test');
@@ -14659,9 +15764,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.deepStrictEqual(canonical(syncTreeApi.fileExplorerExpandedForTest()), [
         '/home/test/yolomux.dev2',
       ], 'Finder Sync Expand opens the selected repository without modified-file directories');
-    }
+    });
 
-    {
+    test("Finder sync opens only the selected repository and its ancestors under home", () => {
       const api = loadYomux('', ['1', '2']);
       api.setFileExplorerRootMode('sync', {sync: false});
       api.setFileExplorerRootForTest('/home/test');
@@ -14702,9 +15807,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         ],
       });
       assert.equal(api.fileExplorerSyncPlanForTest('2').root, '/tmp/outside', 'mixed home and outside-home working paths outside home use the focused repo root');
-    }
+    });
 
-    {
+    await testAsync("syncing a home tab opens the home root", async () => {
       const api = loadYomux('', ['1', '2']);
       api.setFileExplorerRootMode('sync', {sync: false});
       api.setFileExplorerDirListingForTest('/home/test', [{name: 'project', kind: 'dir'}]);
@@ -14780,9 +15885,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         '/home/test/project',
         '/home/test/project/1/src',
       ], 'returning to the tab restores its in-memory state without auto-reopening the manually collapsed working folder');
-    }
+    });
 
-    {
+    await testAsync("image paste installs one document paste listener", async () => {
       const api = loadYomux('', ['1']);
       const slots = api.emptyLayoutSlots();
       slots[api.layoutTreeKey] = api.leafNode('left');
@@ -14857,7 +15962,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         false,
         'pasted image upload does not force a transcript/session-metadata rescan on the latency-sensitive path',
       );
-    }
+    });
 
     // Negative control for the Pacific upload stamp. Pinning docker/Dockerfile.test to
     // America/Los_Angeles must not be able to hide a real date bug, so prove the filename assertion
@@ -14933,7 +16038,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     // attachment. Headless clipboard/drag image injection is unreliable, so the shared logic (not a flaky
     // Selenium clipboard test) is the regression surface; live event wiring is covered by the paste
     // contracts below + the source-grep invariant.
-    {
+    await testAsync("78.5: image File item is image-bearing", async () => {
       const api = loadYomux();
       const dt = over => ({
         items: over.items || [],
@@ -14955,11 +16060,11 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal((await files(dt({items: [fileItem(), fileItem('image/jpeg')]}))).length, 2, '78.5: extracts every image File item (multi-image)');
       assert.equal((await files(dt({files: [{type: 'image/png', name: 'p.png'}, {type: 'text/plain', name: 'n.txt'}]}))).length, 1, '78.5: extracts only image entries from a plain File list');
       assert.equal((await files(dt({types: ['text/html'], data: {'text/html': '<img src="data:image/png;base64,AAAA">'}}))).length, 1, '78.5: extracts image data URLs from rich text/html');
-    }
+    });
 
     // DOIT.78 (78.1): an image pasted as RICH DATA (text/html <img>, NO File) must still be CLAIMED
     // (preventDefault + stopPropagation) so the raw image cannot leak to the agent as an attachment.
-    {
+    await testAsync("78.1: rich-data image paste is claimed so it cannot leak to the agent as an attachment", async () => {
       const api = loadYomux('', ['1']);
       const slots = api.emptyLayoutSlots();
       slots[api.layoutTreeKey] = api.leafNode('left');
@@ -14985,11 +16090,11 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       await flushAsyncWork();
       assert.equal(richPaste.defaultPrevented, true, '78.1: rich-data image paste is claimed so it cannot leak to the agent as an attachment');
       assert.equal(richPaste.propagationStopped, true, '78.1: rich-data image paste stops propagation once claimed');
-    }
+    });
 
     // DOIT.78 (78.4): pasting MULTIPLE image Files in one event uploads ALL of them and inserts a text
     // reference for each — never one ref + one attachment.
-    {
+    await testAsync("78.4: multi-image paste is claimed", async () => {
       const api = loadYomux('', ['1']);
       const slots = api.emptyLayoutSlots();
       slots[api.layoutTreeKey] = api.leafNode('left');
@@ -15017,10 +16122,10 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(multiPaste.defaultPrevented, true, '78.4: multi-image paste is claimed');
       const allSent = sent.map(message => message.data).join('');
       assert.ok(allSent.includes('multi-a.png') && allSent.includes('multi-b.png'), '78.4: both pasted images become text references in the terminal (no attachment)');
-    }
+    });
 
     // Markdown editor image paste inserts file-directory paths returned by the server into CodeMirror.
-    {
+    await testAsync("Markdown editor image paste is claimed before terminal handling", async () => {
       const api = loadYomux('', ['1']);
       const sent = [];
       api.registerTerminalForTest('1', {focus() {}, refresh() {}, rows: 24, cols: 80, resize(cols, rows) { this.cols = cols; this.rows = rows; }}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
@@ -15082,10 +16187,10 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(focused, true, 'Markdown editor paste restores CodeMirror focus');
       assert.equal(sent.length, 0, 'Markdown editor paste never sends raw image data to xterm');
       assert.equal(api.markdownPreviewImageTarget('note/one.png', path).path, '/repo/docs/note/one.png', 'uploaded Markdown references retain relative source semantics for the owning Markdown file');
-    }
+    });
 
     // Rich remote images are still claimed for Markdown editors even when no uploadable File can be extracted.
-    {
+    await testAsync("remote Markdown image paste is claimed", async () => {
       const api = loadYomux('', ['1']);
       const sent = [];
       api.registerTerminalForTest('1', {focus() {}, refresh() {}, rows: 24, cols: 80, resize(cols, rows) { this.cols = cols; this.rows = rows; }}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
@@ -15126,10 +16231,10 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(calls.length, 1, 'remote Markdown image paste fetches the rich image source before deciding whether it is uploadable');
       assert.equal(calls[0].url, 'https://example.com/remote.png', 'remote Markdown image paste fetches the image source');
       assert.equal(sent.length, 0, 'remote Markdown image paste never leaks to xterm');
-    }
+    });
 
     // Non-Markdown editors do not steal the terminal image paste path.
-    {
+    await testAsync("non-Markdown editor paste falls back to terminal upload", async () => {
       const api = loadYomux('', ['1']);
       const sent = [];
       api.registerTerminalForTest('1', {focus() {}, refresh() {}, rows: 24, cols: 80, resize(cols, rows) { this.cols = cols; this.rows = rows; }}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
@@ -15163,11 +16268,11 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       await flushAsyncWork();
       assert.equal(calls[0], '/api/upload?session=1', 'non-Markdown editor paste falls back to terminal upload');
       assert.ok(sent.some(message => String(message.data || '').includes('/repo/.uploads/python.png')), 'non-Markdown editor paste keeps terminal reference insertion');
-    }
+    });
 
     // DOIT.78 (78.6): invariant guard — paste and drop must route through the ONE shared image-payload
     // detector so a new entry point can't reintroduce a divergent leak path.
-    {
+    test("78.6: the document paste handler claims via the shared dataTransferHasImagePayload detector before editor or terminal routing", () => {
       const imgSource = fs.readFileSync('static/yomux.js', 'utf8');
       assert.ok(/scope\.ownEvent\('paste', document, 'paste', async event => \{\s*if \(!dataTransferHasImagePayload\(event\.clipboardData\)\) return;[\s\S]*markdownEditorPasteTarget\(event\)/.test(imgSource), '78.6: the document paste handler claims via the shared dataTransferHasImagePayload detector before editor or terminal routing');
       assert.ok(imgSource.includes('function hasUploadableDrag(event)') && /addEventListener\('drop', async event => \{\s*if \(!hasUploadableDrag\(event\)\) return;/.test(imgSource), '78.6: the file-drop handler claims via hasUploadableDrag (file OR image rich-data)');
@@ -15175,9 +16280,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.ok(/const files = await dataTransferImageFiles\(event\.clipboardData\);[\s\S]*uploadEditorFiles\(editorTarget, files\)/.test(imgSource), '78.6: Markdown editor paste uploads through the shared image-payload extractor');
       assert.ok(/const proseMirrorView = panel\?\._pmView[\s\S]*surface = proseMirrorView/.test(imgSource), '78.6: ViewEditor paste target is selected from the ProseMirror surface');
       assert.ok(/surface === 'view-editor'[\s\S]*state\.tr\.replaceWith\(from, to, content\)/.test(imgSource), '78.6: ViewEditor image references use the ProseMirror selection');
-    }
+    });
 
-    {
+    await testAsync("concurrent identical directory listings share one direct fast request", async () => {
       const api = loadYomux();
       const calls = [];
       api.setFetchForTest((url, options = {}) => {
@@ -15197,9 +16302,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const cachedEntries = await api.fetchDirectoryForTest('/home/test');
       assert.strictEqual(cachedEntries, firstEntries, 'completed directory listing is reused by the short TTL cache');
       assert.equal(calls.length, 1, 'short TTL cache avoids an immediate repeat directory listing');
-    }
+    });
 
-    {
+    await testAsync("the bootstrap list is already in flight", async () => {
       const api = loadYomux();
       const batches = [];
       api.setFetchForTest(url => {
@@ -15223,9 +16328,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(row.classList.contains('loading-children'), false, 'the click settles before the bootstrap response');
       batches[0].resolve(jsonResponse({path, entries: [{name: 'bootstrap.txt', kind: 'file'}]}));
       assert.equal((await background)[0].name, 'bootstrap.txt', 'the background request remains independently observable');
-    }
+    });
 
-    {
+    await testAsync("hidden pages skip background Finder directory fetches", async () => {
       const api = loadYomux();
       const calls = [];
       api.setDocumentVisibilityForTest('hidden');
@@ -15243,9 +16348,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         method: 'GET',
         url: '/api/fs/fast/list?path=%2Fhome%2Fhidden',
       }], 'explicit user Finder fetches bypass hidden-background suppression');
-    }
+    });
 
-    {
+    await testAsync("concurrent fresh directory listings bypass stale values but share one in-flight backend request", async () => {
       const api = loadYomux();
       const calls = [];
       api.setFetchForTest((url, options = {}) => {
@@ -15262,9 +16367,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const [firstEntries, secondEntries] = await Promise.all([first, second]);
       assert.equal(firstEntries[0].name, 'a.txt');
       assert.strictEqual(secondEntries, firstEntries, 'fresh coalesced callers share the same response object');
-    }
+    });
 
-    {
+    await testAsync("watched Finder/Differ directories use explicit one-level fast GETs in breadth-first order", async () => {
       const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
@@ -15287,9 +16392,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         '/api/fs/fast/list?path=%2Frepo%2Fsrc%2Fjs',
       ], 'watched Finder/Differ directories use explicit one-level fast GETs in breadth-first order');
       assert.deepStrictEqual(canonical(Array.from(entriesByDir.keys()).sort()), ['/repo', '/repo/src', '/repo/src/js', '/repo/tests']);
-    }
+    });
 
-    {
+    await testAsync("an authoritative parent file entry never reaches the directory-listing route", async () => {
       const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
@@ -15308,9 +16413,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       await api.fileExplorerEntriesByWatchedDirectoryForTest('/repo', {fresh: true});
       assert.deepStrictEqual(canonical(calls), ['/repo'], 'an authoritative parent file entry never reaches the directory-listing route');
       assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [], 'a restored file path is retired from directory disclosure state');
-    }
+    });
 
-    {
+    await testAsync("a terminal missing-directory result suppresses repeated background demand", async () => {
       const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
@@ -15339,9 +16444,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.ok(negativeRecord.retryAt > Date.now(), 'the terminal negative result carries a bounded retry deadline');
       await api.fetchDirectoryForTest('/repo/gone', {fresh: true, user: true});
       assert.equal(calls.filter(path => path === '/repo/gone').length, 2, 'explicit user demand may bypass the background negative backoff once');
-    }
+    });
 
-    {
+    await testAsync("a newer parent classification keeps ownership after an old child response settles", async () => {
       const api = loadYomux('', ['1']);
       const staleChild = deferredFetch();
       api.setFileExplorerRootForTest('/repo');
@@ -15360,9 +16465,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const record = api.fileExplorerFsResourceRecordsForTest().find(candidate => candidate.key === 'list\x1f/repo/file');
       assert.equal(record.failureStatus, 400, 'a newer parent classification keeps ownership after an old child response settles');
       assert.equal(record.hasValue, false, 'the stale child response cannot republish a directory listing after file classification');
-    }
+    });
 
-    {
+    await testAsync("ancestor retirement fences and removes descendant listing records", async () => {
       const api = loadYomux('', ['1']);
       const heldDescendant = deferredFetch();
       let descendantRequests = 0;
@@ -15388,7 +16493,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const recreated = await api.fetchDirectoryForTest('/repo/dir/sub', {user: true});
       assert.equal(descendantRequests, 2, 'a recreated descendant performs a new request instead of reusing stale retired data');
       assert.equal(recreated[0].name, 'fresh.txt', 'the recreated descendant publishes only its new generation');
-    }
+    });
 
     await testAsync('Finder Sync cannot resurrect a directory retired by a newer parent classification', async () => {
       const api = loadYomux('', ['1']);
@@ -15417,7 +16522,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(api.fileExplorerSyncStateForTest().inFlightSignature, '', 'retirement cancels the stale sync transaction owner');
     });
 
-    {
+    await testAsync("a file-valued Finder root opens its containing directory", async () => {
       const api = loadYomux('', ['1']);
       const calls = [];
       let rootKind = 'dir';
@@ -15470,9 +16575,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(calls[1].queryPath, '/repo/note.txt');
       assert.equal(calls[2].path, '/api/fs/batch', 'the file-valued probe falls back to INFO after the fast route rejects the file');
       assert.equal(calls.filter(call => call.path === '/api/fs/fast/list' && call.queryPath === '/repo/note.txt').length, 2, 'file-to-directory recreation clears the old list negative and fetches the new directory once');
-    }
+    });
 
-    {
+    await testAsync("the newer validated root applies while the old INFO request is held", async () => {
       const api = loadYomux('', ['1']);
       const oldInfo = deferredFetch();
       let infoRequests = 0;
@@ -15510,9 +16615,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(await oldOpen, false, 'the older validated root is fenced after its delayed INFO settles');
       assert.equal(api.fileExplorerRootForTest(), '/repo/new', 'delayed root validation cannot overwrite the newer open generation');
       assert.deepStrictEqual(canonical(fastListPaths), ['/repo/new'], 'the stale validated root never issues a directory listing');
-    }
+    });
 
-    {
+    await testAsync("P4: push-refresh-depth returns a benign null", async () => {
       const api = loadYomux();
       api.setFileExplorerLastListErrorForTest('/home/test/blocked', 'Cannot open blocked');
       api.setFileExplorerPushRefreshDepthForTest(1);
@@ -15529,9 +16634,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(await api.fetchDirectoryForTest('/home/test/secret', {fresh: true}), null, 'P4: real list failures still return null');
       assert.equal(api.currentFileExplorerListErrorForTest('/home/test/secret'), 'denied /home/test/secret', 'P4: real list failures record a path-keyed error');
       assert.equal(api.currentFileExplorerListErrorForTest('/home/test'), '', 'P4: real errors remain scoped to the failed path');
-    }
+    });
 
-    {
+    await testAsync("concurrent identical path-info lookups share one batched backend request", async () => {
       const api = loadYomux();
       const calls = [];
       api.setFetchForTest((url, options = {}) => {
@@ -15560,9 +16665,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const cachedInfo = await api.fetchFilePathInfoForTest('/home/test');
       assert.strictEqual(cachedInfo, firstInfo, 'completed path-info lookup is reused by the short TTL cache');
       assert.equal(calls.length, 1, 'short TTL cache avoids an immediate repeat path-info lookup');
-    }
+    });
 
-    {
+    await testAsync("directory with five files uses only the normal delete confirm", async () => {
       const deleteCalls = [];
       const runDelete = async ({path, kind = 'dir', count = 0, confirmResponses = [true], fetchRejectsCount = false, role = 'admin'}) => {
         const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', role);
@@ -15616,9 +16721,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       result = await runDelete({path: '/home/test/readonly', count: 10, confirmResponses: [true, true], role: 'readonly'});
       assert.equal(result.confirms.length, 0, 'readonly mode blocks delete before any confirm');
       assert.equal(result.calls.length, 0, 'readonly mode blocks delete before count or delete requests');
-    }
+    });
 
-    {
+    await testAsync("terminal file refs use one bounded point resolver request", async () => {
       const api = loadYomux('', ['1']);
       api.setTranscriptInfoForTest('1', {selected_pane: {target: '%test', current_path: '/home/test/yolomux.dev3'}, panes: [{target: '%test', active: true, window_active: true, current_path: '/home/test/yolomux.dev3'}]});
       const lines = [terminalLine('• Documented it in tests/SHARE_TEST_INVENTORY.md:123')];
@@ -15647,7 +16752,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         path: '/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md',
         text: 'tests/SHARE_TEST_INVENTORY.md:123',
       }, 'confirmed terminal file refs carry the absolute path and line for the Open file menu action');
-    }
+    });
 
     await testAsync('terminal file menus expose Open file without resolver admission and the selected tab owns its read', async () => {
       const api = loadYomux('', ['1']);
@@ -15696,7 +16801,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(fetches, beforeMenuFetches, 'the explicit gesture does not submit the already-known target a second time');
     });
 
-    {
+    test("HTTP request targets in terminal server logs are not probed as filesystem paths", () => {
       const api = loadYomux('', ['1']);
       const lines = [terminalLine('127.0.0.1 - - "GET /api/auto-approve HTTP/1.1" 404 -')];
       const term = {cols: 100, rows: 10, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
@@ -15706,9 +16811,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         [],
         'HTTP request targets in terminal server logs are not probed as filesystem paths',
       );
-    }
+    });
 
-    {
+    test("a path token clipped at the terminal right edge is not probed before its continuation arrives", () => {
       const api = loadYomux('', ['1']);
       const prefix = '/tmp/instruction-';
       const lines = [terminalLine(prefix), terminalLine('')];
@@ -15723,9 +16828,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       lines[1] = terminalLine('fleet-check.md', true);
       const completed = api.terminalWrappedLineReferences(term, 1).find(ref => ref.type === 'file');
       assert.equal(completed?.path, '/tmp/instruction-fleet-check.md', 'the same token resolves after its real soft-wrap continuation arrives');
-    }
+    });
 
-    {
+    await testAsync("terminal file underline paint does not submit background filesystem work", async () => {
       const api = loadYomux('', ['1']);
       api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/dynamo4/lib/llm/src'}});
       const lines = [terminalLine('protocols/openai/chat_completions/qwen3_coder_v2.rs')];
@@ -15754,9 +16859,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         decorations: {pointerCursor: false, underline: true},
       }, 'xterm marks terminal file refs with underline but no left-click pointer affordance');
       assert.equal(links[0].activate(), undefined, 'left-click activation is intentionally a no-op');
-    }
+    });
 
-    {
+    await testAsync("missing passive terminal file refs resolve to null", async () => {
       const api = loadYomux('', ['1']);
       api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/cache-misses'}});
       const fileRef = {type: 'file', path: 'missing.js', text: 'missing.js'};
@@ -15784,9 +16889,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.ok(requestCount > requestsAfterFirstResolution, 'fresh context-menu resolution bypasses a passive cached miss');
       api.invalidateTerminalFileReferenceTargetsForTest(['/home/test/cache-misses']);
       assert.equal(api.terminalFileReferenceTargetCacheHasForTest('1', fileRef), false, 'filesystem changes invalidate matching cached terminal misses before their TTL');
-    }
+    });
 
-    {
+    await testAsync("one visible path has one in-flight candidate request even when terminal references carry different line numbers", async () => {
       const api = loadYomux('', ['1']);
       api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/repo'}});
       let requestCount = 0;
@@ -15804,9 +16909,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       resolveRequest(jsonResponse({path: '/repo/a.py', info: {kind: 'file', name: 'a.py', path: '/repo/a.py'}}));
       assert.deepEqual(canonical(await first), {path: '/repo/a.py', info: {kind: 'file', name: 'a.py', path: '/repo/a.py'}, line: 10, text: 'a.py:10'});
       assert.deepEqual(canonical(await second), {path: '/repo/a.py', info: {kind: 'file', name: 'a.py', path: '/repo/a.py'}, line: 20, text: 'a.py:20'});
-    }
+    });
 
-    {
+    await testAsync("unsupported file-like references are rejected locally", async () => {
       const api = loadYomux('', ['1']);
       let requests = 0;
       api.setFetchForTest(() => {
@@ -15815,9 +16920,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       });
       assert.equal(await api.terminalFileReferenceTarget('1', {type: 'file', path: 'https://example.invalid/file.md'}, {fresh: false}), null, 'unsupported file-like references are rejected locally');
       assert.equal(requests, 0, 'unsupported file-like references do not submit an empty resolver request');
-    }
+    });
 
-    {
+    await testAsync("the fake-clock negative lookup initially misses", async () => {
       const api = loadYomux('', ['1']);
       api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/cache-ttl'}});
       let now = 1_000_000;
@@ -15850,9 +16955,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       api.invalidateFileExplorerFsCachesForTest();
       assert.ok(await api.terminalFileReferenceTarget('1', existing, {fresh: false, now: clock}), 'an expired positive result is resolved again');
       assert.ok(requestCount > afterPositive, 'the fake clock proves existing candidates retry only after their TTL');
-    }
+    });
 
-    {
+    await testAsync("the first 512 distinct terminal file refs each resolve once", async () => {
       const api = loadYomux('', ['1']);
       api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/cache-lru'}});
       let requestCount = 0;
@@ -15878,9 +16983,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(requestCount, 513, 'the recently reused oldest target survives the LRU eviction');
       await api.terminalFileReferenceTarget('1', ref(1), {fresh: false});
       assert.equal(api.terminalFileReferenceTargetCacheHasForTest('1', ref(1)), true, 're-resolving the evicted target returns it to the bounded target cache');
-    }
+    });
 
-    {
+    await testAsync("YO!agent job confirm/cancel controls call the existing job routes and refresh the list", async () => {
       const api = loadYomux('', ['1']);
       api.applyYoagentJobsPayloadForTest({jobs: [{id: 'job-1', status: 'pending_confirmation', target: {session: '1'}, public_text: 'date'}]});
       const calls = [];
@@ -15899,9 +17004,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         {method: 'POST', url: '/api/yoagent/jobs/job-1/cancel'},
         {method: 'GET', url: '/api/yoagent/jobs'},
       ], 'YO!agent job confirm/cancel controls call the existing job routes and refresh the list');
-    }
+    });
 
-    {
+    await testAsync("submitting while YO!agent is busy enqueues the next ask instead of dropping it", async () => {
       const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
       const calls = [];
       let firstChatResolve = null;
@@ -15945,9 +17050,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.ok(chatBodies.every(body => body.request_id && body.stream_id && body.request_id === body.stream_id), 'chat sends carry one request/stream id so local thinking and backend deltas update the same row');
       const source = fs.readFileSync('static/yomux.js', 'utf8');
       assert.ok(/new AbortController\(\)|typeof AbortController === 'function'/.test(source) && /signal:\s*controller\?\.signal/.test(source), 'active chat fetch uses AbortController when the browser provides it');
-    }
+    });
 
-    {
+    await testAsync("YO!agent chat still sends the current prompt", async () => {
       const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
       const hiddenToolOutput = 'hidden tool output '.repeat(20000);
       let chatBody = null;
@@ -15979,9 +17084,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(Object.prototype.hasOwnProperty.call(chatBody, 'history'), false, 'YO!agent chat relies on server-side transcript history instead of reposting browser messages');
       assert.ok(encodedBody.length < 2048, 'YO!agent chat request stays small even when prior visible messages carry hidden stream/tool data');
       assert.equal(encodedBody.includes('hidden tool output'), false, 'hidden stream/tool details are not serialized into the chat request');
-    }
+    });
 
-    {
+    await testAsync("YO!agent 413 errors explain that the resumable conversation is too large", async () => {
       const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
       api.setFetchForTest((url) => {
         if (String(url) === '/api/yoagent/chat') {
@@ -15993,9 +17098,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const html = api.yoagentChatHtml();
       assert.ok(html.includes('conversation too large to resume'), 'YO!agent 413 errors explain that the resumable conversation is too large');
       assert.equal(html.includes('chat failed: Request Entity Too Large'), false, 'YO!agent 413 errors do not expose only the raw HTTP reason');
-    }
+    });
 
-    {
+    await testAsync("without installed-agent metadata, explicit Claude cannot be attempted yet", async () => {
       const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           availableAgents: [],
@@ -16011,9 +17116,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         agentAuth: {claude: {installed: true, logged_in: true}},
       }, {refreshAuto: false, refreshActivity: false});
       assert.equal(api.yoagentResolvedBackendForTest(), 'claude', 'metadata refresh updates availableAgents as well as agentAuth');
-    }
+    });
 
-    {
+    await testAsync("explicit Claude selection stays explicit when the CLI exists", async () => {
       const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           availableAgents: ['claude'],
@@ -16048,9 +17153,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         {method: 'POST', url: '/api/yoagent/chat'},
       ], 'explicit backend sends force-refresh agent auth before posting chat');
       assert.equal(JSON.parse(calls[1].body).message, 'hello', 'chat request still posts the user request after refresh');
-    }
+    });
 
-    {
+    await testAsync("pending target-agent waits make new asks join the queue", async () => {
       const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
       const calls = [];
       api.applyYoagentConversationPayloadForTest({
@@ -16076,9 +17181,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       await new Promise(resolve => setTimeout(resolve, 0));
       assert.equal(api.yoagentChatQueueForTest().length, 0, 'clearing the pending wait drains the next queued ask');
       assert.deepStrictEqual(calls.filter(call => call.url === '/api/yoagent/chat').map(call => JSON.parse(call.body).message), ['after'], 'pending-wait queue drains FIFO after the target AI finishes');
-    }
+    });
 
-    {
+    await testAsync("busy submit creates a cancelable queued item", async () => {
       const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
       const calls = [];
       api.setYoagentBusyForTest(true);
@@ -16118,9 +17223,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         {method: 'POST', url: '/api/yoagent/chat'},
         {method: 'POST', url: `/api/yoagent/chat/${active.id}/cancel`},
       ], 'active cancel posts to the request-scoped cancel route');
-    }
+    });
 
-    {
+    test("running thinking preview shows one continuously growing thinking line", () => {
       const api = loadYomux('', ['1']);
       const detailsPreviews = html => [...String(html || '').matchAll(/<span class="[^"]*\byoagent-details-preview\b[^"]*">([\s\S]*?)<\/span>/g)].map(match => match[1]);
       const thinkingLine = 'thinking: scanning files reading activity context final synthesis';
@@ -16190,9 +17295,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(tokenProgressHtml.includes('thinking: thinking'), false, 'Claude token-only thinking progress does not duplicate the thinking prefix');
       assert.ok(tokenProgressHtml.includes('did not expose readable thinking text'), 'Claude token-only thinking progress explains why no words are shown');
       assert.equal(tokenProgressHtml.includes('<pre class="yoagent-auxiliary-stream">'), false, 'Claude token-only progress is metadata, not fake thinking body text');
-    }
+    });
 
-    {
+    test("multiline tool output continuation lines do not leak into the thinking details preview", () => {
       const api = loadYomux('', ['1']);
       api.applyYoagentStreamPayloadForTest({
         stream_id: 'stream-multiline-tool',
@@ -16209,9 +17314,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(html.includes('Details…'), false, 'multiline tool output continuation lines do not leak into the thinking details preview');
       assert.ok(html.includes('yoagent-toolcall-details'), 'multiline tool output still renders in the structured tool-call block');
       assert.ok(html.includes('tool output: command: line 1\nline 2'), 'tool-call pre preserves real multiline output');
-    }
+    });
 
-    {
+    test("interleaved YO!agent stream rows all render", () => {
       const api = loadYomux('', ['1']);
       api.applyYoagentStreamPayloadForTest({
         stream_id: 'stream-interleaved',
@@ -16236,9 +17341,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.deepStrictEqual(ordered, [...ordered].sort((left, right) => left - right), 'thinking/tool rows and assistant text render in stream order');
       assert.ok(html.includes('yoagent-message-stream'), 'interleaved stream uses the ordered message stream renderer');
       assert.equal((html.match(/<details class="[^"]*yoagent-stream-detail/g) || []).length, 2, 'thinking and tool-call stream rows remain independently collapsible');
-    }
+    });
 
-    {
+    test("real Claude thinking text stream renders in the expanded GUI body", () => {
       const api = loadYomux('', ['1']);
       api.applyYoagentStreamPayloadForTest({
         stream_id: 'stream-real-claude-thinking',
@@ -16254,9 +17359,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.ok(html.includes('thinking: Reading context\n  and checking files'), 'real Claude thinking text stream renders in the expanded GUI body');
       assert.ok(html.includes('thinking (6 words)…'), 'real Claude thinking text uses the normal thinking label');
       assert.equal(html.includes('did not expose readable thinking text'), false, 'real Claude thinking text never shows the token-only note');
-    }
+    });
 
-    {
+    test("adjacent tool calls coalesce but assistant text splits tool runs", () => {
       const api = loadYomux('', ['1']);
       api.applyYoagentStreamPayloadForTest({
         stream_id: 'stream-coalesced',
@@ -16274,9 +17379,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal((html.match(/yoagent-toolcall-details/g) || []).length, 2, 'adjacent tool calls coalesce but assistant text splits tool runs');
       assert.ok(html.includes('tool start: command: rg files') && html.includes('tool output: command: found one') && html.includes('tool done: command: exit 0'), 'coalesced tool block keeps every tool line in order');
       assert.ok(html.includes('|stream|0') && html.includes('|stream|4'), 'coalesced tool runs keep stable source-index detail keys');
-    }
+    });
 
-    {
+    test("coalesced thinking stream label counts the full merged thinking run", () => {
       const api = loadYomux('', ['1']);
       api.applyYoagentStreamPayloadForTest({
         stream_id: 'stream-thinking-count',
@@ -16291,9 +17396,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const html = api.yoagentChatHtml();
       assert.ok(html.includes('thinking (5 words)…'), 'coalesced thinking stream label counts the full merged thinking run');
       assert.equal((html.match(/<details class="[^"]*yoagent-stream-detail/g) || []).length, 1, 'adjacent thinking stream rows coalesce into one collapsible');
-    }
+    });
 
-    {
+    await testAsync("YO!agent pending wait rows expose a Clear control", async () => {
       const api = loadYomux('', ['1']);
       api.applyYoagentConversationPayloadForTest({
         messages: [],
@@ -16320,9 +17425,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const html = api.yoagentChatHtml();
       assert.equal(html.includes('yoagent-waiting-queue'), false, 'clearing a stale wait removes the pending row');
       assert.ok(html.includes('Result from tmux session') && html.includes('done'), 'clearing a stale wait preserves recorded result messages');
-    }
+    });
 
-    {
+    test("mobile accessory maps Esc to the terminal escape byte", () => {
       const frames = [];
       const api = loadYomux('', ['1'], 'http:', 'iPhone', 'admin', {coarsePointer: true});
       api.registerTerminalForTest('1', {focus() {}, refresh() {}, rows: 24, cols: 80, resize(cols, rows) { this.cols = cols; this.rows = rows; }}, {
@@ -16380,9 +17485,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal((keyboardHtml.match(/data-terminal-mobile-key="interrupt"/g) || []).length, 2, 'both pages reuse the shared Ctrl-C definition');
       assert.equal((keyboardHtml.match(/data-terminal-mobile-key="more"/g) || []).length, 2, 'both pages retain the More page toggle');
       assert.ok(keyboardHtml.includes('⌘P') && keyboardHtml.includes('⌘V'), 'the touch palette exposes Command-P quick-open and Command-V paste without a physical keyboard');
-    }
+    });
 
-    {
+    test("an already-owned terminal key does not re-enter synchronous focus and attention ownership", () => {
       const frames = [];
       const api = loadYomux('', ['1']);
       api.registerTerminalForTest('1', {focus() {}, refresh() {}, rows: 24, cols: 80, resize(cols, rows) { this.cols = cols; this.rows = rows; }}, {
@@ -16405,7 +17510,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       api.handleTerminalDataForTest('1', '\x1b[I');
       const afterPassive = Object.fromEntries(api.clientPerfSummaryForTest().map(counter => [counter.name, counter]));
       assert.equal(afterPassive.keydownToTermData.count, 1, 'a consumed native timestamp cannot become page uptime for passive reports');
-    }
+    });
 
     await testAsync('native input timers cannot survive a non-producing event or be consumed by focus reports', async () => {
       const tasks = [];
@@ -16541,6 +17646,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       ];
       api.setFetchForTest((url, options = {}) => {
         fetchCalls.push({url: String(url), method: options.method || 'GET'});
+        if (String(url).startsWith('/api/update-status')) return Promise.resolve(jsonResponse({available: true, target: '0.4.18', target_sha: 'pinned-sha', build_state: 'ready'}));
         if (String(url).startsWith('/api/self-update')) {
           return Promise.resolve(jsonResponse({
             ok: true,
@@ -16555,15 +17661,16 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         return Promise.reject(new Error(`unexpected fetch ${url}`));
       });
 
-      api.applyUpdateAvailableForTest({available: true, notify: true, target: '0.4.18'});
+      api.applyUpdateAvailableForTest({available: true, notify: true, target: '0.4.18', build_state: 'ready'});
       assert.equal(owner.dataset.updateTarget, '0.4.18', 'update toast carries the target version');
       assert.ok(actionButton, 'Update Now action was rendered');
       actionButton.listeners.get('click')[0]({target: actionButton, stopPropagation() {}});
-      assert.equal(owner.removed, true, 'Update Now dismisses the update-available toast before the API returns');
+      assert.notEqual(owner.removed, true, 'notice remains visible while readiness is checked');
 
       await flushAsyncWork();
       await flushAsyncWork();
-      assert.deepStrictEqual(canonical(fetchCalls[0]), {method: 'POST', url: '/api/self-update'}, 'self-update posts immediately after confirmation');
+      assert.deepStrictEqual(canonical(fetchCalls[1]), {method: 'POST', url: '/api/self-update'}, 'self-update posts after readiness and confirmation');
+      assert.equal(owner.removed, true, 'accepted update dismisses availability notice');
       assert.ok(toasts.some(item => item.title === 'Installing update...'), 'successful restarting update shows installing status');
       assert.ok(toasts.some(item => item.lines[0] === 'YOmux was updated and is restarting now.'), 'self-update resolves the server descriptor through the active locale instead of showing its raw fallback');
       assert.deepStrictEqual(canonical(api.selfUpdateReloadStateForTest()), {
@@ -16581,6 +17688,95 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.equal(api.reloadCountForTest(), 0, 'old server ping cannot complete restart polling');
       await api.pollSelfUpdateReloadForTest();
       assert.equal(api.reloadCountForTest(), 1, 'reachable restarted server triggers automatic reload');
+    });
+
+    await testAsync('self-update: checking and failed builds keep availability without an upgrade action', async () => {
+      const api = loadYomux('', ['1']);
+      const notices = [];
+      api.setShowToastForTest((title, lines, options = {}) => { notices.push({title, lines, actions: options.actions}); return null; });
+      for (const state of ['checking', 'failed', undefined]) {
+        api.applyUpdateAvailableForTest({available: true, target: '0.11.0', build_state: state, build_error: 'Bazel unavailable'});
+        const notice = notices.at(-1);
+        assert.equal(notice.title, 'YOmux update available');
+        assert.equal(notice.actions.length, 0, 'unverified candidate has no upgrade action');
+        assert.ok(notice.lines.some(line => String(line).includes(state === 'failed' ? 'Bazel unavailable' : 'Checking whether')));
+      }
+      let confirmations = 0;
+      const calls = [];
+      api.setConfirmForTest(() => { confirmations += 1; return true; });
+      api.setFetchForTest(url => { calls.push(String(url)); return Promise.resolve(jsonResponse({available: true, target: '0.11.0', build_state: 'failed', build_error: 'compiler failed'})); });
+      await api.triggerSelfUpdateForTest();
+      assert.equal(confirmations, 0, 'failed candidate cannot offer install confirmation');
+      assert.deepStrictEqual(calls, ['/api/update-status'], 'badge click cannot post an unverified upgrade');
+      api.applyUpdateAvailableForTest({available: true, target: '0.11.0', build_state: 'ready'});
+      assert.equal(notices.at(-1).actions.length, 1, 'successful preparation enables upgrade');
+    });
+
+    await testAsync('self-update: newer reads and pushed state retire stale readiness responses', async () => {
+      for (const reader of ['triggerSelfUpdateForTest', 'checkForUpdateOnceForTest']) {
+        for (const newerState of ['ready', 'failed']) {
+          const api = loadYomux('', ['1']);
+          const notices = [];
+          const pending = [];
+          let confirmations = 0;
+          api.setShowToastForTest((title, lines, options = {}) => { notices.push({title, lines, actions: options.actions}); return null; });
+          api.setConfirmForTest(() => { confirmations += 1; return true; });
+          api.setFetchForTest(url => {
+            assert.equal(String(url), '/api/update-status', 'stale readiness must never authorize a POST');
+            return new Promise(resolve => pending.push(resolve));
+          });
+          const oldState = newerState === 'ready' ? 'failed' : 'ready';
+          const first = api[reader]();
+          api.applyUpdateAvailableForTest({available: true, target: '99.0.0', build_state: newerState});
+          pending.shift()(jsonResponse({available: true, target: '99.0.0', build_state: oldState}));
+          await first;
+          assert.equal(notices.length, 1, 'a pushed state cannot be replaced by an older response');
+          assert.equal(notices[0].actions.length, newerState === 'ready' ? 1 : 0);
+          assert.equal(confirmations, 0, 'superseded readiness cannot prompt for installation');
+
+          notices.length = 0;
+          const olderRead = api[reader]();
+          const newerRead = api.checkForUpdateOnceForTest();
+          pending[1](jsonResponse({available: true, target: '99.0.0', build_state: newerState}));
+          await newerRead;
+          pending[0](jsonResponse({available: true, target: '99.0.0', build_state: oldState}));
+          await olderRead;
+          assert.equal(notices.length, 1, 'the latest started read owns reversed completion');
+          assert.equal(notices[0].actions.length, newerState === 'ready' ? 1 : 0);
+          assert.equal(confirmations, 0, 'an older ready read cannot authorize installation');
+        }
+      }
+    });
+
+    await testAsync('self-update: queued status paint preserves publication and read ownership', async () => {
+      for (const reader of ['triggerSelfUpdateForTest', 'checkForUpdateOnceForTest']) {
+        for (const order of ['read-push-response', 'push-response-paint', 'push-paint-response']) {
+          const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {requestAnimationFrame: () => 1});
+          const notices = [];
+          let release, confirmations = 0;
+          api.setShowToastForTest((title, lines, options = {}) => { notices.push(options.actions.length); return null; });
+          api.setConfirmForTest(() => { confirmations += 1; return false; });
+          api.setFetchForTest(() => new Promise(resolve => { release = () => resolve(jsonResponse({available: true, target: '99.0.0', build_state: 'ready'})); }));
+          const push = () => api.handleClientPushEventForTest('update_available', {available: true, target: '99.0.0', build_state: 'failed', build_error: 'Newer failure'});
+          if (order !== 'read-push-response') assert.equal(push(), true);
+          const pending = api[reader]();
+          if (order === 'read-push-response') assert.equal(push(), true);
+          if (order === 'push-paint-response') {
+            api.flushQueuedClientPushEventsForTest();
+            assert.deepStrictEqual(notices, [0], 'known failure remains visible while the newer read is pending');
+          }
+          release();
+          await pending;
+          api.flushQueuedClientPushEventsForTest();
+          if (order === 'read-push-response') {
+            assert.equal(confirmations, 0, 'accepted newer failure retires stale readiness before queued paint');
+            assert.deepStrictEqual(notices, [0]);
+          } else {
+            assert.equal(confirmations, reader === 'triggerSelfUpdateForTest' ? 1 : 0, 'queued paint does not retire the newer readiness read');
+            assert.deepStrictEqual(notices, order === 'push-paint-response' ? [0, 1] : [1], 'older queued state cannot overwrite a published HTTP response');
+          }
+        }
+      }
     });
 
     await testAsync('self-update: reconnecting browser recovers a missed availability event', async () => {
@@ -16790,7 +17986,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       const clipboardSourceFiles = fs.readdirSync('static_src/js/yomux').filter(name => name.endsWith('.js')).sort();
       const rawTextWriterFiles = clipboardSourceFiles.filter(name => fs.readFileSync(`static_src/js/yomux/${name}`, 'utf8').includes('copyTextToClipboard('));
       const clipboardItemFiles = clipboardSourceFiles.filter(name => fs.readFileSync(`static_src/js/yomux/${name}`, 'utf8').includes('ClipboardItem'));
-      assert.match(core, /function copyTextWithFeedback\(text, options = \{\}\)[\s\S]*copyTextToClipboard\(text\)\.then\([\s\S]*showCopyFeedback\(options\)/, 'one parent owns text-copy success and failure feedback');
+      assert.match(core, /function copyTextWithFeedback\(text, options = \{\}\) \{\s*return copyOperationWithFeedback\(copyTextToClipboard\(text\), options\)/, 'text copy routes through the shared operation feedback parent');
+      assert.match(core, /function copyOperationWithFeedback\(operation, options = \{\}\)[\s\S]*showCopyFeedback\(options\)[\s\S]*statusErr\(localizedHtml\('common.copyFailed'/, 'one parent owns copy success and failure feedback');
       assert.deepEqual(rawTextWriterFiles, ['10_core_utils.js'], 'the raw text writer stays private to the shared feedback parent');
       assert.deepEqual(clipboardItemFiles, ['10_core_utils.js', '45_file_explorer_actions.js', '88_markdown_preview.js'], 'the ClipboardItem inventory is explicit and small enough to enforce');
       assert.equal([...core.matchAll(/copyTextToClipboard\(/g)].length, 2, 'only the shared feedback parent may invoke the raw text clipboard writer');

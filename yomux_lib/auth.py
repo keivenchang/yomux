@@ -263,14 +263,17 @@ def hash_auth_password(password: str) -> str:
 
 def auth_password_matches(password: str, stored: str) -> bool:
     if not auth_password_is_hash(stored):
-        return hmac.compare_digest(password, stored)
+        return hmac.compare_digest(password.encode("utf-8"), stored.encode("utf-8"))
     _, iterations_text, salt, expected = stored.split("$", 3)
     try:
         iterations = int(iterations_text)
-    except ValueError:
+        expected_bytes = bytes.fromhex(expected)
+        if iterations < 1 or len(expected) != 64 or len(expected_bytes) != 32:
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), iterations)
+    except (ValueError, OverflowError):
         return False
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("ascii"), iterations).hex()
-    return hmac.compare_digest(digest, expected)
+    return hmac.compare_digest(digest, expected_bytes)
 
 
 def hash_plaintext_auth_users(users: tuple[AuthUser, ...]) -> tuple[AuthUser, ...]:
@@ -297,26 +300,28 @@ AUTH_CONFIG_READ_ONLY_ENV = product_env_name('AUTH_CONFIG_READ_ONLY')
 
 
 def load_auth_cookie_secret(path: Path = AUTH_COOKIE_SECRET_PATH) -> bytes:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
-    if path.exists():
-        path.chmod(0o600)
-        raw = path.read_text(encoding="utf-8").strip()
-        try:
-            secret = bytes.fromhex(raw)
-        except ValueError:
-            secret = b""
-        if len(secret) == 32:
+    with shared_config_lock(path):
+        while True:
+            secure_auth_config_permissions(path)
+            try:
+                raw = path.read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                raw = None
+            except UnicodeDecodeError:
+                raw = ""
+            try:
+                secret = bytes.fromhex(raw) if raw is not None else b""
+            except ValueError:
+                secret = b""
+            if len(secret) == 32:
+                return secret
+            secret = os.urandom(32)
+            try:
+                # Native startup publishes complete files without taking the Python lock.
+                atomic_write_text(path, f"{secret.hex()}\n", mode=0o600, overwrite=raw is not None)
+            except FileExistsError:
+                continue
             return secret
-    secret = os.urandom(32)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(f"{secret.hex()}\n")
-    path.chmod(0o600)
-    return secret
-
-
-AUTH_COOKIE_SECRET = load_auth_cookie_secret()
 
 
 def write_auth_config(path: Path, text: str, *, expected_revision: str | None = None) -> None:
@@ -342,11 +347,12 @@ def auth_cookie_value(username: str, password: str) -> str:
 
 def auth_identity_for_credentials(username: str, password: str) -> AuthIdentity | None:
     for user in current_auth_users():
-        username_matches = hmac.compare_digest(username, user.username)
+        username_matches = hmac.compare_digest(username.encode("utf-8"), user.username.encode("utf-8"))
         password_matches = auth_password_matches(password, user.password)
         if username_matches and password_matches:
             return AuthIdentity(username=user.username, password=user.password, role=user.role)
     return None
 
 
+AUTH_COOKIE_SECRET = load_auth_cookie_secret()
 AUTH_CONFIG = initialize_auth_config(AUTH_CONFIG_PATH)

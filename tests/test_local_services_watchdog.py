@@ -70,7 +70,7 @@ def _rows(batchd_socket, web_cpu, worker_cpu, extra=(), command_payload=""):
 def _install_live_process_view(monkeypatch, live_table):
     """Answer the escalation's mid-flight identity re-proof from a fixture table.
 
-    ``GroupOverloadWatchdog._identity_replaced`` deliberately re-proves each
+    ``GroupOverloadWatchdog._identity_diagnostic`` deliberately re-proves each
     authorized pid against the LIVE system rather than against the snapshot the
     decision was taken on: a pid recycled between the SIGTERM and the SIGKILL is
     a different process and must be yielded to, not force-killed. Every pid in
@@ -104,6 +104,8 @@ def _watchdog(monkeypatch, tmp_path, service_dir, tables, kills, *, sustained=3,
 
     def kill(pid, signum):
         kills.append((pid, signum))
+        if pid not in tables[-1]:
+            live_table.pop(pid, None)
 
     # The process group the KERNEL would report for each of these synthetic pids.
     # `live_process_group` deliberately asks `os.getpgid` rather than the process
@@ -112,7 +114,8 @@ def _watchdog(monkeypatch, tmp_path, service_dir, tables, kills, *, sustained=3,
     # "unproven" and refuses -- see
     # `test_watchdog_refuses_a_target_whose_live_process_group_cannot_be_proven`.
     known_groups = {pid: entry.pgid for snapshot in tables for pid, entry in snapshot.items()}
-    _install_live_process_view(monkeypatch, tables[-1])
+    live_table = {pid: entry for snapshot in tables for pid, entry in snapshot.items()}
+    _install_live_process_view(monkeypatch, live_table)
 
     return GroupOverloadWatchdog(
         port=8881,
@@ -125,11 +128,6 @@ def _watchdog(monkeypatch, tmp_path, service_dir, tables, kills, *, sustained=3,
         evidence_dir=tmp_path,
         table_reader=table_reader,
         process_group_reader=lambda pid: known_groups.get(int(pid)),
-        # The escalation's liveness poll. The product default (`pid_is_serving`)
-        # would ask the real /proc about pids this fixture invented, so it reads
-        # the same process-table snapshots every other observation here comes
-        # from -- exactly what the containment loop used to do explicitly.
-        liveness_reader=lambda pid: int(pid) in table_reader(),
         kill=kill,
         clock=clock,
         sleep=lambda _seconds: None,

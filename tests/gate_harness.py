@@ -38,12 +38,14 @@ from selenium.webdriver.support.ui import WebDriverWait
 from yomux_lib import common
 from yomux_lib import auth as auth_module
 from yomux_lib.auth import TEST_AUTH_BYPASS_ENV
+from tests.helpers.fixture_tools import run_fixture_cleanup_phases
 from tests.helpers.route_contract import RESPONSE_SSE
 from tests.helpers.route_contract import RESPONSE_WEBSOCKET
 from tests.helpers.route_contract import route_for_request
 from yomux_lib.infra.inotify_capacity import INOTIFY_FD_TARGET
 from yomux_lib.infra.inotify_capacity import INOTIFY_MAX_USER_INSTANCES_PATH
 from yomux_lib.infra.inotify_capacity import INOTIFY_MAX_USER_WATCHES_PATH
+from yomux_lib.infra.inotify_capacity import UNMEASURED_LIMIT
 from yomux_lib.infra.inotify_capacity import inotify_instance_census
 from yomux_lib.infra.inotify_capacity import process_fd_owners
 from yomux_lib.infra.inotify_capacity import read_kernel_limit
@@ -1840,7 +1842,11 @@ def local_service_daemons_beneath(
                 service=_daemon_service_name(command),
                 socket_path=str(socket_path),
                 spawn_generation=process_spawn_generation(pid),
-                inotify_instances=counts.get(pid, 0),
+                inotify_instances=(
+                    counts.get(pid, 0)
+                    if inotify_by_pid is not None
+                    else UNMEASURED_LIMIT
+                ),
             )
         )
     return tuple(sorted(found, key=lambda daemon: (daemon.service, daemon.pid)))
@@ -1864,6 +1870,7 @@ class ResourceLedgerSnapshot:
     inotify_instances_self: int
     inotify_instances_user: int
     inotify_instances_by_pid: Mapping[int, int]
+    inotify_census_error: str
     inotify_max_user_instances: int
     inotify_max_user_watches: int
     local_service_daemons: tuple[LocalServiceDaemonIdentity, ...]
@@ -1878,6 +1885,7 @@ class ResourceLedgerSnapshot:
             "fd_count": self.fd_count,
             "inotify_instances_self": self.inotify_instances_self,
             "inotify_instances_user": self.inotify_instances_user,
+            "inotify_census_error": self.inotify_census_error,
             "inotify_max_user_instances": self.inotify_max_user_instances,
             "inotify_max_user_watches": self.inotify_max_user_watches,
             "local_service_daemons": [daemon.as_reason() for daemon in self.local_service_daemons],
@@ -1890,7 +1898,18 @@ def capture_resource_ledger(root: Path, *, phase: str) -> ResourceLedgerSnapshot
     worker_pid = os.getpid()
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     fd_owners = process_fd_owners(worker_pid)
-    user_total, by_pid = inotify_instance_census()
+    try:
+        user_total, by_pid = inotify_instance_census()
+        census_error = ""
+    except OSError as error:
+        # Resource ledgers are fixture diagnostics and may run inside a
+        # container whose /proc cannot expose every same-uid process. Preserve
+        # the worker's directly measured descriptors and state explicitly that
+        # the uid-wide total is unavailable. Gate admission keeps its separate
+        # capacity probe and never treats this missing census as zero.
+        user_total, by_pid = UNMEASURED_LIMIT, {}
+        census_error = f"{type(error).__name__}: {error}"
+    self_instances = by_pid.get(worker_pid, fd_owners.get(INOTIFY_FD_TARGET, 0))
     return ResourceLedgerSnapshot(
         phase=phase,
         worker_pid=worker_pid,
@@ -1899,12 +1918,16 @@ def capture_resource_ledger(root: Path, *, phase: str) -> ResourceLedgerSnapshot
         rlimit_nofile_hard=hard,
         fd_count=sum(fd_owners.values()),
         fd_owners=fd_owners,
-        inotify_instances_self=by_pid.get(worker_pid, 0),
+        inotify_instances_self=self_instances,
         inotify_instances_user=user_total,
         inotify_instances_by_pid=by_pid,
+        inotify_census_error=census_error,
         inotify_max_user_instances=read_kernel_limit(INOTIFY_MAX_USER_INSTANCES_PATH),
         inotify_max_user_watches=read_kernel_limit(INOTIFY_MAX_USER_WATCHES_PATH),
-        local_service_daemons=local_service_daemons_beneath(root, inotify_by_pid=by_pid),
+        local_service_daemons=local_service_daemons_beneath(
+            root,
+            inotify_by_pid=None if census_error else by_pid,
+        ),
     )
 
 
@@ -1913,16 +1936,15 @@ def assert_no_surviving_local_service_daemons(root: Path, *, label: str) -> None
 
     A surviving daemon holds its uid-wide inotify instance for as long as it
     runs, so leaving it alive would refuse a watcher inside some later, innocent
-    test.  The survivor is killed here so one leak cannot cascade, and the leak
-    is still reported as this test's failure with the owner named.
+    test.  Fixture teardown owns retiring the process after its owner is named.
     """
 
     survivors = local_service_daemons_beneath(root)
     if not survivors:
         return
     # Only now, on the failure path, is the uid-wide census worth its cost.
-    survivors = local_service_daemons_beneath(root, inotify_by_pid=inotify_instance_census()[1])
     snapshot = capture_resource_ledger(root, phase="after")
+    survivors = snapshot.local_service_daemons
     reason = {
         "error_code": LOCAL_SERVICE_DAEMON_SURVIVED_CODE,
         "label": label,
@@ -2086,11 +2108,12 @@ def fixture_spawned_processes_beneath_tmpdir(root: Path) -> tuple[FixtureSpawned
 def _fixture_spawned_process_still_running(process: FixtureSpawnedProcessIdentity, root: Path) -> bool:
     """Re-prove identity and fixture root immediately before an exact signal."""
 
+    tmpdir = _fixture_process_tmpdir(process.pid)
     return (
         process_start_identity(process.pid) == process.start_identity
         and process_spawn_generation(process.pid) == process.generation_marker
-        and _fixture_process_tmpdir(process.pid) is not None
-        and _fixture_process_tmpdir(process.pid).resolve() == (root / "tmp").resolve()
+        and tmpdir is not None
+        and tmpdir.resolve() == (root / "tmp").resolve()
     )
 
 
@@ -2265,21 +2288,6 @@ def settle_fixture_local_service_reapers(registries: Iterable[Any], *, label: st
         raise errors[0]
     if errors:
         raise BaseExceptionGroup(f"{label} local-service reaper settlement failed", errors)
-
-
-def run_fixture_cleanup_phases(label: str, phases: Sequence[tuple[str, Callable[[], None]]]) -> None:
-    """Attempt ordered cleanup boundaries and preserve their original failures."""
-
-    errors: list[BaseException] = []
-    for _phase_name, callback in phases:
-        try:
-            callback()
-        except BaseException as error:
-            errors.append(error)
-    if len(errors) == 1:
-        raise errors[0]
-    if errors:
-        raise BaseExceptionGroup(f"{label} teardown failed", errors)
 
 
 def stop_fixture_app_runtime(

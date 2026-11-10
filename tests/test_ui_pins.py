@@ -10,6 +10,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PINS = json.loads((REPO_ROOT / "tests" / "fixtures" / "ui_pins.json").read_text(encoding="utf-8"))
 TOKENS_CSS = (REPO_ROOT / "static_src" / "css" / "yomux" / "00_tokens_base.css").read_text(encoding="utf-8")
@@ -63,7 +65,7 @@ def test_ui_pins_match_sources():
         "activeAccentBrightLight": ("body.theme-light", "--active-accent-bright"),
     }
     for pin, (scope, token) in scoped_token_pins.items():
-        pattern = rf"{re.escape(scope)}\s*\{{[\s\S]*?{re.escape(token)}:\s*{re.escape(PINS[pin])};"
+        pattern = rf"{re.escape(scope)}\s*\{{[^}}]*?{re.escape(token)}:\s*{re.escape(PINS[pin])};"
         assert re.search(pattern, TOKENS_CSS), f"{pin} ({PINS[pin]}) no longer matches {token} in {scope}"
     # JS-literal pins: the diff overview band colors are literals in the shipping editor source
     assert f"'{PINS['diffOverviewAdd']}'" in CM_JS, "diffOverviewAdd no longer matches the JS diff-overview band color"
@@ -79,6 +81,17 @@ def test_ui_label_pins_resolve_from_english_catalog():
         assert isinstance(EN_CATALOG[locale_key], str) and EN_CATALOG[locale_key].strip(), (
             f"{pin} refers to blank/non-string English locale value {locale_key}"
         )
+
+
+def test_scoped_ui_color_pin_cannot_match_a_later_unrelated_rule(monkeypatch):
+    scope = re.search(r"body\.theme-light\s*\{[^}]*\}", TOKENS_CSS)
+    assert scope is not None
+    declaration = f"--active-accent-bright: {PINS['activeAccentBrightLight']};"
+    assert declaration in scope.group()
+    missing = TOKENS_CSS[:scope.start()] + scope.group().replace(declaration, "") + TOKENS_CSS[scope.end():]
+    monkeypatch.setitem(globals(), "TOKENS_CSS", missing + f"\n.unrelated {{ {declaration} }}\n")
+    with pytest.raises(AssertionError, match="activeAccentBrightLight"):
+        test_ui_pins_match_sources()
 
 
 def test_ui_class_pins_are_stable_css_identifiers():

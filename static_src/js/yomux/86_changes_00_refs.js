@@ -75,19 +75,11 @@ function diffRefQueryString(repo) {
   return `from=${encodeURIComponent(refs.from)}&to=${encodeURIComponent(refs.to)}`;
 }
 
-function sessionFilesRelevantDiffRefRepos() {
-  const session = fileExplorerSessionFilesTargetSession();
-  const payload = fileExplorerSessionFilesState.payload;
-  if (!sessionFilesPayloadIsLoadedForSession(payload, session)) return new Set();
-  return new Set(sessionFilesRepoRoots(payload));
-}
-
-// C6: the per-repo override map encoded for /api/session-files. Keep this scoped to the current loaded
-// Differ payload so stale repo refs from old sessions do not bloat forced refreshes or fragment cache keys.
-function sessionFilesRefsQuery() {
-  const map = {};
-  const relevantRepos = sessionFilesRelevantDiffRefRepos();
+function sessionFilesRepoRefs(session) {
+  const scope = fileExplorerSessionFilesState.comparisonScope;
+  const relevantRepos = new Set(scope.session === session ? scope.repos : []);
   const globalRefs = diffRefParams();
+  const map = {};
   for (const [repo, refs] of Object.entries(diffRefsByRepo || {})) {
     const normalizedRepo = normalizeDirectoryPath(repo);
     if (!normalizedRepo || !relevantRepos.has(normalizedRepo)) continue;
@@ -98,34 +90,24 @@ function sessionFilesRefsQuery() {
     if (nextRefs.from === globalRefs.from && nextRefs.to === globalRefs.to) continue;
     map[normalizedRepo] = nextRefs;
   }
-  return Object.keys(map).length ? `&refs=${encodeURIComponent(JSON.stringify(map))}` : '';
-}
-
-function sessionFilesRequestQueryString(destination = 'differ') {
-  return destination === 'finder'
-    ? `from=HEAD&to=current${(typeof fileExplorerVisibleRepositoryPaths === 'function' ? fileExplorerVisibleRepositoryPaths() : [])
-      .map(path => `&repo_path=${encodeURIComponent(path)}`).join('')}`
-    : `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
+  return Object.keys(map).length ? map : null;
 }
 
 function sessionFilesRequestForDestination(destination, sessionOverride = '') {
-  const params = new URLSearchParams(sessionFilesRequestQueryString(destination));
-  let repoRefs = null;
-  const refs = params.get('refs');
-  if (refs) {
-    const parsed = safeJsonParse(refs, null);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) repoRefs = parsed;
-  }
-  const request = {
-    session: sessionOverride || (destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession()),
-    hours: 24,
-    from_ref: params.get('from') || 'HEAD',
-    to_ref: params.get('to') || 'current',
-    repo_refs: repoRefs,
-  };
-  const repoPaths = destination === 'finder' ? params.getAll('repo_path') : [];
+  const finder = destination === 'finder';
+  const session = sessionOverride || (finder ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession());
+  const refs = finder ? {from: 'HEAD', to: 'current'} : diffRefParams();
+  const request = {session, hours: 24, from_ref: refs.from, to_ref: refs.to,
+    repo_refs: finder ? null : sessionFilesRepoRefs(session)};
+  const repoPaths = finder ? fileExplorerVisibleRepositoryPaths() : [];
   if (repoPaths.length) request.repo_paths = repoPaths;
   return request;
+}
+
+function sessionFilesRequestQueryString(request) {
+  return `from=${encodeURIComponent(request.from_ref)}&to=${encodeURIComponent(request.to_ref)}`
+    + (request.repo_refs ? `&refs=${encodeURIComponent(JSON.stringify(request.repo_refs))}` : '')
+    + (request.repo_paths || []).map(path => `&repo_path=${encodeURIComponent(path)}`).join('');
 }
 
 function clientSessionFilesWatchRequests() {
@@ -217,7 +199,7 @@ function sessionFilesDestinationsForRequest(request = {}, session = '') {
 }
 
 function sessionFilesCacheKey(session, destination = 'differ') {
-  return `${String(session || '')}\x1f${sessionFilesRequestQueryString(destination)}`;
+  return `${String(session || '')}\x1f${sessionFilesRequestQueryString(sessionFilesRequestForDestination(destination, session))}`;
 }
 
 function sessionFilesPayloadHasDifferPath(payload, path) {
@@ -281,48 +263,10 @@ function defaultDiffRefSuggestions() {
   ];
 }
 
-function diffRefSuggestions(repo) {
-  const suggestions = defaultDiffRefSuggestions();
+function appendDiffRefSuggestions(suggestions, refs) {
   const seen = new Set(suggestions.map(item => item.ref));
-  const addRefs = refs => {
-    if (!Array.isArray(refs)) return;
-    for (const item of refs) {
-      const ref = cleanDiffRef(item?.ref || '', '');
-      if (!ref) continue;
-      if (seen.has(ref)) {
-        const existing = suggestions.find(candidate => candidate.ref === ref);
-        if (existing) {
-          if (item?.short) existing.short = item.short;
-          if (item?.subject) existing.subject = localizedDiffRefSubject(ref, item.subject);
-          if (item?.date) existing.date = item.date;
-          if (item?.author) existing.author = item.author;
-          if (item?.commit) existing.commit = item.commit;
-          if (Array.isArray(item?.aliases)) existing.aliases = item.aliases.slice();
-        }
-        continue;
-      }
-      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: localizedDiffRefSubject(ref, item?.subject), date: item?.date || '', author: item?.author || '', commit: item?.commit || '', aliases: Array.isArray(item?.aliases) ? item.aliases.slice() : []});
-      seen.add(ref);
-      if (suggestions.length >= diffRefSuggestionLimit) return;
-    }
-  };
-  const refsByRepo = fileExplorerSessionFilesState.payload?.refs_by_repo && typeof fileExplorerSessionFilesState.payload.refs_by_repo === 'object'
-    ? fileExplorerSessionFilesState.payload.refs_by_repo
-    : {};
-  if (repo) {
-    addRefs(diffRefRepoRefs(refsByRepo, repo));
-  } else {
-    for (const refs of Object.values(refsByRepo)) addRefs(refs);
-  }
-  return coalescedDiffRefSuggestions(suggestions);
-}
-
-function fileDiffRefHistoryItems(path) {
-  const state = fileState.get(path);
-  if (!path || !fileStateHasUsefulGitHistory(state)) return [];
-  const suggestions = defaultDiffRefSuggestions();
-  const seen = new Set(suggestions.map(item => item.ref));
-  for (const item of normalizedFileGitHistory(state.gitHistory)) {
+  if (!Array.isArray(refs)) return;
+  for (const item of refs) {
     const ref = cleanDiffRef(item?.ref || '', '');
     if (!ref) continue;
     if (seen.has(ref)) {
@@ -339,8 +283,28 @@ function fileDiffRefHistoryItems(path) {
     }
     suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: localizedDiffRefSubject(ref, item?.subject), date: item?.date || '', author: item?.author || '', commit: item?.commit || '', aliases: Array.isArray(item?.aliases) ? item.aliases.slice() : []});
     seen.add(ref);
-    if (suggestions.length >= diffRefSuggestionLimit) break;
+    if (suggestions.length >= diffRefSuggestionLimit) return;
   }
+}
+
+function diffRefSuggestions(repo) {
+  const suggestions = defaultDiffRefSuggestions();
+  const refsByRepo = fileExplorerSessionFilesState.payload?.refs_by_repo && typeof fileExplorerSessionFilesState.payload.refs_by_repo === 'object'
+    ? fileExplorerSessionFilesState.payload.refs_by_repo
+    : {};
+  if (repo) {
+    appendDiffRefSuggestions(suggestions, diffRefRepoRefs(refsByRepo, repo));
+  } else {
+    for (const refs of Object.values(refsByRepo)) appendDiffRefSuggestions(suggestions, refs);
+  }
+  return coalescedDiffRefSuggestions(suggestions);
+}
+
+function fileDiffRefHistoryItems(path) {
+  const state = fileState.get(path);
+  if (!path || !fileStateHasUsefulGitHistory(state)) return [];
+  const suggestions = defaultDiffRefSuggestions();
+  appendDiffRefSuggestions(suggestions, normalizedFileGitHistory(state.gitHistory));
   return coalescedDiffRefSuggestions(suggestions);
 }
 

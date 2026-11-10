@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from collections.abc import Callable
 from typing import Any
 
 
@@ -79,7 +80,22 @@ def _redact_secret_header(match: re.Match[str]) -> str:
     return f"{match.group('name')}{match.group('separator')}[redacted-secret]"
 
 
-def redact_diagnostic_value(value: Any, key: str = "", depth: int = 0) -> Any:
+def redact_diagnostic_text(value: str) -> str:
+    """Redact one complete text value before a consumer applies its own bounds."""
+
+    # Diagnostics can outlive the producer that named a credential. Keep upgrade data safe via
+    # a bounded token-suffix grammar instead of retaining producer-specific identifiers here.
+    text = DIAGNOSTIC_TOKEN_QUERY_RE.sub(r"\1[redacted-secret]", value)
+    text = DIAGNOSTIC_AUTHORIZATION_HEADER_RE.sub(_redact_secret_header, text)
+    text = DIAGNOSTIC_MALFORMED_AUTHORIZATION_HEADER_RE.sub(_redact_secret_header, text)
+    text = DIAGNOSTIC_COOKIE_HEADER_RE.sub(_redact_secret_header, text)
+    text = DIAGNOSTIC_MALFORMED_COOKIE_HEADER_RE.sub(_redact_secret_header, text)
+    text = DIAGNOSTIC_SECRET_ASSIGNMENT_RE.sub(_redact_secret_assignment, text)
+    text = DIAGNOSTIC_BEARER_VALUE_RE.sub(r"\1\2[redacted-secret]", text)
+    return text
+
+
+def redact_diagnostic_value(value: Any, key: str = "", depth: int = 0, *, text_limit: int | None = 4000, text_transform: Callable[[str], str] | None = None) -> Any:
     """Remove credentials from bounded diagnostic values before retention."""
 
     if depth > 12:
@@ -90,20 +106,14 @@ def redact_diagnostic_value(value: Any, key: str = "", depth: int = 0) -> Any:
         # Accept any Mapping (e.g. the MappingProxyType returned by
         # families.validate_payload) and always return a plain redacted dict.
         return {
-            str(name)[:120]: redact_diagnostic_value(item, str(name), depth + 1)
+            str(name)[:120]: redact_diagnostic_value(item, str(name), depth + 1, text_limit=text_limit, text_transform=text_transform)
             for name, item in value.items()
         }
-    if isinstance(value, list):
-        return [redact_diagnostic_value(item, key, depth + 1) for item in value[:256]]
+    if isinstance(value, (list, tuple)):
+        return [redact_diagnostic_value(item, key, depth + 1, text_limit=text_limit, text_transform=text_transform) for item in value[:256]]
     if isinstance(value, str):
-        # Diagnostics can outlive the producer that named a credential. Keep upgrade data safe via
-        # a bounded token-suffix grammar instead of retaining producer-specific identifiers here.
-        text = DIAGNOSTIC_TOKEN_QUERY_RE.sub(r"\1[redacted-secret]", value)
-        text = DIAGNOSTIC_AUTHORIZATION_HEADER_RE.sub(_redact_secret_header, text)
-        text = DIAGNOSTIC_MALFORMED_AUTHORIZATION_HEADER_RE.sub(_redact_secret_header, text)
-        text = DIAGNOSTIC_COOKIE_HEADER_RE.sub(_redact_secret_header, text)
-        text = DIAGNOSTIC_MALFORMED_COOKIE_HEADER_RE.sub(_redact_secret_header, text)
-        text = DIAGNOSTIC_SECRET_ASSIGNMENT_RE.sub(_redact_secret_assignment, text)
-        text = DIAGNOSTIC_BEARER_VALUE_RE.sub(r"\1\2[redacted-secret]", text)
-        return text[:4000] + ("[truncated]" if len(text) > 4000 else "")
+        text = redact_diagnostic_text(value)
+        if text_transform is not None:
+            text = text_transform(text)
+        return text if text_limit is None else text[:text_limit] + ("[truncated]" if len(text) > text_limit else "")
     return value

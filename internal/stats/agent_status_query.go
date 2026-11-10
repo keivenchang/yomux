@@ -185,9 +185,18 @@ func (d *Database) QueryAgentStatus(ctx context.Context, query AgentStatusQuery)
 	if window > 24*time.Hour {
 		return AgentStatusSnapshot{}, fmt.Errorf("token rate window exceeds 24 hours")
 	}
-	result := AgentStatusSnapshot{SourceGeneration: d.Header.SourceGeneration, TokenRates: AgentTokenRates{WindowSeconds: window.Seconds()}}
+	database, closeSnapshot, err := d.beginReadSnapshot(ctx)
+	if err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	defer closeSnapshot()
+	d = database
+	generation, err := d.snapshotGeneration(ctx)
+	if err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	result := AgentStatusSnapshot{SourceGeneration: generation, TokenRates: AgentTokenRates{WindowSeconds: window.Seconds()}}
 	nowSeconds := float64(now.UnixNano()) / 1e9
-	var err error
 	result.TokenRates, err = d.agentTokenRates(ctx, nowSeconds-window.Seconds(), nowSeconds, window)
 	if err != nil {
 		return AgentStatusSnapshot{}, err

@@ -326,7 +326,11 @@ func linkNoReplace(directory *os.File, oldName, newName string) error {
 	return platformLinkNoReplace(directory, oldName, newName)
 }
 func renameNoReplace(directory *os.File, oldName, newName string) error {
-	return platformRenameNoReplace(directory, oldName, newName)
+	return renameBetweenNoReplace(directory, oldName, directory, newName)
+}
+
+func renameBetweenNoReplace(source *os.File, oldName string, target *os.File, newName string) error {
+	return platformRenameBetweenNoReplace(source, oldName, target, newName)
 }
 
 func publishRegularNoReplace(directory *os.File, oldName, newName string) error {

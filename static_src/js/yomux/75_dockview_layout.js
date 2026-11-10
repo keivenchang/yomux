@@ -201,17 +201,23 @@ function dockviewCommitPanelActivation(item, options = {}) {
     // input and reschedule current side work without restarting the already-running activation.
     const generation = nextTabSwitchHighlightGeneration();
     rememberFileExplorerExplicitSyncSession(panelItem);
+    setFocusedTerminal(panelItem, {...focusOptions, userInitiated: true, syncFinder: false});
     focusTerminalDom(panelItem);
     dockviewFinishTabActivationPerf(panelItem);
     scheduleTerminalActivationFollowup(panelItem, generation, sharedGesture);
+    scheduleEditorNavContentFocus(panelItem);
     return true;
   }
   if (isTmuxSession(panelItem) && userInitiated) rememberFileExplorerExplicitSyncSession(panelItem);
   if (isTmuxSession(panelItem) && userInitiated && typeof focusTerminalFromUserAction === 'function') {
     const generation = nextTabSwitchHighlightGeneration();
     commitUserTerminalTabActivation(panelItem, focusOptions, generation, sharedGesture);
-  } else setFocusedPanelItem(panelItem, {...options, userInitiated, deferSideSync: userInitiated});
+  } else {
+    setFocusedPanelItem(panelItem, {...options, userInitiated, deferSideSync: userInitiated});
+    if (userInitiated) focusPanel(panelItem, {...options, focusContent: true});
+  }
   dockviewFinishTabActivationPerf(panelItem);
+  if (userInitiated) scheduleEditorNavContentFocus(panelItem);
   return true;
 }
 
@@ -2753,7 +2759,7 @@ function createDockviewPanelRenderer() {
       if (panel._dockviewPreActivationCaptured.timer) window.clearTimeout(panel._dockviewPreActivationCaptured.timer);
       delete panel._dockviewPreActivationCaptured;
     }
-    element.replaceChildren(panel);
+    if (panel.parentNode !== element || element.childNodes.length !== 1) element.replaceChildren(panel);
     if (dockviewLayoutState.applyingFromLayout) return;
     // A native switch mounts before its activation callback adopts the layout. That
     // adoption owns slot updates and startup, just as app-driven switches do.
@@ -2898,6 +2904,15 @@ function handleDockviewHeaderActionClick(event, fallbackItem = '') {
   }
 }
 
+function disposeDockviewRendererResources(disposables, beforeDispose = null) {
+  const cleanup = createLifecycleScope();
+  disposables.splice(0).reverse().forEach((disposable, index) => {
+    cleanup.replace(index, disposable, value => value?.dispose?.());
+  });
+  cleanup.replace('before', beforeDispose, dispose => dispose());
+  cleanup.dispose('dockview-renderer-disposed');
+}
+
 function createDockviewHeaderActionsRenderer() {
   const element = document.createElement('div');
   element.className = 'dockview-pane-header-actions';
@@ -2923,8 +2938,7 @@ function createDockviewHeaderActionsRenderer() {
     }
   };
   const dispose = () => {
-    for (const disposable of disposables) disposable?.dispose?.();
-    disposables = [];
+    disposeDockviewRendererResources(disposables);
   };
   element.addEventListener('click', event => {
     if (event.target.closest?.('.tabber-advanced-control')) { event.stopPropagation(); return; }
@@ -3002,14 +3016,13 @@ function createDockviewTabRenderer() {
     } else bindTabInteraction({anchor: element, item, sourceSlot: () => slotForItem(item)});
   };
   const dispose = () => {
-    cleanupDetachedPaneTabPopover(element);
-    for (const disposable of disposables) disposable?.dispose?.();
-    disposables = [];
+    disposeDockviewRendererResources(disposables, () => cleanupDetachedPaneTabPopover(element));
   };
   const commitExplicitTabInteraction = (options = {}) => {
     dockviewCommitPanelActivation(item, {userInitiated: true, ...options});
   };
   element.__yomuxDockviewRefresh = render;
+  bindPaneTabDismissInteraction(element);
   element.addEventListener('pointerdown', event => {
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) event.stopPropagation();
     else {
@@ -3025,6 +3038,8 @@ function createDockviewTabRenderer() {
       captureDockviewPreviousPaneBeforeTabActivation(element, item);
     }
     dockviewBeginTabPointerDrag(event, item);
+    // Pointer activation owns content focus; native tab focus would blur it afterward.
+    event.preventDefault();
   });
   element.addEventListener('click', async event => {
     const close = event.target.closest('[data-pane-tab-close]');

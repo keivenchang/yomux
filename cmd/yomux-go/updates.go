@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,10 @@ import (
 )
 
 type updateSnapshot struct {
+	BuildState string `json:"build_state"`
+	BuildError string `json:"build_error,omitempty"`
+	prepared   *preparedSelfUpdate
+
 	Available bool      `json:"available"`
 	Current   string    `json:"current_version"`
 	Target    string    `json:"target_version,omitempty"`
@@ -41,6 +46,8 @@ type updateChecker struct {
 	current  string
 	branch   string
 	readPref func() string
+	prepare  func(context.Context, selfUpdateJob) (*preparedSelfUpdate, error)
+	publish  func(updateSnapshot)
 	snapshot updateSnapshot
 	running  bool
 	wait     chan struct{}
@@ -68,13 +75,44 @@ func (c *updateChecker) Check(ctx context.Context) updateSnapshot {
 			return c.Snapshot()
 		}
 	}
+	previous := c.snapshot
 	c.running = true
 	c.wait = make(chan struct{})
 	wait := c.wait
 	c.mu.Unlock()
-	result := c.check(ctx)
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, time.Minute)
+	result := c.check(fetchCtx)
+	fetchCancel()
+	if result.Available && c.prepare != nil {
+		result.BuildState = "checking"
+		c.mu.Lock()
+		c.snapshot = result
+		c.mu.Unlock()
+		if c.publish != nil {
+			c.publish(result)
+		}
+		buildCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+		job := selfUpdateJob{ID: fmt.Sprintf("preflight-%d-%d", os.Getpid(), time.Now().UnixNano()), Target: result.Target, TargetSHA: result.TargetSHA}
+		prepared := previous.prepared
+		var err error
+		if prepared == nil || prepared.target != result.TargetSHA || validatePreparedUpdate(buildCtx, prepared) != nil {
+			prepared, err = c.prepare(buildCtx, job)
+		}
+		cancel()
+		result.BuildState = "ready"
+		if err != nil {
+			result.BuildState, result.BuildError = "failed", err.Error()
+		} else {
+			result.prepared = prepared
+		}
+	}
 	c.mu.Lock()
 	c.snapshot = result
+	c.mu.Unlock()
+	if c.publish != nil {
+		c.publish(result)
+	}
+	c.mu.Lock()
 	c.running = false
 	close(wait)
 	c.mu.Unlock()
@@ -154,13 +192,7 @@ func (s *server) updateNotifyPreference() string {
 }
 
 func (s *server) runUpdateChecker(ctx context.Context) {
-	check := func() {
-		result := s.updates.Check(ctx)
-		if result.Error == "" {
-			payload := map[string]any{"available": result.Available, "current": result.Current, "current_version": result.Current, "target": result.Target, "target_version": result.Target, "target_sha": result.TargetSHA, "branch": result.Branch, "version_change_level": result.Level, "last_checked_at": result.CheckedAt, "instance_id": s.instanceID, "bundle_revision": "go:" + version}
-			_, _ = s.events.publish("update_available", payload)
-		}
-	}
+	check := func() { s.updates.Check(ctx) }
 	check()
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
@@ -174,24 +206,38 @@ func (s *server) runUpdateChecker(ctx context.Context) {
 	}
 }
 
+func updateStatusPayload(result updateSnapshot) map[string]any {
+	return map[string]any{
+		"available": result.Available, "notify": result.Available, "current": result.Current, "current_version": result.Current,
+		"target": result.Target, "target_version": result.Target, "target_sha": result.TargetSHA, "branch": result.Branch,
+		"version_change_level": result.Level, "last_checked_at": result.CheckedAt, "error": result.Error,
+		"build_state": result.BuildState, "build_error": result.BuildError,
+	}
+}
+
+func (s *server) publishUpdateStatus(result updateSnapshot) {
+	payload := updateStatusPayload(result)
+	payload["instance_id"], payload["bundle_revision"] = s.instanceID, "go:"+version
+	if _, err := s.events.publish("update_available", payload); err != nil {
+		fmt.Fprintf(os.Stderr, "publish update readiness: %v\n", err)
+	}
+}
+
 func (s *server) updateStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	result := s.updates.Snapshot()
-	if result.CheckedAt.IsZero() || time.Since(result.CheckedAt) > time.Hour {
-		go s.updates.Check(context.Background())
+	if s.producerContext != nil && (result.CheckedAt.IsZero() || time.Since(result.CheckedAt) > time.Hour) {
+		s.startBackgroundWork(func() { s.updates.Check(s.producerContext) })
 	}
-	payload := map[string]any{
-		"available": result.Available, "notify": result.Available, "current": result.Current, "current_version": result.Current,
-		"target": result.Target, "target_version": result.Target, "target_sha": result.TargetSHA, "branch": result.Branch,
-		"version_change_level": result.Level, "last_checked_at": result.CheckedAt, "error": result.Error,
-	}
-	jsonResponse(w, http.StatusOK, payload)
+	jsonResponse(w, http.StatusOK, updateStatusPayload(result))
 }
 
 type selfUpdateJob struct {
+	prepared *preparedSelfUpdate
+
 	ID          string    `json:"id"`
 	State       string    `json:"state"`
 	Progress    string    `json:"progress"`
@@ -290,6 +336,15 @@ func (s *server) selfUpdateStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) recoverSelfUpdateJob() {
 	job := s.loadUpdateJob()
+	if job.State == "preparing" || job.State == "activating" {
+		if _, err := mutateSelfUpdateJob(s.updateJobPath, job.ID, []string{"preparing", "activating"}, func(current *selfUpdateJob) {
+			current.State, current.Progress = "failed", "Previous update was interrupted before restart"
+			current.Error = "The previous update was interrupted. Check the new build result before retrying."
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "recover interrupted update: %v\n", err)
+		}
+		return
+	}
 	if job.State != "restarting" {
 		return
 	}
@@ -325,18 +380,28 @@ func (s *server) selfUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Query().Get("dryrun") == "1" {
-		update := s.updates.Snapshot()
-		jsonResponse(w, http.StatusOK, map[string]any{
-			"ok":           true,
-			"dry_run":      true,
-			"restarting":   false,
-			"target":       update.Target,
-			"version":      update.Target,
-			"user_message": map[string]any{"key": "update.dryRunComplete", "params": map[string]any{}, "fallback": "Dry run complete. No update was installed."},
-		})
+		// A dry run performs the same preparation as the automatic eligibility check.
+		update := s.updates.Check(r.Context())
+		status := http.StatusOK
+		if update.BuildState != "ready" {
+			status = http.StatusConflict
+		}
+		jsonResponse(w, status, map[string]any{"ok": status == http.StatusOK, "dry_run": true, "restarting": false, "target": update.Target, "build_state": update.BuildState, "error": update.BuildError, "user_message": map[string]any{"fallback": func() string {
+			if status == http.StatusOK {
+				return "Build verified. No update was installed."
+			}
+			if update.BuildError != "" {
+				return update.BuildError
+			}
+			return "No verified update build is ready."
+		}()}})
 		return
 	}
-	s.updateJobMu.Lock()
+
+	if !s.updateJobMu.TryLock() {
+		jsonResponse(w, http.StatusConflict, map[string]any{"ok": false, "error": "The update build is still being verified. Wait for the update notice."})
+		return
+	}
 	job := s.loadUpdateJob()
 	if job.State == "preparing" || job.State == "activating" || job.State == "restarting" {
 		s.updateJobMu.Unlock()
@@ -349,7 +414,27 @@ func (s *server) selfUpdate(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusConflict, map[string]any{"ok": false, "error": "No eligible update is currently available."})
 		return
 	}
-	job = selfUpdateJob{ID: fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()), State: "preparing", Progress: "Preparing the pinned update", Target: update.Target, TargetSHA: update.TargetSHA, StartedAt: time.Now().UTC()}
+	if update.BuildState != "ready" || update.prepared == nil {
+		s.updateJobMu.Unlock()
+		jsonResponse(w, http.StatusConflict, map[string]any{"ok": false, "error": "The update build is not ready. " + update.BuildError, "build_state": update.BuildState})
+		return
+	}
+	var request struct {
+		TargetSHA string `json:"target_sha"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&request); err != nil {
+			s.updateJobMu.Unlock()
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "Invalid update request"})
+			return
+		}
+	}
+	if request.TargetSHA != "" && request.TargetSHA != update.TargetSHA {
+		s.updateJobMu.Unlock()
+		jsonResponse(w, http.StatusConflict, map[string]any{"ok": false, "error": "The available version changed. Review the new update notice before upgrading."})
+		return
+	}
+	job = selfUpdateJob{ID: fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()), prepared: update.prepared, State: "preparing", Progress: "Activating the verified update build", Target: update.Target, TargetSHA: update.TargetSHA, StartedAt: time.Now().UTC()}
 	if err := s.saveUpdateJob(job); err != nil {
 		s.updateJobMu.Unlock()
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -358,6 +443,254 @@ func (s *server) selfUpdate(w http.ResponseWriter, r *http.Request) {
 	s.updateJobMu.Unlock()
 	go s.runSelfUpdate(job)
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "restarting": true, "version": job.Target, "target": job.Target, "instance_id": s.instanceID, "job": job})
+}
+
+type preparedSelfUpdate struct {
+	runtimeRoot, root, head, stage, binary, target string
+	installation                                   *nativeInstallSource
+	hashes                                         map[string][32]byte
+}
+
+func (s *server) prepareSelfUpdate(ctx context.Context, job selfUpdateJob) (result *preparedSelfUpdate, resultErr error) {
+	s.updateJobMu.Lock()
+	defer s.updateJobMu.Unlock()
+	active := s.loadUpdateJob()
+	if active.ID != job.ID && (active.State == "preparing" || active.State == "activating" || active.State == "restarting") {
+		return nil, errors.New("an update is already being installed")
+	}
+	command := func(dir string, args ...string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(string(output)))
+		}
+		return output, nil
+	}
+	runtimeRoot, err := filepath.EvalSymlinks(s.root)
+	if err != nil {
+		return nil, err
+	}
+	runtimeRoot, err = filepath.Abs(runtimeRoot)
+	if err != nil {
+		return nil, err
+	}
+	if runtimeRoot != s.root {
+		return nil, errors.New("checkout identity changed")
+	}
+	root, installation, err := nativeUpdateSource(runtimeRoot)
+	if err != nil {
+		return nil, err
+	}
+	headBytes, err := command(root, "rev-parse", "HEAD")
+	if err != nil {
+		return nil, err
+	}
+	head := strings.TrimSpace(string(headBytes))
+	status, err := command(root, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := command(root, "rev-parse", job.TargetSHA)
+	if err != nil || strings.TrimSpace(string(resolved)) != job.TargetSHA {
+		return nil, errors.New("pinned target commit changed or is unavailable")
+	}
+	ancestorErr := exec.CommandContext(ctx, "git", "-C", root, "merge-base", "--is-ancestor", head, job.TargetSHA).Run()
+	notAncestor := false
+	if ancestorErr != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(ancestorErr, &exitErr) || exitErr.ExitCode() != 1 {
+			return nil, fmt.Errorf("could not verify update ancestry: %w", ancestorErr)
+		}
+		notAncestor = true
+	}
+	hasLocalChanges := strings.TrimSpace(string(status)) != ""
+	if notAncestor {
+		if hasLocalChanges {
+			return nil, fmt.Errorf("Auto-update can't use this checkout because it has local work. Save that work, then run this instance from a clean %s checkout.", job.Target)
+		} else {
+			return nil, fmt.Errorf("Auto-update can't use this branch because it has a local commit. Run this instance from a clean %s checkout to update.", job.Target)
+		}
+	}
+	if hasLocalChanges {
+		return nil, errors.New("Auto-update needs a clean checkout. Commit or stash the local edits, then retry.")
+	}
+	stage := filepath.Join(s.config, "self-update", job.TargetSHA, job.ID)
+	if strings.HasPrefix(job.ID, "preflight-") {
+		// One owned workspace keeps Bazel's output-base identity bounded across retries and targets.
+		stage = filepath.Join(s.config, "self-update", "preflight")
+		marker := stage + ".owner"
+		if _, err := os.Lstat(stage); err == nil {
+			owner, readErr := os.ReadFile(marker)
+			info, statErr := os.Lstat(stage)
+			if readErr != nil || string(owner) != "yomux-update-preflight-v1\n" || statErr != nil || !info.IsDir() {
+				return nil, errors.New("update preflight workspace has no valid ownership record")
+			}
+			if err := os.RemoveAll(stage); err != nil {
+				return nil, err
+			}
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+		if err := os.MkdirAll(filepath.Dir(stage), 0o700); err != nil {
+			return nil, err
+		}
+		if err := writeAtomicFile(marker, []byte("yomux-update-preflight-v1\n")); err != nil {
+			return nil, err
+		}
+	}
+	stage, err = filepath.Abs(stage)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		return nil, err
+	}
+	// Retire only the candidate workspace's Bazel server; never another checkout's server.
+	defer func() {
+		if _, err := os.Stat(filepath.Join(stage, "MODULE.bazel")); err == nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(shutdownCtx, "bazel", "--bazelrc=/dev/null", "shutdown")
+			cmd.Dir, cmd.WaitDelay = stage, 5*time.Second
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				result, resultErr = nil, errors.Join(resultErr, fmt.Errorf("retire update build worker: %w: %s", err, strings.TrimSpace(string(output))))
+			}
+		}
+	}()
+	archive := exec.CommandContext(ctx, "git", "-C", root, "archive", "--format=tar", job.TargetSHA)
+	tar := exec.CommandContext(ctx, "tar", "-xf", "-", "-C", stage)
+	pipe, err := archive.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	tar.Stdin = pipe
+	var archiveErr strings.Builder
+	archive.Stderr = &archiveErr
+	if err := tar.Start(); err != nil {
+		return nil, err
+	}
+	if err := archive.Start(); err != nil {
+		_ = tar.Process.Kill()
+		_ = tar.Wait()
+		return nil, err
+	}
+	archiveWait := archive.Wait()
+	tarWait := tar.Wait()
+	if archiveWait != nil || tarWait != nil {
+		return nil, fmt.Errorf("stage archive failed: %s %v %v", archiveErr.String(), archiveWait, tarWait)
+	}
+	for _, args := range [][]string{{"tools/build_go.sh"}, {"bazel-bin/tools/staticgen/staticgen_/staticgen", "--source-root", stage, "--output-directory", filepath.Join(stage, "static")}} {
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+		cmd.Dir = stage
+		cmd.Env = os.Environ()
+		cmd.WaitDelay = 5 * time.Second
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
+		logPath := filepath.Join(stage, "build.log")
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		cmd.Stdout, cmd.Stderr = logFile, logFile
+		runErr := cmd.Run()
+		if ctx.Err() != nil && cmd.Process != nil {
+			// WaitDelay bounds TERM; retire build children that outlived their parent.
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				runErr = errors.Join(runErr, err)
+			}
+		}
+		closeErr := logFile.Close()
+		if runErr != nil {
+			logReader, readErr := os.Open(logPath)
+			if readErr != nil {
+				return nil, errors.Join(runErr, readErr)
+			}
+			info, statErr := logReader.Stat()
+			if statErr != nil {
+				logReader.Close()
+				return nil, errors.Join(runErr, statErr)
+			}
+			if info.Size() > 4096 {
+				_, readErr = logReader.Seek(-4096, io.SeekEnd)
+			}
+			logData, tailErr := io.ReadAll(io.LimitReader(logReader, 4096))
+			closeErr := logReader.Close()
+			if err := errors.Join(readErr, tailErr, closeErr); err != nil {
+				return nil, errors.Join(runErr, err)
+			}
+			return nil, fmt.Errorf("%s failed: %w: %s (full log: %s)", args[0], runErr, strings.TrimSpace(string(logData)), logPath)
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+
+	}
+	binary := filepath.Join(stage, "bazel-bin", "cmd", "yomux-go", "yomux-go_", "yomux-go")
+	if info, err := os.Stat(binary); err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("prepared Go executable is missing")
+	}
+	versionCheck := exec.CommandContext(ctx, binary, "--version")
+	versionOutput, versionErr := versionCheck.Output()
+	if versionErr != nil || strings.TrimSpace(string(versionOutput)) != "yomux-go "+job.Target {
+		return nil, fmt.Errorf("prepared Go executable reported the wrong version: %s", strings.TrimSpace(string(versionOutput)))
+	}
+	operatorCheck := exec.CommandContext(ctx, binary, "--operator", "version", "--root", stage)
+	operatorOutput, operatorErr := operatorCheck.CombinedOutput()
+	if operatorErr != nil || strings.TrimSpace(string(operatorOutput)) != job.Target {
+		return nil, fmt.Errorf("prepared checkout lacks compatible native launch support: %s", strings.TrimSpace(string(operatorOutput)))
+	}
+	if installation != nil {
+		options := exec.CommandContext(ctx, "bash", filepath.Join(stage, "tools", "install.sh"), "--help")
+		output, err := options.CombinedOutput()
+		if err != nil || !strings.Contains(string(output), "--source-root") {
+			return nil, fmt.Errorf("prepared installer lacks installed-update provenance support: %s", strings.TrimSpace(string(output)))
+		}
+	}
+	preparedBinary := filepath.Join(stage, "yomux-go")
+	if err := copyAtomic(binary, preparedBinary, 0o700); err != nil {
+		return nil, err
+	}
+	for _, asset := range []string{"yomux.js", "yomux.css"} {
+		if info, err := os.Stat(filepath.Join(stage, "static", asset)); err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			return nil, fmt.Errorf("prepared browser asset %s is missing", asset)
+		}
+	}
+	prepared := &preparedSelfUpdate{runtimeRoot: runtimeRoot, root: root, head: head, installation: installation, stage: stage, binary: preparedBinary, target: job.TargetSHA, hashes: make(map[string][32]byte)}
+	for _, path := range []string{preparedBinary, filepath.Join(stage, "static", "yomux.js"), filepath.Join(stage, "static", "yomux.css")} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		prepared.hashes[path] = sha256.Sum256(data)
+	}
+	if err := validatePreparedUpdate(ctx, prepared); err != nil {
+		return nil, err
+	}
+	return prepared, nil
+}
+
+func validatePreparedUpdate(ctx context.Context, prepared *preparedSelfUpdate) error {
+	currentHead, err := exec.CommandContext(ctx, "git", "-C", prepared.root, "rev-parse", "HEAD").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(currentHead)) != prepared.head {
+		return errors.New("checkout changed during update preparation")
+	}
+	status, err := exec.CommandContext(ctx, "git", "-C", prepared.root, "status", "--porcelain", "--untracked-files=all").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(status)) != "" {
+		return errors.New("checkout changed during update preparation")
+	}
+	currentSource, currentInstallation, err := nativeUpdateSource(prepared.runtimeRoot)
+	if err != nil || currentSource != prepared.root || (prepared.installation == nil) != (currentInstallation == nil) ||
+		(prepared.installation != nil && *prepared.installation != *currentInstallation) {
+		return errors.New("installation provenance changed during update preparation")
+	}
+	for path, expected := range prepared.hashes {
+		data, err := os.ReadFile(path)
+		if err != nil || sha256.Sum256(data) != expected {
+			return errors.New("prepared update artifacts changed; check for updates again")
+		}
+	}
+	return nil
 }
 
 func (s *server) runSelfUpdate(job selfUpdateJob) {
@@ -369,6 +702,23 @@ func (s *server) runSelfUpdate(job selfUpdateJob) {
 		_ = s.saveUpdateJob(job)
 	}
 	fail := func(err error) { set("failed", "Update stopped; the current server remains available", err) }
+	prepared := job.prepared
+	if prepared == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		var err error
+		prepared, err = s.prepareSelfUpdate(ctx, job)
+		if err != nil {
+			fail(err)
+			return
+		}
+	}
+	if prepared.target != job.TargetSHA {
+		fail(errors.New("prepared update target changed"))
+		return
+	}
+
+	runtimeRoot, root, installation, stage, preparedBinary := prepared.runtimeRoot, prepared.root, prepared.installation, prepared.stage, prepared.binary
 	command := func(dir string, args ...string) ([]byte, error) {
 		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 		output, err := cmd.CombinedOutput()
@@ -377,160 +727,9 @@ func (s *server) runSelfUpdate(job selfUpdateJob) {
 		}
 		return output, nil
 	}
-	runtimeRoot, err := filepath.EvalSymlinks(s.root)
-	if err != nil {
-		fail(err)
-		return
-	}
-	runtimeRoot, err = filepath.Abs(runtimeRoot)
-	if err != nil {
-		fail(err)
-		return
-	}
-	if runtimeRoot != s.root {
-		fail(errors.New("checkout identity changed"))
-		return
-	}
-	root, installation, err := nativeUpdateSource(runtimeRoot)
-	if err != nil {
-		fail(err)
-		return
-	}
-	headBytes, err := command(root, "rev-parse", "HEAD")
-	if err != nil {
-		fail(err)
-		return
-	}
-	head := strings.TrimSpace(string(headBytes))
-	status, err := command(root, "status", "--porcelain", "--untracked-files=all")
-	if err != nil {
-		fail(err)
-		return
-	}
-	resolved, err := command(root, "rev-parse", job.TargetSHA)
-	if err != nil || strings.TrimSpace(string(resolved)) != job.TargetSHA {
-		fail(errors.New("pinned target commit changed or is unavailable"))
-		return
-	}
-	ancestorErr := exec.Command("git", "-C", root, "merge-base", "--is-ancestor", head, job.TargetSHA).Run()
-	notAncestor := false
-	if ancestorErr != nil {
-		var exitErr *exec.ExitError
-		if !errors.As(ancestorErr, &exitErr) || exitErr.ExitCode() != 1 {
-			fail(fmt.Errorf("could not verify update ancestry: %w", ancestorErr))
-			return
-		}
-		notAncestor = true
-	}
-	hasLocalChanges := strings.TrimSpace(string(status)) != ""
-	if notAncestor {
-		if hasLocalChanges {
-			fail(fmt.Errorf("Auto-update can't use this checkout because it has local work. Save that work, then run this instance from a clean %s checkout.", job.Target))
-		} else {
-			fail(fmt.Errorf("Auto-update can't use this branch because it has a local commit. Run this instance from a clean %s checkout to update.", job.Target))
-		}
-		return
-	}
-	if hasLocalChanges {
-		fail(errors.New("Auto-update needs a clean checkout. Commit or stash the local edits, then retry."))
-		return
-	}
-	stage := filepath.Join(s.config, "self-update", job.TargetSHA, job.ID)
-	stage, err = filepath.Abs(stage)
-	if err != nil {
-		fail(err)
-		return
-	}
-	if err := os.MkdirAll(stage, 0o700); err != nil {
-		fail(err)
-		return
-	}
-	set("preparing", "Building the pinned Go binary and browser bundle", nil)
-	archive := exec.Command("git", "-C", root, "archive", "--format=tar", job.TargetSHA)
-	tar := exec.Command("tar", "-xf", "-", "-C", stage)
-	pipe, err := archive.StdoutPipe()
-	if err != nil {
-		fail(err)
-		return
-	}
-	tar.Stdin = pipe
-	var archiveErr strings.Builder
-	archive.Stderr = &archiveErr
-	if err := tar.Start(); err != nil {
-		fail(err)
-		return
-	}
-	if err := archive.Start(); err != nil {
-		_ = tar.Process.Kill()
-		fail(err)
-		return
-	}
-	archiveWait := archive.Wait()
-	tarWait := tar.Wait()
-	if archiveWait != nil || tarWait != nil {
-		fail(fmt.Errorf("stage archive failed: %s %v %v", archiveErr.String(), archiveWait, tarWait))
-		return
-	}
-	for _, args := range [][]string{{"tools/build_go.sh"}, {"bazel-bin/tools/staticgen/staticgen_/staticgen", "--source-root", stage, "--output-directory", filepath.Join(stage, "static")}} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = stage
-		cmd.Env = os.Environ()
-		if output, runErr := cmd.CombinedOutput(); runErr != nil {
-			fail(fmt.Errorf("%s failed: %w: %s", args[0], runErr, strings.TrimSpace(string(output))))
-			return
-		}
-	}
-	binary := filepath.Join(stage, "bazel-bin", "cmd", "yomux-go", "yomux-go_", "yomux-go")
-	if info, err := os.Stat(binary); err != nil || !info.Mode().IsRegular() {
-		fail(errors.New("prepared Go executable is missing"))
-		return
-	}
-	versionCheck := exec.Command(binary, "--version")
-	versionOutput, versionErr := versionCheck.Output()
-	if versionErr != nil || strings.TrimSpace(string(versionOutput)) != "yomux-go "+job.Target {
-		fail(fmt.Errorf("prepared Go executable reported the wrong version: %s", strings.TrimSpace(string(versionOutput))))
-		return
-	}
-	operatorCheck := exec.Command(binary, "--operator", "version", "--root", stage)
-	operatorOutput, operatorErr := operatorCheck.CombinedOutput()
-	if operatorErr != nil || strings.TrimSpace(string(operatorOutput)) != job.Target {
-		fail(fmt.Errorf("prepared checkout lacks compatible native launch support: %s", strings.TrimSpace(string(operatorOutput))))
-		return
-	}
-	if installation != nil {
-		options := exec.Command("bash", filepath.Join(stage, "tools", "install.sh"), "--help")
-		output, err := options.CombinedOutput()
-		if err != nil || !strings.Contains(string(output), "--source-root") {
-			fail(fmt.Errorf("prepared installer lacks installed-update provenance support: %s", strings.TrimSpace(string(output))))
-			return
-		}
-	}
-	preparedBinary := filepath.Join(stage, "yomux-go")
-	if err := copyAtomic(binary, preparedBinary, 0o700); err != nil {
-		fail(err)
-		return
-	}
-	for _, asset := range []string{"yomux.js", "yomux.css"} {
-		if info, err := os.Stat(filepath.Join(stage, "static", asset)); err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
-			fail(fmt.Errorf("prepared browser asset %s is missing", asset))
-			return
-		}
-	}
 	set("activating", "Validating checkout and activating the pinned fast-forward", nil)
-	currentHead, err := command(root, "rev-parse", "HEAD")
-	if err != nil || strings.TrimSpace(string(currentHead)) != head {
-		fail(errors.New("checkout changed during update preparation"))
-		return
-	}
-	status, err = command(root, "status", "--porcelain", "--untracked-files=all")
-	if err != nil || strings.TrimSpace(string(status)) != "" {
-		fail(errors.New("checkout changed during update preparation"))
-		return
-	}
-	currentSource, currentInstallation, err := nativeUpdateSource(runtimeRoot)
-	if err != nil || currentSource != root || (installation == nil) != (currentInstallation == nil) ||
-		(installation != nil && *installation != *currentInstallation) {
-		fail(errors.New("installation provenance changed during update preparation"))
+	if err := validatePreparedUpdate(context.Background(), prepared); err != nil {
+		fail(err)
 		return
 	}
 	if _, err := command(root, "merge", "--ff-only", job.TargetSHA); err != nil {
@@ -572,6 +771,7 @@ func (s *server) runSelfUpdate(job selfUpdateJob) {
 		return
 	}
 	if err := launchManagedSelfUpdateSupervisor(s, job, preparedBinary, supervisorSpecPath, launcherLog); err != nil {
+		fail(err)
 		return
 	}
 }

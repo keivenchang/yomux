@@ -28,7 +28,6 @@ import (
 const gitViewTimeout = 30 * time.Second
 
 var gitRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$`)
-var blameSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var blamePR = regexp.MustCompile(`\(#([0-9]+)\)`)
 
 func gitCommandEnvironment() []string {
@@ -39,7 +38,7 @@ func gitCommandEnvironment() []string {
 		}
 		environment = append(environment, entry)
 	}
-	return append(environment,
+	environment = append(environment,
 		"GIT_OPTIONAL_LOCKS=0",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_CONFIG_NOSYSTEM=1",
@@ -53,6 +52,36 @@ func gitCommandEnvironment() []string {
 		"LC_ALL=C",
 		"LANG=C",
 	)
+	if path, ok := bundledGitExecPath(); ok {
+		environment = append(environment, "GIT_EXEC_PATH="+path)
+	}
+	return environment
+}
+
+func bundledGitExecPath() (string, bool) {
+	bundle := strings.TrimSpace(os.Getenv("YOMUX_NATIVE_BUNDLE"))
+	configured := strings.TrimSpace(os.Getenv("GIT_EXEC_PATH"))
+	if bundle == "" || configured == "" {
+		return "", false
+	}
+	bundleRoot, err := filepath.Abs(bundle)
+	if err != nil {
+		return "", false
+	}
+	expected := filepath.Join(bundleRoot, "compiler", "libexec", "git-core")
+	configuredPath, err := filepath.Abs(configured)
+	if err != nil || filepath.Clean(configuredPath) != expected {
+		return "", false
+	}
+	info, err := os.Stat(expected)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	helper, err := os.Stat(filepath.Join(expected, "git-upload-pack"))
+	if err != nil || !helper.Mode().IsRegular() || helper.Mode().Perm()&0o111 == 0 {
+		return "", false
+	}
+	return expected, true
 }
 
 type gitView struct {
@@ -173,7 +202,6 @@ type gitNamespace struct {
 	gitDirPath       string
 	commonPath       string
 	objectsPath      string
-	alternates       string
 	alternateID      descriptorIdentity
 	alternateSet     bool
 	layoutCache      *gitObjectLayoutCache
@@ -261,27 +289,55 @@ func (namespace *gitNamespace) validateContext(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	info, err := os.Lstat(namespace.alternates)
-	if errors.Is(err, os.ErrNotExist) {
+	info, err := readGitAlternates(ctx, namespace.objects)
+	if err == nil && info == nil {
 		if namespace.alternateSet {
 			return errGitNamespaceChanged
 		}
 		return nil
 	}
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+	if err != nil {
 		return errGitNamespaceChanged
 	}
 	if !namespace.alternateSet || !sameDescriptorIdentity(namespace.alternateID, identityFor(info)) {
 		return errGitNamespaceChanged
 	}
-	data, err := os.ReadFile(namespace.alternates)
-	if err != nil {
-		return errGitNamespaceChanged
-	}
-	if len(bytes.TrimSpace(data)) != 0 {
-		return errGitNamespaceChanged
-	}
 	return nil
+}
+
+func readGitAlternates(ctx context.Context, objects *os.File) (os.FileInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	directory, err := openAt(objects, "info", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, errGitNamespaceChanged
+	}
+	defer directory.Close()
+	file, err := openAt(directory, "alternates", syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, errGitNamespaceChanged
+	}
+	defer file.Close()
+	before, err := file.Stat()
+	if err != nil || !before.Mode().IsRegular() || before.Size() > 4096 {
+		return nil, errGitNamespaceChanged
+	}
+	data, err := readDescriptorContext(ctx, file, 4096)
+	if err != nil {
+		return nil, err
+	}
+	after, err := file.Stat()
+	if err != nil || identityFor(before) != identityFor(after) || len(data) > 4096 || len(bytes.TrimSpace(data)) != 0 {
+		return nil, errGitNamespaceChanged
+	}
+	return before, nil
 }
 
 func (s *Service) openGitView(ctx context.Context, raw string) (*gitView, *Error) {
@@ -482,8 +538,7 @@ func (s *Service) openGitNamespaceGenericContext(ctx context.Context, directory 
 		}
 		return nil, gitNamespaceChanged(requested)
 	}
-	alternates := filepath.Join(objects, "info", "alternates")
-	namespace := &gitNamespace{gitDirPath: gitDir, commonPath: commonDir, objectsPath: objects, alternates: alternates, layoutCache: &s.gitObjectLayouts}
+	namespace := &gitNamespace{gitDirPath: gitDir, commonPath: commonDir, objectsPath: objects, layoutCache: &s.gitObjectLayouts}
 	for _, item := range []struct {
 		path      string
 		directory **os.File
@@ -510,25 +565,15 @@ func (s *Service) openGitNamespaceGenericContext(ctx context.Context, directory 
 		}
 		*item.directory = opened
 	}
-	if info, statErr := os.Lstat(alternates); statErr == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			namespace.close()
-			return nil, forbidden(requested, "fs.error.outsideRoots", "Git alternate object store is not trusted")
-		}
-		data, readErr := os.ReadFile(alternates)
-		if readErr != nil {
-			namespace.close()
-			return nil, filesystemError(requested, readErr)
-		}
-		if strings.TrimSpace(string(data)) != "" {
-			namespace.close()
-			return nil, forbidden(requested, "fs.error.outsideRoots", "Git alternate object stores are not supported")
-		}
+	if info, statErr := readGitAlternates(ctx, namespace.objects); statErr == nil && info != nil {
 		namespace.alternateSet = true
 		namespace.alternateID = identityFor(info)
-	} else if !errors.Is(statErr, os.ErrNotExist) {
+	} else if statErr != nil {
 		namespace.close()
-		return nil, filesystemError(requested, statErr)
+		if ctx.Err() != nil {
+			return nil, cancelled(requested)
+		}
+		return nil, forbidden(requested, "fs.error.outsideRoots", "Git alternate object stores are not supported")
 	}
 	return namespace, nil
 }
@@ -936,6 +981,9 @@ func unifiedDiffRange(from, to int) string {
 	if length == 1 {
 		return strconv.Itoa(start)
 	}
+	if length == 0 {
+		start--
+	}
 	return fmt.Sprintf("%d,%d", start, length)
 }
 
@@ -1162,7 +1210,7 @@ func parseBlamePorcelain(text string) map[string]map[string]any {
 			if info == nil {
 				info = map[string]any{}
 			}
-			uncommitted := currentSHA == strings.Repeat("0", 40)
+			uncommitted := currentSHA == strings.Repeat("0", len(currentSHA))
 			summary, _ := info["summary"].(string)
 			author, _ := info["author"].(string)
 			line := map[string]any{"sha": currentSHA, "author": author, "time": info["author_time"], "summary": summary, "pr": nil}
@@ -1176,12 +1224,15 @@ func parseBlamePorcelain(text string) map[string]map[string]any {
 			continue
 		}
 		fields := strings.SplitN(raw, " ", 4)
-		if len(fields) >= 3 && blameSHA.MatchString(fields[0]) {
+		if len(fields) >= 3 && gitObjectIDPattern.MatchString(fields[0]) {
 			currentSHA = fields[0]
 			finalLine, _ = strconv.Atoi(fields[2])
 			if metadata[currentSHA] == nil {
 				metadata[currentSHA] = map[string]any{}
 			}
+			continue
+		}
+		if metadata[currentSHA] == nil {
 			continue
 		}
 		if strings.HasPrefix(raw, "author ") {

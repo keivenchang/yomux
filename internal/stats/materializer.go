@@ -1013,7 +1013,7 @@ func addUsage(b *MaterializedBucket, a UsageAtom, price PriceResolver) (bool, er
 				b.costModels[key] = modelDetail
 			}
 			modelDetail.TotalTokens += int64(q)
-			addAttributionDimension(modelDetail, usageCostDimension(a), int64(q), 0, 0)
+			addCostDimension(&modelDetail.Dimensions, usageCostDimension(a), int64(q), 0, 0)
 		}
 		if agent != "" {
 			if b.costAgents == nil {
@@ -1026,7 +1026,7 @@ func addUsage(b *MaterializedBucket, a UsageAtom, price PriceResolver) (bool, er
 				b.costAgents[key] = agentDetail
 			}
 			agentDetail.TotalTokens += int64(q)
-			addAttributionDimension(agentDetail, usageCostDimension(a), int64(q), 0, 0)
+			addCostDimension(&agentDetail.Dimensions, usageCostDimension(a), int64(q), 0, 0)
 		}
 		if agent != "" && model != "" {
 			// Keep model-token series on the same canonical dimensions used by
@@ -1080,7 +1080,7 @@ func addUsage(b *MaterializedBucket, a UsageAtom, price PriceResolver) (bool, er
 				detail.APIListMicroUSD += l
 				detail.PricedAtoms++
 				detail.PricedTokens += int64(q)
-				addAttributionDimension(detail, usageCostDimension(a), 0, m, l)
+				addCostDimension(&detail.Dimensions, usageCostDimension(a), 0, m, l)
 				if agent != "" && detail == b.costAgents[stableCostKey(agent)] {
 					addAttributionSource(detail, source, usageCostDimension(a), int64(q), m, l, true)
 				}
@@ -1157,7 +1157,7 @@ func addAttributionSource(detail *MaterializedCostAttribution, source, dimension
 			item.UnpricedAtoms++
 			item.UnpricedTokens += tokens
 		}
-		addAttributionDimensionSource(item, dimension, tokens, microUSD, apiListMicroUSD)
+		addCostDimension(&item.Dimensions, dimension, tokens, microUSD, apiListMicroUSD)
 		return
 	}
 	item := MaterializedCostSource{Source: source, TotalTokens: tokens, MicroUSD: microUSD, APIListMicroUSD: apiListMicroUSD}
@@ -1168,34 +1168,13 @@ func addAttributionSource(detail *MaterializedCostAttribution, source, dimension
 		item.UnpricedAtoms = 1
 		item.UnpricedTokens = tokens
 	}
-	addAttributionDimensionSource(&item, dimension, tokens, microUSD, apiListMicroUSD)
+	addCostDimension(&item.Dimensions, dimension, tokens, microUSD, apiListMicroUSD)
 	detail.Sources = append(detail.Sources, item)
 }
 
-func addAttributionDimensionSource(detail *MaterializedCostSource, dimension string, tokens, microUSD, apiListMicroUSD int64) {
-	ensureCostDimensionRows(&detail.Dimensions)
-	for index := range detail.Dimensions {
-		if detail.Dimensions[index].Dimension == dimension {
-			detail.Dimensions[index].Tokens += tokens
-			detail.Dimensions[index].MicroUSD += microUSD
-			detail.Dimensions[index].APIListMicroUSD += apiListMicroUSD
-			return
-		}
-	}
-	detail.Dimensions = append(detail.Dimensions, MaterializedCostDimension{Dimension: dimension, Tokens: tokens, MicroUSD: microUSD, APIListMicroUSD: apiListMicroUSD})
-}
-
-func addAttributionDimension(detail *MaterializedCostAttribution, dimension string, tokens, microUSD, apiListMicroUSD int64) {
-	ensureCostDimensionRows(&detail.Dimensions)
-	for index := range detail.Dimensions {
-		if detail.Dimensions[index].Dimension == dimension {
-			detail.Dimensions[index].Tokens += tokens
-			detail.Dimensions[index].MicroUSD += microUSD
-			detail.Dimensions[index].APIListMicroUSD += apiListMicroUSD
-			return
-		}
-	}
-	detail.Dimensions = append(detail.Dimensions, MaterializedCostDimension{Dimension: dimension, Tokens: tokens, MicroUSD: microUSD, APIListMicroUSD: apiListMicroUSD})
+func addCostDimension(dimensions *[]MaterializedCostDimension, dimension string, tokens, microUSD, apiListMicroUSD int64) {
+	ensureCostDimensionRows(dimensions)
+	mergeCostDimensions(dimensions, []MaterializedCostDimension{{Dimension: dimension, Tokens: tokens, MicroUSD: microUSD, APIListMicroUSD: apiListMicroUSD}})
 }
 
 func ensureCostDimensionRows(dimensions *[]MaterializedCostDimension) {

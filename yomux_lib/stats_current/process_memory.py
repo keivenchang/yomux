@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import hashlib
-import math
 import os
 import re
 import subprocess
@@ -14,6 +13,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+
+from ..infra.numeric import is_finite_number
 
 
 MAX_PROCESS_MEMORY_SERIES = 5
@@ -83,10 +84,10 @@ def aggregate_process_memory_by_binary(
     totals: dict[str, int] = {}
     for raw_binary, raw_rss in rows:
         binary = normalize_process_binary(raw_binary)
-        if not binary or isinstance(raw_rss, bool) or not isinstance(raw_rss, (int, float)):
+        if not binary or not is_finite_number(raw_rss):
             continue
         rss = float(raw_rss)
-        if not math.isfinite(rss) or rss <= 0:
+        if rss <= 0:
             continue
         totals[binary] = totals.get(binary, 0) + int(rss)
     ranked = sorted(totals.items(), key=lambda item: (-item[1], item[0]))
@@ -101,10 +102,10 @@ def aggregate_process_cpu_by_binary(
     totals: dict[str, float] = {}
     for raw_binary, raw_percent in rows:
         binary = normalize_process_binary(raw_binary)
-        if not binary or isinstance(raw_percent, bool) or not isinstance(raw_percent, (int, float)):
+        if not binary or not is_finite_number(raw_percent):
             continue
         percent = float(raw_percent)
-        if not math.isfinite(percent) or percent < 0:
+        if percent < 0:
             continue
         totals[binary] = totals.get(binary, 0.0) + percent
     ranked = sorted(totals.items(), key=lambda item: (-item[1], item[0]))

@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-import math
 
+from ..infra.numeric import is_finite_number
 from .families_constants import (
     AGENT_COUNTS,
     AGENT_ROSTER,
@@ -32,9 +32,7 @@ def validate_value(value: object, kind: str, path: str, *, error_type: type[Valu
     if kind in {NUMBER, NULLABLE_NUMBER}:
         if value is None and kind == NULLABLE_NUMBER:
             return
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            fail(f"{path} must be a non-negative finite number")
-        if not math.isfinite(value) or value < 0:
+        if not is_finite_number(value) or value < 0:
             fail(f"{path} must be a non-negative finite number")
         return
     if kind == STRING:

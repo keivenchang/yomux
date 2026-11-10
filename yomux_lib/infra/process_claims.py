@@ -208,10 +208,6 @@ class ProcessClaimLedger:
         self.namespace = str(self.directory)
         self.clock = clock
         self.start_identity_reader = start_identity_reader
-        # Set only inside one adoption transaction's cleanup and consumed by that
-        # same transaction's row, so a marker that could not be removed is
-        # reported instead of silently blocking the next adoption.
-        self._last_marker_cleanup_error = ""
 
     @property
     def adoption_permitted(self) -> bool:
@@ -445,6 +441,7 @@ class ProcessClaimLedger:
             row = _row(path, pid, CLAIM_ACTION_ADOPT, CLAIM_RESULT_ADOPTION_FAILED, CLAIM_REASON_SUPERVISOR_GONE)
             row["error"] = type(error).__name__
             return row
+        marker_cleanup_error = ""
         try:
             marker_payload = {"claim_id": claim_id, "successor": successor, "marked_at": float(self.clock())}
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -461,12 +458,9 @@ class ProcessClaimLedger:
                 # The marker outliving its transaction blocks the NEXT adoption of
                 # this claim, so the failure has to reach the caller rather than
                 # being dropped into a bare `pass`.
-                self._last_marker_cleanup_error = type(error).__name__
-        if self._last_marker_cleanup_error:
-            # Consumed on EVERY outcome, not just the winning one: a refusal that
-            # left the error set would hand it to the next unrelated transaction.
-            row["marker_remove_error"] = self._last_marker_cleanup_error
-            self._last_marker_cleanup_error = ""
+                marker_cleanup_error = type(error).__name__
+        if marker_cleanup_error:
+            row["marker_remove_error"] = marker_cleanup_error
         return row
 
     def _swap_supervisor(
@@ -718,7 +712,7 @@ def process_is_provably_gone(state: LocalProcessDiagnostic) -> bool:
 def _read_claim(path: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
 

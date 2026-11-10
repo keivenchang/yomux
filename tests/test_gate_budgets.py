@@ -1,22 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
-import errno
-from http import HTTPStatus
-from http.client import HTTPConnection
 import inspect
-import json
 import os
 import re
 import socket
-import stat
 import subprocess
 import sys
-import threading
 import tempfile
-import time
-from urllib.parse import urlencode
-import uuid
 from pathlib import Path
 
 import pytest
@@ -27,38 +18,20 @@ from yomux_lib.local_services import rpc as local_service_rpc_module
 from yomux_lib.filesystem import git_ops
 from yomux_lib.local_services.client import LocalServiceClient
 from yomux_lib.local_services.client import local_service_failure_is_transient
-from yomux_lib.local_services.rpc import local_service_traffic_ledger
-from yomux_lib.local_services.rpc import reset_local_service_traffic
-from yomux_lib.observability.pricing_catalog import PricingRefreshCoordinator
-from yomux_lib.server_logs import SERVER_LOGS
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
-from tests.browser_helpers.browser_layout import WebDriverWait
 from tests.gate_harness import RepeatFailure
-from tests.gate_harness import GateHttpResponse
-from tests.gate_harness import assert_fixture_client_event_demand_claimed
 from tests.gate_harness import assert_computed_style
 from tests.gate_harness import assert_counter_delta
-from tests.gate_harness import gate_http_request
 from tests.gate_harness import gate_http_port
 from tests.gate_harness import gate_http_port_candidates
 from tests.native_gate_fixtures import gate_live_server
 from tests.gate_harness import gate_runtime_paths
 from tests.gate_harness import gate_tmux
-from tests.gate_harness import claim_fixture_client_event_demand
-from tests.gate_harness import release_fixture_client_event_demand
-from tests.gate_harness import load_gate_browser
-from tests.gate_harness import load_gate_terminal_only_browser
 from tests.gate_harness import repeat
 from tests.gate_harness import run_when_browser_ready
-from tests.helpers.browser_contracts import send_native_key as _send_native_key
-from tests.tmux_runtime import wait_for_isolated_tmux_panes
 from tests.tmux_runtime import run_isolated_tmux
 from tools.test_plan import PYTEST_LANE_NAMES
-
-
-ENDPOINT_COMPUTE_BUDGET_MS = 750.0
-TERMINAL_KEYPRESS_BUDGET_SECONDS = 3.5
 
 
 @pytest.mark.shared_tooling
@@ -207,6 +180,13 @@ def test_counter_sampler_failure_reports_both_samples_and_delta():
         assert_counter_delta(lambda: next(samples), lambda: None, at_most=2)
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_counter_sampler_rejects_nonfinite_observations(value):
+    samples = iter((value, value))
+    with pytest.raises(ValueError, match="finite"):
+        assert_counter_delta(lambda: next(samples), lambda: None, at_most=2)
+
+
 class FakeBrowserDriver:
     def __init__(self):
         self.calls = []
@@ -261,20 +241,6 @@ def test_computed_style_assertion_reads_rendered_style_values():
     assert actual == {"display": "block", "visibility": "visible"}
 
 
-def _performance_payload(runtime):
-    response = gate_http_request(runtime, "/api/diagnostics/performance")
-    assert response.status == HTTPStatus.OK
-    return response.json()
-
-
-def _transport_teardown_total(runtime):
-    transport = _performance_payload(runtime).get("transport")
-    assert isinstance(transport, dict), "L1 requires transport counters at the HTTP diagnostics boundary"
-    total = transport.get("teardowns_total")
-    assert isinstance(total, int) and not isinstance(total, bool), transport
-    return total
-
-
 def test_l1_transport_teardown_delta_is_zero_for_one_healthy_request(gate_runtime_paths, monkeypatch):
     socket_path = gate_runtime_paths.state_dir / "services" / "l1-healthy.sock"
     client = LocalServiceClient("gate-l1-healthy", "gate.module", socket_path, service_dir=socket_path.parent)
@@ -314,93 +280,6 @@ def test_l1_failed_transport_increments_the_teardown_counter_once(
     assert body == b""
     assert after_payload["teardowns_total"] - before_total == 1
     assert after_payload["teardowns_by_exception"]["TimeoutError"] - before_by_type == 1
-
-
-
-
-def _follow_operation_terminal(runtime, response):
-    if response.status != HTTPStatus.ACCEPTED:
-        return response
-    receipt = response.json()
-    assert receipt["state"] == "queued" and receipt.get("terminal") is not True, receipt
-    operation = receipt["operation"]
-    operation_id = operation["id"]
-    status_url = operation["status_url"]
-    assert status_url == f"/api/operations/{operation_id}", receipt
-    terminal_payload, terminal_status = WebDriverWait(
-        runtime,
-        5.0,
-        poll_frequency=0.02,
-    ).until(
-        lambda app_runtime: (
-            result
-            if (result := app_runtime.app.operation_status_payload(operation_id))[1] != HTTPStatus.ACCEPTED
-            else False
-        )
-    )
-    terminal = gate_http_request(runtime, status_url)
-    assert terminal.status == terminal_status, (terminal.status, terminal.body, terminal_payload)
-    assert terminal.json() == terminal_payload, (terminal.json(), terminal_payload)
-    assert terminal_payload["state"] in {"ready", "failed"}, terminal_payload
-    assert terminal_payload["request"]["id"] == receipt["request"]["id"], terminal_payload
-    return terminal
-
-
-def _endpoint_compute_sample(runtime, path, surface):
-    request_id = f"r-gate-budget-{uuid.uuid4().hex}"
-    connection = HTTPConnection("127.0.0.1", runtime.port, timeout=8.0)
-    try:
-        connection.request("GET", path, headers={"X-YOmux-Request-ID": request_id})
-        response = connection.getresponse()
-        endpoint_response = GateHttpResponse(
-            status=int(response.status),
-            headers={str(name): str(value) for name, value in response.getheaders()},
-            body=response.read(),
-        )
-        endpoint_payload = endpoint_response.json()
-        response_request = endpoint_payload.get("request") if isinstance(endpoint_payload, dict) else None
-        correlation_id = str(response_request.get("id") or request_id) if isinstance(response_request, dict) else request_id
-        terminal = _follow_operation_terminal(runtime, endpoint_response)
-        assert terminal.status == HTTPStatus.OK, (path, terminal.status, terminal.body)
-        # The handler records performance after writing the endpoint body. Reusing its HTTP/1.1
-        # connection makes this diagnostics request an exact completion barrier for that handler.
-        connection.request("GET", "/api/diagnostics/performance")
-        diagnostics = connection.getresponse()
-        diagnostics_body = diagnostics.read()
-        assert diagnostics.status == HTTPStatus.OK, (diagnostics.status, diagnostics_body)
-        recent = json.loads(diagnostics_body).get("perf", {}).get("recent", [])
-    finally:
-        connection.close()
-    matches = [
-        row
-        for row in recent
-        if row.get("role") == "http-endpoint"
-        and row.get("surface") == surface
-        and isinstance(row.get("details"), dict)
-        and row["details"].get("request_id") == correlation_id
-    ]
-    assert matches, f"no performance record for {surface}"
-    compute_ms = matches[-1].get("compute_ms")
-    assert isinstance(compute_ms, (int, float)) and not isinstance(compute_ms, bool), matches[-1]
-    return float(compute_ms)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_l6_local_service_over_budget_response_is_delivered_not_raised():

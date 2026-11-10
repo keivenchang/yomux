@@ -20,7 +20,7 @@ from tools.product_environment import apply_yomux_environment_assignments
 from tools.product_environment import product_env
 from tools.product_environment import product_env_names
 from yomux_lib.background_scheduler import pid_is_alive
-from yomux_lib.host_identity import process_start_identity
+from yomux_lib.host_identity import process_start_identity, process_state
 from yomux_lib.tmux_utils import PRODUCT_TMUX_SOCKET_ENV
 
 
@@ -60,7 +60,7 @@ def adaptive_tmux_poll_interval(attempt: int, *, initial: float = TMUX_WAIT_INIT
 def run_isolated_tmux(runtime, *args: str, timeout: float = 8, declared_socket: bool = False):
     tmux_args = ["-S", str(runtime.socket_path)] if declared_socket else runtime.tmux_args
     return subprocess.run(
-        [runtime.tmux_binary, *tmux_args, *args],
+        [runtime.tmux_binary, "-f", os.devnull, *tmux_args, *args],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -142,22 +142,28 @@ def wait_for_isolated_tmux_pane_exit(
     deadline = clock() + max(0.0, float(timeout))
     while True:
         retained = []
+        unavailable = []
         for pid, identity in expected:
             current_identity = process_start_identity(pid)
             if current_identity == identity:
                 retained.append((pid, identity))
             elif current_identity is None and pid_is_alive(pid):
-                if sys.platform == "darwin":
+                if sys.platform == "darwin" and process_state(pid) == "Z":
                     # libproc stops exposing birth identity once an exited child is a zombie;
                     # the matching identity was already captured before fixture shutdown.
                     continue
-                raise AssertionError(
-                    f"cannot prove isolated tmux pane PID {pid} exited because its start identity is unavailable"
-                )
-        if not retained:
+                # Some platforms temporarily stop exposing process birth identity while the
+                # process is exiting. Keep polling the exact PID; do not treat uncertainty as
+                # proof of exit, and still fail if it remains alive at the deadline.
+                unavailable.append((pid, identity))
+        if not retained and not unavailable:
             return
         remaining = deadline - clock()
         if remaining <= 0:
+            if unavailable:
+                raise AssertionError(
+                    f"cannot prove isolated tmux pane PID {unavailable[0][0]} exited because its start identity is unavailable"
+                )
             raise AssertionError(f"isolated tmux retained pane process identities after kill-server: {tuple(retained)}")
         _TMUX_PROCESS_EXIT_POLL.wait(min(TMUX_PROCESS_EXIT_POLL_SECONDS, remaining))
 

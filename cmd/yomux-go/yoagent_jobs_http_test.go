@@ -11,16 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/keivenchang/yomux/internal/yoagent"
 )
 
 func TestNativeYOAgentJobRoutesPersistDeduplicateConfirmAndCancel(t *testing.T) {
-	store, err := yoagent.NewStore(filepath.Join(t.TempDir(), "yoagent"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := newYOAgentTestStore(t, filepath.Join(t.TempDir(), "yoagent"))
 	s := &server{
 		yoagentState: store, events: newEventBroker(),
 		tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) { return []string{"agent-a", "agent-b"}, nil }},

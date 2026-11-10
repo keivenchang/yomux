@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"maps"
 	"mime"
 	"net/http"
 	"os"
@@ -118,6 +119,9 @@ type Service struct {
 	mu                 sync.Mutex
 	nativeMu           work.ContextMutex
 	watches            map[string]watchRecord
+	openFiles          map[string]*openFileRecord
+	openFileSequence   uint64
+	openFileMutationMu work.ContextMutex
 	watchGeneration    uint64
 	epoch              string
 	revision           uint64
@@ -133,25 +137,31 @@ type Service struct {
 	registrationRebuilds       uint64
 	publishGitRename           func(context.Context, *gitRenamePlan, string) error
 	beforeWriteConflictRecheck func()
+	beforeBrokenSymlinkRecheck func()
 	watchContext               context.Context
 	watchCancel                context.CancelFunc
 	stop                       chan struct{}
 	done                       chan struct{}
 	stopOnce                   sync.Once
-	lastChangeAt               time.Time
-	lastChangePaths            []string
-	gitProductMu               sync.Mutex
-	gitHistoryCache            *cache.LRU[string, map[string]any]
-	gitCommitCache             *cache.LRU[string, map[string]any]
-	gitReachabilityCache       *cache.LRU[string, struct{}]
-	gitHistoryStatsCache       *cache.LRU[string, gitHistoryStatsInfo]
-	gitObjectLayouts           gitObjectLayoutCache
-	gitSnapshots               *darwinGitSnapshotCache
-	searchIndex                *SearchIndexWorkerClient
+
+	attributionIndex       *AttributionIndex
+	attributionUnavailable error
+	lastChangeAt           time.Time
+	lastChangeGenerations  map[string]string
+	gitProductMu           sync.Mutex
+	gitHistoryCache        *cache.LRU[string, map[string]any]
+	gitCommitCache         *cache.LRU[string, map[string]any]
+	gitReachabilityCache   *cache.LRU[string, struct{}]
+	gitHistoryStatsCache   *cache.LRU[string, gitHistoryStatsInfo]
+	gitObjectLayouts       gitObjectLayoutCache
+	gitSnapshots           *darwinGitSnapshotCache
+	searchIndex            *SearchIndexWorkerClient
 }
 
 type watchRecord struct {
+	OpenFiles           map[string]string
 	Roots               []string
+	RootScopes          []openFileScope
 	SearchRoots         []string
 	SignaturePaths      []string
 	Files               []string
@@ -301,7 +311,7 @@ func newService(root string, publish EventPublisher, native nativeWatchControlle
 	watchContext, watchCancel := context.WithCancel(context.Background())
 	s := &Service{
 		watchContext: watchContext, watchCancel: watchCancel,
-		root: root, uploadLimits: uploadLimits, publish: publish, watches: make(map[string]watchRecord),
+		root: root, uploadLimits: uploadLimits, publish: publish, watches: make(map[string]watchRecord), openFiles: make(map[string]*openFileRecord),
 		native: native, nativeStatus: nativeStatus, epoch: fmt.Sprintf("finder-%d", time.Now().UnixNano()),
 		demandChanged: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{}),
 		gitHistoryCache:      cache.NewLRU[string, map[string]any](maxGitProductCacheEntries),
@@ -326,6 +336,12 @@ func (s *Service) Close() {
 		}
 	})
 	<-s.done
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, entry := range s.openFiles {
+		entry.file.Close()
+		delete(s.openFiles, id)
+	}
 }
 
 func (s *Service) Root() string { return s.root }
@@ -629,6 +645,7 @@ func fastEntryInfoAt(directory *os.File, resolvedDir string, entry os.DirEntry) 
 		"mtime_ns": linkInfo.ModTime().UnixNano(), "is_symlink": isSymlink, "realpath": resolved,
 		"file_id": fileID(targetInfo), "file_identity": "id:" + fileID(targetInfo),
 	}
+	addEntryMetadata(row, linkInfo)
 	if isSymlink {
 		if target, targetErr := readlinkAt(directory, entry.Name()); targetErr == nil {
 			row["symlink_target"] = target
@@ -699,6 +716,7 @@ func (s *Service) entryInfoAt(directory *os.File, requestedDir, resolvedDir, nam
 		"mtime_ns": linkInfo.ModTime().UnixNano(), "is_symlink": isSymlink, "realpath": resolved,
 		"file_id": fileID(targetInfo), "file_identity": "id:" + fileID(targetInfo),
 	}
+	addEntryMetadata(row, linkInfo)
 	if isSymlink {
 		if target, targetErr := readlinkAt(directory, name); targetErr == nil {
 			row["symlink_target"] = target
@@ -715,44 +733,11 @@ func (s *Service) entryInfoAt(directory *os.File, requestedDir, resolvedDir, nam
 
 func brokenSymlinkEntry(directory *os.File, name string, linkInfo os.FileInfo) (map[string]any, bool) {
 	row := map[string]any{"name": name, "kind": "symlink-broken", "size": 0, "mtime": linkInfo.ModTime().Unix(), "mtime_ns": linkInfo.ModTime().UnixNano(), "is_symlink": true}
+	addEntryMetadata(row, linkInfo)
 	if target, targetErr := readlinkAt(directory, name); targetErr == nil {
 		row["symlink_target"] = target
 	}
 	return row, true
-}
-
-func (s *Service) entryInfo(raw string, entry os.DirEntry, includeRepo bool) map[string]any {
-	row := map[string]any{"name": entry.Name(), "is_symlink": entry.Type()&os.ModeSymlink != 0}
-	info, err := entry.Info()
-	if err != nil {
-		row["kind"] = "symlink-broken"
-		row["size"] = 0
-		return row
-	}
-	kind := "other"
-	if info.IsDir() {
-		kind = "dir"
-	} else if info.Mode().IsRegular() {
-		kind = "file"
-	}
-	row["kind"] = kind
-	row["size"] = info.Size()
-	row["mtime"] = info.ModTime().Unix()
-	row["mtime_ns"] = info.ModTime().UnixNano()
-	row["file_id"] = fileID(info)
-	row["file_identity"] = "id:" + fileID(info)
-	if resolved, err := filepath.EvalSymlinks(raw); err == nil {
-		row["realpath"] = resolved
-		if entry.Type()&os.ModeSymlink != 0 {
-			if target, targetErr := os.Readlink(raw); targetErr == nil {
-				row["symlink_target"] = target
-			}
-		}
-	}
-	if kind == "dir" {
-		row["is_repo"] = includeRepo && isRepository(raw)
-	}
-	return row
 }
 
 func (s *Service) Read(ctx context.Context, raw string, includeGit ...bool) (map[string]any, *Error) {
@@ -790,6 +775,8 @@ func (s *Service) Read(ctx context.Context, raw string, includeGit ...bool) (map
 	default:
 	}
 	result := map[string]any{"path": requested, "realpath": resolved, "size": info.Size(), "mtime": info.ModTime().Unix(), "mtime_ns": info.ModTime().UnixNano(), "content": string(data), "extension": strings.ToLower(filepath.Ext(requested)), "is_text_extension": isTextPath(requested), "file_id": fileID(info), "file_identity": "id:" + fileID(info), "git_root": "", "git_tracked": false, "git_history": []any{}, "git_has_history": false, "git_enrichment": map[string]any{"available": false, "reason": "deferred"}}
+	addEntryMetadata(result, info)
+	s.addContentWriteMetadata(result, requested, info)
 	if len(includeGit) > 0 && includeGit[0] {
 		s.addGitMetadata(ctx, result, requested, resolved, file)
 		if ctx.Err() != nil {
@@ -803,6 +790,32 @@ func (s *Service) Read(ctx context.Context, raw string, includeGit ...bool) (map
 }
 
 func (s *Service) Info(ctx context.Context, raw string, includeGit ...bool) (map[string]any, *Error) {
+	metadata, err := s.entryMetadata(raw)
+	if err != nil {
+		return nil, err
+	}
+	result, legacyErr := s.contentInfo(ctx, raw, includeGit...)
+	if legacyErr != nil {
+		if ctx.Err() != nil {
+			return nil, cancelled(raw)
+		}
+		metadata["content_info_error"] = legacyErr.Message
+		return metadata, nil
+	}
+	if metadata["is_symlink"] != true && result["file_id"] != metadata["metadata_identity"] {
+		return nil, changed(raw)
+	}
+	metadata["metadata_kind"] = metadata["kind"]
+	for key, value := range metadata {
+		if metadata["is_symlink"] == true && (key == "kind" || key == "size" || key == "realpath") {
+			continue
+		}
+		result[key] = value
+	}
+	return result, nil
+}
+
+func (s *Service) contentInfo(ctx context.Context, raw string, includeGit ...bool) (map[string]any, *Error) {
 	select {
 	case <-ctx.Done():
 		return nil, &Error{Status: http.StatusRequestTimeout, Code: "cancelled", MessageKey: "request.error.cancelled", Path: raw, Retryable: true, Message: "file info cancelled"}
@@ -833,7 +846,13 @@ func (s *Service) Info(ctx context.Context, raw string, includeGit ...bool) (map
 			return nil, filesystemError(filepath.Dir(requested), err)
 		}
 		defer parent.Close()
-		_, linkInfo, targetInfo, childResolved, err := openDescriptorEntry(parent, filepath.Base(requested))
+		if s.beforeBrokenSymlinkRecheck != nil {
+			s.beforeBrokenSymlinkRecheck()
+		}
+		child, linkInfo, targetInfo, childResolved, err := openDescriptorEntry(parent, filepath.Base(requested))
+		if child != nil {
+			defer child.Close()
+		}
 		if err != nil || linkInfo == nil || linkInfo.Mode()&os.ModeSymlink == 0 || targetInfo != nil {
 			return nil, openErr
 		}
@@ -1053,35 +1072,52 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 	if err != nil {
 		return nil, invalid("", err.Error())
 	}
-	for index, raw := range searchRoots {
+	normalizedSearchRoots := make([]string, 0, len(searchRoots))
+	for _, raw := range searchRoots {
 		requested, _, authErr := s.authorize(raw, false)
 		if authErr != nil {
+			if authErr.Status == http.StatusNotFound && s.retainedOpenFileWatchPath(clientID, raw, true) {
+				continue
+			}
 			return nil, authErr
 		}
-		searchRoots[index] = requested
+		normalizedSearchRoots = append(normalizedSearchRoots, requested)
 	}
+	searchRoots = normalizedSearchRoots
 	files, err := stringList(payload["files"], MaxWatchFiles)
 	if err != nil {
 		return nil, invalid("", err.Error())
 	}
 	normalized := make([]string, 0, len(roots))
+	rootScopes := make([]openFileScope, 0, len(roots))
+	omittedRoots := map[string]bool{}
 	for _, raw := range roots {
-		requested, _, authErr := s.authorize(raw, false)
+		requested, resolved, authErr := s.authorize(raw, false)
 		if authErr != nil {
+			if authErr.Status == http.StatusNotFound && s.retainedOpenFileWatchPath(clientID, raw, true) {
+				omittedRoots[filepath.Clean(raw)] = true
+				continue
+			}
 			return nil, authErr
 		}
 		normalized = append(normalized, requested)
+		rootScopes = append(rootScopes, openFileScope{path: requested, resolved: resolved})
 	}
 	normalizedFiles := make([]string, 0, len(files))
 	for _, raw := range files {
 		requested, _, authErr := s.authorize(raw, true)
 		if authErr != nil {
+			// Parent relocation can remove hot paths while retained documents
+			// still need their lease and reconnect snapshot.
+			if authErr.Status == http.StatusNotFound && s.retainedOpenFileWatchPath(clientID, raw, false) {
+				continue
+			}
 			return nil, authErr
 		}
 		normalizedFiles = append(normalizedFiles, requested)
 	}
 	files = normalizedFiles
-	watchPayload, payloadErr := s.normalizeWatchPayload(payload, normalized, files)
+	watchPayload, payloadErr := s.normalizeWatchPayload(payload, normalized, files, omittedRoots)
 	if payloadErr != nil {
 		return nil, payloadErr
 	}
@@ -1127,7 +1163,7 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 	s.watchGeneration++
 	generation := s.watchGeneration
 	s.watches[clientID] = watchRecord{
-		Roots: normalized, SearchRoots: searchRoots, SignaturePaths: signaturePaths, Files: files, BackgroundFiles: watchPayload.BackgroundFiles,
+		OpenFiles: previous.OpenFiles, Roots: normalized, RootScopes: rootScopes, SearchRoots: searchRoots, SignaturePaths: signaturePaths, Files: files, BackgroundFiles: watchPayload.BackgroundFiles,
 		RootSurfacesVersion: watchPayload.RootSurfacesVersion, RootSurfaces: watchPayload.RootSurfaces, ContextItems: watchPayload.ContextItems,
 		SessionFiles: watchPayload.SessionFiles, ActivitySummary: watchPayload.ActivitySummary,
 		Signatures: signatures, UpdatedAt: now, ExpiresAt: now.Add(watchLeaseDuration), Generation: generation,
@@ -1160,6 +1196,24 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 		removedRoots = []string{}
 	}
 	var rootChangePayload map[string]any
+
+	if ownsGeneration {
+		refs, openErr := s.registerOpenFilesLocked(clientID, payload["open_files"])
+		if openErr != nil {
+			if hadPrevious {
+				s.watches[clientID] = previous
+			} else {
+				delete(s.watches, clientID)
+			}
+			s.releaseUnusedOpenFilesLocked()
+			s.mu.Unlock()
+			_ = s.reconfigureNative(context.Background(), true)
+			return nil, openErr
+		}
+		current.OpenFiles = refs
+		s.watches[clientID] = current
+		s.releaseUnusedOpenFilesLocked()
+	}
 	if ownsGeneration && rootsChanged {
 		s.revision++
 		changedRoots := append(append([]string{}, previous.Roots...), normalized...)
@@ -1180,6 +1234,7 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 		"root_surfaces_version": current.RootSurfacesVersion, "root_surfaces": append([]map[string]any{}, current.RootSurfaces...),
 		"context_items": append([]map[string]any{}, current.ContextItems...), "session_files": append([]map[string]any{}, current.SessionFiles...),
 		"activity_summary": map[string]any{},
+		"open_files":       s.openFileSnapshotLocked(current.OpenFiles),
 	}
 	result["mode"] = s.watchModeLocked()
 	result["ttl_seconds"] = int(watchLeaseDuration / time.Second)
@@ -1378,7 +1433,12 @@ func (s *Service) WatchDiff(ctx context.Context, since string, forceFull bool) (
 	}
 	removed := make([]string, 0)
 	for _, path := range changed {
-		if s.signature(ctx, path) == "missing" {
+		// Absence needs the exact descriptor open, not a recursive content
+		// signature of every watched directory from every client.
+		file, _, _, finderErr := s.openAny(path)
+		if finderErr == nil {
+			file.Close()
+		} else if finderErr.Status == http.StatusNotFound {
 			removed = append(removed, path)
 		}
 	}
@@ -1405,11 +1465,9 @@ func (s *Service) watchSignature(ctx context.Context, raw string) ([]any, *Error
 	file, requested, _, finderErr := s.openAny(raw)
 	if finderErr != nil {
 		if finderErr.Status == http.StatusNotFound {
-			requested, _, authErr := s.authorize(raw, true)
-			if authErr == nil {
-				return []any{requested, "missing"}, nil
-			}
-			return nil, authErr
+			// WatchDiff supplies an already registered path. Its parent may
+			// also have disappeared; reporting absence needs no new authorization.
+			return []any{filepath.Clean(raw), "missing"}, nil
 		}
 		return nil, finderErr
 	}
@@ -1435,6 +1493,7 @@ func (s *Service) watchLoop() {
 	defer ticker.Stop()
 	var nativeEvents <-chan nativeWatchEvent
 	var lastFallbackPoll time.Time
+	var lastOpenFilePoll time.Time
 	if s.native != nil {
 		nativeEvents = s.native.Events()
 	}
@@ -1445,6 +1504,10 @@ func (s *Service) watchLoop() {
 		case <-ticker.C:
 			now := time.Now()
 			s.pruneExpiredWatches(now)
+			if lastOpenFilePoll.IsZero() || now.Sub(lastOpenFilePoll) >= time.Second {
+				s.reconcileOpenFiles()
+				lastOpenFilePoll = now
+			}
 			mode := s.pollingFallbackMode()
 			if mode.interval > 0 && (lastFallbackPoll.IsZero() || now.Sub(lastFallbackPoll) >= mode.interval) {
 				if mode.uncoveredOnly {
@@ -1666,6 +1729,7 @@ func (s *Service) pruneExpiredWatches(now time.Time) {
 			removed = true
 		}
 	}
+	s.releaseUnusedOpenFilesLocked()
 	s.mu.Unlock()
 	if removed {
 		s.notifyDemandChanged()
@@ -1764,9 +1828,18 @@ func (s *Service) recordChange(paths []string, reason string) {
 	if len(unique) == 0 {
 		return
 	}
+	generations := make(map[string]string, len(unique))
+	for _, path := range unique {
+		generation, known := watchChangeGeneration(path)
+		if !known {
+			generations = nil
+			break
+		}
+		generations[path] = generation
+	}
 	s.mu.Lock()
 	now := time.Now()
-	if !s.lastChangeAt.IsZero() && now.Sub(s.lastChangeAt) <= watchEventCoalesceWindow && sameStringSet(unique, s.lastChangePaths) {
+	if generations != nil && !s.lastChangeAt.IsZero() && now.Sub(s.lastChangeAt) <= watchEventCoalesceWindow && maps.Equal(generations, s.lastChangeGenerations) {
 		s.mu.Unlock()
 		return
 	}
@@ -1776,7 +1849,7 @@ func (s *Service) recordChange(paths []string, reason string) {
 		s.changes = s.changes[len(s.changes)-watchHistoryLimit:]
 	}
 	s.lastChangeAt = now
-	s.lastChangePaths = append(s.lastChangePaths[:0], unique...)
+	s.lastChangeGenerations = generations
 	payload := map[string]any{"paths": unique, "reason": reason, "token": s.watchTokenLocked(), "revision": s.revision}
 	s.mu.Unlock()
 	if s.publish != nil {
@@ -1785,20 +1858,36 @@ func (s *Service) recordChange(paths []string, reason string) {
 	}
 }
 
-func sameStringSet(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	seen := make(map[string]struct{}, len(left))
-	for _, value := range left {
-		seen[value] = struct{}{}
-	}
-	for _, value := range right {
-		if _, ok := seen[value]; !ok {
-			return false
+func watchChangeGeneration(path string) (string, bool) {
+	stamp := func(info os.FileInfo) (string, bool) {
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || info.IsDir() {
+			// A directory's own metadata cannot establish that its descendants
+			// stayed unchanged. Overflow/root invalidations must reach readers.
+			return "", false
 		}
+		return fmt.Sprintf("%v:%d", identityFor(info), statCTime(stat)), true
 	}
-	return true
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "missing", true
+	}
+	if err != nil {
+		return "", false
+	}
+	generation, known := stamp(info)
+	if !known || info.Mode()&os.ModeSymlink == 0 {
+		return generation, known
+	}
+	target, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return generation + ":missing", true
+	}
+	if err != nil {
+		return "", false
+	}
+	targetGeneration, known := stamp(target)
+	return generation + ":" + targetGeneration, known
 }
 
 func (s *Service) signature(ctx context.Context, path string) string {
@@ -1828,7 +1917,7 @@ func (s *Service) descriptorWatchSignature(ctx context.Context, file *os.File, p
 		kind = "file"
 	}
 	if !info.IsDir() {
-		return []any{path, kind, info.ModTime().UnixNano(), info.Size()}
+		return []any{path, kind, info.ModTime().UnixNano(), info.Size(), numericMode(info.Mode())}
 	}
 	entries, err := file.ReadDir(maxWatchSignatureEntries + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -1990,15 +2079,15 @@ func (s *Service) addGitMetadata(ctx context.Context, result map[string]any, req
 		trackedOutput, trackedErr := run(trackedArgs...)
 		tracked = trackedErr == nil && strings.TrimSpace(string(trackedOutput)) != ""
 		if tracked {
-			logArgs := []string{"log", "-n", "60", "--format=%H%x1f%h%x1f%s%x1e"}
+			logArgs := []string{"log", "-n", "60", "--format=%H%x1f%h%x1f%s%x1f%an%x1e"}
 			logArgs = append(logArgs, historyPathArgs(filepath.ToSlash(relative))...)
 			if logOutput, logErr := run(logArgs...); logErr == nil {
 				for _, record := range strings.Split(string(logOutput), "\x1e") {
 					fields := strings.Split(strings.TrimSpace(record), "\x1f")
-					if len(fields) < 3 || fields[0] == "" {
+					if len(fields) < 4 || fields[0] == "" {
 						continue
 					}
-					history = append(history, map[string]any{"ref": fields[0], "sha": fields[0], "short": fields[1], "subject": fields[2]})
+					history = append(history, map[string]any{"ref": fields[0], "sha": fields[0], "short": fields[1], "subject": fields[2], "author": fields[3]})
 				}
 			}
 		}
@@ -2039,6 +2128,17 @@ func nonEmptyLines(value string) []string {
 }
 
 func filesystemError(path string, err error) *Error {
+	var recovery *mutationRestoreError
+	if errors.As(err, &recovery) {
+		failure := detailedFilesystemError(path, err)
+		failure.Code, failure.Retryable = "restoration_failed", false
+		failure.Details = map[string]any{"recovery_path": recovery.path}
+		return failure
+	}
+	var typed *Error
+	if errors.As(err, &typed) {
+		return typed
+	}
 	if errors.Is(err, os.ErrPermission) {
 		return forbidden(path, "fs.error.permissionDenied", "permission denied")
 	}
@@ -2046,6 +2146,10 @@ func filesystemError(path string, err error) *Error {
 		return notFound(path)
 	}
 	return &Error{Status: http.StatusInternalServerError, Code: "filesystem_error", MessageKey: "fs.error.operationFailed", Path: path, Retryable: true, Message: err.Error()}
+}
+
+func detailedFilesystemError(path string, err error) *Error {
+	return &Error{Status: http.StatusInternalServerError, Code: "filesystem_error", MessageKey: "common.errorDetail", MessageParams: map[string]any{"error": err.Error()}, Path: path, Retryable: true, Message: err.Error()}
 }
 
 func cancelled(path string) *Error {
@@ -2148,9 +2252,4 @@ func previewMime(path string) string {
 		}
 	}
 	return ""
-}
-
-func isRepository(path string) bool {
-	info, err := os.Stat(filepath.Join(path, ".git"))
-	return err == nil && (info.IsDir() || info.Mode().IsRegular())
 }

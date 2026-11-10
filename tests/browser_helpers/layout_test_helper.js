@@ -922,9 +922,6 @@ function loadYomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], proto
     console: vmConsole,
     EventSource: TestEventSource,
     WheelEvent: TestWheelEvent,
-    CustomEvent: class TestCustomEvent {
-      constructor(type, init = {}) { this.type = type; this.detail = init.detail; }
-    },
     File: TestFile,
     FormData: TestFormData,
     URL,
@@ -1020,10 +1017,6 @@ function loadYomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], proto
         if (!windowListeners.has(type)) windowListeners.set(type, []);
         windowListeners.get(type).push(listener);
       },
-      dispatchEvent(event) {
-        for (const listener of [...(windowListeners.get(event?.type) || [])]) listener(event);
-        return true;
-      },
       clearTimeout: testClearTimeout,
       confirm: () => true,
       dispatchEvent(event) {
@@ -1102,6 +1095,7 @@ globalThis.__layoutTestApi = {
   agentErrorIsBlocking,
   appModifier,
   appMenuTree,
+  fileSurfaceGroupLabel,
   openAppMenuForTest: openAppMenu,
   topbarMenuTreeForTest: topbarMenuTree,
   topbarFullNavigationFitsForTest: topbarFullNavigationFits,
@@ -1191,10 +1185,12 @@ globalThis.__layoutTestApi = {
   codeMirrorSearchMatchSummary,
   codeMirrorSearchVisibleMatchIndex,
   codeMirrorPhraseValues,
-  emptyPlaceholderPaneState,
   emptyLayoutSlots,
   editorNav,
   editorNavBackForTest: editorNavBack,
+  editorNavForwardForTest: editorNavForward,
+  reconcileEditorNavForTest: reconcileEditorNav,
+  replaceEditorNavItemsForTest: replaceEditorNavItems,
   recordEditorNav,
   cursorStyleFileReference,
   fileEditorPaneTabHtml,
@@ -1451,7 +1447,6 @@ globalThis.__layoutTestApi = {
   openFileExplorerAtForTest: openFileExplorerAt,
   visibleFileEditorWatchFilesForTest: visibleFileEditorWatchFiles,
   backgroundFileEditorWatchFilesForTest: backgroundFileEditorWatchFiles,
-  clientServerWatchStateForTest: clientServerWatchState,
   clientEventDemandDescriptorForTest: clientEventDemandDescriptor,
   setEventLogTabActiveForTest(session, active = true) {
     const pane = document.getElementById('events-pane-' + session);
@@ -1527,7 +1522,6 @@ globalThis.__layoutTestApi = {
   bindScopedOnceForTest: bindScopedOnce,
   normalizeAppOwnedControlsForTest: normalizeAppOwnedControls,
   reconcilePanelBodyForTest: reconcilePanelBody,
-  createHoverPopoverForTest: createHoverPopover,
   bindPanelPopoverForTest: bindPanelPopover,
   debugRuntimeFacadeForTest: debugRuntimeFacade,
   terminalRuntimeFacadeForTest: terminalRuntimeFacade,
@@ -1648,7 +1642,6 @@ globalThis.__layoutTestApi = {
   },
   waitForApiOperationResultForTest: waitForApiOperationResult,
   apiFetchDeadlineMsForTest: apiFetchDeadlineMs,
-  apiFetchJsonForTest: apiFetchJson,
   fetchFilesystemOperationPayloadForTest: fetchFilesystemOperationPayload,
   apiOperationStateForTest() {
     return {
@@ -1832,7 +1825,6 @@ globalThis.__layoutTestApi = {
   chatNotificationLinesForTest: chatNotificationLines,
   chatMessageTimestampForTest: chatMessageTimestamp,
   chatPreciseRelativeTimeFormatForTest: chatPreciseRelativeTimeFormat,
-  setDateTimeHourCycleForTest(value) { dateTimeHourCycle = normalizeDateTimeHourCycle(value); },
   chatEmojiSearchTextForTest: chatEmojiSearchText,
   chatRecentEmojiForTest: chatRecentEmoji,
   rememberChatEmojiForTest: rememberChatEmoji,
@@ -2542,14 +2534,12 @@ globalThis.__layoutTestApi = {
     return record ? {...record} : null;
   },
   attentionAcknowledgementRecordCountForTest() { return attentionAcknowledgementRecords.size; },
-  terminalDataShouldAcknowledgeAttentionForTest: terminalDataShouldAcknowledgeAttention,
   updateSessionButtonStatesForTest: refreshAgentWindowActivityDisplays,
   browserFaviconBadgeCount,
   browserFaviconBadgeLabel,
   tmuxSignalPaneForTarget,
   setTmuxSignalStateForTest(payload) { tmuxSignalState = payload; },
   tmuxSignalStateForTest() { return tmuxSignalState; },
-  setAutoApproveStateForTest(session, state) { autoApproveStates.set(session, state); },
   autoApproveStateForTest(session) { return autoApproveStates.get(session); },
   applyAutoApprovePayloadForTest: applyAutoApprovePayload,
   renderAutoApproveButtonsForTest: renderAutoApproveButtons,
@@ -2630,6 +2620,9 @@ globalThis.__layoutTestApi = {
   setPanelNodeForTest(item, panel) { panelNodes.set(item, panel); },
   removeFilePanelOwnerForTest: removeFilePanelOwner,
   renameOpenFilePathForTest: renameOpenFilePath,
+  applyOpenFileRelocationForTest: applyOpenFileRelocation,
+  markOpenFileMissingForTest: markOpenFileMissing,
+  clientEventRepairChannelsForTest: clientEventRepairChannels,
   scheduleFileEditorSplitScrollSyncForTest: scheduleFileEditorSplitScrollSync,
   scheduleFileEditorPreviewLayoutSyncForTest: scheduleFileEditorPreviewLayoutSync,
   fileEditorPreviewScrollSyncSourceForTest: fileEditorPreviewScrollSyncSource,
@@ -2959,7 +2952,6 @@ globalThis.__layoutTestApi = {
   smallLayoutSlotCandidate,
   slotCanAutoPrune,
   splitPercentForPointer,
-  layoutNodeMinWidth,
   minSplitPaneWidthPx,
   minSplitPaneHeightPx,
   layoutVisiblePaneCount,
@@ -2975,7 +2967,6 @@ globalThis.__layoutTestApi = {
   clearDropPreview,
   shouldPreserveSourceSlotForSplit,
   startSessionDrag,
-  startPaneDrag,
   beginFileDragForTest: beginFileDrag,
   cancelDragOperationStateForTest: cancelDragOperationState,
   paneDragPayload,
@@ -3023,7 +3014,6 @@ globalThis.__layoutTestApi = {
   clampSidePaneWidthPercent,
   sidePaneWidthPercent,
   paneRoleAllowsItemTransfer,
-  paneStateWithTabs,
   emptyPaneState,
   emptyPlaceholderPaneState,
   terminalWheelSignedLines,

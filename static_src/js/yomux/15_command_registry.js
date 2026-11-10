@@ -85,7 +85,9 @@ const COMMAND_ROUTES = Object.freeze({
   'finder-file-create': commandRoute({id: 'finder-file-create', method: 'POST', path: '/api/fs/write', contractClass: 'pending'}),
   'finder-folder-create': commandRoute({id: 'finder-folder-create', method: 'POST', path: '/api/fs/mkdir', contractClass: 'pending'}),
   'finder-delete': commandRoute({id: 'finder-delete', method: 'POST', path: '/api/fs/delete', contractClass: 'optimistic'}),
+  'finder-move': commandRoute({id: 'finder-move', method: 'POST', path: '/api/fs/move', contractClass: 'optimistic'}),
   'finder-rename': commandRoute({id: 'finder-rename', method: 'POST', path: '/api/fs/rename', contractClass: 'optimistic'}),
+  'finder-chmod': commandRoute({id: 'finder-chmod', method: 'POST', path: '/api/fs/chmod', contractClass: 'pending'}),
   'watch-roots-sync': commandRoute({id: 'watch-roots-sync', method: 'POST', path: '/api/watch/roots', contractClass: 'background', applyResult: acceptedWatchRootsCommandResult}),
 });
 

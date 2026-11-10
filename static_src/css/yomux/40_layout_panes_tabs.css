@@ -160,25 +160,6 @@ body.theme-light .yomux-dockview .yomux-dockview-core {
   min-width: 20px;
   max-width: 20px;
 }
-.yomux-dockview .dockview-pane-header-actions .pane-drag-handle {
-  flex: 0 0 min(18px, var(--pane-tab-height));
-  min-width: min(18px, var(--pane-tab-height));
-  max-width: min(18px, var(--pane-tab-height));
-  margin: 0 0 0 var(--space-3);
-  padding: 0;
-  cursor: grab;
-}
-.yomux-dockview .dockview-pane-header-actions .pane-drag-handle:active {
-  cursor: grabbing;
-}
-.pane-drag-handle::before {
-  content: "";
-  width: 3px;
-  height: 3px;
-  border-radius: var(--radius-pill);
-  background: currentColor;
-  box-shadow: 0 5px 0 currentColor, 5px 0 0 currentColor, 5px 5px 0 currentColor;
-}
 .yomux-dockview .dv-groupview {
   --pane-bar-bg: var(--panel2);
   --panel-ring-color: transparent;
@@ -2084,7 +2065,8 @@ body.theme-light .pane-tab-close {
 
   color: var(--40-layout-panes-tabs-tmux-pane-tab-token-fg-4);
 }
-so on the light-green/gray inactive tabs in LIGHT mode they were white-on-white. Give them dark text (active tabs keep their own white-on-green via the rules above; dark mode keeps the near-white). */ .pane-tab:not(.active) .session-button-name {
+/* Inactive tabs need dark text on the light theme's pale background. */
+.pane-tab:not(.active) .session-button-name {
 
   color: var(--40-layout-panes-tabs-pane-tab-fg-5);
 }
@@ -2092,7 +2074,8 @@ so on the light-green/gray inactive tabs in LIGHT mode they were white-on-white.
 
   color: var(--40-layout-panes-tabs-pane-tab-fg-7);
 }
-so in light mode force it dark on the light row. (meta/dir/detail already resolve dark via the --pane-tab-panel-head-text light override.) */ .panel-detail-row .session-button-name {
+/* Detail labels use the shared theme token, like neighboring metadata. */
+.panel-detail-row .session-button-name {
 
   color: var(--40-layout-panes-tabs-panel-detail-row-fg-22);
 }

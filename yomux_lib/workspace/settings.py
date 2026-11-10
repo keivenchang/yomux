@@ -21,6 +21,7 @@ from ..infra.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from ..infra.common import UPDATE_NOTIFY_LEVELS
 from ..infra.common import UPLOAD_MAX_BYTES
 from ..infra.shared_config_lock import shared_config_lock
+from ..infra.shared_config_lock import shared_config_file_signature
 from ..prune_policy import DEFAULT_PRUNE_LOCAL_TIME
 from ..prune_policy import PRUNE_LOCAL_TIME_CHOICES
 from .locales import LANGUAGE_PREFERENCES
@@ -37,7 +38,7 @@ _SETTINGS_SCHEMA["SETTING_COMMENTS"]["general.language"] = language_preference_d
 
 SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
 SETTINGS_DISPLAY_PATH = "~/.config/yomux/settings.yaml"
-_SETTINGS_PAYLOAD_CACHE: dict[Path, tuple[int, int, dict[str, Any]]] = {}
+_SETTINGS_PAYLOAD_CACHE: dict[Path, tuple[tuple[int, ...], dict[str, Any]]] = {}
 _PRICING_PROFILE_HISTORY_KEYS = {
     "openai": "_openai_pricing_profile_history",
     "anthropic": "_anthropic_pricing_profile_history",
@@ -243,7 +244,7 @@ def usage_pricing_profile(
         return value if value in {"default", "subscription"} else "default"
     try:
         timestamp = float(observed_at)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "default"
     if not math.isfinite(timestamp) or timestamp < 0:
         return "default"
@@ -280,7 +281,9 @@ def coerce_bool(value: Any, default: bool) -> bool:
 def coerce_number(value: Any, default: int | float, lower: float, upper: float) -> int | float:
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(number):
         return default
     clamped = max(lower, min(upper, number))
     if isinstance(default, int):
@@ -380,12 +383,12 @@ def migrate_stale_default(section: str, key: str, value: Any, default: Any) -> A
     stale_values = stale_value if isinstance(stale_value, tuple) else (stale_value,)
     try:
         value_number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return value
     for candidate in stale_values:
         try:
             stale_number = float(candidate)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
         if value_number == stale_number:
             return default
@@ -536,10 +539,10 @@ def _write_settings_file_unlocked(settings: dict[str, Any], path: Path = SETTING
 
 def write_settings_file(settings: dict[str, Any], path: Path = SETTINGS_PATH) -> None:
     with locked_settings_file(path):
-        signature = _settings_payload_file_signature(path)
+        signature = shared_config_file_signature(path)
         cached = _SETTINGS_PAYLOAD_CACHE.get(path)
-        if signature is not None and cached is not None and cached[:2] == signature:
-            previous = copy.deepcopy(cached[2]["settings"])
+        if signature is not None and cached is not None and cached[0] == signature and isinstance(cached[1]["settings"], dict):
+            previous = copy.deepcopy(cached[1]["settings"])
         else:
             previous, _ = _read_settings_file_unlocked(path)
         current = sanitize_settings(settings)
@@ -553,7 +556,7 @@ def _read_settings_file_unlocked(path: Path = SETTINGS_PATH, *, stored_values: d
         _write_settings_file_unlocked(default_settings(), path)
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
         return default_settings(), str(exc)
     if stored_values is not None and isinstance(raw, dict):
         stored_values.update(raw)
@@ -578,8 +581,6 @@ def _read_settings_file_unlocked(path: Path = SETTINGS_PATH, *, stored_values: d
 
 
 def read_settings_file(path: Path = SETTINGS_PATH) -> tuple[dict[str, Any], str]:
-    if path.exists():
-        return _read_settings_file_unlocked(path)
     with locked_settings_file(path):
         return _read_settings_file_unlocked(path)
 
@@ -631,33 +632,24 @@ def _settings_payload_unlocked(path: Path = SETTINGS_PATH) -> dict[str, Any]:
     }
 
 
-def _settings_payload_file_signature(path: Path) -> tuple[int, int] | None:
-    try:
-        stat = path.stat() if path.exists() else None
-    except OSError:
-        return None
-    return (stat.st_mtime_ns, stat.st_size) if stat is not None else None
-
-
 def _settings_payload_cache_clear_unlocked(path: Path = SETTINGS_PATH) -> None:
     _SETTINGS_PAYLOAD_CACHE.pop(path, None)
 
 
-def _settings_payload_cache_store_unlocked(path: Path, payload: dict[str, Any]) -> None:
-    signature = _settings_payload_file_signature(path)
-    if signature is None:
+def _settings_payload_cache_store_unlocked(path: Path, payload: dict[str, Any], signature: tuple[int, ...] | None) -> None:
+    if signature is None or signature != shared_config_file_signature(path):
         _settings_payload_cache_clear_unlocked(path)
         return
-    _SETTINGS_PAYLOAD_CACHE[path] = (signature[0], signature[1], copy.deepcopy(payload))
+    _SETTINGS_PAYLOAD_CACHE[path] = (signature, copy.deepcopy(payload))
 
 
 def _settings_payload_cached_unlocked(path: Path = SETTINGS_PATH) -> dict[str, Any]:
-    signature = _settings_payload_file_signature(path)
+    signature = shared_config_file_signature(path)
     cached = _SETTINGS_PAYLOAD_CACHE.get(path)
-    if signature is not None and cached is not None and cached[:2] == signature:
-        return copy.deepcopy(cached[2])
+    if signature is not None and cached is not None and cached[0] == signature:
+        return copy.deepcopy(cached[1])
     payload = _settings_payload_unlocked(path)
-    _settings_payload_cache_store_unlocked(path, payload)
+    _settings_payload_cache_store_unlocked(path, payload, signature)
     return copy.deepcopy(payload)
 
 
@@ -798,8 +790,6 @@ def settings_catalog(settings: dict[str, Any] | None = None) -> dict[str, dict[s
 
 
 def settings_payload(path: Path = SETTINGS_PATH) -> dict[str, Any]:
-    if path.exists():
-        return _settings_payload_cached_unlocked(path)
     with locked_settings_file(path):
         return _settings_payload_cached_unlocked(path)
 
@@ -813,8 +803,9 @@ def save_settings(patch: Any, path: Path = SETTINGS_PATH) -> dict[str, Any]:
         next_settings = merge_settings(current, patch, coerced)
         _record_pricing_profile_changes(current, next_settings, effective_at=time.time())
         _write_settings_file_unlocked(next_settings, path)
+        signature = shared_config_file_signature(path)
         payload = _settings_payload_unlocked(path)
-        _settings_payload_cache_store_unlocked(path, payload)
+        _settings_payload_cache_store_unlocked(path, payload, signature)
         payload = copy.deepcopy(payload)
         # report which patched keys were clamped/reverted so the API/UI can surface it
         # instead of silently changing the value (e.g. ui_font_size:999 -> 30).

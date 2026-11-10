@@ -262,7 +262,50 @@ function applyBackendHealthRosterState({epoch, revision, rows, observedIds}) {
 // `ready` returns a model like every other state. It used to return null, which routed healthy into
 // the same branch as "no report yet" and painted it as an empty transparent slot -- so an all-green
 // Daemons roster could not produce a green triangle even in principle.
+let statsCollectorHealthWarning = '';
+let statsCollectorHealthToast = null;
+const statsCollectorHealthFailures = new Map();
+
+function applyStatsCollectorHealth(payload = {}) {
+  const labels = {cpu: 'debug.graph.chart.cpu', system_memory: 'debug.graph.chart.memory',
+    system_disk: 'debug.graph.chart.systemDisk', gpu: 'debug.graph.chart.gpuUtil',
+    agent_status: 'debug.graph.chart.agentStatus', agent_tokens: 'debug.graph.chart.agentTokens', service_load: 'debug.tab.services'};
+  for (const [name, state] of Object.entries(payload.collectors || {})) {
+    if (state.consecutive_failures > 0) statsCollectorHealthFailures.set(name, state);
+    else if (state.last_successful_commit > 0
+        && state.last_successful_commit >= (statsCollectorHealthFailures.get(name)?.last_attempt || 0)) {
+      statsCollectorHealthFailures.delete(name);
+    }
+  }
+  // A missing collector or an initial attempt after restart proves no commit.
+  const failing = [...statsCollectorHealthFailures.entries()];
+  const wasDegraded = !!statsCollectorHealthWarning;
+  statsCollectorHealthWarning = failing.map(([name, state]) => {
+    const label = t(labels[name.replace(/^host:/, '')] || 'debug.tab.services');
+    const last = state.last_successful_commit > 0
+      ? new Date(state.last_successful_commit * 1000).toLocaleString() : t('debug.system.roster.state.neverStarted');
+    return `${label}: ${last}`;
+  }).join('; ');
+  if (statsCollectorHealthWarning && !wasDegraded) {
+    statsCollectorHealthToast = showToast(t('statsRecording.failed'), [t('statsRecording.last', {details: statsCollectorHealthWarning})],
+      {className: 'attention-alert toast stats-collector-warning', coalesceKey: 'stats-collector-recording'});
+  }
+  if (statsCollectorHealthWarning && wasDegraded && statsCollectorHealthToast?.isConnected) {
+    renderToastLines(statsCollectorHealthToast.querySelector('.toast-body'),
+      [t('statsRecording.last', {details: statsCollectorHealthWarning})]);
+  }
+  if (!statsCollectorHealthWarning) {
+    dismissCoalescedToast('stats-collector-recording');
+    statsCollectorHealthToast = null;
+  }
+  syncBackendHealthIndicator();
+}
+
 function backendHealthIndicatorModel() {
+  if (statsCollectorHealthWarning && !['down', 'unresponsive'].includes(backendHealthState.serviceSeverity)
+      && backendHealthState.consecutiveFailures < backendHealthFailureThreshold) {
+    return {severity: 'degraded', text: `${t('statsRecording.failed')}. ${t('statsRecording.last', {details: statsCollectorHealthWarning})}`, reasonCode: 'collector_recording_failed'};
+  }
   if (backendHealthState.consecutiveFailures >= backendHealthFailureThreshold) {
     return {
       severity: 'unresponsive',
@@ -650,6 +693,16 @@ function apiFetchResponseWithDeadline(response, deadlineState) {
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
+}
+
+async function retireStreamReader(reader) {
+  try {
+    await reader.cancel?.();
+  } catch (error) {
+    if (error?.name !== 'AbortError') console.warn('stream reader cancellation failed', error);
+  } finally {
+    reader.releaseLock?.();
+  }
 }
 
 let previousApiFetchTimingWindow = null;
@@ -2988,7 +3041,19 @@ function applyFileIdentityMetadata(state, payload) {
   if (realpath) state.realpath = realpath;
   if (fileId) state.fileId = fileId;
   if (identity) state.fileIdentity = identity;
+  applyFileWriteMetadata(state, payload);
   return state;
+}
+
+function applyFileWriteMetadata(state, payload) {
+  if (Number.isInteger(payload.mode)) state.mode = payload.mode;
+  if (typeof payload.writable === 'boolean') state.writable = payload.writable;
+  if (typeof payload.write_reason === 'string') state.writeReason = payload.write_reason;
+}
+
+function fileEditorStateWritable(state) {
+  return Boolean(state && !readOnlyMode && state.historical !== true && state.readOnly !== true
+    && state.writable !== false && (!Number.isInteger(state.mode) || (state.mode & 0o222) !== 0));
 }
 
 function registerFileIdentityForPath(path, payload) {
@@ -3135,6 +3200,13 @@ function setFileState(path, state) {
     if (!Object.prototype.hasOwnProperty.call(state, 'realpath')) state.realpath = previous.realpath;
     if (!Object.prototype.hasOwnProperty.call(state, 'fileId')) state.fileId = previous.fileId;
     if (!Object.prototype.hasOwnProperty.call(state, 'fileIdentity')) state.fileIdentity = previous.fileIdentity;
+    if (state.fileId && previous.fileId && state.fileId !== previous.fileId) {
+      state.trackingId = '';
+      state.trackingRevision = 0;
+    }
+    if (!Object.prototype.hasOwnProperty.call(state, 'trackingId')) state.trackingId = previous.trackingId;
+    if (!Object.prototype.hasOwnProperty.call(state, 'trackingRevision')) state.trackingRevision = previous.trackingRevision;
+    if (!Object.prototype.hasOwnProperty.call(state, 'relocationRevision')) state.relocationRevision = previous.relocationRevision;
     if (!Object.prototype.hasOwnProperty.call(state, 'openPromise')) state.openPromise = previous.openPromise;
   }
   const normalized = normalizeFileStateRecord(state);
@@ -3388,7 +3460,7 @@ function sessionWorkSummary(session, info = {}, options = {}) {
     const focusedRepositoryIds = focusedRepositoryIdsForTmuxTarget(info, target);
     const focusedBranchIds = focusedBranchIdsForTmuxTarget(info, target);
     const pullRequestIds = pullRequestIdsForTmuxTarget(info, target);
-    const focusedRepo = repositories.find(repo => focusedRepositoryIds.includes(repo.local_repository_id)) || repositories.find(repo => focusedWorktreeIds.includes(repo.worktree_id)) || repositories[0] || null;
+    const focusedRepo = repositories.find(repo => focusedWorktreeIds.includes(repo.worktree_id)) || repositories.find(repo => focusedRepositoryIds.includes(repo.local_repository_id)) || repositories[0] || null;
     const observations = graphEntityValues(graph, 'path_observations', graphObservationIdsForTmuxPaneIds(graph, graphTmuxPaneIdsForTarget(graph, target)));
     const selectedPath = observations.sort((left, right) => Number(right?.last_observed_at || 0) - Number(left?.last_observed_at || 0)).find(observation => observation?.path)?.path || focusedRepo?.cwd || '';
     const pullRequests = graphEntityValues(graph, 'pull_requests', pullRequestIds)
@@ -3410,9 +3482,7 @@ function sessionTranscriptInfo(session) {
 }
 
 function sessionRepoSummaries(info) {
-  const summary = sessionWorkSummary('', info);
-  if (summary.graphBacked) return summary.repositories;
-  return summary.repositories;
+  return sessionWorkSummary('', info).repositories;
 }
 
 function selectedSessionRepoIndex(session, info) {
@@ -3458,9 +3528,8 @@ function displayedSessionGit(session, info) {
 }
 
 function cycleSessionRepoDisplay(session, info, direction) {
-  const repos = sessionRepoSummaries(info);
+  const {repos, repoIndex: current} = projectMetaSelection(session, info);
   if (repos.length < 2) return null;
-  const current = selectedSessionRepoIndex(session, info);
   const delta = Number(direction) < 0 ? -1 : 1;
   const next = (Math.max(0, current) + delta + repos.length) % repos.length;
   sessionRepoDisplayRoot.set(session, repos[next].root);
@@ -4172,6 +4241,11 @@ function refreshFileExplorerViewSettingsSurface(view) {
     renderFileExplorerChangesPanels({force: true, view: surface});
   }
   syncFileExplorerTreeDateButtons();
+  for (const button of document.querySelectorAll('[data-file-explorer-permissions]')) {
+    const active = fileExplorerPermissionsVisible();
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
 }
 
 function setFileExplorerTreeDateMode(mode, view = 'finder') {
@@ -4201,7 +4275,7 @@ function toggleTabMetadata() {
 
 function recordFocusNavTransition(previousItem, nextItem) {
   if (!nextItem) return;
-  if (previousItem && previousItem !== nextItem) recordEditorNav(previousItem);
+  if (!editorNav.stack.length && previousItem && previousItem !== nextItem) recordEditorNav(previousItem);
   recordEditorNav(nextItem);
 }
 
@@ -4312,8 +4386,10 @@ function updateFocusOnlyChrome() {
 
 function setFocusedTerminalMeasured(session, options = {}) {
   const previousItem = focusedPanelItem;
+  editorNav.focusedItem = session;
   const alreadyFocused = focusedTerminal === session && focusedPanelItem === session;
   if (alreadyFocused) {
+    if (options.userInitiated === true) recordEditorNav(session);
     rememberActivePaneItem(session);
     if (isTmuxSession(session)) lastFocusedTmuxSession = session;
     if (options.userInitiated === true) {
@@ -4342,7 +4418,6 @@ function setFocusedTerminalMeasured(session, options = {}) {
     }
     recordFocusNavTransition(previousItem, session);
   }
-  else recordAutoFocusNav(session, previousItem);
 }
 
 function clearFocusedTerminal(session) {
@@ -4368,11 +4443,12 @@ function applyUserInitiatedPanelFocus(item, previousItem, options = {}) {
   }
   const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);
   if (!isFileExplorerItem(item) && options.deferSideSync !== true) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});
-  if (previousItem !== item) recordFocusNavTransition(previousItem, item);
+  recordFocusNavTransition(previousItem, item);
 }
 
 function setFocusedPanelItem(item, options = {}) {
   const previousItem = focusedPanelItem;
+  editorNav.focusedItem = item;
   const alreadyFocused = focusedPanelItem === item;
   if (alreadyFocused) {
     rememberActivePaneItem(item);
@@ -4396,27 +4472,14 @@ function setFocusedPanelItem(item, options = {}) {
   if (options.userInitiated === true) {
     applyUserInitiatedPanelFocus(item, previousItem, options);
   }
-  else recordAutoFocusNav(item, previousItem);
-}
-
-let autoFocusNavTimer = null;
-// an AUTO-FOCUS-driven focus change records back/forward nav "as if clicked", so Back
-// returns to where you were. Debounced by a short dwell so rapid auto-focus flapping (focus chasing
-// needs-attention) records only the focus that LANDS, not every transient flip. User clicks already
-// record immediately (activatePaneTab userInitiated); a back/forward re-activation lands on the item
-// already at the stack head, so recordEditorNav's consecutive-dedupe makes this a no-op there.
-function recordAutoFocusNav(item, previousItem = null) {
-  if (!autoFocusCanFollowCursor() || !item) return;
-  if (autoFocusNavTimer) clearTimeout(autoFocusNavTimer);
-  autoFocusNavTimer = setTimeout(() => {
-    autoFocusNavTimer = null;
-    if (focusedPanelItem === item) recordFocusNavTransition(previousItem, item);
-  }, 500);
 }
 
 function clearPendingFileEditorFocusExcept(item) {
   for (const pendingItem of Array.from(pendingFileEditorFocus)) {
-    if (pendingItem !== item) pendingFileEditorFocus.delete(pendingItem);
+    if (pendingItem !== item) {
+      pendingFileEditorFocus.delete(pendingItem);
+      explicitFileEditorFocus.delete(pendingItem);
+    }
   }
 }
 
@@ -4438,7 +4501,9 @@ function focusTerminalFromUserAction(session, delay = 0, options = {}) {
 }
 
 function focusTerminalDom(session, delay = 0) {
+  const generation = tabSwitchHighlightGeneration;
   const run = () => {
+    if (delay > 0 && (generation !== tabSwitchHighlightGeneration || focusedPanelItem !== session)) return;
     const item = terminals.get(session);
     const textarea = item?.container?.querySelector?.('textarea.xterm-helper-textarea');
     recordTerminalMobileInputTrace(session, 'focus-attempt', {
@@ -4663,16 +4728,25 @@ function fuzzyHighlightHtml(query, text, {markClass = 'fuzzy-match'} = {}) {
   }
   if (!indexes.size) return esc(value);
   const chars = Array.from(value);
+  // The matcher indexes lowercased UTF-16 text; render whole original code points,
+  // including surrogate pairs and characters whose lowercase form expands.
+  let foldedOffset = 0;
+  const matchedChars = chars.map(char => {
+    const length = char.toLowerCase().length;
+    const matched = Array.from({length}, (_, offset) => foldedOffset + offset).some(offset => indexes.has(offset));
+    foldedOffset += length;
+    return matched;
+  });
   const parts = [];
   let index = 0;
   while (index < chars.length) {
-    if (!indexes.has(index)) {
+    if (!matchedChars[index]) {
       parts.push(esc(chars[index]));
       index += 1;
       continue;
     }
     const start = index;
-    while (index < chars.length && indexes.has(index)) index += 1;
+    while (index < chars.length && matchedChars[index]) index += 1;
     parts.push(`<mark class="${esc(markClass)}">${esc(chars.slice(start, index).join(''))}</mark>`);
   }
   return parts.join('');
@@ -5918,18 +5992,12 @@ function terminalWrappedLineGroup(term, y, scan = terminalReferenceScanContext(t
   return {text: joined, rows, term, buffer, headIncomplete, headStructuralPrefixLength, tailIncomplete, boundaryRow};
 }
 
-function terminalWrappedOffsetPosition(group, offset, endPosition = false) {
-  const target = endPosition ? Math.max(0, offset - 1) : offset;
-  const row = group.rows.find(candidate => target >= candidate.start && target < candidate.end) || group.rows[group.rows.length - 1];
-  if (!row) return null;
-  // A stitched continuation row had `indent` leading spaces stripped before joining, so its real
-  // terminal column is shifted right by that indent.
-  return {x: Math.max(1, target - row.start + 1 + (row.indent || 0)), y: row.y};
-}
-
 function terminalTextCellWidth(term, text) {
   const value = String(text || '');
-  const unicodeService = term?.unicode;
+  // The pinned xterm public Unicode API configures providers; the core service
+  // owns the active provider's cell widths, including combining characters.
+  const unicodeService = term?._core?.unicodeService || term?.unicode;
+  if (typeof unicodeService?.getStringCellWidth === 'function') return unicodeService.getStringCellWidth(value);
   if (typeof unicodeService?.wcwidth === 'function') {
     let width = 0;
     for (const char of value) width += Math.max(0, Number(unicodeService.wcwidth(char.codePointAt(0))) || 0);
@@ -5945,9 +6013,6 @@ function terminalRowCellOffset(term, text, offset) {
 }
 
 function terminalWrappedRange(group, startIndex, endIndex) {
-  const start = terminalWrappedOffsetPosition(group, startIndex, false);
-  const end = terminalWrappedOffsetPosition(group, endIndex, true);
-  if (!start || !end) return null;
   const segments = group.rows
     .map(row => {
       const segmentStart = Math.max(startIndex, row.start);
@@ -5962,9 +6027,9 @@ function terminalWrappedRange(group, startIndex, endIndex) {
       };
     })
     .filter(Boolean);
-  const range = {start, end};
-  // Keep the public logical range stable while giving hit testing the actual painted segment on each
-  // row. The segments are an implementation detail, so they must not change serialized range keys.
+  if (!segments.length) return null;
+  const range = {start: segments[0].start, end: segments[segments.length - 1].end};
+  // Logical endpoints and physical hit-testing segments share the same cell coordinates.
   Object.defineProperty(range, 'segments', {value: segments, enumerable: false});
   return range;
 }
@@ -6026,12 +6091,7 @@ function terminalWrappedLineReferences(term, y, scan = terminalReferenceScanCont
     || group.boundaryRow?.y === y
     || (group.boundaryRow?.terminalEndsWithWhitespace && group.boundaryRow.y + 1 === y);
   if (!queryIsInGroup) return [];
-  const references = group.rows.length === 1 && !group.rows[0].indent
-    ? terminalTextReferences(group.text, (startIndex, endIndex) => ({
-      start: {x: startIndex + 1, y},
-      end: {x: endIndex, y},
-    }), y)
-    : terminalTextReferences(group.text, (startIndex, endIndex) => terminalWrappedRange(group, startIndex, endIndex));
+  const references = terminalTextReferences(group.text, (startIndex, endIndex) => terminalWrappedRange(group, startIndex, endIndex));
   const complete = terminalCompletedWrappedReferences(term, group, references);
   if (!group.boundaryRow) return complete;
   const referencesOnIndependentRow = (row, startsAfterBoundary = false) => {
@@ -6734,7 +6794,11 @@ function showCopyFeedback(options = {}) {
 }
 
 function copyTextWithFeedback(text, options = {}) {
-  return copyTextToClipboard(text).then(() => {
+  return copyOperationWithFeedback(copyTextToClipboard(text), options);
+}
+
+function copyOperationWithFeedback(operation, options = {}) {
+  return operation.then(() => {
     showCopyFeedback(options);
     return true;
   }, error => {
@@ -6742,6 +6806,23 @@ function copyTextWithFeedback(text, options = {}) {
     if (options.rethrow === true) throw error;
     return false;
   });
+}
+
+function writeClipboardItemWithFeedback(data, options = {}) {
+  return copyOperationWithFeedback(writeClipboardItem(data), options);
+}
+
+function writeClipboardItem(data) {
+  // Observe every promised blob even if native write rejects before consuming the item.
+  const blobs = Promise.all(Object.values(data));
+  let write;
+  try {
+    // Keep write in the click handler to preserve transient user activation.
+    write = navigator.clipboard.write([new ClipboardItem(data)]);
+  } catch (error) {
+    write = Promise.reject(error);
+  }
+  return Promise.all([blobs, write]);
 }
 
 async function copyTextToClipboard(text) {
@@ -6789,20 +6870,39 @@ function copyTextToClipboardViaCopyEvent(text) {
   }
 }
 
-function clipboardImageBlobFor(image) {
+async function clipboardImageBlobFor(image) {
   const path = String(image?.dataset?.resolvedPath || '');
   const url = String(image?.currentSrc || image?.src || '');
+  let blob;
   if (path && typeof fetchRawFileBlob === 'function') {
-    return fetchRawFileBlob(path).then(result => {
-      if (!result?.ok || !result.blob) throw result?.error || new Error(`Unable to read image: ${path}`);
-      return result.blob;
-    });
-  }
-  if (!url) return Promise.reject(new Error('Image source is unavailable'));
-  return fetch(url, {credentials: 'same-origin'}).then(response => {
+    const result = await fetchRawFileBlob(path);
+    if (!result.ok || !result.blob) throw result.error || new Error(`Unable to read image: ${path}`);
+    blob = result.blob;
+  } else {
+    if (!url) throw new Error('Image source is unavailable');
+    const response = await fetch(url, {credentials: 'same-origin'});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return response.blob();
-  });
+    blob = await response.blob();
+  }
+  return clipboardPngBlob(blob);
+}
+
+async function clipboardPngBlob(blob) {
+  if (blob.type === 'image/png') return blob;
+  // Both image-copy actions advertise PNG to the native clipboard, which validates the Blob type.
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    canvas.getContext('2d').drawImage(bitmap, 0, 0);
+    return await new Promise((resolve, reject) => canvas.toBlob(
+      png => png ? resolve(png) : reject(new Error('Unable to encode clipboard image as PNG')),
+      'image/png',
+    ));
+  } finally {
+    bitmap.close();
+  }
 }
 
 // ONE clipboard-write chain for terminal-initiated copies (shortcut copy AND the OSC 52
@@ -6966,12 +7066,18 @@ function bindOnce(root, key, installer) {
 function bindScopedOnce(root, key, installer) {
   return bindOnce(root, key, () => {
     const scope = createLifecycleScope();
-    const uninstall = installer(scope, root);
-    return () => {
-      if (typeof uninstall === 'function') uninstall();
-      else uninstall?.dispose?.();
-      scope.dispose(`bind-once:${String(key)}`);
-    };
+    let uninstall;
+    try { uninstall = installer(scope, root); }
+    catch (error) {
+      try { scope.dispose('installer-failed'); }
+      catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Scoped installation and cleanup failed'); }
+      throw error;
+    }
+    scope.replace(Symbol('installer-cleanup'), uninstall, cleanup => {
+      if (typeof cleanup === 'function') cleanup();
+      else cleanup?.dispose?.();
+    });
+    return () => scope.dispose(`bind-once:${String(key)}`);
   });
 }
 
@@ -7035,9 +7141,15 @@ function createLifecycleScope(options = {}) {
     dispose(reason = 'disposed') {
       if (disposed) return false;
       disposed = true;
-      for (const record of [...resources.values()].reverse()) disposeResource(record);
+      const failures = [];
+      for (const record of [...resources.values()].reverse()) {
+        try { disposeResource(record); }
+        catch (error) { failures.push(error); }
+      }
       resources.clear();
-      options.onDispose?.(reason);
+      try { options.onDispose?.(reason); }
+      catch (error) { failures.push(error); }
+      if (failures.length) throw new AggregateError(failures, 'Lifecycle scope disposal failed');
       return true;
     },
     disposed() { return disposed; },
@@ -7203,7 +7315,7 @@ function dedupeInflight(inflight, key, canReuse, makeRequest) {
 
 function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) {
   const iconHtml = options.checked !== undefined
-    ? `<span class="context-menu-check" aria-hidden="true">${options.checked ? '✓' : ''}</span>`
+    ? `<span class="context-menu-check" aria-hidden="true">${options.checked ? '✓' : ''}</span>${options.checkedIconHtml ? stripTitleAttrs(options.checkedIconHtml) : ''}`
     : options.iconHtml ? stripTitleAttrs(options.iconHtml) : '';
   const shortcutHtml = options.shortcut ? `<span class="context-menu-shortcut">${esc(options.shortcut)}</span>` : '';
   const buttonHtml = iconHtml || shortcutHtml
@@ -7426,18 +7538,11 @@ async function copyMarkdownPreviewImageToClipboard(image, button) {
     reader.readAsDataURL(blob);
   }));
   const htmlBlob = dataUrl.then(source => new Blob([`<img src="${esc(source)}" alt="${esc(image?.alt || '')}">`], {type: 'text/html'}));
-  try {
-    // Start write() in the click handler. ClipboardItem accepts promise-valued blobs, so the
-    // browser preserves transient user activation while the image fetch completes.
-    await navigator.clipboard.write([new ClipboardItem({
-      'text/plain': new Blob([image?.alt || image?.dataset?.originalSrc || url], {type: 'text/plain'}),
-      'text/html': htmlBlob,
-      'image/png': imageBlob,
-    })]);
-    showCopyFeedback({button, statusText: t('status.copiedImage', {name: image?.alt || 'image'})});
-  } catch (error) {
-    await copyTextWithFeedback(image?.dataset?.originalSrc || url || path, {button});
-  }
+  return writeClipboardItemWithFeedback({
+    'text/plain': new Blob([image?.alt || image?.dataset?.originalSrc || url], {type: 'text/plain'}),
+    'text/html': htmlBlob,
+    'image/png': imageBlob,
+  }, {button, statusText: t('status.copiedImage', {name: image?.alt || 'image'})});
 }
 
 function showImageContextMenu(image, x, y) {
@@ -7886,7 +7991,7 @@ async function copyDeferredTextToClipboard(payloadPromise, options = {}) {
   if (clipboard?.write && typeof globalThis.ClipboardItem === 'function' && typeof globalThis.Blob === 'function') {
     const textBlob = payloadPromise.then(({text}) => new Blob([text], {type: 'text/plain'}));
     try {
-      await clipboard.write([new ClipboardItem({'text/plain': textBlob})]);
+      await writeClipboardItem({'text/plain': textBlob});
       const result = await payloadPromise;
       showCopyFeedback({...options, result});
       return result;
@@ -8189,7 +8294,7 @@ function showTabContextMenu(item, x, y, options = {}) {
   closeFileContextMenu();
   closeOtherSessionPopovers(null);
   const menu = document.createElement('div');
-  menu.className = `terminal-context-menu session-context-menu${options.presentation === 'sheet' ? ' tab-action-sheet' : ''}`;
+  menu.className = `terminal-context-menu session-context-menu context-menu-icon-rows${options.presentation === 'sheet' ? ' tab-action-sheet' : ''}`;
   menu.setAttribute('role', 'menu');
   const refreshPosition = () => positionContextMenu(menu, x, y);
   const appendDescription = () => {
@@ -8198,30 +8303,39 @@ function showTabContextMenu(item, x, y, options = {}) {
     const rawDescription = tabMenuDetailText(item, info);
     const description = rawDescription && rawDescription !== tab ? rawDescription : t('common.notAvailable');
     const text = t('tab.actions.moreDescription', {tab, description});
-    const line = makeButton({
+    appendContextMenuButton(menu, text, () => openTabDescriptionPopover(item, options.tab), closeSessionContextMenu, {
       className: 'tab-action-description',
-      label: text,
       ariaLabel: text,
       title: t('common.details'),
-      onClick: event => {
-        event.preventDefault();
-        event.stopPropagation();
-        openTabDescriptionPopover(item, options.tab);
-      },
+      iconHtml: fileContextMenuIcon('info'),
     });
-    menu.appendChild(line);
   };
   const renderActions = () => {
     menu.replaceChildren();
     const sourceSlot = options.sourceSlot || slotForItem(item);
     if (options.tab && options.descriptionWindow == null) appendTabSplitCommands(menu, item, options);
     if (!slotIsSidePane(sourceSlot) && options.descriptionWindow == null) appendDescription();
+    if (isTmuxSession(item) && options.descriptionWindow == null) {
+      const rename = tmuxSessionActionCommands(item, {
+        includeYolo: false,
+        includeKill: false,
+        renameAction: options.tab ? () => beginPaneTabRename(options.tab, item) : () => renameTmuxSession(item),
+      })[0];
+      if (rename) {
+        appendContextMenuButton(menu, rename.label, rename.action, closeSessionContextMenu, {
+          disabled: rename.disabled,
+          ariaLabel: rename.ariaLabel,
+          iconHtml: fileContextMenuIcon('rename'),
+        });
+      }
+    }
     if (options.descriptionWindow == null && (tabWorkspaceIsFilled(item) || tabCanFillWorkspace(item))) {
       appendContextMenuButton(
         menu,
         tabWorkspaceIsFilled(item) ? t('layout.status.restored', {item: itemLabel(item)}) : t('pane.expand'),
         () => { toggleTabWorkspaceFill(item); },
         closeSessionContextMenu,
+        {iconHtml: fileContextMenuIcon(tabWorkspaceIsFilled(item) ? 'restore' : 'expand')},
       );
     }
     if (options.descriptionWindow == null) appendContextMenuSeparator(menu);
@@ -8297,8 +8411,8 @@ function appendTabSplitCommands(menu, item, options = {}) {
 
 function appendTabActionCommands(menu, item, options = {}) {
   if (options.descriptionWindow != null && isTmuxSession(item)) {
-    appendContextMenuButton(menu, 'Rename Description', () => showSessionRenameDialog(item, options.descriptionWindow, options.descriptionWindowId), closeSessionContextMenu, {disabled: readOnlyMode});
-    appendContextMenuButton(menu, 'Rename tmux', () => renameTmuxSession(item), closeSessionContextMenu, {disabled: readOnlyMode});
+    appendContextMenuButton(menu, 'Rename Description', () => showSessionRenameDialog(item, options.descriptionWindow, options.descriptionWindowId), closeSessionContextMenu, {disabled: readOnlyMode, iconHtml: fileContextMenuIcon('rename')});
+    appendContextMenuButton(menu, 'Rename tmux', () => renameTmuxSession(item), closeSessionContextMenu, {disabled: readOnlyMode, iconHtml: fileContextMenuIcon('rename')});
   }
   if (isPinnableTab(item)) {
     const pinned = tabIsPinned(item);
@@ -8309,12 +8423,13 @@ function appendTabActionCommands(menu, item, options = {}) {
       closeSessionContextMenu,
       {
         checked: pinned,
+        checkedIconHtml: fileContextMenuIcon('pin'),
         iconHtml: appMenuUiIcon('pin', pinned),
         shortcut: `${appShortcutText('K', {shift: true})} Enter`,
       },
     );
     if (typeof paneCanPopout === 'function' && paneCanPopout(item)) {
-      appendContextMenuButton(menu, t('tab.popout'), () => openPanePopout(item), closeSessionContextMenu);
+      appendContextMenuButton(menu, t('tab.popout'), () => openPanePopout(item), closeSessionContextMenu, {iconHtml: fileContextMenuIcon('open')});
     }
   }
   if (isFileEditorItem(item) || item === differItemId) {
@@ -8323,20 +8438,32 @@ function appendTabActionCommands(menu, item, options = {}) {
       isFileEditorItem(item) ? t('finder.close', {name: itemLabel(item)}) : t('common.close'),
       () => closeLayoutTabItem(item),
       closeSessionContextMenu,
+      {iconHtml: fileContextMenuIcon('close')},
     );
   }
   if (isTmuxSession(item)) {
     if (isPinnableTab(item)) appendContextMenuSeparator(menu);
     const renameAction = options.tab ? () => beginPaneTabRename(options.tab, item) : () => renameTmuxSession(item);
-    for (const command of tmuxSessionActionCommands(item, {renameAction, includeKill: false, includeRename: options.descriptionWindow == null})) {
-      appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {disabled: command.disabled, checked: command.checked});
-    }
-    const paneInfoBarLabel = t('menu.tmux.paneDetails');
-    const viewItems = tmuxSessionViewCommands(item, {includeStatus: false}).filter(command => command.label !== paneInfoBarLabel);
-    for (const command of viewItems) {
+    for (const command of tmuxSessionActionCommands(item, {
+      renameAction,
+      includeKill: false,
+      includeRename: false,
+    })) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {
         disabled: command.disabled,
         checked: command.checked,
+        iconHtml: command.iconHtml,
+        checkedIconHtml: command.iconHtml,
+      });
+    }
+    const paneInfoBarLabel = t('menu.tmux.paneDetails');
+    const viewItems = tmuxSessionViewCommands(item, {includeStatus: false}).filter(command => command.label !== paneInfoBarLabel);
+    const viewIcons = ['transcript', 'summary', 'event'];
+    for (const [index, command] of viewItems.entries()) {
+      appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {
+        disabled: command.disabled,
+        checked: command.checked,
+        checkedIconHtml: fileContextMenuIcon(viewIcons[index]),
         title: command.detail || '',
       });
     }
@@ -8350,21 +8477,30 @@ function appendTabActionCommands(menu, item, options = {}) {
         : record.index === Number(options.descriptionWindow));
       if (windowRecord && windows.length > 1) {
         const killWindow = tmuxWindowKillCommand(item, windowRecord);
-        appendContextMenuButton(menu, killWindow.label, killWindow.action, closeSessionContextMenu, {disabled: killWindow.disabled, className: 'danger'});
+        appendContextMenuButton(menu, killWindow.label, killWindow.action, closeSessionContextMenu, {disabled: killWindow.disabled, className: 'danger', iconHtml: fileContextMenuIcon('delete')});
         const label = localizedLabel('menu.tmux.kill.session.windows', 'Kill entire tmux session ({count} windows)', {count: windows.length});
         const killSession = tmuxSessionKillCommand(item, {label});
-        appendContextMenuButton(menu, killSession.label, killSession.action, closeSessionContextMenu, {disabled: killSession.disabled, className: 'danger'});
+        appendContextMenuButton(menu, killSession.label, killSession.action, closeSessionContextMenu, {disabled: killSession.disabled, className: 'danger', iconHtml: fileContextMenuIcon('delete')});
       } else if (windowRecord) {
         const killSession = tmuxSessionKillCommand(item, {label: t('menu.tmux.kill')});
-        appendContextMenuButton(menu, killSession.label, killSession.action, closeSessionContextMenu, {disabled: killSession.disabled, className: 'danger'});
+        appendContextMenuButton(menu, killSession.label, killSession.action, closeSessionContextMenu, {disabled: killSession.disabled, className: 'danger', iconHtml: fileContextMenuIcon('delete')});
       }
     } else {
       const killItem = tmuxSessionKillCommand(item);
-      appendContextMenuButton(menu, killItem.label, killItem.action, closeSessionContextMenu, {disabled: killItem.disabled, className: 'danger'});
+      appendContextMenuButton(menu, killItem.label, killItem.action, closeSessionContextMenu, {disabled: killItem.disabled, className: 'danger', iconHtml: fileContextMenuIcon('delete')});
     }
   }
 }
 
 function showSessionContextMenu(session, x, y, options = {}) {
   showTabContextMenu(session, x, y, options);
+}
+
+function fileExplorerPermissionsVisible() {
+  return storageGet('yomux.finder.permissions.v1') === '1';
+}
+
+function toggleFileExplorerPermissions() {
+  storageSet('yomux.finder.permissions.v1', fileExplorerPermissionsVisible() ? '0' : '1');
+  refreshFileExplorerViewSettingsSurface('finder');
 }

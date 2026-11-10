@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/keivenchang/yomux/internal/stats"
-	"github.com/keivenchang/yomux/internal/yoagent"
 )
 
 func TestNativeYOAgentJobRuntimeRequiresFreshKnownSession(t *testing.T) {
@@ -37,6 +36,12 @@ func TestNativeYOAgentSessionStateUsesMostUrgentObservedState(t *testing.T) {
 		{name: "no verified agent", want: "unavailable"},
 		{name: "all idle", input: []map[string]any{{"status": "idle"}, {"status": "idle"}}, want: "idle"},
 		{name: "question takes precedence", input: []map[string]any{{"status": "blocked"}, {"status": "needs-input", "attention_kind": "question"}}, want: "needs-input"},
+		{name: "question before approval", input: []map[string]any{{"status": "needs-input", "attention_kind": "question"}, {"status": "needs-input", "attention_kind": "approval"}}, want: "needs-input"},
+		{name: "approval before question", input: []map[string]any{{"status": "needs-input", "attention_kind": "approval"}, {"status": "needs-input", "attention_kind": "question"}}, want: "needs-input"},
+		{name: "unavailable before working", input: []map[string]any{{"status": "unavailable"}, {"status": "working"}}, want: "working"},
+		{name: "working before unavailable", input: []map[string]any{{"status": "working"}, {"status": "unavailable"}}, want: "working"},
+		{name: "ambiguous ask before question", input: []map[string]any{{"status": "needs-input"}, {"status": "needs-input", "attention_kind": "question"}}, want: "unavailable"},
+		{name: "question before ambiguous ask", input: []map[string]any{{"status": "needs-input", "attention_kind": "question"}, {"status": "needs-input"}}, want: "unavailable"},
 		{name: "approval is blocked", input: []map[string]any{{"status": "needs-input", "attention_kind": "approval"}}, want: "blocked"},
 		{name: "ambiguous ask fails closed", input: []map[string]any{{"status": "needs-input"}}, want: "unavailable"},
 		{name: "working prevents idle", input: []map[string]any{{"status": "idle"}, {"status": "working"}}, want: "working"},
@@ -94,11 +99,7 @@ func TestNativeYOAgentJobRuntimePublishesNotificationAndUsesVerifiedSendOwner(t 
 	}
 	events.mu.Unlock()
 
-	store, err := yoagent.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := newYOAgentTestStore(t, t.TempDir())
 	current := nativeYOAgentActionTarget{
 		Session: "agent-a", SessionIdentity: "session:1", PaneTarget: "%7",
 		ProcessInstanceID: "process:1", AgentKind: "codex", Status: stats.AgentStatusIdle,
@@ -119,5 +120,33 @@ func TestNativeYOAgentJobRuntimePublishesNotificationAndUsesVerifiedSendOwner(t 
 	execution, err = runtime.Execute(context.Background(), job)
 	if err != nil || !execution.Attempted || !execution.Succeeded || execution.Result["send"] == nil {
 		t.Fatalf("verified send execution=%#v err=%v", execution, err)
+	}
+}
+
+func TestNativeYOAgentJobsRetainLiveMetadataAttentionClassification(t *testing.T) {
+	for _, kind := range []string{"question", "approval", "unknown"} {
+		t.Run(kind, func(t *testing.T) {
+			service := &server{agentStatusClassifier: func(context.Context, stats.AgentStatusRequest) stats.AgentStatusResult {
+				return stats.AgentStatusResult{Status: stats.AgentStatusAsk, AttentionKind: kind}
+			}}
+			metadata := service.liveSessionMetadataFromOutput("fixture", []byte("fixture\t0\twindow\t0\t%1\t/tmp\tcodex\t\t999999999\t1\t1\n"), nil)
+			want, predicate := "needs-input", "session_needs_input"
+			if kind == "approval" {
+				want, predicate = "blocked", "session_blocked"
+			}
+			if kind == "unknown" {
+				want = "unavailable"
+			}
+			state := nativeYOAgentSessionState(metadata)
+			if state != want {
+				t.Fatalf("live %s classified as %s want %s", kind, state, want)
+			}
+			runtime := &nativeYOAgentJobRuntime{server: service, known: map[string]bool{"fixture": true}, status: map[string]string{"fixture": state}}
+			job := map[string]any{"type": "notify_session_idle", "target": map[string]any{"session": "fixture"}, "predicate": map[string]any{"type": predicate}}
+			observation, err := runtime.Observe(context.Background(), job)
+			if err != nil || observation.Ready != (kind != "unknown") {
+				t.Fatalf("live predicate observation=%+v err=%v", observation, err)
+			}
+		})
 	}
 }

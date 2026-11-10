@@ -13,7 +13,36 @@ import (
 	"testing"
 
 	"github.com/keivenchang/yomux/internal/capabilities"
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
+
+func TestNativeBuiltinSettingsSkillPreservesClarificationGuard(t *testing.T) {
+	s := &server{root: testsupport.RepoRoot(t), config: t.TempDir()}
+	response := httptest.NewRecorder()
+	s.yoagentSkills(response, httptest.NewRequest(http.MethodGet, "/api/yoagent/skills", nil))
+	var payload struct {
+		OK     bool `json:"ok"`
+		Skills []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"skills"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || !payload.OK {
+		t.Fatalf("builtin skills response=%d %s", response.Code, response.Body.String())
+	}
+	for _, skill := range payload.Skills {
+		if skill.Name == "settings-operator" {
+			if !strings.HasSuffix(skill.Description, "YOLO rule paths, or broad list replacement.") {
+				t.Fatalf("settings clarification guard truncated: %q", skill.Description)
+			}
+			return
+		}
+	}
+	t.Fatal("builtin settings-operator skill missing")
+}
 
 func TestNativeYOAgentSkillFileRoutesReadWriteAndDelete(t *testing.T) {
 	root, config := t.TempDir(), t.TempDir()

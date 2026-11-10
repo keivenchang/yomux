@@ -103,10 +103,8 @@ def load_or_create_secret_key(path: Path, num_bytes: int = 32) -> bytes:
 def open_wal_database(path: Path, busy_timeout_ms: int, *, row_factory: Any = None) -> sqlite3.Connection:
     """Open a WAL-friendly SQLite connection under a private 0700 parent dir.
 
-    chat_store and the login rate-limiter both open a multi-writer WAL database with the
-    same connect timeout + busy_timeout so concurrent writers wait rather than error;
-    this is the one owner of that open dance (callers add their own schema-specific
-    PRAGMAs like foreign_keys). `isolation_level=None` keeps autocommit so callers drive
+    Use matching connect and busy timeouts so concurrent writers wait rather than error.
+    Callers add their own schema-specific PRAGMAs. `isolation_level=None` keeps autocommit so callers drive
     explicit BEGIN IMMEDIATE transactions.
     """
     preflight_mutable_roots(wal_databases=[path])
@@ -181,11 +179,12 @@ def is_atomic_write_temp(name: str, *, target_name: str) -> bool:
     return match is not None and match.group("target") == target_name
 
 
-def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
+def atomic_write_text(path: Path, text: str, mode: int | None = None, *, overwrite: bool = True) -> None:
     """Write `text` to `path` atomically: unique temp sibling, fsync, then os.replace.
 
     The temp name carries pid + thread id + ns so concurrent writers never collide. `mode` (e.g. 0o600)
     sets permissions on both the temp (at create) and the final file (after replace).
+    With ``overwrite=False``, publish the complete file only if the destination is absent.
     """
     tmp = path.with_name(_atomic_temp_name(path.name))
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if mode is None else mode)
@@ -194,7 +193,10 @@ def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        if overwrite:
+            os.replace(tmp, path)
+        else:
+            os.link(tmp, path)
         if mode is not None:
             path.chmod(mode)
     finally:

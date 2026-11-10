@@ -42,6 +42,11 @@ func settingsList(value any) []any {
 	return list
 }
 
+func setPairedEditorPreviewFontSize(appearance map[string]any, value any) {
+	appearance["editor_font_size"] = value
+	appearance["preview_font_size"] = value
+}
+
 func (schema nativeSettingsSchema) entry(name, path string) any {
 	return settingsObject(schema[name])[path]
 }
@@ -398,6 +403,8 @@ func (schema nativeSettingsSchema) sanitize(raw any, coerced *[]string) map[stri
 			break
 		}
 	}
+	appearance := settingsObject(result["appearance"])
+	setPairedEditorPreviewFontSize(appearance, appearance["editor_font_size"])
 	return result
 }
 
@@ -420,6 +427,17 @@ func (schema nativeSettingsSchema) merge(current map[string]any, patch any, coer
 	merged = schema.sanitize(merged, coerced)
 	appearance := settingsObject(merged["appearance"])
 	patchAppearance := settingsObject(settingsObject(patch)["appearance"])
+	if _, exists := patchAppearance["editor_font_size"]; exists {
+		pairedSize := appearance["editor_font_size"]
+		setPairedEditorPreviewFontSize(appearance, pairedSize)
+	} else if size, exists := patchAppearance["preview_font_size"]; exists {
+		candidate := schema.sanitize(map[string]any{"appearance": map[string]any{
+			"editor_font_size":  size,
+			"preview_font_size": size,
+		}}, nil)
+		pairedSize := settingsObject(candidate["appearance"])["editor_font_size"]
+		setPairedEditorPreviewFontSize(appearance, pairedSize)
+	}
 	_, syncPresent := patchAppearance["sync_font_sizes"]
 	_, sizePresent := patchAppearance["global_font_size"]
 	if appearance["sync_font_sizes"] == true && (syncPresent || sizePresent) {

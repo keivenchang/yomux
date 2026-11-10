@@ -510,7 +510,7 @@ body.editor-theme-light .file-editor-image-panel {
 .file-editor-dialog-body {
   padding: var(--space-12);
   overflow: auto;
-  color: var(--inactive-tab-bg-hover);
+  color: var(--text);
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
   white-space: pre-wrap;
 }
@@ -520,6 +520,27 @@ body.editor-theme-light .file-editor-image-panel {
 }
 .file-editor-dialog-body.custom {
   white-space: normal;
+}
+.finder-move-comparison {
+  display: grid;
+  gap: var(--space-6);
+}
+.finder-move-comparison + .finder-move-comparison {
+  margin-top: var(--space-12);
+  padding-top: var(--space-12);
+  border-top: 1px solid var(--line);
+}
+.finder-move-source,
+.finder-move-target {
+  font-family: var(--mono-font);
+  min-width: 0;
+}
+.finder-move-target strong {
+  font-weight: 700;
+}
+.finder-move-arrow {
+  font-size: 1.2em;
+  line-height: 1;
 }
 
 .drop-action-result pre {
@@ -540,10 +561,10 @@ body.editor-theme-light .file-editor-image-panel {
 .file-editor-dialog-action {
   min-height: 26px;
   padding: var(--space-4) var(--space-9);
-  border: 1px solid #59677d;
+  border: 1px solid var(--pc-control-border);
   border-radius: var(--radius-control);
-  background: #202838;
-  color: #edf3ff;
+  background: var(--pc-control-bg);
+  color: var(--pc-control-fg);
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
   cursor: pointer;
 }
@@ -554,7 +575,7 @@ body.editor-theme-light .file-editor-image-panel {
   box-shadow: var(--active-control-focus-shadow-compact);
 }
 .file-editor-dialog-action.danger {
-  border-color: #9b2d33;
+  border-color: var(--danger-strong);
   color: var(--danger-text-soft);
 }
 .file-editor-conflict-compare {
@@ -773,7 +794,28 @@ body.editor-theme-light .file-editor-image {
   min-height: 100%;
   outline: none;
   cursor: text;
+  caret-color: var(--editor-cursor);
+  caret-shape: bar;
+  caret-animation: manual;
   white-space: pre-wrap;
+}
+body.editor-cursor-block .prosemirror-editor > .ProseMirror {
+  caret-shape: block;
+}
+.prosemirror-editor > .ProseMirror:focus {
+  animation: editor-native-cursor-blink var(--editor-cursor-blink-cycle) step-end infinite;
+}
+@keyframes editor-native-cursor-blink {
+  from, to { caret-color: var(--editor-cursor); }
+  50% { caret-color: transparent; }
+}
+.cm-cursorLayer {
+  animation-duration: var(--editor-cursor-blink-cycle) !important;
+}
+body.editor-cursor-static .cm-cursorLayer,
+body.editor-cursor-static .prosemirror-editor > .ProseMirror,
+body.editor-cursor-static .preferences-cursor-example {
+  animation: none !important;
 }
 .prosemirror-editor .mermaid-preview-host {
   overflow: visible;
@@ -1296,6 +1338,14 @@ body.theme-light .file-editor-panel .file-editor-title * {
   justify-content: flex-start;
   padding: 0;
   min-width: 0;
+}
+@media (max-width: 520px) {
+  .file-explorer-actions-row {
+    flex-wrap: wrap;
+  }
+  .file-explorer-actions-row .file-explorer-toolbar-spacer {
+    display: none;
+  }
 }
 .file-explorer-toolbar-row {
   inline-size: 100%;
@@ -1917,6 +1967,7 @@ body :is(
   position: relative;
   padding-inline-end: 58px;
 }
+.file-editor-readonly .cm-chunkButtons { display: none; }
 .file-editor-diff-codemirror .cm-deletedChunk .cm-chunkButtons {
   position: absolute !important;
   inset-block-start: 2px;
@@ -3395,8 +3446,6 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .session-button-dir,
 .ci-indicator,
 .popover-row.compact .popover-value,
-.pane-drag-image-title,
-.pane-drag-image-tabs span,
 .file-drag-title,
 .file-drag-more,
 .diff-ref-suggestion-ref,

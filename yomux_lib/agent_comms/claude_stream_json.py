@@ -6,14 +6,15 @@ from __future__ import annotations
 
 import json
 import os
-import selectors
 import subprocess
 import threading
 import time
 from typing import Any
 
-from .exceptions import TransportInterrupted
 from .stream_events import ClaudeStreamJsonNormalizer
+from .process_stream import process_pipe_output
+from .process_stream import retire_process
+from .process_stream import close_process_pipes
 
 
 CLAUDE_STREAM_JSON_DEFAULT_TOOLS = "default"
@@ -122,44 +123,25 @@ def claude_stream_json_run(
             raise OSError("claude stream-json pipes are unavailable")
         if callable(process_callback):
             process_callback(process)
-        process.stdin.write(text)
-        process.stdin.close()
         deadline = time.monotonic() + max(1.0, timeout)
-        selector = selectors.DefaultSelector()
+        stderr_parts: list[str] = []
         try:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            while True:
-                if cancel_event is not None and cancel_event.is_set():
-                    raise TransportInterrupted("interrupted")
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired(args, timeout)
-                ready = selector.select(timeout=min(0.25, remaining))
-                for key, _mask in ready:
-                    line = key.fileobj.readline()
-                    if line:
-                        stdout_parts.append(line)
-                        if callable(on_event):
-                            for event in normalizer.normalize_line(line):
-                                on_event(event)
-                if process.poll() is not None:
-                    for line in process.stdout.readlines():
-                        stdout_parts.append(line)
-                        if callable(on_event):
-                            for event in normalizer.normalize_line(line):
-                                on_event(event)
-                    break
-        finally:
-            selector.close()
-        if process.stderr is not None:
-            stderr_text = process.stderr.read()
+            with process_pipe_output(process, lambda: deadline, cancel_event=cancel_event, input_text=text) as output:
+                for name, line in output:
+                    if name == "stderr":
+                        stderr_parts.append(line)
+                        continue
+                    stdout_parts.append(line)
+                    if callable(on_event):
+                        for event in normalizer.normalize_line(line):
+                            on_event(event)
+        except TimeoutError as error:
+            raise subprocess.TimeoutExpired(args, timeout) from error
+        stderr_text = "".join(stderr_parts)
         return process.wait(timeout=max(0.1, deadline - time.monotonic())), "".join(stdout_parts), stderr_text
-    except BaseException:
-        if process is not None and process.poll() is None:
-            process.terminate()
+    finally:
+        if process is not None:
             try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=1)
-        raise
+                retire_process(process)
+            finally:
+                close_process_pipes(process)

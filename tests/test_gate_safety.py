@@ -2,56 +2,17 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Gate P9/P10: destructive defaults and approval failures fail closed."""
 
-import json
-from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from tests.browser_helpers.browser_console import validate_server_log_ring_payload
-from tests.browser_helpers.browser_console import validate_server_log_ring_transition
-from tests.gate_harness import gate_http_request
 from tests.gate_harness import gate_http_port  # noqa: F401
 from tests.native_gate_fixtures import gate_live_server  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 from yomux_lib.approval import auto_approve_worker
 from yomux_lib.approval import yolo_rules
-from yomux_lib.server_logs import SERVER_LOGS
-from yomux_lib.workspace import settings as settings_module
-
-
-def _retire_expected_settings_failure(runtime, response, route: str) -> None:
-    """Advance the fixture boundary only for this exact malformed-settings failure."""
-
-    start = validate_server_log_ring_payload(runtime.server_log_boundary)
-    current = validate_server_log_ring_payload(SERVER_LOGS.payload())
-    transition = validate_server_log_ring_transition(start, current)
-    failures = [
-        entry
-        for entry in transition["newLogs"]
-        if str(entry.get("level") or "").lower() in {"warning", "error"}
-    ]
-    payload = response.json()
-    request_id = payload["request"]["id"]
-    assert transition["droppedCount"] == 0, transition
-    assert len(failures) == 1, transition
-    entry = failures[0]
-    message = json.loads(str(entry.get("message") or ""))
-    assert (entry.get("level"), entry.get("source"), entry.get("category")) == (
-        "error",
-        "api-response",
-        "api",
-    )
-    assert message["code"] == "settings_file_malformed"
-    assert message["request"]["id"] == request_id
-    assert message["stack"] == [{
-        "code": "settings_file_malformed",
-        "component": "server.http",
-        "operation": route,
-    }]
-    runtime.server_log_boundary = current
 
 
 class _ApprovalEffectProbe:
@@ -166,10 +127,3 @@ def test_p10_evaluator_failure_fails_closed_with_a_typed_reason(monkeypatch, gat
         _exercise_broken_ruleset(monkeypatch, rule_path),
         "rules_evaluator_failed",
     )
-
-
-def _write_malformed_settings(path: Path) -> bytes:
-    malformed = b"chat:\n  retention_days: [unterminated\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(malformed)
-    return malformed

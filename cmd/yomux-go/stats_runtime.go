@@ -547,6 +547,7 @@ func (s *server) statsRuntimeDiagnostics() map[string]any {
 		}
 	}
 	payload["collectors"] = collectors
+	payload["collector_health"] = s.statsCollectorHealth()
 	if s.statsRuntimeRecorder != nil {
 		payload["runtime_recorder"] = s.statsRuntimeRecorder.diagnostics()
 	}
@@ -888,7 +889,7 @@ func (s *server) statsCapabilities(w http.ResponseWriter, r *http.Request) {
 	if s.statsMigration != nil {
 		payload["migration"] = cloneMap(s.statsMigration)
 	}
-	jsonResponse(w, http.StatusOK, statsReadyEnvelope(statsRequestID(r), payload))
+	jsonResponse(w, http.StatusOK, apiReadyEnvelope(statsRequestID(r), payload))
 }
 
 func (s *server) statsSessionAliases(w http.ResponseWriter, r *http.Request) {
@@ -913,26 +914,6 @@ func statsRequestID(r *http.Request) string {
 		}
 	}
 	return fmt.Sprintf("r-%d", time.Now().UnixNano())
-}
-
-func statsReadyEnvelope(requestID string, payload map[string]any) map[string]any {
-	// Keep the transport envelope compatible with Python's
-	// ApiResponseWriter, which preserves established payload aliases at the
-	// top level for JSON products. The browser unwraps data, while raw parity
-	// consumers compare these aliases too.
-	envelope := map[string]any{
-		"state":    "ready",
-		"request":  map[string]any{"id": requestID},
-		"data":     payload,
-		"ok":       true,
-		"terminal": true,
-	}
-	for key, value := range payload {
-		if _, exists := envelope[key]; !exists {
-			envelope[key] = value
-		}
-	}
-	return envelope
 }
 
 // statsHTTPErrorEnvelope mirrors the Python ApiResponseWriter's canonical
@@ -1924,7 +1905,7 @@ func (s *server) statsObservations(w http.ResponseWriter, r *http.Request) {
 		receipts = append(receipts, map[string]any{"event_id": fmt.Sprintf("observation-%d", index), "disposition": "duplicate"})
 	}
 	statsPayload := map[string]any{"ok": true, "source_generation": result.Generation, "accepted": result.ObservationsAccepted, "duplicates": result.ObservationsDuplicate, "observation_receipts": receipts}
-	jsonResponse(w, http.StatusOK, statsReadyEnvelope(statsRequestID(r), statsPayload))
+	jsonResponse(w, http.StatusOK, apiReadyEnvelope(statsRequestID(r), statsPayload))
 }
 
 type browserObservationEnvelope struct {
@@ -2689,7 +2670,7 @@ func (s *server) pricingCatalog(w http.ResponseWriter, r *http.Request) {
 		refreshState["status"] = "running"
 	}
 	s.pricingRefreshMu.Unlock()
-	jsonResponse(w, http.StatusOK, statsReadyEnvelope(statsRequestID(r), map[string]any{"catalog": s.pricing.PublicPayload(), "refresh": refreshState}))
+	jsonResponse(w, http.StatusOK, apiReadyEnvelope(statsRequestID(r), map[string]any{"catalog": s.pricing.PublicPayload(), "refresh": refreshState}))
 }
 
 func (s *server) pricingCatalogRefresh(w http.ResponseWriter, r *http.Request) {

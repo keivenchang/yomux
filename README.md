@@ -38,7 +38,9 @@ The Go backend is a modular monolith, not a port of Python's web-process-plus-lo
 
 Available Go routes include terminal/session, Finder, Git, Differ, editor, diagnostics, YO!stats, and existing-session YO auto-approval. `yolo.auto-approve.v1` owns the authenticated YO toggle and configured approval rules for supported Claude and Codex panes. Go also retries the exact visible Codex capacity notice immediately with bracketed paste of exact `continue` followed by a real Enter key, then every 10 seconds while that notice remains current. The background-terminal count, `Goal achieved` label in the model footer, and shortcuts/warnings footer do not hide that notice. YO leaves user drafts untouched and stops retrying when newer output, active work, or an unrecognized footer makes the screen unsafe to submit. If its own `continue` is still unsubmitted, the next retry sends Enter only, and `yolo.dry_run` records intended actions without sending terminal input. YO!chat and YO!agent use native Go storage and handlers; their capabilities are enabled after their stores initialize. Agent responses use the installed Claude or Codex CLI. Unknown `/api/*` routes return typed `501 feature_unavailable` errors. [`GO_MIGRATION.md`](GO_MIGRATION.md) owns route, capability, and migration status.
 
-Go Finder accepts any absolute path the server process can access. It does not apply the legacy Python backend's configured-root or credential-name denylist. OS permissions, descriptor identity checks, bounded operation limits, role checks, and the protected product-root mutation guard still apply.
+Go Finder accepts any absolute path the server process can access. Reading file contents, file comparisons, and commit patches requires an administrator account. It does not apply the legacy Python backend's configured-root or credential-name denylist. OS permissions, descriptor identity checks, bounded operation limits, role checks, and the protected product-root mutation guard still apply.
+
+Finder's `rwx` control beside Date/Ago shows Unix permissions and remembers the choice. Right-click a file or folder and select **Get Info** for filesystem metadata and cancellable folder contents totals. Administrators can apply Owner, Group, and Others permissions when the server's OS account permits it. Applying to enclosed items requires a separate confirmation and applies the exact selected bits, including execute; Cancel preserves changes already completed. Symlink permissions are read-only. Unavailable creation times remain unavailable, and incomplete folder totals are marked partial.
 
 Build, validate, and then start the preview:
 
@@ -63,6 +65,8 @@ Automated Go validation uses the Docker or qualified native backend with fixture
 Contributors should use `make dev`. Its `dev` extra installs `mypy`, `pillow`, `pytest`, `pytest-timeout`, `pytest-xdist`, and `selenium` for the Python gate. Browser lanes additionally require Chrome or Chromium plus a compatible chromedriver; the xterm provenance check requires Node.js and npm. [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) lists the development checks and Go test lane.
 
 Go uses Linux native filesystem events and bounded reconciliation; other platforms use polling. The old watchfiles shim and Python daemon topology are retired.
+
+Differ prepares file attribution in a private SQLite index under the instance state directory. Requests use prepared history and enqueue background catch-up instead of scanning transcript archives. Saved results remain visible during refresh, and incomplete preparation displays “Indexing history.” The index stores normalized file operations and progress, without transcript bodies or shell commands. Stats and attribution retain independent durable positions through the shared in-process transcript reader.
 
 ## Runtime architecture
 
@@ -227,9 +231,9 @@ The Go server applies the route catalog's role policy before handling authentica
 | Role | Can do |
 | --- | --- |
 | `admin` | Type into tmux panes, create sessions, upload files, toggle `YO`, switch tmux sub-windows, and configure native YO!agent. |
-| `readonly` | View panes, transcripts, branch metadata, logs, YOLO status, and Repo Diff history, statistics, changed-file lists, and file comparisons. Terminals and Repo Diff file views are read-only. |
+| `readonly` | View panes, transcripts, branch metadata, logs, YOLO status, and Repo Diff history, statistics, and changed-file lists. Terminal input and arbitrary filesystem contents require an administrator account. |
 
-Read-only access is not a filesystem sandbox. Go admits accessible filesystem reads and searches according to its route policy; writing files, uploading, and sending terminal input require `admin` access.
+Read-only access shares live panes and repository metadata. Arbitrary filesystem contents, file comparisons, commit patches, writing files, uploading, and sending terminal input require `admin` access. Finder listings, metadata, and filename searches remain available to readonly users.
 
 Browser writes, login submissions, logout, and terminal connections reject another scheme, host, or port. Normal page navigation and command-line requests without browser-origin headers remain supported. Terminating a session requires `POST /api/kill-session`.
 

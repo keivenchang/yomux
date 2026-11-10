@@ -1084,7 +1084,7 @@ def test_pending_completion_never_recreates_a_removed_service_directory(tmp_path
     assert registry.ensure_started() is False
     child, ownership = registry.process, registry.spawn_ownership
     directory = registry.record_path.parent if remove_record_directory else registry.lock_path.parent
-    rmtree_within(directory, tmp_path)
+    rmtree_within(directory, tmp_path, socket_source=registry.service_dir / registry.spec.socket_name)
     after_backoff = registry.next_start_at + 1
     registry.clock = lambda: after_backoff
     assert registry.ensure_started() is False
@@ -1219,6 +1219,32 @@ def test_registry_resources_returns_none_when_ps_reports_no_such_pid(tmp_path, m
     registry = LocalServiceRegistry(tmp_path, LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", 1))
 
     assert registry.resources(999999) == {"cpu_percent": None, "rss_bytes": None}
+
+
+@pytest.mark.parametrize("group", [False, True])
+def test_linux_resource_readings_preserve_fields_after_spaced_parenthesized_names(tmp_path, monkeypatch, group):
+    registry = LocalServiceRegistry(tmp_path, LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", 1))
+    original_read = Path.read_text
+    fields = ["0"] * 50
+    fields[0] = "S"
+    fields[1] = "100"
+    fields[11], fields[12] = "200", "100"
+
+    def read(path, *args, **kwargs):
+        if path.parent.parent == Path("/proc") and path.parent.name in {"100", "101"}:
+            if path.name == "stat":
+                return f"{path.parent.name} (cpu ) worker) " + " ".join(fields)
+            if path.name == "statm":
+                return "10 4 0 0 0 0 0"
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(registry_mod.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(registry_mod.os, "sysconf", lambda name: 100 if name == "SC_CLK_TCK" else 4096)
+    if group:
+        assert registry._read_process_group_cpu_seconds_and_rss(100, (100, 101)) == {100: (3.0, 16384), 101: (3.0, 16384)}
+    else:
+        assert registry_mod.read_process_cpu_seconds_and_rss(100) == (3.0, 16384)
 
 
 def test_registry_resources_for_pids_aggregates_verified_workers_and_resets_on_membership_change(tmp_path, monkeypatch):
@@ -1525,7 +1551,7 @@ def test_registry_write_record_refuses_typed_when_its_directory_vanishes_mid_wri
         # (os.replace) and the trailing os.chmod inside atomic_write_text --
         # the exact historical incident line, reproduced deterministically.
         real_replace(src, dst)
-        rmtree_within(registry.record_path.parent, tmp_path)
+        rmtree_within(registry.record_path.parent, tmp_path, socket_source=registry.service_dir / registry.spec.socket_name)
 
     monkeypatch.setattr(registry_mod.os, "replace", replace_then_remove_directory)
 
@@ -1562,6 +1588,18 @@ def test_rmtree_within_refuses_a_named_shared_directory_outside_owned_root(tmp_p
         rmtree_within(shared_lookalike, tmp_path)
 
 
+def test_rmtree_within_refuses_an_arbitrary_sibling_directory(tmp_path):
+    owned_root = tmp_path / "owned"
+    owned_root.mkdir()
+    sibling = tmp_path / "unrelated"
+    sibling.mkdir()
+    canary = sibling / "canary"
+    canary.write_bytes(b"preserve")
+    with pytest.raises(AssertionError):
+        rmtree_within(sibling, owned_root)
+    assert canary.read_bytes() == b"preserve"
+
+
 def test_registry_publish_record_surfaces_the_same_write_race_as_a_typed_refusal(tmp_path, monkeypatch):
     """The same race surfaces through ``_publish_record()`` as a typed
     refusal, not a raw uncaught exception escaping the caller.
@@ -1577,7 +1615,7 @@ def test_registry_publish_record_surfaces_the_same_write_race_as_a_typed_refusal
     def replace_then_remove_directory(src, dst):
         real_replace(src, dst)
         replace_calls.append(True)
-        rmtree_within(registry.record_path.parent, tmp_path)
+        rmtree_within(registry.record_path.parent, tmp_path, socket_source=registry.service_dir / registry.spec.socket_name)
 
     monkeypatch.setattr(registry_mod.os, "replace", replace_then_remove_directory)
 
@@ -1643,7 +1681,7 @@ def test_registry_fences_a_real_child_after_its_fixture_directory_is_removed(tmp
         # The directory is gone before the *next* write attempt starts (not
         # mid-write like the two tests above) -- the real child keeps running
         # underneath a service directory that no longer exists.
-        rmtree_within(registry.record_path.parent, tmp_path)
+        rmtree_within(registry.record_path.parent, tmp_path, socket_source=registry.service_dir / registry.spec.socket_name)
         assert registry.record_path.parent.exists() is False
 
         write_calls: list[str] = []

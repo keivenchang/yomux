@@ -9,7 +9,7 @@ Open these files directly in YOmux Preview to verify the useful rendered preview
 | `image` | `12-image.svg` | Direct raw-file image Preview, not inline trusted SVG DOM |
 | `mermaid` | `14-mermaid.mmd` | Direct Mermaid source Preview as sanitized generated SVG image |
 | `structured` | `15-structured.json` | Pretty structured JSON Preview |
-| `structured` | `16-structured.jsonl` | JSONL Preview with record count |
+| `json-lines-table` | `16-structured.jsonl` | Bounded JSONL table Preview with record count |
 | `structured` | `17-notebook.ipynb` | Safe notebook summary, outputs hidden |
 | `structured` | `18-structured.yaml` | Bounded YAML Preview |
 | `structured` | `19-structured.toml` | Bounded TOML Preview |

@@ -1,5 +1,91 @@
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_errors
+
+
+def test_inactive_tab_and_detail_label_rules_survive_css_parsing(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    rules = browser.execute_script("""
+      const selectors=[];
+      const visit=rules=>{for(const rule of rules){if(rule.selectorText) selectors.push(rule.selectorText);if(rule.cssRules) visit(rule.cssRules);}};
+      for(const sheet of document.styleSheets) visit(sheet.cssRules);
+      return ['.pane-tab:not(.active) .session-button-name','.panel-detail-row .session-button-name']
+        .map(selector=>({selector,present:selectors.includes(selector)}));
+    """)
+    assert all(row['present'] for row in rules), rules
+
+
+def test_session_popover_paths_remain_literal_text(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_script("""
+      const path='/tmp/<img src=x onerror="window.__pathInjected=true">';
+      const info={session:'1',selected_pane:{current_path:path},panes:[{current_path:path,window:0,window_active:true,active:true}],agents:[]};
+      const host=document.createElement('div');
+      host.innerHTML=sessionPopoverHtml('1',info,'',false,{key:'idle',label:'Idle',reason:''});
+      return {images:host.querySelectorAll('img').length,literal:host.textContent.includes(path)};
+    """)
+    assert metrics == {'images': 0, 'literal': True}, metrics
+
+
+def test_repeated_blocked_status_renders_keep_their_opacity_animation(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      (async()=>{
+        workflowTransitionGlowSeconds=5;
+        agentStatusPulsePeriodMs=600;
+        applyCssSettings();
+        const host=document.createElement('div');
+        host.style.cssText='position:fixed;left:20px;top:100px;z-index:99999';
+        document.body.append(host);
+        try {
+          for(const [index,state] of ['blocked','needs-input'].entries()){
+            const options={session:'pulse-browser-fixture',window_index:index,scheduleRefresh:false};
+            agentWindowActivityIconHtml('codex',state,null,options);
+            const row=document.createElement('div');row.dataset.sample=state;
+            row.innerHTML=agentWindowActivityIconHtml('codex',state,null,options);host.append(row);
+          }
+          const nodes=[...host.querySelectorAll('.agent-window-status-dot')];
+          const samples=nodes.map(()=>[]);
+          const started=performance.now();
+          do {
+            await new Promise(requestAnimationFrame);
+            nodes.forEach((node,index)=>samples[index].push(Number(getComputedStyle(node).opacity)));
+          } while(performance.now()-started<700);
+          return nodes.map((node,index)=>({state:node.closest('[data-sample]').dataset.sample,
+            animation:getComputedStyle(node).animationName,range:Math.max(...samples[index])-Math.min(...samples[index])}));
+        } finally {host.remove();}
+      })().then(done,error=>done({error:String(error.stack||error)}));
+    """)
+    assert isinstance(metrics, list), metrics
+    assert len(metrics) == 2, metrics
+    for row in metrics:
+        assert 'agent-status-opacity-pulse' in row['animation'] and row['range'] > 0.15, metrics
+
+
+def test_open_theme_menu_updates_checked_rows_after_each_choice(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("return typeof setGlobalThemeMode==='function' && document.querySelector('.app-menu[data-app-menu=\"view\"]')"))
+    browser.find_element(By.CSS_SELECTOR, '.app-menu[data-app-menu="view"] > .app-menu-button').click()
+    for mode in ['light', 'dark']:
+        command = browser.execute_script("""
+          return [...document.querySelectorAll('.app-menu[data-app-menu="view"] .app-menu-command')]
+            .find(button=>button.querySelector('.app-menu-label')?.textContent===t('common.theme.'+arguments[0]));
+        """, mode)
+        assert command is not None
+        command.click()
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return normalizeGlobalThemeMode()===arguments[0]", mode))
+        metrics = browser.execute_script("""
+          const menu=document.querySelector('.app-menu[data-app-menu="view"]');
+          return {open:menu.classList.contains('open'), rows:['light','dark'].map(mode=>{
+            const button=[...menu.querySelectorAll('.app-menu-command')].find(node=>node.querySelector('.app-menu-label')?.textContent===t('common.theme.'+mode));
+            return {mode,checked:button?.getAttribute('aria-checked')};
+          })};
+        """)
+        assert metrics['open'], metrics
+        assert [row['mode'] for row in metrics['rows'] if row['checked'] == 'true'] == [mode], metrics
 
 
 def test_visible_event_frame_keeps_disjoint_patches_and_scoped_signals(browser, tmp_path):
@@ -701,6 +787,33 @@ def test_legacy_footer_updates_and_late_command_settlement_preserve_authenticati
           await window.__yomuxTestWaitFor(() => Boolean(release), {timeoutMs:5000});
           claimTerminalAuthentication(new Response('{}', {status:401}));
           const auth = statusEl.outerHTML;
+          const originalWarn = console.warn;
+          const originalFetchWatchDiff = fetchFilesystemWatchDiff;
+          const originalTreeVisible = fileExplorerTreePaneIsVisible;
+          const originalRefreshOpenFiles = refreshOpenFilesIfChanged;
+          const originalRefreshTrees = refreshFileExplorerTrees;
+          const originalRefreshTreeIfChanged = refreshFileExplorerIfChanged;
+          let watchWarnings = 0;
+          let watchFallbacks = 0;
+          console.warn = (...args) => {
+            if (args[0] === 'client fs watch diff refresh failed') watchWarnings += 1;
+            originalWarn(...args);
+          };
+          fileExplorerTreePaneIsVisible = () => true;
+          fetchFilesystemWatchDiff = async () => { throw terminalAuthenticationError(); };
+          refreshOpenFilesIfChanged = async () => { watchFallbacks += 1; };
+          refreshFileExplorerTrees = async () => { watchFallbacks += 1; };
+          refreshFileExplorerIfChanged = async () => { watchFallbacks += 1; };
+          try {
+            await refreshFileExplorerFromWatchDiffOnce({}, {full:true});
+          } finally {
+            console.warn = originalWarn;
+            fetchFilesystemWatchDiff = originalFetchWatchDiff;
+            fileExplorerTreePaneIsVisible = originalTreeVisible;
+            refreshOpenFilesIfChanged = originalRefreshOpenFiles;
+            refreshFileExplorerTrees = originalRefreshTrees;
+            refreshFileExplorerIfChanged = originalRefreshTreeIfChanged;
+          }
           showLayoutStatus('late text callback');
           setStatusHtml('<a href="/late">late HTML callback</a>');
           showTimedStatusNotice('late notice callback');
@@ -714,6 +827,7 @@ def test_legacy_footer_updates_and_late_command_settlement_preserve_authenticati
           let rejectedForAuthentication = false;
           try { await signedOut; } catch (error) { rejectedForAuthentication = error.terminalAuthentication === true; }
           return {plainClean, html, lateSettlePreserved, authPreserved: statusEl.outerHTML === auth,
+            watchWarnings, watchFallbacks,
             pendingPreserved, overduePreserved, rejectedForAuthentication,
             role: statusEl.getAttribute('role'), live: statusEl.getAttribute('aria-live')};
         } finally { window.fetch = originalFetch; }
@@ -723,6 +837,7 @@ def test_legacy_footer_updates_and_late_command_settlement_preserve_authenticati
     assert metrics["plainClean"] is True and metrics["lateSettlePreserved"] is True, metrics
     assert metrics["html"] == '<a href="/example">saved &amp; linked</a>', metrics
     assert metrics["authPreserved"] is True and metrics["role"] == "alert" and metrics["live"] == "assertive", metrics
+    assert metrics["watchWarnings"] == 0 and metrics["watchFallbacks"] == 0, metrics
     assert metrics["pendingPreserved"] is True and metrics["overduePreserved"] is True and metrics["rejectedForAuthentication"] is True, metrics
 
 
@@ -788,3 +903,178 @@ def test_api_debug_phases_do_not_reuse_a_full_native_resource_buffer(browser, tm
     assert metrics["bufferedStarts"] == [metrics["retainedStart"]], metrics
     assert metrics["freshMatched"] is True, metrics
     assert metrics["borrowedPhases"] == [] and metrics["protocol"] == "", metrics
+
+
+def test_upgrade_status_transitions_restore_errors_without_repeating_dismissed_notices(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=1', sessions=['1'])
+    metrics = browser.execute_script('''
+      const trace = [];
+      for (const state of ['failed', 'ready', 'failed']) {
+        applyUpdateAvailable({available: true, notify: true, target: '99.0.0', build_state: state,
+          build_error: state === 'failed' ? 'Same compiler failure' : ''});
+        trace.push({state, text: [...document.querySelectorAll('.toast-update')].map(node => node.textContent).join(' '),
+          actions: document.querySelectorAll('.toast-update .toast-action').length});
+      }
+      document.querySelector('.toast-update [data-toast-close]').click();
+      applyUpdateAvailable({available: true, notify: true, target: '99.0.0', build_state: 'failed', build_error: 'Same compiler failure'});
+      return {trace, dismissedCount: document.querySelectorAll('.toast-update').length};
+    ''')
+    assert 'Same compiler failure' in metrics['trace'][0]['text'], metrics
+    assert metrics['trace'][1]['actions'] == 1, metrics
+    assert 'Same compiler failure' in metrics['trace'][2]['text'], metrics
+    assert metrics['trace'][2]['actions'] == 0, metrics
+    assert metrics['dismissedCount'] == 0, metrics
+
+
+def test_upgrade_readiness_is_checked_when_the_consumer_resumes(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=1', sessions=['1'])
+    metrics = browser.execute_async_script('''
+      const done = arguments[arguments.length - 1];
+      (async () => {
+        const originalRead = readCurrentUpdateStatus, originalFetch = window.fetch.bind(window), originalConfirm = window.confirm;
+        let confirmations = 0, requests = 0;
+        try {
+          window.confirm = () => { confirmations += 1; return false; };
+          window.fetch = (input, options) => {
+            const path = new URL(String(input), location.href).pathname;
+            if (path === '/api/self-update') throw new Error('Unexpected update activation');
+            if (path !== '/api/update-status') return originalFetch(input, options);
+            requests += 1;
+            return Promise.resolve(new Response(JSON.stringify({available: true, target: '99.0.0', build_state: 'ready'}),
+              {headers: {'Content-Type': 'application/json'}}));
+          };
+          readCurrentUpdateStatus = (...args) => {
+            const pending = originalRead(...args);
+            pending.then(() => applyUpdateAvailable({available: true, target: '99.0.0', build_state: 'failed', build_error: 'Newer failure'}));
+            return pending;
+          };
+          await triggerSelfUpdate();
+          await checkForUpdateOnce();
+          return {confirmations, requests, state: document.querySelector('[data-update-badge]').dataset.updateBuildState,
+            actions: document.querySelectorAll('.toast-update .toast-action').length};
+        } finally { readCurrentUpdateStatus = originalRead; window.fetch = originalFetch; window.confirm = originalConfirm; }
+      })().then(done, error => done({error: String(error.stack || error)}));
+    ''')
+    assert metrics == {'confirmations': 0, 'requests': 2, 'state': 'failed', 'actions': 0}, metrics
+
+
+def test_upgrade_queued_push_and_http_reads_keep_their_publication_order(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=1', sessions=['1'])
+    metrics = browser.execute_async_script('''
+      const done = arguments[arguments.length - 1];
+      (async () => {
+        const originalFetch = window.fetch, originalConfirm = window.confirm, originalFrame = window.requestAnimationFrame;
+        const results = [];
+        try {
+          window.requestAnimationFrame = () => 1;
+          for (const reader of [triggerSelfUpdate, checkForUpdateOnce]) {
+            for (const order of ['read-push-response', 'push-response-paint', 'push-paint-response']) {
+              dismissUpdateAvailableToasts();
+              const target = `99.0.${results.length}`;
+              let release = null, confirmations = 0;
+              window.confirm = () => { confirmations += 1; return false; };
+              window.fetch = input => {
+                if (new URL(String(input), location.href).pathname !== '/api/update-status') throw new Error('Unexpected update activation');
+                return new Promise(resolve => { release = () => resolve(new Response(JSON.stringify({available: true, target, build_state: 'ready'}),
+                  {headers: {'Content-Type': 'application/json'}})); });
+              };
+              const push = () => handleClientPushEvent('update_available', {available: true, target, build_state: 'failed', build_error: 'Queued failure'});
+              if (order !== 'read-push-response') push();
+              const pending = reader();
+              await window.__yomuxTestWaitFor(() => release, {timeoutMs: 5000});
+              if (order === 'read-push-response') push();
+              let pendingFailureVisible = null;
+              if (order === 'push-paint-response') {
+                flushQueuedClientPushEvents();
+                pendingFailureVisible = [...document.querySelectorAll('.toast-update')].some(node => node.textContent.includes('Queued failure'));
+              }
+              release();
+              await pending;
+              flushQueuedClientPushEvents();
+              results.push({reader: reader === triggerSelfUpdate ? 'activate' : 'refresh', order, confirmations, pendingFailureVisible,
+                state: document.querySelector('[data-update-badge]').dataset.updateBuildState,
+                actions: document.querySelectorAll('.toast-update .toast-action').length});
+            }
+          }
+          return results;
+        } finally { window.fetch = originalFetch; window.confirm = originalConfirm; window.requestAnimationFrame = originalFrame; }
+      })().then(done, error => done({error: String(error.stack || error)}));
+    ''')
+    assert isinstance(metrics, list) and len(metrics) == 6, metrics
+    for result in metrics:
+        superseded = result['order'] == 'read-push-response'
+        assert result['confirmations'] == (1 if result['reader'] == 'activate' and not superseded else 0), result
+        assert result['state'] == ('failed' if superseded else 'ready'), result
+        assert result['actions'] == (0 if superseded else 1), result
+        if result['order'] == 'push-paint-response':
+            assert result['pendingFailureVisible'] is True, result
+
+
+def test_upgrade_build_readiness_precedes_confirmation_and_preserves_visible_errors(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=1', sessions=['1'])
+    WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
+        "return typeof applyUpdateAvailable === 'function' && !!document.querySelector('[data-update-badge]')"))
+    browser.execute_script('''
+      window.__updateRequests = [];
+      const originalFetch = window.fetch;
+      window.__upgradeStatus = {available: true, notify: true, target: '99.0.0', target_sha: 'fixture-pinned-sha', build_state: 'checking'};
+      window.__upgradeAccepted = false;
+      const badge = document.querySelector('[data-update-badge]');
+      badge.removeEventListener('click', triggerSelfUpdate);
+      badge.addEventListener('click', event => { window.__upgradePending = triggerSelfUpdate(event); });
+      window.fetch = (input, options = {}) => {
+        const path = new URL(String(input), location.href).pathname;
+        if (path === '/api/update-status') {
+          const response = new Response(JSON.stringify(window.__upgradeStatus), {headers: {'Content-Type': 'application/json'}});
+          if (window.__upgradeStatus.build_state === 'failed') return new Promise(resolve => {
+            window.__releaseUpgradeStatus = () => resolve(response);
+          });
+          return Promise.resolve(response);
+        }
+        if (path === '/api/self-update') {
+          window.__updateRequests.push(JSON.parse(options.body));
+          return Promise.resolve(new Response(JSON.stringify(window.__upgradeAccepted
+            ? {ok: true, restarting: true, target: '99.0.0', instance_id: 'fixture-old', job: {progress: 'Activating the verified update build'}}
+            : {ok: false, error: 'Fixture activation refused'}), {status: window.__upgradeAccepted ? 200 : 409, headers: {'Content-Type': 'application/json'}}));
+        }
+        return originalFetch(input, options);
+      };
+      handleClientPushEvent('update_available', window.__upgradeStatus);
+    ''')
+    notice = lambda: browser.execute_script("return [...document.querySelectorAll('.toast-update')].filter(node => node.getClientRects().length).map(node => node.textContent).join(' ')")
+    WebDriverWait(browser, 10).until(lambda driver: 'Checking whether' in notice())
+    assert browser.execute_script("return document.querySelectorAll('.toast-update .toast-action').length") == 0
+    browser.execute_script('''
+      window.__upgradeStatus.build_state = 'failed';
+      window.__upgradeStatus.build_error = 'Fixture compiler unavailable';
+      handleClientPushEvent('update_available', window.__upgradeStatus);
+    ''')
+    WebDriverWait(browser, 10).until(lambda driver: 'Fixture compiler unavailable' in notice())
+    assert browser.execute_script("return document.querySelectorAll('.toast-update .toast-action').length") == 0
+    browser.find_element(By.CSS_SELECTOR, '[data-update-badge]').click()
+    WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("return typeof window.__releaseUpgradeStatus === 'function'"))
+    assert browser.execute_script('return window.__updateRequests.length') == 0
+    browser.execute_script('''
+      window.__upgradeStatus.build_state = 'ready';
+      window.__upgradeStatus.build_error = '';
+      handleClientPushEvent('update_available', window.__upgradeStatus);
+    ''')
+    action = WebDriverWait(browser, 10).until(lambda driver: driver.find_element(By.CSS_SELECTOR, '.toast-update .toast-action'))
+    assert browser.execute_async_script('''
+      const done = arguments[arguments.length - 1];
+      window.__releaseUpgradeStatus();
+      window.__upgradePending.then(() => done(document.querySelectorAll('.toast-update .toast-action').length),
+        error => done(String(error.stack || error)));
+    ''') == 1
+    action.click()
+    WebDriverWait(browser, 5).until(EC.alert_is_present()).accept()
+    WebDriverWait(browser, 10).until(lambda driver: 'Fixture activation refused' in driver.find_element(By.TAG_NAME, 'body').text)
+    assert browser.execute_script("return !document.querySelector('[data-update-badge]').hidden")
+    assert browser.execute_script('return window.__updateRequests') == [{'target_sha': 'fixture-pinned-sha'}]
+    browser.execute_script('window.__upgradeAccepted = true;')
+    browser.find_element(By.CSS_SELECTOR, '[data-update-badge]').click()
+    WebDriverWait(browser, 5).until(EC.alert_is_present()).accept()
+    WebDriverWait(browser, 10).until(lambda driver: 'Activating the verified update build' in driver.find_element(By.TAG_NAME, 'body').text)
+    assert browser.execute_script("return document.querySelector('[data-update-badge]').hidden")
+    assert browser.execute_script('return window.__updateRequests.length') == 2
+    consume_only_expected_js_debug_api_errors(browser, [{"method": "POST", "path": "/api/self-update", "status": 409, "ok": False}])

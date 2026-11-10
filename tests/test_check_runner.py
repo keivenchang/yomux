@@ -29,17 +29,19 @@ from types import SimpleNamespace
 import pytest
 
 from tests import latency_calibration
+from tests._git_helpers import git, init_repo
 from tests.browser_helpers import webdriver_lease
 from tests.source_inventory import parsed_python_source
 from tests.source_inventory import python_source_paths
 from tools import static_build
+from tools import bazel_go_browser_e2e as fixture
 from tools import instance_isolation
 from tools.instance_isolation import synthetic_test_environment
 from tools import test_catalog
 from tools import test_plan
 from tools import pytest_catalog_plugin
 from tools.test_catalog import discover_pytest_phase_files
-from tools.tool_guard import container_command_with_host_tool_guard
+from tools.tool_guard import container_command_with_host_tool_guard, terminate_process_group
 from tools.product_environment import product_env_name
 from tools.product_environment import product_env_suffix
 from tools.product_environment import product_env_names
@@ -57,6 +59,46 @@ def load_check_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize("state", ["unstaged", "staged", "release"])
+def test_whitespace_lane_rejects_pending_and_committed_release_whitespace(tmp_path, monkeypatch, state):
+    check = load_check_module()
+    monkeypatch.setattr(check, "YOMUX_VERSION", "1.2.3")
+    init_repo(tmp_path)
+    (tmp_path / "version.yaml").write_text('version: "1.2.3"\n')
+    source = tmp_path / "candidate.js"
+    source.write_text("const candidate = 1;\n")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-qm", "base")
+    source.write_text("const candidate = 2;  \n")
+    if state != "unstaged":
+        git(tmp_path, "add", "candidate.js")
+    if state == "release":
+        git(tmp_path, "commit", "-qm", "Release YOmux 1.2.3")
+
+    legacy = subprocess.run(["git", "diff", "--check"], cwd=tmp_path, capture_output=True, text=True)
+    assert (legacy.returncode == 0) == (state != "unstaged")
+    step = check.step_catalog(whitespace_base=check.whitespace_revision(tmp_path))[check.StepId.WHITESPACE]
+    result = subprocess.run(step.args, cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "candidate.js:1: trailing whitespace" in result.stdout
+    source.write_text("const candidate = 2;\n")
+    assert subprocess.run(step.args, cwd=tmp_path, capture_output=True).returncode == 0
+
+
+@pytest.mark.parametrize("subject_version, expected_parent", [("1.2.3", "^"), ("1.2.2", "")])
+def test_canonical_command_pins_the_release_whitespace_baseline(monkeypatch, capsys, subject_version, expected_parent):
+    check = load_check_module()
+    monkeypatch.setattr(check, "YOMUX_VERSION", "1.2.3")
+    revision = "a" * 40
+    monkeypatch.setattr(check.bazel_execution_contract, "repository_release_context", lambda _root: {
+        "revision": revision, "commit_subject": f"Release YOmux {subject_version}",
+    })
+    assert check.main(["--lane", "whitespace", "--list-lanes"]) == 0
+    whitespace = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("whitespace\t"))
+    command = shlex.split(whitespace.split("\t", 2)[2])
+    assert command[-3:] == ["--check", revision + expected_parent, "--"]
 
 
 
@@ -299,6 +341,169 @@ def test_every_node_shard_runs_in_the_gate_unless_one_owner_excludes_it():
     _all_suite_files, excluded_block = launcher.split("const defaultGateExcludedSuiteFiles", 1)
     launcher_excluded = set(re.findall(r"'(tests/[^']+\.test\.js)'", excluded_block.split("]);", 1)[0]))
     assert launcher_excluded == excluded, "the launcher and the check catalog exclude different shards"
+
+
+def test_editor_settings_shard_waits_for_its_async_catalog_before_summary():
+    result = subprocess.run(
+        ["node", "-e", """
+const Module = require('node:module');
+const originalLoad = Module._load;
+Module._load = function(name, parent, main) {
+  if (name === './browser_helpers/editor_preview_suite') {
+    return {runEditorPreviewSuite: () => new Promise(resolve => setImmediate(() => {
+      console.log('ASYNC_EDITOR_CATALOG_SETTLED');
+      resolve();
+    }))};
+  }
+  return originalLoad.apply(this, arguments);
+};
+require('./tests/editor_preview_settings.test.js');
+"""],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ASYNC_EDITOR_CATALOG_SETTLED" in result.stdout, result.stdout
+    assert "layout suite:" in result.stdout, result.stdout
+    assert result.stdout.index("ASYNC_EDITOR_CATALOG_SETTLED") < result.stdout.index("layout suite:"), result.stdout
+
+
+def test_editor_catalog_shards_own_each_unit_once_and_await_graph_metadata():
+    result = subprocess.run(
+        ["node", "-e", """
+const assert = require('node:assert/strict');
+const Module = require('node:module');
+const originalLoad = Module._load;
+const registrations = [];
+let pending = 0;
+const test = label => registrations.push(label);
+const testAsync = label => {
+  registrations.push(label);
+  pending++;
+  return new Promise(resolve => setImmediate(() => { pending--; resolve(); }));
+};
+Module._load = function(name, parent, main) {
+  if (name === './layout_test_helper') return {test, testAsync};
+  return originalLoad.apply(this, arguments);
+};
+const {runEditorPreviewSuite} = require('./tests/browser_helpers/editor_preview_suite');
+assert.equal(registrations.length, 0, 'importing a shared catalog cannot execute test units');
+(async () => {
+  for (let shardIndex = 0; shardIndex < 3; shardIndex++) {
+    await runEditorPreviewSuite({shardIndex, shardCount: 3});
+    assert.equal(pending, 0, 'the shard must await every async unit');
+  }
+  assert.ok(registrations.length > 0);
+  assert.equal(new Set(registrations).size, registrations.length, 'each catalog unit belongs to exactly one shard');
+  const {runEditorPreviewInfoGraphSuite} = require('./tests/browser_helpers/editor_preview_info_graph_suite');
+  await runEditorPreviewInfoGraphSuite(test, testAsync);
+  assert.equal(pending, 0, 'the graph helper must await its metadata unit');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("mutation, expected_failure", [
+    ("actual", ""),
+    ("import", "cannot start unowned async units on import"),
+    ("middle", "each async unit waits for its async predecessor"),
+    ("return", "must await every async unit before returning"),
+])
+def test_layout_async_units_belong_to_their_awaited_suite(mutation, expected_failure):
+    result = subprocess.run(
+        ["node", "-e", """
+const assert = require('node:assert/strict');
+const Module = require('node:module');
+const originalLoad = Module._load;
+const mutation = process.argv[1];
+let pending = 0;
+let count = 0;
+Module._load = function(name) {
+  if (name === './browser_helpers/layout_test_helper') return {
+    test() { assert.equal(pending, 0, "each unit waits for its async predecessor"); },
+    testAsync() {
+      assert.equal(pending, 0, "each async unit waits for its async predecessor");
+      count++;
+      pending++;
+      return new Promise(resolve => setImmediate(() => { pending--; resolve(); }));
+    },
+  };
+  if (name === './tests/layout_async.test.js' && mutation !== 'actual') {
+    const filename = require.resolve(name);
+    let source = require('node:fs').readFileSync(filename, 'utf8');
+    if (mutation === 'import') source += String.fromCharCode(10) + "testAsync('unowned import', async () => {});";
+    if (mutation === 'middle') source = source.replace('await testAsync(', 'testAsync(');
+    if (mutation === 'return') source += `
+const originalOwner = module.exports.runLayoutAsyncSuite;
+module.exports.runLayoutAsyncSuite = async () => {
+  await originalOwner();
+  testAsync('unowned final unit', async () => {});
+};`;
+    const catalog = new Module(filename, module);
+    catalog.filename = filename;
+    catalog.paths = Module._nodeModulePaths(require('node:path').dirname(filename));
+    catalog._compile(source, filename);
+    return catalog.exports;
+  }
+  return originalLoad.apply(this, arguments);
+};
+(async () => {
+  for (const [path, owner] of [
+    ['./tests/layout_async.test.js', 'runLayoutAsyncSuite'],
+    ['./tests/tabber.test.js', 'runTabberSuite'],
+    ['./tests/layout_restore.test.js', 'runLayoutRestoreSuite'],
+  ]) {
+    const catalog = require(path);
+    assert.equal(pending, 0, `${path} cannot start unowned async units on import`);
+    const before = count;
+    await catalog[owner]();
+    assert.ok(count > before, `${path} must retain its async units`);
+    assert.equal(pending, 0, `${path} must await every async unit before returning`);
+  }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+""", mutation],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if expected_failure:
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert expected_failure in result.stderr
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_removed_pane_drag_browser_gate_rejects_a_handle_in_the_loaded_product(tmp_path):
+    source = REPO_ROOT / "tests/test_browser_dockview.py"
+    target = next(node for node in ast.parse(source.read_text()).body
+                  if isinstance(node, ast.FunctionDef) and node.name == "test_dockview_pane_drag_removed")
+    loaded = False
+
+    def load_product(*_args, **_kwargs):
+        nonlocal loaded
+        loaded = True
+
+    browser = SimpleNamespace(execute_script=lambda *_args: int(loaded))
+    scope = {
+        "load_dockview_runtime_boot_fixture": load_product,
+        "wait_for_dockview": lambda *_args, **_kwargs: None,
+        "wait_for_dockview_tab_geometry": lambda *_args, **_kwargs: None,
+    }
+    exec(compile(ast.Module(body=[target], type_ignores=[]), str(source), "exec"), scope)
+    with pytest.raises(AssertionError):
+        scope[target.name](browser, tmp_path)
+    assert loaded, "the browser gate must inspect the product instead of an empty document"
 
 
 def test_focused_pytest_lanes_retain_only_nonduplicated_entry_points():
@@ -897,7 +1102,7 @@ def test_bazel_runner_uses_a_persistent_action_cache_and_private_output_roots():
     assert '--cache_test_results="$test_result_cache"' in runner
     assert 'product_env_assign "BAZEL_CPU_COUNT=$jobs"' in runner
     assert 'product_env_print BAZEL_CACHE' in outer
-    assert 'cpu_args+=(--cpus="$cpu_limit")' in outer
+    assert 'cpu_args+=(--cpu-period=10000 --cpu-quota="${cpu_limit}0000")' in outer
     assert 'product_env_print TEST_CPU_COUNT' in outer
     assert 'product_env_print BAZEL_CPU_COUNT' in outer
     assert 'product_env_print TEST_MEMORY_MB' in outer
@@ -1493,6 +1698,26 @@ def test_run_lane_exports_its_identity_to_every_step():
     assert result.output.endswith("pytest-e2e\n")
 
 
+def test_group_retirement_reaps_its_finished_leader_before_waiting_for_descendants(monkeypatch):
+    check = load_check_module()
+    reaped = False
+
+    def poll():
+        nonlocal reaped
+        reaped = True
+        return -signal.SIGTERM
+
+    def signal_group(_pid, number):
+        if number != signal.SIGTERM and reaped:
+            raise ProcessLookupError
+
+    process = SimpleNamespace(pid=123, poll=poll, wait=lambda **_kwargs: -signal.SIGTERM)
+    monkeypatch.setattr(check.os, "killpg", signal_group)
+    monkeypatch.setattr(check.time, "sleep", lambda _seconds: pytest.fail("a reaped empty group must not consume the grace window"))
+    check.terminate_process_group(process, 10.0)
+    assert reaped
+
+
 def test_run_lane_terminates_a_timed_out_launcher_and_its_pipe_holding_child(monkeypatch, tmp_path):
     """A launcher that exits while its child owns stdout must not hang the gate."""
 
@@ -1544,7 +1769,7 @@ def test_run_lane_terminates_a_timed_out_launcher_and_its_pipe_holding_child(mon
             assert process.wait(timeout=max(0.0, deadline - time.monotonic())) == 0
             child_pid = int(child_pid_path.read_text(encoding="utf-8"))
         except (AssertionError, OSError, subprocess.TimeoutExpired):
-            check._terminate_lane_process_group(process)
+            check.terminate_process_group(process, check.LANE_STEP_TERMINATE_GRACE_SECONDS)
             process.communicate(timeout=1.0)
             raise
         started = time.monotonic()
@@ -2681,7 +2906,8 @@ def owned_process_tree():
             "import subprocess, sys, time; "
             "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
             "time.sleep(60)",
-        ]
+        ],
+        start_new_session=True,
     )
     try:
         deadline = time.monotonic() + 15
@@ -2689,15 +2915,25 @@ def owned_process_tree():
             time.sleep(0.05)
         yield owner
     finally:
-        owner.kill()
-        owner.wait(timeout=10)
-        for pid in descendant_pids_of(owner.pid):
-            os.kill(pid, signal.SIGKILL)
+        terminate_process_group(owner, grace_seconds=0.5)
 
 
 def descendant_pids_of(pid):
     check = load_check_module()
     return [process["pid"] for process in check.descendant_processes(pid)]
+
+
+def test_owned_process_tree_retires_child_before_losing_parent_relationship():
+    children = []
+    try:
+        with owned_process_tree() as owner:
+            children = descendant_pids_of(owner.pid)
+            assert children
+        assert all(process_state(pid) in {"", "Z"} for pid in children)
+    finally:
+        for pid in children:
+            if process_state(pid) not in {"", "Z"}:
+                os.kill(pid, signal.SIGKILL)
 
 
 def test_retirement_joins_a_real_owned_child_and_reports_a_survivor_by_deadline(monkeypatch):
@@ -4306,6 +4542,25 @@ def test_certification_junit_problems_report_typed_reasons(tmp_path):
         assert check.certification_failed_nodes(path, lane_ok=False).unavailable == reason
 
 
+@pytest.mark.parametrize("reason", ["junit_malformed", "junit_timing_invalid"])
+def test_certification_phase_retains_typed_junit_rejections_without_reparsing(monkeypatch, tmp_path, reason):
+    check = load_check_module()
+    evidence = tmp_path / "cert"
+    evidence.mkdir()
+    file, name = check.CERTIFICATION_NODE_IDS[0].split("::", 1)
+    xml = "<testsuites>" if reason == "junit_malformed" else _junit_document([(file, name, "passed")]).replace('time="1.0"', 'time="invalid"')
+    (evidence / check.CERTIFICATION_JUNIT_NAME).write_text(xml)
+    monkeypatch.setattr(check, "retire_owned_processes", lambda **_kwargs: {"retired": True})
+    monkeypatch.setattr(check.latency_calibration, "certification_host_qualification", lambda **_kwargs: {"qualified": True})
+    monkeypatch.setattr(check, "run_lane", lambda _lane, **_kwargs: check.LaneResult("certification", "certification", True, 0, ""))
+
+    payload, _lane = check.run_certification_phase(evidence_dir=evidence)
+    assert payload["result"] == "not-certifiable"
+    assert payload["reason"] == "certification_junit_rejected"
+    assert payload["evidence"]["junit_reason"] == reason
+    assert payload["outcomes"] == {}
+
+
 def test_run_certification_phase_payload_carries_exact_failed_nodes_from_its_junit(monkeypatch, tmp_path):
     """The real certification path with bounded stubs, not a serializer spread."""
     check = load_check_module()
@@ -4419,38 +4674,6 @@ def test_bazel_source_root_materializes_symlinked_docker_context(tmp_path):
     run_tests = materialized / "docker" / "run-tests.sh"
     assert run_tests.is_file()
     assert os.access(run_tests, os.X_OK)
-
-
-def test_check_runner_splits_one_concurrent_budget_between_pytest_and_bazel(monkeypatch):
-    check = load_check_module()
-    monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
-    monkeypatch.delenv("YOLOMUX_CHECK_CPU_PERCENT", raising=False)
-    monkeypatch.setattr(check.platform, "system", lambda: "Linux")
-
-    # Pytest and Bazel split the configured budget evenly by default.
-    expected = {
-        4: ("1", "1", "1"),
-        10: ("2", "1", "2"),
-        14: ("3", "2", "2"),
-        32: ("8", "5", "3"),
-    }
-    for cores, counts in expected.items():
-        monkeypatch.setattr(check.os, "cpu_count", lambda: 64)
-        monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid, cores=cores: set(range(cores)), raising=False)
-        assert check.pytest_worker_counts() == counts
-
-    monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "5,3,1")
-    assert check.pytest_worker_counts() == ("5", "3", "1")
-
-    # The platform no longer changes the shared-box default.
-    monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
-    monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(check.os, "cpu_count", lambda: 8)
-    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: set(range(8)), raising=False)
-    assert check.pytest_worker_counts() == ("2", "1", "1")
-
-    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: (_ for _ in ()).throw(OSError("unavailable")), raising=False)
-    assert check.pytest_worker_counts() == ("2", "1", "1")
 
 
 @pytest.mark.parametrize("canonical_empty", [False, True])
@@ -4748,3 +4971,125 @@ def test_required_real_client_sample_cannot_pass_by_skipping(pytestconfig, monke
     assert report.outcome == ("failed" if required else "skipped")
     if required:
         assert "required real-client URL sample did not run" in report.longrepr
+
+
+@pytest.mark.parametrize("failure", ["spawn", "readiness", "cleanup"])
+def test_native_browser_fixture_retires_private_tmux_after_server_spawn_failure(tmp_path, monkeypatch, failure):
+
+    source = tmp_path / "source"
+    for name in ("static", "tools", "yomux_lib", "assets/runtime"):
+        (source / name).mkdir(parents=True)
+    for name in ("yomux.js", "yomux.css"):
+        (source / "static" / name).write_bytes(b"fixture asset")
+    socket = fixture.short_tmux_socket_path("startup-failure")
+    socket_dir = socket.parent
+    monkeypatch.setattr(fixture, "resolve_source_root", lambda: source)
+    monkeypatch.setattr(fixture, "short_tmux_socket_path", lambda _prefix: socket)
+    binary = tmp_path / "unexecutable-binary"
+    binary.write_bytes(b"not executable")
+    binary.chmod(0o600)
+    logs = []
+    original_open = Path.open
+
+    def open_file(path, *args, **kwargs):
+        stream = original_open(path, *args, **kwargs)
+        if path.name.startswith("server-") and path.suffix == ".txt":
+            logs.append(stream)
+        return stream
+
+    monkeypatch.setattr(Path, "open", open_file)
+    processes = []
+    original_popen = subprocess.Popen
+    original_run = subprocess.run
+    if failure == "readiness":
+        def start_process(command, **kwargs):
+            if command[0] == str(binary):
+                process = original_popen([sys.executable, "-c", "import time; time.sleep(60)"], **kwargs)
+                processes.append(process)
+                return process
+            return original_popen(command, **kwargs)
+
+        def fail_readiness(*_args, **_kwargs):
+            raise ValueError("readiness failure")
+
+        monkeypatch.setattr(subprocess, "Popen", start_process)
+        monkeypatch.setattr(fixture.urllib.request, "urlopen", fail_readiness)
+    elif failure == "cleanup":
+        def fail_cleanup(command, **kwargs):
+            if command == ("tmux", "-S", str(socket), "kill-server"):
+                return subprocess.CompletedProcess(command, 2, "", "injected cleanup failure")
+            return original_run(command, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fail_cleanup)
+    try:
+        expected_error = ValueError if failure == "readiness" else SystemExit if failure == "cleanup" else PermissionError
+        with pytest.raises(expected_error) as raised:
+            fixture.main(str(binary))
+        if failure == "cleanup":
+            assert "injected cleanup failure" in str(raised.value)
+        else:
+            probe = original_run(["tmux", "-S", str(socket), "list-sessions"], capture_output=True, check=False)
+            assert probe.returncode == 1, probe.stdout
+            assert not socket_dir.exists()
+        assert all(process.poll() is not None for process in processes)
+        assert logs and all(stream.closed for stream in logs)
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
+        original_run(["tmux", "-S", str(socket), "kill-server"], capture_output=True, check=False)
+        shutil.rmtree(socket_dir, ignore_errors=True)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -1, True, "1", 10**1000], ids=["nan", "infinity", "negative", "boolean", "string", "oversized"])
+def test_calibration_numeric_boundaries_reject_malformed_evidence(value):
+    host = latency_calibration.host_qualification({"signal": value}, limits={"signal": 1.0})
+    assert host["qualified"] is False
+    assert host["reasons"][0]["reason"] == "signal_malformed"
+    invalid_limit = latency_calibration.host_qualification({"signal": 0.0}, limits={"signal": value})
+    assert invalid_limit["qualified"] is False
+    assert invalid_limit["reasons"][0]["reason"] == "limit_malformed"
+    with pytest.raises(ValueError, match="finite and positive"):
+        latency_calibration.browser_calibration_qualification({"calibrationNowMs": value})
+    with pytest.raises(ValueError, match="finite and positive"):
+        latency_calibration.browser_calibration_qualification({"calibrationNowMs": 1.0}, admission_ms=value)
+    with pytest.raises(ValueError, match="finite and positive"):
+        latency_calibration.fixed_ceiling_verdict(label="invalid", raw_measured_ms=value, ceiling_ms=100.0)
+    with pytest.raises(ValueError, match="finite and positive"):
+        latency_calibration.calibration_pressure_verdict(quiet_samples_ms=[1.0, 1.0, value], busy_samples_ms=[2.0] * 3)
+    with pytest.raises(ValueError, match="finite and positive"):
+        latency_calibration.calibration_pressure_verdict(quiet_samples_ms=[1.0] * 3, busy_samples_ms=[2.0] * 3, move_ratio=value)
+
+
+@pytest.mark.parametrize("sample_count", [1, 7, 15])
+def test_outlier_count_includes_the_maximum_order_statistic(sample_count):
+    assert latency_calibration.outliers_required_to_move(sample_count, sample_count - 1) == 1
+    for index in range(sample_count):
+        assert latency_calibration.outliers_required_to_move(sample_count, index) == sample_count - index
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -1, 0, True, "1", 10**1000], ids=["nan", "infinity", "negative", "zero", "boolean", "string", "oversized"])
+def test_calibration_probe_and_platform_references_reject_malformed_numbers(value):
+    class ProbeBrowser:
+        def set_window_size(self, *_args):
+            pass
+
+        def get(self, _url):
+            pass
+
+        def execute_async_script(self, *_args):
+            return {"calibrationNowMs": value, "samplesMs": [value] * latency_calibration.CALIBRATION_SAMPLE_COUNT}
+
+    with pytest.raises(AssertionError):
+        latency_calibration.run_browser_latency_calibration(ProbeBrowser())
+    populations = {name: {"probes": 1, "cpu_work_median_ms": [1.0, 1.0], "storage_work_median_ms": [1.0, 1.0]} for name in ("quiet", "post_lane", "saturated")}
+    populations['saturated'].update(cpu_work_median_ms=[3.0, 3.0], storage_work_median_ms=[3.0, 3.0])
+    populations['quiet']['cpu_work_median_ms'] = [value, value]
+    assert latency_calibration._darwin_platform_profile(populations)["certifiable"] is False
+
+
+@pytest.mark.parametrize(("quiet", "busy"), [([1e308, 1e308], [1e308, 1e308]), ([1e-308], [1e308])], ids=["median-overflow", "ratio-overflow"])
+def test_calibration_pressure_rejects_arithmetic_overflow(quiet, busy):
+    with pytest.raises(ValueError, match="finite and positive"):
+        latency_calibration.calibration_pressure_verdict(quiet_samples_ms=quiet, busy_samples_ms=busy)

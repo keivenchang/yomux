@@ -4,10 +4,10 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from types import MappingProxyType
 
+from ..infra.numeric import is_finite_number
 from . import identity
 from .storage import UsageAtom
 from .storage import UsageAtomTombstone
@@ -119,15 +119,9 @@ def _enum(value: object, name: str, choices: frozenset[str]) -> str:
 
 
 def _number(value: object, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_finite_number(value) or value < 0:
         raise UsageValidationError(f"{name} must be a non-negative finite number")
-    try:
-        normalized = float(value)
-    except OverflowError as error:
-        raise UsageValidationError(f"{name} must be a non-negative finite number") from error
-    if not math.isfinite(normalized) or normalized < 0:
-        raise UsageValidationError(f"{name} must be a non-negative finite number")
-    return normalized
+    return float(value)
 
 
 def normalize_usage_atom(atom: UsageAtom) -> UsageAtom:

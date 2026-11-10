@@ -256,6 +256,25 @@ func roleAllows(user authUser, requiredRole string) bool {
 	}
 }
 
+// Delayed receipts retain the originating route's authority across polling and SSE replay.
+func operationRequiredRole(record *goOperation) string {
+	if record == nil || record.Route == "" {
+		return "admin"
+	}
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		policy := capabilities.Policy(method, record.Route)
+		if policy.Role == "admin" || policy.Capability == "" {
+			return "admin"
+		}
+	}
+	return "readonly"
+}
+
+func operationVisibleToRequest(r *http.Request, record *goOperation) bool {
+	user, authenticated := r.Context().Value(authContextKey{}).(authUser)
+	return authenticated && roleAllows(user, operationRequiredRole(record))
+}
+
 func safeLoginNextValue(next string) string {
 	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.ContainsAny(next, "\\\r\n") {
 		return "/"

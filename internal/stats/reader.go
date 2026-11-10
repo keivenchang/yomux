@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -610,36 +611,45 @@ func rowNumbers4(a, b, c, d any) (float64, float64, float64, uint64, error) {
 	return x, y, z, w, err
 }
 func number(value any) (float64, error) {
-	switch value := value.(type) {
-	case float64:
-		return value, nil
-	case float32:
-		return float64(value), nil
-	case int64:
-		return float64(value), nil
-	case int:
-		return float64(value), nil
-	case uint:
-		return float64(value), nil
-	case uint32:
-		return float64(value), nil
-	case uint64:
-		return float64(value), nil
-	case []byte:
-		var v float64
-		_, err := fmt.Sscan(string(value), &v)
-		return v, err
-	case string:
-		var v float64
-		_, err := fmt.Sscan(value, &v)
-		return v, err
-	default:
-		return 0, fmt.Errorf("expected number, got %T", value)
+	if raw, ok := value.([]byte); ok {
+		value = string(raw)
 	}
+	var n float64
+	var valid bool
+	if text, ok := value.(string); ok {
+		var err error
+		n, err = strconv.ParseFloat(strings.TrimSpace(text), 64)
+		valid = err == nil
+	} else {
+		n, valid = currentNumber(value)
+	}
+	if !valid || math.IsNaN(n) || math.IsInf(n, 0) {
+		return 0, fmt.Errorf("expected finite number, got %v", value)
+	}
+	return n, nil
 }
 func uint64Value(value any) (uint64, error) {
+	// SQLite integers and textual owner identities must not round through float64.
+	if raw, ok := value.([]byte); ok {
+		value = string(raw)
+	}
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if n, err := strconv.ParseUint(text, 10, 64); err == nil {
+		return n, nil
+	}
+	switch value.(type) {
+	case string, json.Number:
+		// Reuse bounded exact decimal normalization for legacy 1.0/1e3 text.
+		// A float fallback would admit fractions rounded to large integers.
+		if decimal, ok := normalizePricingDecimal(text); ok {
+			if n, err := strconv.ParseUint(decimal, 10, 64); err == nil {
+				return n, nil
+			}
+		}
+		return 0, fmt.Errorf("invalid unsigned integer")
+	}
 	n, err := number(value)
-	if err != nil || n < 0 || math.Trunc(n) != n || n > math.MaxUint64 {
+	if err != nil || n < 0 || math.Trunc(n) != n || n >= math.Exp2(64) {
 		return 0, fmt.Errorf("invalid unsigned integer")
 	}
 	return uint64(n), nil

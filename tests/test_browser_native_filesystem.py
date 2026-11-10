@@ -14,13 +14,499 @@ import pytest
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
+from tests.gate_harness import run_fixture_cleanup_phases
 from tests.tmux_runtime import run_isolated_tmux
+from tests.browser_helpers.visual_contracts import wcag_contrast_ratio
+from tests.browser_helpers.browser_console import assert_only_expected_browser_http_error
+from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
 from tests.helpers.terminal_url_fixtures import terminal_url_matrix_examples
 from tools.product_environment import product_env
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize('theme', ['dark', 'light'])
+def test_native_finder_get_info_permissions(browser, isolated_dev_server_factory, tmp_path, request, theme):
+    server = isolated_dev_server_factory('get-info-' + theme)
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    directory = tmp_path / 'info-folder'
+    directory.mkdir()
+    target = directory / '.hidden-file  spaces'
+    target.write_bytes(b'contents')
+    target.chmod(0o640)
+    original_size = browser.get_window_size()
+    request.addfinalizer(lambda: browser.set_window_size(original_size['width'], original_size['height']))
+    browser.set_window_size(1280, 1200)
+    browser.get(server.base_url)
+    wait = WebDriverWait(browser, 20)
+    wait.until(lambda driver: driver.execute_script(
+        "return typeof showFileGetInfo === 'function' && typeof selectSession === 'function' && initialAppShellPainted"
+    ))
+    browser.execute_script("document.body.classList.toggle('theme-light', arguments[0] === 'light'); showFileGetInfo(arguments[1]);", theme, str(target))
+    wait.until(lambda driver: len(driver.find_elements(By.CSS_SELECTOR, '.file-get-info [data-permission-bit]')) == 9)
+    dialog = browser.find_element(By.CSS_SELECTOR, '.file-get-info')
+    assert str(target) in dialog.text
+    assert '-rw-r-----' in dialog.text
+    assert '0640' in dialog.text
+    assert 'OS checks use the account running YOmux' in dialog.text
+    assert 'Resolved path' not in dialog.text
+    assert 'Symlink target' not in dialog.text
+    assert 'Octal mode' not in dialog.text
+    geometry = browser.execute_script("""
+      const dialog=document.querySelector('.file-get-info .file-editor-dialog'),body=dialog.querySelector('.file-editor-dialog-body');
+      return {height:dialog.getBoundingClientRect().height,width:dialog.getBoundingClientRect().width,
+        font:parseFloat(getComputedStyle(body).fontSize),normal:parseFloat(getComputedStyle(document.body).getPropertyValue('--ui-font-size')),
+        background:getComputedStyle(dialog).backgroundColor,
+        colors:[...body.querySelectorAll('dt,dd,p,th,legend,h3')].map(node=>getComputedStyle(node).color)};
+    """)
+    assert geometry['font'] >= geometry['normal']
+    assert geometry['height'] <= 650.203125 * 0.8, geometry
+    assert geometry['width'] <= 640
+    assert all(wcag_contrast_ratio(color, geometry['background']) >= 4.5 for color in geometry['colors']), geometry
+    browser.find_element(By.CSS_SELECTOR, '.file-get-info input[aria-label="Owner Execute"]').click()
+    assert target.stat().st_mode & 0o777 == 0o640
+    button_geometry = browser.execute_script("""
+      const table=document.querySelector('.file-info-access-controls table').getBoundingClientRect();
+      const button=document.querySelector('[data-permission-apply]'),rect=button.getBoundingClientRect();
+      return {buttonCount:document.querySelectorAll('[data-permission-apply]').length,left:rect.left,right:table.right,
+        center:(rect.top+rect.bottom)/2,tableCenter:(table.top+table.bottom)/2};
+    """)
+    assert button_geometry['buttonCount'] == 1, button_geometry
+    assert button_geometry['left'] >= button_geometry['right'], button_geometry
+    assert abs(button_geometry['center'] - button_geometry['tableCenter']) < 12, button_geometry
+    browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-permission-apply]').click()
+    wait.until(lambda driver: driver.find_element(By.CSS_SELECTOR, '[data-info-result]').text and 'Applying' not in driver.find_element(By.CSS_SELECTOR, '[data-info-result]').text)
+    assert 'Changed: 1' in browser.find_element(By.CSS_SELECTOR, '[data-info-result]').text
+    assert target.stat().st_mode & 0o777 == 0o740
+    assert '0740' in browser.find_element(By.CSS_SELECTOR, '[data-info-permissions]').text
+    browser.execute_script('showFileGetInfo(arguments[0]);', str(directory))
+    wait.until(lambda driver: 'Total:' in driver.find_element(By.CSS_SELECTOR, '[data-info-size]').text)
+    assert '1 files' in browser.find_element(By.CSS_SELECTOR, '[data-info-size]').text
+    assert browser.find_element(By.CSS_SELECTOR, '[data-permission-apply]').is_displayed() is False
+    browser.find_element(By.CSS_SELECTOR, '[data-permission-recursive]').click()
+    browser.find_element(By.CSS_SELECTOR, '.file-get-info input[aria-label="Others Write"]').click()
+    browser.find_element(By.CSS_SELECTOR, '[data-permission-apply]').click()
+    wait.until(lambda driver: len(driver.find_elements(By.CSS_SELECTOR, '[data-dialog-action="no"]')) == 1)
+    confirmation = browser.find_element(By.CSS_SELECTOR, '[data-dialog-action="no"]').find_element(By.XPATH, '../..')
+    assert str(directory) in confirmation.text
+    assert 'including execute' in confirmation.text
+    browser.find_element(By.CSS_SELECTOR, '[data-dialog-action="no"]').click()
+    assert browser.execute_script("return document.activeElement.matches('[data-permission-apply]')")
+    assert target.stat().st_mode & 0o777 == 0o740
+    browser.find_element(By.CSS_SELECTOR, '[data-permission-apply]').click()
+    wait.until(lambda driver: len(driver.find_elements(By.CSS_SELECTOR, '[data-dialog-action="yes"]')) == 1)
+    browser.find_element(By.CSS_SELECTOR, '[data-dialog-action="yes"]').click()
+    wait.until(lambda driver: 'Changed: 2' in driver.find_element(By.CSS_SELECTOR, '[data-info-result]').text)
+    assert target.stat().st_mode & 0o777 == directory.stat().st_mode & 0o777
+    link = tmp_path / 'info-link'
+    link.symlink_to(target)
+    browser.execute_script('showFileGetInfo(arguments[0]);', str(link))
+    wait.until(lambda driver: 'Permissions cannot be edited on symlinks' in driver.find_element(By.CSS_SELECTOR, '[data-info-permissions]').text)
+    assert not browser.find_element(By.CSS_SELECTOR, '[data-permission-apply]').is_enabled()
+    browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-dialog-action]').click()
+    guest_server = isolated_dev_server_factory('get-info-guest-' + theme, auth_bypass=False)
+    guest_server.paths.auth_config_path.write_text('users:\n  - username: reader\n    password: fixture-password\n    role: readonly\n', encoding='utf-8')
+    browser.get(guest_server.base_url)
+    browser.find_element(By.NAME, 'username').send_keys('reader')
+    browser.find_element(By.NAME, 'password').send_keys('fixture-password')
+    browser.find_element(By.CSS_SELECTOR, 'button[type=submit]').click()
+    wait.until(lambda driver: driver.execute_script("return typeof showFileGetInfo === 'function'"))
+    browser.execute_script("document.body.classList.toggle('theme-light',arguments[0]==='light');showFileGetInfo(arguments[1]);", theme, str(target))
+    wait.until(lambda driver: 'administrator account' in driver.find_element(By.CSS_SELECTOR, '[data-info-permissions]').text)
+    assert not browser.find_element(By.CSS_SELECTOR, '[data-permission-apply]').is_enabled()
+    reason_colors = browser.execute_script("const p=document.querySelector('[data-info-permissions] p[role=status]');return [getComputedStyle(p).color,getComputedStyle(p.closest('.file-editor-dialog')).backgroundColor]")
+    assert wcag_contrast_ratio(*reason_colors) >= 4.5
+    # The native batch route requires admin; the guest's startup probe must be refused.
+    assert_only_expected_browser_http_error(browser, path='/api/fs/batch', status=403, query={})
+    consume_only_expected_js_debug_api_error(browser, path='/api/fs/batch', status=403, method='POST', query={})
+    browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-dialog-action]').click()
+    browser.get(server.base_url)
+    wait.until(lambda driver: driver.execute_script("return typeof showFileGetInfo === 'function'"))
+    browser.execute_script("document.body.classList.toggle('theme-light',arguments[0]==='light')", theme)
+    browser.execute_script("""
+      window.originalSizeStream=fileMetadataStream;
+      window.failNextGetInfoSize=false;
+      fileMetadataStream=(url,options,signal,progress)=>{
+        if(!url.startsWith('/api/fs/directory-size?')) return originalSizeStream(url,options,signal,progress);
+        if(window.failNextGetInfoSize){window.failNextGetInfoSize=false;return Promise.reject(new Error('HTTP 501'))}
+        return new Promise((resolve,reject)=>{
+          const data={bytes:12,allocated_bytes:512,files:1,folders:0,complete:false,partial:false,errors:[]};
+          signal.addEventListener('abort',()=>reject(new DOMException('Cancelled','AbortError')),{once:true});
+          window.finishGetInfoSize=()=>{const final={...data,partial:true,errors:[{path:'long-directory/'.repeat(30),error:'Permission denied'}]};progress(final);resolve(final)};
+          progress(data);
+        });
+      };
+      showFileGetInfo(arguments[0]);
+    """, str(directory))
+    wait.until(lambda driver: '512 bytes' in driver.find_element(By.CSS_SELECTOR, '[data-info-size]').text)
+    assert '99 bytes' not in browser.find_element(By.CSS_SELECTOR, '[data-info-size]').text
+    browser.find_element(By.CSS_SELECTOR, '[data-size-cancel]').click()
+    wait.until(lambda driver: 'Cancelled (partial)' in driver.find_element(By.CSS_SELECTOR, '[data-info-size]').text)
+    browser.find_element(By.CSS_SELECTOR, '[data-size-recalculate]').click()
+    wait.until(lambda driver: 'Calculating:' in driver.find_element(By.CSS_SELECTOR, '[data-info-size]').text)
+    browser.execute_script('finishGetInfoSize()')
+    wait.until(lambda driver: 'Permission denied' in driver.find_element(By.CSS_SELECTOR, '[data-info-size]').text)
+    assert browser.execute_script("const b=document.querySelector('.file-get-info .file-editor-dialog-body');return b.scrollWidth <= b.clientWidth")
+    browser.execute_script("window.failNextGetInfoSize=true")
+    browser.find_element(By.CSS_SELECTOR, '[data-size-recalculate]').click()
+    wait.until(lambda driver: 'HTTP 501' in driver.find_element(By.CSS_SELECTOR, '[data-info-size]').text)
+    assert browser.find_element(By.CSS_SELECTOR, '[data-size-cancel]').is_displayed() is False
+    assert browser.find_element(By.CSS_SELECTOR, '[data-size-recalculate]').is_displayed()
+    browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-dialog-action]').click()
+    browser.execute_script('fileMetadataStream=originalSizeStream;delete window.originalSizeStream;delete window.finishGetInfoSize;delete window.failNextGetInfoSize')
+    browser.execute_script("""
+      window.originalGetInfoFetch=apiFetchJson;
+      apiFetchJson=async(url,options)=>{
+        const data=await originalGetInfoFetch(url,options);
+        if(url.startsWith('/api/fs/info?')) delete data.metadata_identity;
+        return data;
+      };
+      showFileGetInfo(arguments[0]);
+    """, str(target))
+    wait.until(lambda driver: len(driver.find_elements(By.CSS_SELECTOR, '[data-info-warning]')) == 1)
+    assert 'backend' in browser.find_element(By.CSS_SELECTOR, '[data-info-warning]').text
+    assert not browser.find_element(By.CSS_SELECTOR, '[data-permission-apply]').is_enabled()
+    browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-dialog-action]').click()
+    browser.execute_script("""
+      apiFetchJson=async(url,options)=>url.startsWith('/api/fs/info?') ? null : originalGetInfoFetch(url,options);
+      showFileGetInfo(arguments[0]);
+    """, str(target))
+    wait.until(lambda driver: len(driver.find_elements(By.CSS_SELECTOR, '[data-info-warning]')) == 1)
+    assert not browser.find_element(By.CSS_SELECTOR, '[data-permission-apply]').is_enabled()
+    browser.execute_script("apiFetchJson=originalGetInfoFetch;delete window.originalGetInfoFetch")
+    browser.set_window_size(390, 700)
+    browser.execute_script("document.querySelector('[data-info-warning]').textContent += ' ' + 'wrapped-path/'.repeat(40)")
+    narrow = browser.execute_script("""
+      const dialog=document.querySelector('.file-get-info .file-editor-dialog'),body=dialog.querySelector('.file-editor-dialog-body'),footer=dialog.querySelector('.file-editor-dialog-actions');
+      const rect=dialog.getBoundingClientRect();
+      return {width:rect.width,viewport:innerWidth,bottom:footer.getBoundingClientRect().bottom,height:innerHeight,
+        scroll:body.scrollHeight,client:body.clientHeight,columns:getComputedStyle(dialog.querySelector('dl')).gridTemplateColumns};
+    """)
+    assert narrow['width'] <= narrow['viewport'] * 0.92 + 1, narrow
+    assert narrow['bottom'] <= narrow['height'], narrow
+    assert narrow['scroll'] > narrow['client'], narrow
+    assert len(narrow['columns'].split()) == 1, narrow
+    browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-dialog-action]').send_keys(Keys.TAB)
+    assert browser.execute_script("return document.activeElement.closest('.file-get-info') !== null")
+    browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-dialog-action]').click()
+    browser.set_window_size(1280, 1200)
+    for dialog_class in ['finder-move-dialog', 'markdown-link-url-dialog', 'drop-action-result-dialog',
+                         'file-editor-compare-dialog', 'file-editor-conflict-dialog',
+                         'file-editor-external-change-dialog', 'file-editor-close-dialog']:
+        browser.execute_script("showFileEditorDecisionDialog({title:'Dialog contrast',message:'Readable explanation',className:arguments[0]})", dialog_class)
+        colors = browser.execute_script("const d=document.querySelector('.'+arguments[0]+' .file-editor-dialog');return [getComputedStyle(d.querySelector('.file-editor-dialog-body')).color,getComputedStyle(d).backgroundColor]", dialog_class)
+        assert wcag_contrast_ratio(*colors) >= 4.5, (dialog_class, colors)
+        browser.find_element(By.CSS_SELECTOR, '.' + dialog_class + ' [data-dialog-action]').send_keys(Keys.ESCAPE)
+    browser.execute_script("showFileEditorDecisionDialog({title:'Danger',message:'Danger explanation',messageVariant:'danger'})")
+    danger = browser.execute_script("const d=document.querySelector('.file-editor-dialog');return [getComputedStyle(d.querySelector('.danger')).color,getComputedStyle(d).backgroundColor]")
+    assert wcag_contrast_ratio(*danger) >= 4.5
+    browser.find_element(By.CSS_SELECTOR, '[data-dialog-action]').click()
+    browser.execute_async_script("const done=arguments[arguments.length-1];setTabberMode('advanced');storageSet('yomux.finder.permissions.v1','0');selectSession(finderItemId).then(()=>done(true),error=>done(String(error)))")
+    wait.until(lambda driver: len(driver.find_elements(By.CSS_SELECTOR, '[data-file-explorer-permissions]')) > 0)
+    button = wait.until(lambda driver: next((node for node in driver.find_elements(By.CSS_SELECTOR, '.file-explorer-panel[data-file-explorer-view="finder"] [data-file-explorer-permissions]') if node.is_displayed()), None))
+    assert button.text == 'ⓘ'
+    assert button.get_attribute('aria-label') == 'Show size and permissions'
+    assert button.get_attribute('title') == 'Show size and permissions'
+    geometry = browser.execute_script("""
+      const button = arguments[0], bounds = button.getBoundingClientRect();
+      const siblings = [...button.parentElement.children].filter(node => node !== button && node.offsetWidth > 0);
+      return {width: bounds.width, overlaps: siblings.some(node => {
+        const other = node.getBoundingClientRect();
+        return bounds.left < other.right && bounds.right > other.left && bounds.top < other.bottom && bounds.bottom > other.top;
+      })};
+    """, button)
+    assert geometry['width'] <= 24, geometry
+    assert not geometry['overlaps'], geometry
+    browser.execute_script("window.permissionClicks=[];window.originalPermissionToggle=toggleFileExplorerPermissions;toggleFileExplorerPermissions=()=>{permissionClicks.push(fileExplorerPermissionsVisible());return originalPermissionToggle()}")
+    button.click()
+    assert browser.execute_script('return permissionClicks') == [False]
+    browser.execute_script('toggleFileExplorerPermissions=originalPermissionToggle;delete window.originalPermissionToggle;delete window.permissionClicks')
+    wait.until(lambda driver: driver.execute_script('return fileExplorerPermissionsVisible()'))
+    assert button.get_attribute('aria-pressed') == 'true'
+    browser.execute_script("const row = document.createElement('div'); row.className = 'file-tree-row'; row.id='permission-column-repro'; row.style.cssText='position:fixed;top:100px;left:0;width:100%;pointer-events:none'; document.body.append(row); updateFileTreeRowContents(row,'F','file',{permissionsText:'-rwxr-xr-x', dateText:''});")
+    column = browser.find_element(By.CSS_SELECTOR, '#permission-column-repro .file-tree-permissions')
+    assert column.is_displayed()
+    assert browser.execute_script("return arguments[0].previousElementSibling.className", column) == 'file-tree-date'
+    browser.refresh()
+    wait.until(lambda driver: driver.execute_script("return typeof fileExplorerPermissionsVisible === 'function' && fileExplorerPermissionsVisible()"))
+
+
+@pytest.mark.browser
+def test_native_finder_details_toolbar_control_is_compact(browser, isolated_dev_server_factory, tmp_path, request):
+    server = isolated_dev_server_factory('finder-details-toolbar')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    browser.set_window_size(480, 800)
+    browser.get(server.base_url)
+    wait = WebDriverWait(browser, 20)
+    wait.until(lambda driver: driver.execute_script("return initialAppShellPainted && typeof selectSession === 'function'"))
+    opened = browser.execute_async_script("""
+      const root=arguments[0],done=arguments[arguments.length-1];
+      (async()=>{setTabberMode('advanced');await selectSession(finderItemId);storageSet('yomux.finder.permissions.v1','0');
+        return await openFileExplorerAt(root,{manualSelection:true,user:true});})().then(done,e=>done(String(e)));
+    """, str(tmp_path))
+    assert opened is True, opened
+    button = wait.until(lambda driver: next((node for node in driver.find_elements(By.CSS_SELECTOR, '.file-explorer-panel[data-file-explorer-view="finder"] [data-file-explorer-permissions]') if node.is_displayed()), None))
+    assert button.text == 'ⓘ'
+    assert button.get_attribute('aria-label') == 'Show size and permissions'
+    assert button.get_attribute('title') == 'Show size and permissions'
+    geometry = browser.execute_script("""
+      const button=arguments[0],bounds=button.getBoundingClientRect();
+      const siblings=[...button.parentElement.children].filter(node=>node!==button&&node.offsetWidth>0);
+      return {width:bounds.width,overlaps:siblings.some(node=>{
+        const other=node.getBoundingClientRect();
+        return bounds.left<other.right&&bounds.right>other.left&&bounds.top<other.bottom&&bounds.bottom>other.top;
+      })};
+    """, button)
+    assert geometry['width'] <= 24, geometry
+    assert not geometry['overlaps'], geometry
+
+
+@pytest.mark.browser
+def test_native_get_info_refreshes_directory_size_progress_each_second(browser, isolated_dev_server_factory, tmp_path, request):
+    server = isolated_dev_server_factory('get-info-progress')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    directory = tmp_path / 'progress-folder'
+    directory.mkdir()
+    browser.get(server.base_url)
+    wait = WebDriverWait(browser, 20)
+    wait.until(lambda driver: driver.execute_script("return initialAppShellPainted && typeof showFileGetInfo === 'function'"))
+    browser.execute_script("""
+      window.originalGetInfoFetch=apiFetchJson;
+      apiFetchJson=async(url,options)=>{
+        const data=await originalGetInfoFetch(url,options);
+        if(url.startsWith('/api/fs/info?')) delete data.metadata_identity;
+        return data;
+      };
+      window.originalSizeStream=fileMetadataStream;
+      fileMetadataStream=(url,options,signal,progress)=>{
+        if(!url.startsWith('/api/fs/directory-size?')) return originalSizeStream(url,options,signal,progress);
+        return new Promise((resolve,reject)=>{
+          const data={allocated_bytes:512,files:1,folders:0,complete:false,partial:false,errors:[]};
+          signal.addEventListener('abort',()=>reject(new DOMException('Cancelled','AbortError')),{once:true});
+          progress({...data,bytes:12});
+          progress({...data,bytes:99});
+          window.finishGetInfoSize=()=>{const final={...data,bytes:267323707392,complete:true};progress(final);resolve(final)};
+          setTimeout(()=>progress({...data,bytes:999}),1100);
+        });
+      };
+      void showFileGetInfo(arguments[0]);
+    """, str(directory))
+    wait.until(lambda driver: len(driver.find_elements(By.CSS_SELECTOR, '[data-info-warning]')) == 1)
+    size = browser.find_element(By.CSS_SELECTOR, '[data-info-size]')
+    wait.until(lambda driver: '12' in driver.find_element(By.CSS_SELECTOR, '[data-info-size]').text)
+    assert '99 bytes' not in size.text
+    wait.until(lambda driver: '999 bytes' in driver.find_element(By.CSS_SELECTOR, '[data-info-size]').text)
+    browser.execute_script('finishGetInfoSize()')
+    wait.until(lambda driver: 'Total:' in driver.find_element(By.CSS_SELECTOR, '[data-info-size]').text)
+    assert '1 files' in size.text
+    assert '267,323,707,392 bytes (249 GB)' in size.text
+    browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-dialog-action]').click()
+    browser.execute_script('fileMetadataStream=originalSizeStream;delete window.originalSizeStream;delete window.finishGetInfoSize')
+    browser.execute_script('apiFetchJson=originalGetInfoFetch;delete window.originalGetInfoFetch')
+
+
+@pytest.mark.browser
+def test_native_get_info_directory_size_go_endpoint(browser, isolated_dev_server_factory, tmp_path, request):
+    server = isolated_dev_server_factory('get-info-directory-size-route')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    directory = tmp_path / 'real-size-folder'
+    directory.mkdir()
+    counted = directory / 'counted.txt'
+    counted.write_bytes(b'count-me-123')
+    browser.get(server.base_url)
+    wait = WebDriverWait(browser, 20)
+    wait.until(lambda driver: driver.execute_script("return initialAppShellPainted && typeof showFileGetInfo === 'function'"))
+    browser.execute_script('void showFileGetInfo(arguments[0])', str(directory))
+    wait.until(lambda driver: 'Total:' in driver.find_element(By.CSS_SELECTOR, '[data-info-size]').text)
+    summary = browser.find_element(By.CSS_SELECTOR, '[data-info-size]').text
+    allocated_size = counted.stat().st_blocks * 512
+    expected_size = max(counted.stat().st_size, allocated_size)
+    assert f'{expected_size:,} bytes' in summary, summary
+    assert '1 files' in summary, summary
+    assert '0 folders' in summary, summary
+    assert 'HTTP 501' not in summary, summary
+    browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-dialog-action]').click()
+
+
+@pytest.mark.browser
+def test_chmod_read_permission_reloads_an_open_unreadable_markdown_file(browser, isolated_dev_server_factory, tmp_path, request):
+    server = isolated_dev_server_factory('chmod-readable-editor-refresh')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    target = tmp_path / 'locked.md'
+    target.write_text('# Recovered content\n', encoding='utf-8')
+    browser.get(server.base_url)
+    wait = WebDriverWait(browser, 20)
+    wait.until(lambda driver: driver.execute_script("return initialAppShellPainted && typeof openFileInEditor === 'function'"))
+    setup = browser.execute_script("""
+      const path=arguments[0];
+      const metadata={path,name:'locked.md',kind:'file',size:0,mtime:0,created:null,accessed:null,allocated_size:0,
+        realpath:path,is_symlink:false,owner:'owner',owner_id:1,group:'group',group_id:2,mode:0o200,
+        permissions:'--w-------',octal_mode:'0200',metadata_identity:'fixture-file-identity',permission_edit_reason:'',
+        writable:true,write_reason:''};
+      window.__chmodMetadata=metadata;window.__chmodCanRead=false;window.__chmodReadCount=0;
+      window.__originalApiFetchJson=apiFetchJson;
+      apiFetchJson=async(url,...args)=>{
+        const parsed=new URL(String(url),location.href);
+        if(parsed.pathname==='/api/fs/read'){
+          window.__chmodReadCount++;
+          if(!window.__chmodCanRead){const error=new Error('Permission denied');error.status=403;throw error;}
+          return {...metadata,content:'# Recovered content\\n',size:20,mode:0o600,permissions:'-rw-------',octal_mode:'0600'};
+        }
+        if(parsed.pathname==='/api/fs/info')return {...metadata};
+        return window.__originalApiFetchJson(url,...args);
+      };
+      window.__originalFileMetadataStream=fileMetadataStream;
+      fileMetadataStream=async(url,options,signal,onProgress)=>{
+        if(!String(url).includes('/api/fs/chmod'))return window.__originalFileMetadataStream(url,options,signal,onProgress);
+        window.__chmodCanRead=true;
+        const changed={...metadata,mode:0o600,permissions:'-rw-------',octal_mode:'0600',writable:true,write_reason:''};
+        const result={path,complete:true,metadata:changed,files:1,changed:1,skipped:0,errors:[]};
+        onProgress(result);
+        return result;
+      };
+    """, str(target))
+    browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      openFileInEditor(arguments[0],{name:'locked.md'},{viewMode:'preview',userInitiated:true}).then(done,error=>done(String(error)));
+    """, str(target))
+    wait.until(lambda driver: driver.execute_script("return fileState.get(arguments[0])?.kind==='error'", str(target)))
+    assert browser.execute_script("return window.__chmodReadCount") == 1
+    browser.execute_script('void showFileGetInfo(arguments[0])', str(target))
+    wait.until(lambda driver: len(driver.find_elements(By.CSS_SELECTOR, '.file-get-info [data-permission-bit="256"]')) == 1)
+    browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-permission-bit="256"]').click()
+    apply = browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-permission-apply]')
+    assert apply.is_displayed()
+    apply.click()
+    wait.until(lambda driver: driver.execute_script("return fileState.get(arguments[0])?.kind==='text'", str(target)))
+    result = browser.execute_script("""
+      const path=arguments[0],state=fileState.get(path),item=fileEditorItemFor(path),panel=panelNodes.get(item);
+      return {content:state.content,writable:state.writable,mode:editorViewModeFor(path,item),readCount:window.__chmodReadCount,
+        editor:panel._cmView?.contentDOM.textContent||'',preview:panel.querySelector('.file-editor-preview-pane-panel')?.textContent||''};
+    """, str(target))
+    assert result['content'] == '# Recovered content\n' and result['writable'] is True, result
+    assert result['mode'] == 'edit' and 'Recovered content' in result['editor'], result
+    assert result['readCount'] == 2, result
+
+
+@pytest.mark.browser
+def test_native_create_empty_markdown_opens_editable(browser, isolated_dev_server_factory, tmp_path, request):
+    server = isolated_dev_server_factory('create-empty-markdown')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    directory = tmp_path / 'empty-markdown'
+    directory.mkdir()
+    target = directory / '_hello.md'
+    target.touch()
+    browser.get(server.base_url)
+    wait = WebDriverWait(browser, 20)
+    wait.until(lambda driver: driver.execute_script("return initialAppShellPainted && typeof openFileInEditor === 'function'"))
+    browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      openFileInEditor(arguments[0],{name:'_hello.md'},{userInitiated:true}).then(done,error=>done(String(error)));
+    """, str(target))
+    wait.until(lambda driver: driver.execute_script("""
+      const state=fileState.get(arguments[0]),item=fileEditorItemFor(arguments[0]),panel=panelNodes.get(item);
+      return state?.kind==='text' && !state.loading && panel?._cmView && panel._cmView.contentDOM.isContentEditable;
+    """, str(target)))
+    snapshot = browser.execute_script("""
+      const path=arguments[0],state=fileState.get(path),item=fileEditorItemFor(path),panel=panelNodes.get(item);
+      return {content:state.content,size:state.size,writable:state.writable,mode:editorViewModeFor(path,item),
+        editable:panel._cmView.contentDOM.isContentEditable,editor:panel._cmView.contentDOM.textContent};
+    """, str(target))
+    assert snapshot['content'] == '' and snapshot['size'] == 0, snapshot
+    assert snapshot['writable'] is not False and snapshot['mode'] == 'edit' and snapshot['editable'], snapshot
+    editor = browser.find_element(By.CSS_SELECTOR, '.file-editor-panel .cm-content')
+    ActionChains(browser).click(editor).send_keys('hello').perform()
+    wait.until(lambda driver: driver.execute_script("return fileState.get(arguments[0])?.content==='hello'", str(target)))
+    wait.until(lambda _driver: target.read_text(encoding='utf-8') == 'hello')
+
+
+@pytest.mark.browser
+def test_native_readonly_editor_and_finder_details(browser, isolated_dev_server_factory, tmp_path, request):
+    server = isolated_dev_server_factory('readonly-details')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    target = tmp_path / '_HELLO.md'
+    original = '# Locked\nOriginal content.\n'
+    target.write_text(original, encoding='utf-8')
+    target.chmod(0o444)
+    other = tmp_path / 'larger.log'
+    other.write_bytes(b'x' * 10240)
+    browser.get(server.base_url)
+    wait = WebDriverWait(browser, 20)
+    wait.until(lambda driver: driver.execute_script("return initialAppShellPainted && typeof openFileInEditor === 'function'"))
+    browser.execute_async_script("const done=arguments[arguments.length-1];openFileInEditor(arguments[0],'_HELLO.md',{viewMode:'split',userInitiated:true}).then(()=>done(true),e=>done(String(e)))", str(target))
+    wait.until(lambda driver: driver.execute_script("const p=panelNodes.get(fileEditorItemFor(arguments[0]));return Boolean(p?._cmView && p?._pmView)", str(target)))
+    snapshot = browser.execute_script("""
+      const p=panelNodes.get(fileEditorItemFor(arguments[0]));window.readonlyPanel=p;
+      window.readonlyTextView=p._cmView;window.readonlyViewView=p._pmView;
+      return {text:p._cmView.contentDOM.contentEditable,view:p._pmView.editable,
+        writable:fileState.get(arguments[0]).writable,saveHidden:p.querySelector('.file-editor-save-panel').hidden,
+        uploadHidden:p.querySelector('.file-editor-upload-panel').hidden,status:p.querySelector('.file-editor-status-message').textContent};
+    """, str(target))
+    assert snapshot['text'] == 'false' and snapshot['view'] is False, snapshot
+    assert snapshot['writable'] is False and snapshot['saveHidden'] and snapshot['uploadHidden'], snapshot
+    assert 'read-only' in snapshot['status'].lower(), snapshot
+    for selector in ['.cm-content', '.ProseMirror']:
+        surface = browser.execute_script('return readonlyPanel.querySelector(arguments[0])', selector)
+        ActionChains(browser).click(surface).send_keys('blocked').perform()
+        assert browser.execute_script('return fileState.get(arguments[0]).content', str(target)) == original
+    connection = HTTPConnection('127.0.0.1', server.port, timeout=10)
+    try:
+        connection.request('POST', '/api/fs/write', json.dumps({'path': str(target), 'content': 'must not replace'}),
+                           headers={'Content-Type': 'application/json', 'Origin': server.base_url})
+        response = connection.getresponse()
+        failure = json.loads(response.read())
+        status = response.status
+        if status == 202:
+            receipt = failure
+            def terminal(_server):
+                result = _server.request(receipt['operation']['status_url'])
+                return result if result[0] != 202 else False
+            status, _, body = WebDriverWait(server, 5, poll_frequency=0.05).until(terminal)
+            failure = json.loads(body)
+        assert status == 403 and 'read-only' in str(failure).lower(), failure
+    finally:
+        connection.close()
+    assert target.read_text(encoding='utf-8') == original
+    target.chmod(0o640)
+    browser.execute_async_script('const done=arguments[arguments.length-1];refreshOpenFilesIfChanged({paths:[arguments[0]],fresh:true}).then(()=>done(true),e=>done(String(e)))', str(target))
+    wait.until(lambda driver: driver.execute_script("return readonlyTextView.contentDOM.contentEditable==='true' && readonlyViewView.editable"))
+    assert browser.execute_script('return readonlyPanel._cmView===readonlyTextView && readonlyPanel._pmView===readonlyViewView')
+    target.chmod(0o444)
+    browser.execute_async_script('const done=arguments[arguments.length-1];refreshOpenFilesIfChanged({paths:[arguments[0]],fresh:true}).then(()=>done(true),e=>done(String(e)))', str(target))
+    wait.until(lambda driver: driver.execute_script("return readonlyTextView.contentDOM.contentEditable==='false' && !readonlyViewView.editable"))
+    assert browser.execute_script('return readonlyPanel._cmView===readonlyTextView && readonlyPanel._pmView===readonlyViewView')
+    browser.execute_async_script("""
+      const root=arguments[0],done=arguments[arguments.length-1];
+      (async()=>{setTabberMode('advanced');await selectSession(finderItemId);storageSet('yomux.finder.permissions.v1','0');
+        setFileExplorerManualRootMode();return await openFileExplorerAt(root,{manualSelection:true,user:true});})().then(done,e=>done(String(e)));
+    """, str(tmp_path))
+    button = wait.until(lambda driver: next((node for node in driver.find_elements(By.CSS_SELECTOR, '[data-file-explorer-permissions]') if node.is_displayed()), None))
+    button.click()
+    def details(driver, path):
+        return next((row for row in driver.find_elements(By.CSS_SELECTOR, f'.file-tree-row[data-path="{path}"]')
+                     if row.is_displayed() and row.find_element(By.CSS_SELECTOR, '.file-tree-permissions').text.startswith('-')), None)
+    first = wait.until(lambda driver: details(driver, target))
+    second = wait.until(lambda driver: details(driver, other))
+    assert first.find_element(By.CSS_SELECTOR, '.file-tree-permissions').text == '-r--r--r--'
+    assert first.find_element(By.CSS_SELECTOR, '.file-tree-size').text == f'{len(original.encode())} B'
+    assert second.find_element(By.CSS_SELECTOR, '.file-tree-size').text == '10 KB'
+    browser.execute_script('updateFileTreeGitStatusRows()')
+    assert first.find_element(By.CSS_SELECTOR, '.file-tree-permissions').text == '-r--r--r--'
+    assert first.find_element(By.CSS_SELECTOR, '.file-tree-size').text == f'{len(original.encode())} B'
+    geometry = browser.execute_script("""
+      return arguments[0].map(row=>({permission:row.querySelector('.file-tree-permissions').getBoundingClientRect().right,
+        size:row.querySelector('.file-tree-size').getBoundingClientRect().right,
+        font:parseFloat(getComputedStyle(row.querySelector('.file-tree-permissions')).fontSize),
+        name:parseFloat(getComputedStyle(row.querySelector('.file-tree-name')).fontSize)}));
+    """, [first, second])
+    assert abs(geometry[0]['permission'] - geometry[1]['permission']) < 1, geometry
+    assert abs(geometry[0]['size'] - geometry[1]['size']) < 1, geometry
+    assert all(row['font'] <= row['name'] for row in geometry), geometry
+    assert target.read_text(encoding='utf-8') == original
 
 
 def test_native_codex_wrapped_file_context_menu_opens_complete_path(browser, isolated_dev_server_factory, request):
@@ -79,10 +565,11 @@ def test_native_codex_wrapped_file_context_menu_opens_complete_path(browser, iso
                 ), None))
                 open_button.click()
                 WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("""
-                  const panel=panelNodes.get(fileEditorItemFor(arguments[0]));
-                  return itemIsActivePaneTab(fileEditorItemFor(arguments[0]))
+                  const item=fileEditorItemFor(arguments[0]), panel=panelNodes.get(item);
+                  return itemIsActivePaneTab(item) && editorViewModeFor(arguments[0],item)==='preview'
                     && panel?.getBoundingClientRect().height>0
-                    && panel?._cmView?.state.doc.toString()===arguments[1];
+                    && fileStateFor(arguments[0])?.content===arguments[1]
+                    && panel?._pmView?.state.doc.textContent===arguments[1].trimEnd();
                 """, str(path), content))
 
 
@@ -584,6 +1071,8 @@ def test_native_filesystem_events_refresh_visible_finder_and_hidden_finder_edito
         assert reloaded["finderVisible"] is False and reloaded["readbacks"], reloaded
         assert created.read_text(encoding="utf-8") == reloaded["content"]
     finally:
-        browser.get("about:blank")
-        server.stop()
+        run_fixture_cleanup_phases("native filesystem browser", [
+            ("browser", lambda: browser.get("about:blank")),
+            ("server", server.stop),
+        ])
     assert all(item["converged"] for item in observations), observations

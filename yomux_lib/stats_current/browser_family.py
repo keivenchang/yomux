@@ -18,10 +18,17 @@ class BrowserPayloadError(ValueError):
 _RETAINED_TEXT_BOUNDS = (("message", 500), ("stack", 4000))
 
 
+def _utf8_size(value: str) -> int:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise BrowserPayloadError("browser text must contain valid UTF-8") from error
+
+
 def _bound_retained_text(text: str, maximum: int) -> str:
     """UTF-8-safe re-bound with the truncation marker reserved INSIDE the byte
     limit, so text that a redaction marker expanded can never exceed the bound."""
-    if len(text.encode("utf-8")) <= maximum:
+    if _utf8_size(text) <= maximum:
         return text
     marker = "[truncated]"
     budget = max(0, maximum - len(marker.encode("utf-8")))
@@ -199,7 +206,7 @@ def _validate_operation_wait(payload: Mapping[str, object], present: set[str]) -
 
 
 def _validate_endpoint(value: object) -> None:
-    if not isinstance(value, str) or not value.startswith("/") or len(value.encode("utf-8")) > 240 or any(ord(character) < 32 or ord(character) == 127 for character in value):
+    if not isinstance(value, str) or not value.startswith("/") or _utf8_size(value) > 240 or any(ord(character) < 32 or ord(character) == 127 for character in value):
         raise BrowserPayloadError("browser.endpoint must be a bounded absolute path")
     if "?" in value or "#" in value:
         raise BrowserPayloadError("browser.endpoint must not contain query or fragment data")
@@ -208,21 +215,21 @@ def _validate_endpoint(value: object) -> None:
 def _validate_token(value: object, name: str, *, maximum: int) -> None:
     if (
         not isinstance(value, str)
-        or not 1 <= len(value.encode("utf-8")) <= maximum
+        or not 1 <= _utf8_size(value) <= maximum
         or any(not (character.isascii() and (character.isalnum() or character in "._-/")) for character in value)
     ):
         raise BrowserPayloadError(f"{name} must be bounded ASCII token text")
 
 
 def _validate_request_id(value: object) -> None:
-    if not isinstance(value, str) or not value.startswith("r-") or len(value.encode("utf-8")) > 128 or any(ord(character) < 33 or ord(character) == 127 for character in value):
+    if not isinstance(value, str) or not value.startswith("r-") or _utf8_size(value) > 128 or any(ord(character) < 33 or ord(character) == 127 for character in value):
         raise BrowserPayloadError("browser.request_id must be a bounded request id")
 
 
 def _validate_text(value: object, name: str, *, maximum: int) -> None:
     if (
         not isinstance(value, str)
-        or not 1 <= len(value.encode("utf-8")) <= maximum
+        or not 1 <= _utf8_size(value) <= maximum
         or any(ord(character) < 32 and character not in "\n\t" for character in value)
         or any(ord(character) == 127 for character in value)
     ):
@@ -238,5 +245,5 @@ def _validate_integer(
 ) -> None:
     if value is None:
         return
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not float(value).is_integer() or not minimum <= int(value) <= maximum:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not minimum <= value <= maximum or (isinstance(value, float) and not value.is_integer()):
         raise BrowserPayloadError(f"{name} must be an integer from {minimum} through {maximum}")

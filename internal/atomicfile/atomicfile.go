@@ -11,13 +11,49 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
 type Staged struct{ temporary, destination string }
+
+// SQLiteURI keeps filename bytes separate from SQLite connection options.
+func SQLiteURI(path, query string) string {
+	return "file:" + url.PathEscape(filepath.ToSlash(path)) + "?" + query
+}
+
+// PrivateDatabaseFiles prepares a private SQLite file and tightens existing
+// WAL/SHM sidecars without following links or creating absent sidecars.
+func PrivateDatabaseFiles(path string) error {
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		flags := os.O_RDWR | syscall.O_NOFOLLOW
+		if suffix == "" {
+			flags |= os.O_CREATE
+		}
+		file, err := os.OpenFile(path+suffix, flags, 0o600)
+		if errors.Is(err, os.ErrNotExist) && suffix != "" {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		info, err := file.Stat()
+		if err != nil {
+			return errors.Join(err, file.Close())
+		}
+		if !info.Mode().IsRegular() {
+			return errors.Join(errors.New("database files must be regular"), file.Close())
+		}
+		if err := errors.Join(file.Chmod(0o600), file.Close()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 type durableFile interface {
 	io.Writer

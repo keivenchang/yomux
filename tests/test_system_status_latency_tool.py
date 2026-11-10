@@ -16,6 +16,7 @@ from yomux_lib.infra.listener_census import SCOPE_TARGET
 
 from tools import system_status_latency_probe as probe
 from tests.isolated_dev_server import build_paths
+from tests.gate_harness import run_fixture_cleanup_phases
 from tests.isolated_dev_server import start_isolated_dev_server
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
@@ -327,6 +328,7 @@ def test_standalone_probe_drives_an_ephemeral_authenticated_daemon(monkeypatch, 
         assert len(artifact["raw"]["client_round_trip_ms"]) == probe.SAMPLES
         assert output.with_suffix(".json.sha256").is_file()
     finally:
-        if server is not None:
-            server.stop()
-        stop_isolated_tmux_runtime(tmux_runtime)
+        run_fixture_cleanup_phases("standalone latency probe", [
+            ("server", lambda: server.stop() if server is not None else None),
+            ("tmux runtime", lambda: stop_isolated_tmux_runtime(tmux_runtime)),
+        ])

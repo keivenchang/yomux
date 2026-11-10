@@ -1,74 +1,17 @@
 from __future__ import annotations
 
-import copy
-from contextlib import contextmanager
 import json
 from pathlib import Path
-import shlex
 import subprocess
-import sys
-from types import SimpleNamespace
-from urllib.parse import urlencode
 
 import pytest
-from selenium.webdriver.support.ui import WebDriverWait
 
-from tests.browser_helpers.browser_layout import assert_live_runtime_boot_healthy
 from tests.browser_helpers.browser_layout import browser
-from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
-from tests.browser_helpers.browser_layout import start_browser_server
-from tests.browser_helpers.browser_layout import start_isolated_browser_app
-from tests.browser_helpers.browser_layout import stop_browser_fixture
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
-from tests.gate_harness import wait_for_browser_boot
-from tests.gate_harness import wait_for_fixture_api_quiescence
-from tests.gate_harness import wait_for_fixture_client_event_demand
 from tests.gate_harness import gate_tmux  # noqa: F401
-from tests.tmux_runtime import create_isolated_tmux_session
-from tests.tmux_runtime import run_isolated_tmux
-from tests.tmux_runtime import wait_for_isolated_tmux_panes
-from yomux_lib.local_services.rpc import safe_socket_path
-from yomux_lib.approval.prompt_detector import agent_screen_state
-from yomux_lib.tmux.sessions import discover_sessions
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CAPTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "prompt_corpus"
-WORKING_CAPTURE = CAPTURE_ROOT / "captures" / "working_visible_counter__claude-code-2.1.183_20260620.yaml"
-IDLE_CAPTURE = CAPTURE_ROOT / "synthetic" / "try_suggestion_idle__claude-code-synthetic_20260620.yaml"
-ACHIEVED_CAPTURE = CAPTURE_ROOT / "captures" / "goal_achieved_idle_draft__codex-cli-0.141.0_20260624.yaml"
-REALISTIC_SESSION_COUNT = 14
-INITIAL_REALISTIC_SESSION_COUNT = 12
-# One owner for the failure-only diagnostic projection, shared by F6's failure path and by the
-# reachability probe below, so the two can never drift into separate copies. Pure reads of the
-# EXISTING `transcriptMetadataState.lastApply` owner and the existing deferred-payload binding:
-# it writes nothing, adds no request/timer/retry, and is never evaluated on a passing wait.
-F6_FAILURE_DIAGNOSTIC_JS = """
-        function captureF6FailureDiagnostics() {
-          const last = transcriptMetadataState.lastApply;
-          const apply = (!last || typeof last !== 'object') ? null : {
-            applied: last.applied === true,
-            reason: String(last.reason || ''),
-            payloadGeneration: Number(last.payloadGeneration || 0),
-            appliedGeneration: Number(last.appliedGeneration || 0),
-            session: last.session === undefined ? '' : String(last.session),
-          };
-          let deferred;
-          try {
-            deferred = deferredSealedAutoApprovePayload
-              ? {
-                  present: true,
-                  revision: agentWindowSnapshotRevision(deferredSealedAutoApprovePayload),
-                  sessionCount: Object.keys(deferredSealedAutoApprovePayload.sessions || {}).length,
-                }
-              : {present: false, revision: 0, sessionCount: 0};
-          } catch (error) {
-            deferred = {present: null, unreadable: String((error && error.name) || error)};
-          }
-          return {apply, deferred};
-        }
-"""
-
 F6_CONVERGENCE_PREDICATE_JS = """
         function f6ConvergenceSatisfied(observation, expectedCount, initialRevision) {
           // Observable convergence only. The retired clause additionally required
@@ -305,212 +248,6 @@ def f6_wait_failure_record(result, metadata_requests_before):
     )
 
 
-AGENT_STATE_GLOBALS = {
-    "agentWindowSnapshotRevision": "function",
-    "debugGraphLiveAgentWindowDetailHtml": "function",
-    "refreshSessionMetadata": "function",
-    "sessionAgentWindowStatusModel": "function",
-}
-
-GOAL_BLOCKED_CAPTURE = """• I could not finish the requested change.
-
-  The fixture-owned daemon rejected the transition and no safe recovery remains.
-
-› Explain this codebase
-
-  gpt-5.5 xhigh · /fixture/worktree                    Goal blocked (21m)
-"""
-
-
-def _fixture_capture(path: Path) -> str:
-    marker = "raw_capture: |\n"
-    text = path.read_text(encoding="utf-8")
-    assert marker in text, path
-    capture = text.split(marker, 1)[1]
-    lines = []
-    for line in capture.splitlines():
-        if line and not line.startswith("  "):
-            break
-        lines.append(line[2:] if line.startswith("  ") else "")
-    return "\n".join(lines).rstrip() + "\n"
-
-
-
-
-def _browser_transition(browser, screens_and_states: list[tuple[dict[str, object], str]]) -> list[dict[str, object]]:
-    return browser.execute_script(
-        """
-        const transitions = arguments[0];
-        const session = '1';
-        const snapshots = [];
-        window.__gateAgentTransitionRevision ??= 100;
-        for (const [screen, state] of transitions) {
-          const result = applyAutoApprovePayload({
-            agent_window_snapshot_revision: ++window.__gateAgentTransitionRevision,
-            topology_generation: tmuxTopologyGeneration,
-            session_order: [session],
-            sessions: {
-              [session]: {
-                target: session,
-                enabled: false,
-                screen,
-                agent_windows: [{
-                  kind: 'claude',
-                  state,
-                  window_index: 0,
-                  pane_target: '%gate-agent',
-                  current: true,
-                  window_active: true,
-                }],
-              },
-            },
-          });
-          const agent = sessionAgentWindowStatusPayloads(session, {agents: [], panes: []})[0];
-          const host = document.createElement('div');
-          host.innerHTML = agentWindowActivityIconHtmlForStatus(agent, agent.kind, session, {statusOnly: true});
-          const indicator = host.firstElementChild;
-          snapshots.push({
-            applied: result?.applied === true,
-            state: agent?.state || '',
-            classes: indicator?.className || '',
-            label: indicator?.getAttribute('aria-label') || '',
-            sessionState: sessionState(session, {agents: [], panes: []}).key,
-          });
-        }
-        return snapshots;
-        """,
-        [[screen, state] for screen, state in screens_and_states],
-    )
-
-
-
-
-
-
-
-
-
-
-def _wait_for_mock_agents(runtime, sessions: list[str]) -> None:
-    ready, panes = wait_for_isolated_tmux_panes(
-        runtime.tmux,
-        sessions,
-        lambda captures: all("Claude Code v" in captures[session] for session in sessions),
-        timeout=20,
-    )
-    assert ready, panes
-
-
-def _launch_mock_agents(runtime, sessions: list[str]) -> None:
-    command = shlex.join([sys.executable, str(REPO_ROOT / "tools" / "mockers" / "claude.py"), "--mock"])
-    for session in sessions:
-        launched = run_isolated_tmux(runtime.tmux, "send-keys", "-t", f"{session}:", f"exec {command}", "Enter", timeout=5)
-        assert launched.returncode == 0, launched.stderr or launched.stdout
-    _wait_for_mock_agents(runtime, sessions)
-
-
-def _add_mock_agent_sessions(runtime, count: int) -> list[str]:
-    stem = runtime.sessions[0].rsplit("-", 1)[0]
-    sessions = [f"{stem}-{index}" for index in range(len(runtime.sessions) + 1, len(runtime.sessions) + count + 1)]
-    command = shlex.join([sys.executable, str(REPO_ROOT / "tools" / "mockers" / "claude.py"), "--mock"])
-    for session in sessions:
-        create_isolated_tmux_session(
-            runtime.tmux,
-            session,
-            columns=120,
-            rows=36,
-            command=command,
-        )
-    runtime.sessions.extend(sessions)
-    _wait_for_mock_agents(runtime, sessions)
-    runtime.tmux.sessions.extend(sessions)
-    return sessions
-
-
-def _wait_for_realistic_browser_roster(browser, sessions: list[str]) -> dict[str, object]:
-    metrics = browser.execute_async_script(
-        """
-        const expected = arguments[0];
-        const done = arguments[arguments.length - 1];
-        const observe = () => {
-          const metadataSessions = transcriptMetadataState.payload?.sessions || {};
-          const approvalWindowCounts = expected.map(session => (autoApproveStates.get(session)?.agent_windows || []).length);
-          const revisions = expected.map(session => agentWindowSnapshotRevision(autoApproveStates.get(session)));
-          return {
-            browserSessionCount: sessions.length,
-            expectedCount: expected.length,
-            metadataSessionCount: Object.keys(metadataSessions).length,
-            metadataPresentCount: expected.filter(session => metadataSessions[session]).length,
-            approvalPresentCount: expected.filter(session => autoApproveStates.has(session)).length,
-            approvalWindowCountHistogram: approvalWindowCounts.reduce((counts, count) => ({
-              ...counts,
-              [count]: (counts[count] || 0) + 1,
-            }), {}),
-            positiveRevisionCount: revisions.filter(revision => revision > 0).length,
-            minimumRevision: Math.min(...revisions),
-            maximumRevision: Math.max(...revisions),
-          };
-        };
-        window.__yomuxTestWaitFor(() => {
-          const observation = observe();
-          return observation.browserSessionCount === expected.length
-            && observation.metadataPresentCount === expected.length
-            && observation.approvalWindowCountHistogram[1] === expected.length
-            && observation.positiveRevisionCount === expected.length;
-        }, {timeoutMs: 20000, description: `${expected.length}-session producer roster`}).then(() => done({
-          sessionCount: sessions.length,
-          metadataCount: Object.keys(transcriptMetadataState.payload?.sessions || {}).length,
-          revisions: expected.map(session => agentWindowSnapshotRevision(autoApproveStates.get(session))),
-          rowCount: expected.reduce((count, session) => count + (autoApproveStates.get(session)?.agent_windows || []).length, 0),
-        }), async error => {
-          let serverObservation = {unavailable: true};
-          try {
-            const response = await fetch('/api/auto-approve');
-            const payload = await response.json();
-            const serverSessions = payload?.sessions || {};
-            const windowCounts = Object.values(serverSessions).map(state => (state?.agent_windows || []).length);
-            serverObservation = {
-              status: response.status,
-              sessionCount: Object.keys(serverSessions).length,
-              windowCountHistogram: windowCounts.reduce((counts, count) => ({
-                ...counts,
-                [count]: (counts[count] || 0) + 1,
-              }), {}),
-              revision: payload?.agent_window_snapshot_revision || 0,
-            };
-          } catch (diagnosticError) {
-            serverObservation = {error: String(diagnosticError)};
-          }
-          done({error: String(error?.stack || error), ...observe(), serverObservation});
-        });
-        """,
-        sessions,
-    )
-    if metrics.get("error"):
-        raise AssertionError(json.dumps({
-            key: metrics.get(key)
-            for key in (
-                "error", "browserSessionCount", "expectedCount", "metadataSessionCount",
-                "metadataPresentCount", "approvalPresentCount", "approvalWindowCountHistogram",
-                "positiveRevisionCount", "minimumRevision", "maximumRevision", "serverObservation",
-            )
-        }, sort_keys=True))
-    assert metrics["sessionCount"] == metrics["metadataCount"] == len(sessions), metrics
-    assert metrics["rowCount"] == len(sessions), metrics
-    assert all(revision > 0 for revision in metrics["revisions"]), metrics
-    return metrics
-
-
-
-
-
-
-
-
-
-
-
-
 @pytest.mark.no_browser
 def test_f6_wait_failure_record_is_compact_json_that_survives_pytest_truncation():
     """The failure record must stay small enough to actually be read.
@@ -586,7 +323,6 @@ def test_f6_wait_failure_record_reports_an_unreadable_deferred_binding():
     assert parsed["error"] == "" and parsed["reportingError"] == "", parsed
 
 
-
 def _f6_predicate_says(expression, observation, expected_count=14, initial_revision=1):
     """Evaluate an expression against the REAL shared predicate source, via node.
 
@@ -605,7 +341,6 @@ def _f6_predicate_says(expression, observation, expected_count=14, initial_revis
         ["node", "-e", script], capture_output=True, text=True, check=True, cwd=str(REPO_ROOT),
     )
     return completed.stdout.strip()
-
 
 
 def _f6_build_outcome(*, wait_failed, capture_throws=False, snapshot_throws=False, final=None):

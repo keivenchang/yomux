@@ -4,46 +4,18 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from pathlib import Path
-import threading
 from types import SimpleNamespace
 
 import pytest
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
 from tests.browser_helpers.browser_layout import load_static_html_fixture
-from tests.browser_helpers.browser_layout import start_browser_server
-from tests.browser_helpers.browser_layout import stop_browser_server
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
-from tests.gate_harness import assert_browser_journey_error_free
 from tests.gate_harness import gate_http_port  # noqa: F401
-from tests.gate_harness import gate_http_request
 from tests.native_gate_fixtures import gate_live_server  # noqa: F401
-from tests.gate_harness import load_gate_browser
-from tests.gate_harness import open_gate_stats_surface
-from tests.gate_harness import run_fixture_cleanup_phases
 from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.helpers.browser_stats_coverage import _current_stats_fixture_html, _start_current_stats, _write_current_stats_fixture_assets
-from tests.helpers.gate_stats import NOW, _seed_realistic_stats
-from tools.mockers.transcript import append_record as _append_record
-from tools.mockers.transcript import codex_meta as _codex_meta
-from tools.mockers.transcript import codex_usage as _codex_usage
-from tools.mockers.transcript import write_records as _write_records
-from tests.helpers.gate_stats import commit_scan as _commit
-from yomux_lib.client_events import ClientEventBroker
-from yomux_lib.stats_current import pricing
-from yomux_lib.stats_current import storage
-from yomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
-from yomux_lib.stats_current.usage import usage_atom_from_source
-from yomux_lib.workspace import settings as workspace_settings
-
-
-REALISTIC_ROW_COUNT = 8_929
-REPAIR_BACKLOG_RECORDS = 240
 
 
 def _stats_snapshot_ready(response) -> bool:
@@ -76,93 +48,6 @@ def test_g0_stats_snapshot_readiness_accepts_only_ready_or_bounded_pending():
     for response in invalid:
         with pytest.raises(AssertionError):
             _stats_snapshot_ready(response)
-
-
-
-
-
-
-
-
-def _live_usage_while_repair_backlog_remains(root: Path) -> tuple[tuple[storage.UsageAtom, ...], int]:
-    """Return current-tail atoms while a production-shaped orphan repair remains queued."""
-
-    sessions = root / ".codex" / "sessions" / "2026" / "07" / "31"
-    active = sessions / "rollout-active.jsonl"
-    orphan = sessions / "rollout-orphan.jsonl"
-    _write_records(active, [_codex_meta("active-thread"), _codex_usage(NOW - 3, 100, 20, 10)])
-    rows = [{"key": "gate-stats|0|codex", "kind": "codex", "transcript": str(active)}]
-    scanner = StatsCurrentTranscriptUsageScanner(max_records_per_scan=20)
-    initial = scanner.scan(rows)
-    _commit(scanner, initial)
-
-    _write_records(orphan, [
-        _codex_meta(
-            "orphan-thread",
-            "active-thread",
-            forked_from_id="active-thread",
-            thread_source="subagent",
-        ),
-        *(
-            {"type": "response_item", "timestamp": NOW - 600 + index, "payload": {"text": "historical repair"}}
-            for index in range(REPAIR_BACKLOG_RECORDS)
-        ),
-    ])
-    scanner._max_records_per_scan = 1
-    repair = scanner.scan(rows)
-    _commit(scanner, repair)
-    assert repair.backlog_files == 1
-
-    _append_record(active, _codex_usage(NOW - 1, 140, 25, 17))
-    live = scanner.scan(rows)
-    assert live.backlog_files == 1
-    atoms = tuple(
-        usage_atom_from_source({**vars(item.atom), "tmux_key": item.tmux_key})
-        for scan in (initial, live)
-        for item in scan.items
-    )
-    assert atoms and any(atom.direction == "output" and atom.payload["quantity"] == 7 for atom in atoms)
-    return atoms, live.backlog_files
-
-
-
-
-def _start_current_stats_over_network(browser):
-    """Mount the production stream transport over the fixture's real HTTP server.
-
-    `_current_stats_fixture_html(network_fetch=True)` forwards its fetches to the
-    server, but its generic helper intentionally substitutes a synchronous fake
-    EventSource for renderer tests. G1 exercises the live append-to-paint
-    transition, so it must use the browser's native EventSource too.
-    """
-
-    result = browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        const root = document.getElementById('stats-root');
-        const mounted = YOmuxStatsCurrent.mount(root, {
-          view: 'stats',
-          clientId: 'gate-live-stats',
-          savedRange: 300,
-          savedResolution: 1,
-          fetch: window.__statsFixture.fetch,
-          EventSource: window.EventSource,
-        });
-        window.__statsFixture.mounted = mounted;
-        mounted.start().then(async () => {
-          await window.__yomuxTestWaitFor(
-            () => root.querySelector('[data-stats-chart="cpu"]'),
-            {description: 'live stats first exact generation'}
-          );
-          done({ok: true});
-        }).catch(error => done({error: String(error?.stack || error)}));
-        """
-    )
-    assert result.get("error") is None, result
-
-
-
-
 
 
 @pytest.mark.browser

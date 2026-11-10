@@ -274,16 +274,16 @@ func TestCurrentFamilyValidationIsWriteOnlyAndCompatibilityAware(t *testing.T) {
 	if _, err := currentWriter.AppendBatch(context.Background(), AppendBatch{Observations: []Observation{{
 		EventID: "service-load-empty", Family: "service_load", SourceID: "yolomux-go", ObservedAt: 5.75,
 		EpochID: "service", Payload: map[string]any{"running": true},
-	}}}); err == nil || !strings.Contains(err.Error(), "missing field") {
+	}}}); err == nil || !strings.Contains(requireAppendError(t, err).Unwrap().Error(), "missing field") {
 		t.Fatalf("current writer accepted service load without CPU: %v", err)
 	}
 	if _, err := currentWriter.AppendBatch(context.Background(), AppendBatch{Observations: []Observation{{
 		EventID: "service-load-null-rss", Family: "service_load", SourceID: "yolomux-go", ObservedAt: 5.8,
 		EpochID: "service", Payload: map[string]any{"running": true, "rss_bytes": nil},
-	}}}); err == nil || !strings.Contains(err.Error(), "missing field") {
+	}}}); err == nil || !strings.Contains(requireAppendError(t, err).Unwrap().Error(), "missing field") {
 		t.Fatalf("current writer accepted service load without CPU: %v", err)
 	}
-	if _, err := currentWriter.AppendBatch(context.Background(), malformed); err == nil || !strings.Contains(err.Error(), "missing field") {
+	if _, err := currentWriter.AppendBatch(context.Background(), malformed); err == nil || !strings.Contains(requireAppendError(t, err).Unwrap().Error(), "missing field") {
 		t.Fatalf("current writer accepted malformed current payload: %v", err)
 	}
 	if err := currentWriter.Close(); err != nil {

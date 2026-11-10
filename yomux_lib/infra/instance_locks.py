@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 import fcntl
 import os
 from pathlib import Path
@@ -56,8 +57,7 @@ def instance_root_is_available(paths_or_root: YomuxRoots | Path) -> bool:
 
 
 def _release_fds(fds: list[int]) -> None:
-    for fd in fds:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
+    with ExitStack() as cleanup:
+        for fd in fds:
+            cleanup.callback(os.close, fd)
+            cleanup.callback(fcntl.flock, fd, fcntl.LOCK_UN)

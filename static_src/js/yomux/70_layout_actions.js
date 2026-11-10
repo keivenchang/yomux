@@ -142,8 +142,8 @@ function recordTabActivation(item) {
 }
 
 function maxTabsPerPane() {
-  const raw = Math.floor(Number(initialSetting('appearance.max_tabs_per_pane', 10)));
-  if (!Number.isFinite(raw)) return 10;
+  const raw = Math.floor(Number(initialSetting('appearance.max_tabs_per_pane', 12)));
+  if (!Number.isFinite(raw)) return 12;
   return Math.max(2, Math.min(30, raw));
 }
 
@@ -1333,6 +1333,7 @@ function activatePaneTab(side, session, options = {}) {
   } else {
     setFocusedPanelItem(session, {userInitiated: options.userInitiated === true, deferSideSync: options.userInitiated === true});
     dockviewFinishTabActivationPerf(session);
+    if (options.userInitiated === true) focusPanel(session, focusOptions);
   }
 }
 
@@ -2448,18 +2449,30 @@ function clearSessionEphemeralRuntimeState(session) {
   clearSessionAttentionAcknowledgementRecords(session);
 }
 
+function runSessionUiCleanup(groups, commit = null) {
+  const cleanup = createLifecycleScope({onDispose: commit});
+  groups.reverse().forEach((dispose, index) => cleanup.replace(index, index, dispose));
+  cleanup.dispose('session-ui-retired');
+}
+
 function detachSessionUi(session) {
-  stopTranscriptStream(session);
-  stopSummaryStream(session);
-  const item = terminals.get(session);
-  if (item) closeTerminalItem(session, item);
-  terminals.delete(session);
-  pendingPaneViewStateCaptures.delete(session);
-  const panel = panelNodes.get(session);
-  if (panel) panel.remove();
-  panelNodes.delete(session);
-  clearSessionEphemeralRuntimeState(session);
-  dismissSessionToasts(session);
+  runSessionUiCleanup([
+    () => stopTranscriptStream(session),
+    () => stopSummaryStream(session),
+    () => {
+      const item = terminals.get(session);
+      terminals.delete(session);
+      if (item) closeTerminalItem(session, item);
+    },
+    () => pendingPaneViewStateCaptures.delete(session),
+    () => {
+      const panel = panelNodes.get(session);
+      panelNodes.delete(session);
+      panel?.remove();
+    },
+    () => clearSessionEphemeralRuntimeState(session),
+    () => dismissSessionToasts(session),
+  ]);
 }
 
 function clearSessionUiState(session) {
@@ -2475,9 +2488,8 @@ function clearSessionUiState(session) {
   tabLastActivatedAt.delete(session);
 }
 
-function stopSessionUi(session) {
-  detachSessionUi(session);
-  clearSessionUiState(session);
+function stopSessionUi(session, commit = null) {
+  runSessionUiCleanup([() => detachSessionUi(session), () => clearSessionUiState(session)], commit);
 }
 
 function replaceSessionMetadataEntries(replacements) {
@@ -2534,37 +2546,39 @@ function replaceTmuxSessionsInClient(renameEntries, nextSessions, options = {}) 
   const next = options.authoritativeRoster === true
     ? eligibleSessions
     : normalizedSessionOrder(eligibleSessions.map(item => replacements.get(item) || item)) || [];
-  for (const oldSession of replacements.keys()) {
+  replaceEditorNavItems(replacements);
+  runSessionUiCleanup([...replacements.keys()].map(oldSession => () => {
     clearPendingTmuxSession(oldSession);
     detachSessionUi(oldSession);
-  }
-  if (options.authoritativeRoster !== true) {
-    for (const newSession of replacements.values()) markPendingTmuxSession(newSession);
-  }
-  moveUploadResultRecords(replacements);
-  replaceSessionMetadataEntries(replacements);
-  renameTabberSessionsInClient(replacements);
-  setSessionOrder(next);
-  const focusSession = previousFocusedPanelItem
-    ? replacements.get(previousFocusedPanelItem) || previousFocusedPanelItem
-    : replacements.values().next().value;
-  focusedTerminal = replacements.get(previousFocusedTerminal) || previousFocusedTerminal;
-  focusedPanelItem = replacements.get(previousFocusedPanelItem) || previousFocusedPanelItem;
-  lastFocusedTmuxSession = replacements.get(lastFocusedTmuxSession) || lastFocusedTmuxSession;
-  const layoutOptions = {
-    focusSession,
-    prune: false,
-  };
-  if (replacements.size === 1) {
-    const [[oldSession, newSession]] = replacements;
-    layoutOptions.message = localizedHtml('common.renamed', {oldName: oldSession, newName: newSession});
-    layoutOptions.messageKind = 'advisory';
-  }
-  if (Number.isSafeInteger(options.completionGeneration) && options.completionGeneration > 0) {
-    layoutOptions.completionGeneration = options.completionGeneration;
-  }
-  applyLayoutSlots(layoutWithReplacedItems(replacements), layoutOptions);
-  for (const newSession of replacements.values()) renderUploadResult(newSession);
+  }), () => {
+    if (options.authoritativeRoster !== true) {
+      for (const newSession of replacements.values()) markPendingTmuxSession(newSession);
+    }
+    moveUploadResultRecords(replacements);
+    replaceSessionMetadataEntries(replacements);
+    renameTabberSessionsInClient(replacements);
+    setSessionOrder(next);
+    const focusSession = previousFocusedPanelItem
+      ? replacements.get(previousFocusedPanelItem) || previousFocusedPanelItem
+      : replacements.values().next().value;
+    focusedTerminal = replacements.get(previousFocusedTerminal) || previousFocusedTerminal;
+    focusedPanelItem = replacements.get(previousFocusedPanelItem) || previousFocusedPanelItem;
+    lastFocusedTmuxSession = replacements.get(lastFocusedTmuxSession) || lastFocusedTmuxSession;
+    const layoutOptions = {
+      focusSession,
+      prune: false,
+    };
+    if (replacements.size === 1) {
+      const [[oldSession, newSession]] = replacements;
+      layoutOptions.message = localizedHtml('common.renamed', {oldName: oldSession, newName: newSession});
+      layoutOptions.messageKind = 'advisory';
+    }
+    if (Number.isSafeInteger(options.completionGeneration) && options.completionGeneration > 0) {
+      layoutOptions.completionGeneration = options.completionGeneration;
+    }
+    applyLayoutSlots(layoutWithReplacedItems(replacements), layoutOptions);
+    for (const newSession of replacements.values()) renderUploadResult(newSession);
+  });
 }
 
 function replaceTmuxSessionInClient(oldSession, newSession, nextSessions, options = {}) {
@@ -2751,12 +2765,13 @@ async function killTmuxSession(session) {
          adoptTopologyGeneration(payload);
          const previousActive = activeSessions.slice();
         clearPendingTmuxSession(session);
-        stopSessionUi(session);
-        const sessionsChanged = updateSessionList(payload.sessions || []);
-        updateDocumentTitle();
-        renderSessionButtons();
-        renderPanels(previousActive);
-        if (sessionsChanged) renderPaneTabStrips();
+        stopSessionUi(session, () => {
+          const sessionsChanged = updateSessionList(payload.sessions || []);
+          updateDocumentTitle();
+          renderSessionButtons();
+          renderPanels(previousActive);
+          if (sessionsChanged) renderPaneTabStrips();
+        });
       },
     );
     if (!mutation.committed) return false;
@@ -2829,8 +2844,8 @@ function focusPanel(session, options = {}) {
   if (isFileEditorItem(session)) {
     focusedTerminal = null;
     setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
-    if (autoFocusCanFollowCursor()) {
-      requestFileEditorPanelFocus(session);
+    if (autoFocusCanFollowCursor() || options.userInitiated === true || options.focusContent === true) {
+      requestFileEditorPanelFocus(session, {explicit: options.userInitiated === true || options.focusContent === true});
       focusFileEditorPanelIfReady(panel, session);
     }
     return;
@@ -2838,9 +2853,20 @@ function focusPanel(session, options = {}) {
   if (isVirtualItem(session)) {
     focusedTerminal = null;
     setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
+    if (options.userInitiated === true || options.focusContent === true) {
+      const content = panel.querySelector('[role="tree"], input, textarea, [tabindex="0"]') || panel;
+      if (!content.hasAttribute('tabindex')) content.tabIndex = -1;
+      content.focus({preventScroll: true});
+    }
     return;
   }
-  activateTab(session, 'terminal', options);
+  if (options.focusContent !== true || !document.getElementById(`terminal-pane-${session}`)?.classList.contains(CLS.active)) {
+    activateTab(session, 'terminal', options);
+  }
+  if (options.focusContent === true) {
+    setFocusedTerminal(session);
+    focusTerminalDom(session);
+  }
 }
 
 function terminalFitMetricKey(value, scale = 1000) {
@@ -4148,46 +4174,32 @@ function closeTerminalItem(session, item) {
   item.manualClose = true;
   clearTerminalRemovalLatency('session', session);
   if (terminals.get(session) === item) terminals.delete(session);
-  if (item.reconnectTimer) {
-    clearTimeout(item.reconnectTimer);
-    tmuxSessionLifecycleReleaseTimer(item.sessionLifecycleToken, item.reconnectTimer);
-  }
-  if (item.resizeTimer) {
-    clearTimeout(item.resizeTimer);
-    tmuxSessionLifecycleReleaseTimer(item.sessionLifecycleToken, item.resizeTimer);
-  }
-  if (item.scrollTimer) {
-    clearTimeout(item.scrollTimer);
-    tmuxSessionLifecycleReleaseTimer(item.sessionLifecycleToken, item.scrollTimer);
-  }
-  if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
-  if (item.refreshViewportFrame) cancelAnimationFrame(item.refreshViewportFrame);
-  if (item.fitTimer) clearTimeout(item.fitTimer);
-  if (item.blankScreenRefreshTimer) {
-    clearTimeout(item.blankScreenRefreshTimer);
-    tmuxSessionLifecycleReleaseTimer(item.sessionLifecycleToken, item.blankScreenRefreshTimer);
-  }
-  if (item.attentionHighlightFrame) cancelAnimationFrame(item.attentionHighlightFrame);
-  item.fileUnderlineController?.dispose?.();
-  item.containerBindingDispose?.();
-  item.fitFrame = 0;
-  item.refreshViewportFrame = 0;
-  item.refreshViewportRows = 0;
-  item.refreshPending = false;
-  item.refreshAfterParse = [];
-  item.fitTimer = 0;
-  item.blankScreenRefreshTimer = 0;
-  item.attentionHighlightFrame = 0;
-  item.fileUnderlineController = null;
-  item.containerBindingDispose = null;
-  tmuxSessionLifecycleReleaseSource(item.socket?._tmuxSessionLifecycleToken, item.socket);
+  const cleanup = createLifecycleScope({onDispose: () => {
+    for (const key of ['fitFrame', 'refreshViewportFrame', 'refreshViewportRows', 'fitTimer', 'blankScreenRefreshTimer', 'attentionHighlightFrame']) item[key] = 0;
+    item.refreshPending = false;
+    item.refreshAfterParse = [];
+    item.fileUnderlineController = null;
+    item.containerBindingDispose = null;
+  }});
+  cleanup.replace('terminal', item.term, term => term.dispose());
+  cleanup.replace('socket', item.socket, socket => socket.close());
   const observer = resizeObservers.get(session);
-  if (observer) {
-    observer.disconnect();
-    resizeObservers.delete(session);
+  resizeObservers.delete(session);
+  cleanup.ownObserver('resize-observer', observer);
+  tmuxSessionLifecycleReleaseSource(item.socket?._tmuxSessionLifecycleToken, item.socket);
+  cleanup.replace('container-binding', item.containerBindingDispose, dispose => dispose());
+  cleanup.replace('file-underlines', item.fileUnderlineController, controller => controller.dispose());
+  for (const key of ['fitFrame', 'refreshViewportFrame', 'attentionHighlightFrame']) {
+    if (item[key]) cleanup.ownTimer(key, item[key], cancelAnimationFrame);
   }
-  try { item.socket.close(); } catch (_) {}
-  try { item.term.dispose(); } catch (_) {}
+  if (item.fitTimer) cleanup.ownTimer('fitTimer', item.fitTimer);
+  for (const key of ['reconnectTimer', 'resizeTimer', 'scrollTimer', 'blankScreenRefreshTimer']) {
+    if (item[key]) cleanup.replace(key, item[key], timer => {
+      tmuxSessionLifecycleReleaseTimer(item.sessionLifecycleToken, timer);
+      clearTimeout(timer);
+    });
+  }
+  cleanup.dispose('terminal-closed');
 }
 
 function dismissTerminalConnectionToasts(session) {
@@ -4242,15 +4254,16 @@ function sessionConfirmedGone(session, order) {
 // cleanup without the confirm/POST, for sessions that ended outside this client.
 function pruneDeadSession(session) {
   const previousActive = activeSessions.slice();
-  stopSessionUi(session);
-  completeTerminalRemovalLatency('session', session, {reason: 'prune-dead-session'});
-  if (sessions.includes(session)) updateSessionList(sessions.filter(item => item !== session));
-  updateDocumentTitle();
-  renderSessionButtons();
-  renderPanels(previousActive);
-  renderPaneTabStrips();
-  renderAutoApproveButtons();
-  statusOk(localizedHtml('status.sessionEnded', {session: sessionLabel(session)}));
+  stopSessionUi(session, () => {
+    completeTerminalRemovalLatency('session', session, {reason: 'prune-dead-session'});
+    if (sessions.includes(session)) updateSessionList(sessions.filter(item => item !== session));
+    updateDocumentTitle();
+    renderSessionButtons();
+    renderPanels(previousActive);
+    renderPaneTabStrips();
+    renderAutoApproveButtons();
+    statusOk(localizedHtml('status.sessionEnded', {session: sessionLabel(session)}));
+  });
 }
 
 // A WebSocket close describes the transport, not the tmux session. Confirm the session through the

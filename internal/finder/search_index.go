@@ -30,6 +30,7 @@ import (
 
 	"github.com/mattn/go-sqlite3"
 
+	"github.com/keivenchang/yomux/internal/atomicfile"
 	"github.com/keivenchang/yomux/internal/work"
 )
 
@@ -229,7 +230,7 @@ func createSearchIndexStore(path string) (*searchIndexStore, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite3", "file:"+filepath.ToSlash(path)+"?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL&_cache_size=-32768&_mmap_size=0")
+	db, err := sql.Open("sqlite3", atomicfile.SQLiteURI(path, "_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL&_cache_size=-32768&_mmap_size=0"))
 	if err != nil {
 		return nil, err
 	}
@@ -1552,14 +1553,14 @@ func (engine *searchIndexEngine) statusUnlocked(root, identity string) (payload 
 			return
 		}
 		engine.mu.Lock()
-		active, budget := engine.settingsFloor, engine.budgetBytes
+		active, budget, floorSet := engine.settingsFloor, engine.budgetBytes, engine.settingsFloorSet
 		engine.mu.Unlock()
 		var build, ack uint64
 		_ = engine.store.db.QueryRow(`SELECT settings_revision,active_revision FROM roots WHERE root=?`, root).Scan(&build, &ack)
 		payload["configured_revision"] = strconv.FormatUint(active, 10)
 		payload["active_revision"] = strconv.FormatUint(ack, 10)
 		payload["snapshot_revision"] = strconv.FormatUint(build, 10)
-		payload["snapshot_compatible"] = ack == active || !engine.settingsFloorSet
+		payload["snapshot_compatible"] = ack == active || !floorSet
 		payload["configured_budget_bytes"], payload["max_bytes"] = budget, budget
 		usage, err := engine.store.diskUsage()
 		if err != nil {

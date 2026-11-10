@@ -579,8 +579,10 @@
           acceptSnapshot(snapshot);
         }
       } catch (error) {
-        reportContractViolation(error);
-        scheduleRepair();
+        if (requestMatches(request, serial) && running && visible && !zoomedStatic) {
+          reportContractViolation(error);
+          scheduleRepair();
+        }
       } finally {
         tickBusy = false;
         scheduleTick();
@@ -863,6 +865,7 @@
       stop() {
         explicitlyStopped = true;
         running = false;
+        selectionSerial += 1;
         resetTickTimer();
         clearRepair();
         lastGenerationAdvanceAtMs = null;

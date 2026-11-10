@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/keivenchang/yomux/internal/atomicfile"
@@ -78,7 +77,7 @@ func OpenStore(ctx context.Context, path string, options StoreOptions) (_ *Store
 	if err != nil {
 		return nil, err
 	}
-	if err := privateDatabaseFiles(path); err != nil {
+	if err := atomicfile.PrivateDatabaseFiles(path); err != nil {
 		return nil, errors.Join(err, lease.Close())
 	}
 	db, err := sql.Open("sqlite3", sqliteURI(path, false))
@@ -107,33 +106,6 @@ func OpenStore(ctx context.Context, path string, options StoreOptions) (_ *Store
 }
 
 func (s *Store) Close() error { return s.db.Close() }
-
-func privateDatabaseFiles(path string) error {
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		flags := os.O_RDWR | syscall.O_NOFOLLOW
-		if suffix == "" {
-			flags |= os.O_CREATE
-		}
-		file, err := os.OpenFile(path+suffix, flags, 0600)
-		if suffix != "" && os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		info, err := file.Stat()
-		if err != nil {
-			return errors.Join(err, file.Close())
-		}
-		if !info.Mode().IsRegular() {
-			return errors.Join(errors.New("chat database files must be regular"), file.Close())
-		}
-		if err := errors.Join(file.Chmod(0600), file.Close()); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 const baseSchema = `
 CREATE TABLE IF NOT EXISTS chat_messages (

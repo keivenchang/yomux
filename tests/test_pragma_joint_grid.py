@@ -246,6 +246,8 @@ def test_step_four_rejects_a_cache_point_that_raises_write_bytes():
     decision = grid.decide(reads, writes)
     assert decision["rejected_on_write_regression"] == [
         {"cache_size": -65536, "write_bytes": 1_500_000, "control_write_bytes": 1_000_000}]
+    assert decision["choice"]["cache_size"] == grid.CACHE_SIZE_CONTROL
+    assert decision["choice"]["mmap_size"] == grid.MMAP_SIZE_CONTROL
 
 
 def test_step_five_publishes_the_losing_arms_beside_the_winner():

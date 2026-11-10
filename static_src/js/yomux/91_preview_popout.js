@@ -499,7 +499,13 @@ function previewSnapshotScratch(path, text, options = {}) {
 }
 
 function renderedPreviewSnapshot(path, text) {
-  return snapshotRenderedPreviewContainer(previewSnapshotScratch(path, text, {context: 'popout'}));
+  const scratch = previewSnapshotScratch(path, text, {context: 'popout'});
+  try {
+    return snapshotRenderedPreviewContainer(scratch);
+  } finally {
+    releasePreviewSurfaceResources(scratch);
+    scratch.remove();
+  }
 }
 
 async function renderedPreviewSnapshotAsync(path, text) {

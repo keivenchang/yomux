@@ -48,7 +48,7 @@ def _open_daemons_with_frozen_poll(browser):
 
 
 def _schema_five_payload_script(states=None):
-    """One browser fixture builder for a schema-4 `/api/system-status` payload."""
+    """One browser fixture builder for a schema-5 `/api/system-status` payload."""
     return """
         const inventory = arguments[0];
         const states = arguments[1];

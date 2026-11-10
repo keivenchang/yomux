@@ -122,7 +122,7 @@ func recordActivityClock(clocks map[string]float64, key string, now float64) map
 		oldestKey := ""
 		oldest := now
 		for candidate, ts := range clocks {
-			if ts < oldest {
+			if oldestKey == "" || ts < oldest {
 				oldestKey, oldest = candidate, ts
 			}
 		}

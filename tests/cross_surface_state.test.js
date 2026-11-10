@@ -36,6 +36,416 @@ const {
 const {registerCrossSurfaceQuickOpenSuite} = require('./browser_helpers/cross_surface_quick_open_suite');
 
 async function runCrossSurfaceStateSuite() {
+  test('deferred clipboard denial observes later payload failures', () => {
+    const result = require('node:child_process').spawnSync(process.execPath, ['--unhandled-rejections=strict', '-e', `
+      const assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm');
+      const source = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+      const itemStart = source.indexOf('function writeClipboardItem(');
+      const deferredStart = source.indexOf('async function copyDeferredTextToClipboard(');
+      const context = vm.createContext({Blob, ClipboardItem: class {}, showCopyFeedback() {}, copyTextWithFeedback() { throw Error('unexpected fallback'); }});
+      vm.runInContext(source.slice(itemStart, source.indexOf('async function copyTextToClipboard(', itemStart))
+        + source.slice(deferredStart, source.indexOf('// ROOT CAUSE:', deferredStart)) + ';this.copy = copyDeferredTextToClipboard;', context);
+      (async () => {
+        for (const synchronous of [false, true]) {
+          context.navigator = {clipboard: {write() {
+            const error = Error('native permission denied');
+            if (synchronous) throw error;
+            return Promise.reject(error);
+          }}};
+          let rejectPayload;
+          const payload = new Promise((_resolve, reject) => { rejectPayload = reject; });
+          const failure = Error('delayed payload failure');
+          const outcome = context.copy(payload).then(() => { throw Error('unexpected success'); }, error => error);
+          setImmediate(() => rejectPayload(failure));
+          assert.equal(await outcome, failure);
+          await new Promise(setImmediate);
+        }
+        console.log('deferred clipboard failures observed');
+      })().catch(error => { console.error(error); process.exitCode = 1; });
+    `], {encoding: 'utf8', env: {}, timeout: 10000});
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.signal, null);
+    assert.equal(result.stdout.trim(), 'deferred clipboard failures observed');
+  });
+
+  await testAsync('accepted rename and kill transitions converge before reporting teardown failures', async () => {
+    const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+    for (const route of ['rename', 'kill', 'prune']) {
+      const calls = [];
+      const failure = new Error('terminal teardown failed');
+      const context = {
+        Map, sessions: ['one', 'two'], activeSessions: ['one'], readOnlyMode: false,
+        focusedTerminal: 'one', focusedPanelItem: 'one', lastFocusedTmuxSession: 'one',
+        normalizedSessionOrder: value => value, tmuxSessionLifecycleAllowsTopologySession: () => true,
+        isTmuxSession: () => true, window: {confirm: () => true},
+        replaceEditorNavItems() {}, clearPendingTmuxSession() {}, markPendingTmuxSession() {},
+        detachSessionUi(session) { calls.push('detach-' + session); if (session === 'one') throw failure; },
+        clearSessionUiState(session) { calls.push('state-' + session); },
+        moveUploadResultRecords() {}, replaceSessionMetadataEntries() { calls.push('metadata'); },
+        renameTabberSessionsInClient() {},
+        setSessionOrder(value) { context.sessions = value; calls.push('roster'); },
+        updateSessionList(value) { context.sessions = value; calls.push('roster'); return true; },
+        layoutWithReplacedItems: value => value, applyLayoutSlots() { calls.push('layout'); },
+        renderUploadResult() {}, adoptTopologyGeneration() {}, completeTerminalRemovalLatency() {},
+        updateDocumentTitle() {}, renderSessionButtons() {}, renderPaneTabStrips() {}, renderAutoApproveButtons() {},
+        renderPanels() { calls.push('render'); }, statusOk() {}, statusErr() {}, showLayoutStatus() {},
+        t: value => value, localizedHtml: value => value, sessionLabel: value => value,
+        async runTmuxSessionMutation(_kind, _options, _request, commit) {
+          try { await commit({sessions: ['two']}); }
+          catch (error) { context.commitError = error; }
+          return {committed: true};
+        },
+      };
+      vm.createContext(context);
+      vm.runInContext(core.slice(core.indexOf('function createLifecycleScope('), core.indexOf('function createLatestResource(')), context);
+      for (const fn of ['runSessionUiCleanup', 'stopSessionUi', route === 'rename' ? 'replaceTmuxSessionsInClient' : route === 'kill' ? 'killTmuxSession' : 'pruneDeadSession']) {
+        const start = source.indexOf(`${fn === 'killTmuxSession' ? 'async ' : ''}function ${fn}(`);
+        vm.runInContext(source.slice(start, source.indexOf('\nfunction ', start + 1)), context);
+      }
+      if (route === 'rename') {
+        assert.throws(() => context.replaceTmuxSessionsInClient(new Map([['one', 'renamed-one'], ['two', 'renamed-two']]), ['one', 'two']),
+          error => error === failure || error.errors?.[0] === failure);
+        assert.deepStrictEqual([...context.sessions], ['renamed-one', 'renamed-two']);
+        assert.deepStrictEqual(calls, ['detach-one', 'detach-two', 'metadata', 'roster', 'layout']);
+        assert.equal(context.focusedTerminal, 'renamed-one');
+      } else {
+        if (route === 'kill') {
+          assert.equal(await context.killTmuxSession('one'), true);
+          assert.equal(context.commitError.errors[0], failure);
+        } else assert.throws(() => context.pruneDeadSession('one'), error => error.errors[0] === failure);
+        assert.deepStrictEqual([...context.sessions], ['two']);
+        assert.deepStrictEqual(calls, ['detach-one', 'state-one', 'roster', 'render']);
+      }
+    }
+  });
+
+  test('both Dockview renderer owners release sibling subscriptions after a disposer fails', () => {
+    const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
+    for (const name of ['createDockviewHeaderActionsRenderer', 'createDockviewTabRenderer']) {
+      for (const failPopover of name === 'createDockviewTabRenderer' ? [false, true] : [false]) {
+        const calls = [];
+        const failure = new Error('dispose failed');
+        const context = {
+          document: {createElement: () => ({addEventListener() {}})},
+          dockviewLayoutState: {applyingFromLayout: true}, tabberIsAdvanced: () => true,
+          cleanupDetachedPaneTabPopover() { if (failPopover) throw failure; },
+          bindPaneTabDismissInteraction() {},
+        };
+        vm.createContext(context);
+        vm.runInContext(core.slice(core.indexOf('function createLifecycleScope('), core.indexOf('function createLatestResource(')), context);
+        for (const fn of ['disposeDockviewRendererResources', name]) {
+          const start = source.indexOf(`function ${fn}(`);
+          vm.runInContext(source.slice(start, source.indexOf('\nfunction ', start + 1)), context);
+        }
+        const subscribe = index => () => ({dispose() { calls.push(index); if (index === 1) throw failure; }});
+        const renderer = context[name]();
+        // Initial initialization has no retained resources or popover to retire.
+        if (failPopover) context.cleanupDetachedPaneTabPopover = () => {};
+        renderer.init({api: {onDidActivePanelChange: subscribe(1),
+          onDidActiveChange: subscribe(name.includes('Header') ? 2 : 1),
+          onDidTitleChange: subscribe(2), onDidParametersChange: subscribe(3)}});
+        if (failPopover) context.cleanupDetachedPaneTabPopover = () => { throw failure; };
+        assert.throws(() => renderer.dispose(), error => error.name === 'AggregateError' && error.errors.includes(failure));
+        assert.deepStrictEqual(calls, name.includes('Header') ? [1, 2] : [1, 2, 3]);
+        context.cleanupDetachedPaneTabPopover = () => {};
+        renderer.dispose();
+        assert.deepStrictEqual(calls, name.includes('Header') ? [1, 2] : [1, 2, 3], 'failed teardown relinquishes subscription ownership exactly once');
+      }
+    }
+  });
+
+  test('session detach and stop finish independent cleanup after disposer failures', () => {
+    const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const actions = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+    for (const failing of ['transcript', 'summary', 'terminal', 'panel']) {
+      const calls = [];
+      const failure = new Error(failing + ' failed');
+      const cleanup = name => () => { calls.push(name); if (name === failing) throw failure; };
+      const context = {
+        stopTranscriptStream: cleanup('transcript'), stopSummaryStream: cleanup('summary'),
+        terminals: new Map([['one', {}]]), closeTerminalItem: cleanup('terminal'),
+        pendingPaneViewStateCaptures: new Map([['one', {}]]),
+        panelNodes: new Map([['one', {remove: cleanup('panel')}]]),
+        clearSessionEphemeralRuntimeState: cleanup('ephemeral'), dismissSessionToasts: cleanup('toasts'),
+        clearSessionUiState: cleanup('state'),
+      };
+      vm.createContext(context);
+      vm.runInContext(core.slice(core.indexOf('function createLifecycleScope('), core.indexOf('function createLatestResource(')), context);
+      vm.runInContext(actions.slice(actions.indexOf('function runSessionUiCleanup('), actions.indexOf('function clearSessionUiState('))
+        + actions.slice(actions.indexOf('function stopSessionUi('), actions.indexOf('function replaceSessionMetadataEntries(')), context);
+      assert.throws(() => context.stopSessionUi('one'), error => error.name === 'AggregateError'
+        && error.errors[0].errors[0] === failure);
+      assert.deepStrictEqual(calls, ['transcript', 'summary', 'terminal', 'panel', 'ephemeral', 'toasts', 'state']);
+      assert.equal(context.terminals.size, 0);
+      assert.equal(context.panelNodes.size, 0);
+      assert.equal(context.pendingPaneViewStateCaptures.size, 0);
+    }
+  });
+
+  test('display bucket aggregation retains heartbeat-only client communication', () => {
+    const observation = fs.readFileSync('static_src/js/yomux/84_debug_observation.js', 'utf8');
+    const panel = fs.readFileSync('static_src/js/yomux/85_debug_panel.js', 'utf8');
+    const context = {jsDebugStatsClientIdForRequest: () => 'one'};
+    vm.createContext(context);
+    for (const name of ['debugGraphNewBucket', 'debugGraphNewHostMetrics', 'debugGraphNewClientBucket', 'debugGraphMergeAgentTokenRates', 'debugGraphMergeBucket']) {
+      const start = observation.indexOf(`function ${name}(`);
+      vm.runInContext(observation.slice(start, observation.indexOf('\nfunction ', start + 1)), context);
+    }
+    vm.runInContext(panel.slice(panel.indexOf('function debugGraphCurrentClientRecord('), panel.indexOf('function debugGraphCurrentClientDisconnectedMs(')), context);
+    for (const scale of [1, 0.5]) {
+      const source = context.debugGraphNewBucket(0, 1000);
+      const target = context.debugGraphNewBucket(0, 10000);
+      source.heartbeatCount = 1;
+      const client = context.debugGraphNewClientBucket();
+      client.heartbeatCount = 1;
+      source.clients.set('one', client);
+      context.debugGraphMergeBucket(target, source, scale);
+      assert.equal(target.heartbeatCount, scale);
+      assert.equal(context.debugGraphCurrentClientCommunicationCount(target), scale);
+    }
+  });
+
+  test('terminal teardown releases every resource after an underline disposer fails', () => {
+    const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const actions = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+    const calls = [];
+    const failure = new Error('underline teardown failed');
+    const item = {
+      fileUnderlineController: {dispose() { calls.push('underline'); throw failure; }},
+      containerBindingDispose: () => calls.push('binding'),
+      socket: {close: () => calls.push('socket')}, term: {dispose: () => calls.push('term')},
+      fitFrame: 1, fitTimer: 2, reconnectTimer: 3,
+    };
+    const context = {
+      terminals: new Map([['one', item]]),
+      resizeObservers: new Map([['one', {disconnect: () => calls.push('observer')}]]),
+      clearTerminalRemovalLatency() {},
+      tmuxSessionLifecycleReleaseSource: () => calls.push('source-release'),
+      tmuxSessionLifecycleReleaseTimer: (_token, timer) => calls.push('release-' + timer),
+      clearTimeout: timer => calls.push('timer-' + timer),
+      cancelAnimationFrame: frame => calls.push('frame-' + frame),
+    };
+    vm.createContext(context);
+    vm.runInContext(core.slice(core.indexOf('function createLifecycleScope('), core.indexOf('function createLatestResource(')), context);
+    vm.runInContext(actions.slice(actions.indexOf('function closeTerminalItem('), actions.indexOf('function dismissTerminalConnectionToasts(')), context);
+    assert.throws(() => context.closeTerminalItem('one', item), error => error.name === 'AggregateError' && error.errors[0] === failure);
+    assert.deepStrictEqual(calls, ['source-release', 'release-3', 'timer-3', 'timer-2', 'frame-1', 'underline', 'binding', 'observer', 'socket', 'term']);
+    assert.equal(context.terminals.size, 0);
+    assert.equal(context.resizeObservers.size, 0);
+    assert.equal(item.fileUnderlineController, null);
+    assert.equal(item.fitFrame, 0);
+    assert.equal(item.manualClose, true);
+  });
+
+  test('authentication retirement closes all transport groups when one fails', () => {
+    const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const transport = fs.readFileSync('static_src/js/yomux/99_client_event_transport.js', 'utf8');
+    const calls = [];
+    const failure = new Error('summary cleanup failed');
+    let retire;
+    const context = {
+      registerTerminalAuthenticationRetirement: (_key, callback) => { retire = callback; },
+      clearRuntimeInterval: key => calls.push(key),
+      jsDebugCurrentStatsClientState: {client: {stop: () => calls.push('stats')}, startPromise: {}},
+      clientEventTransportState: {enabled: true},
+      disposeClientEventTransportLifecycle: () => calls.push('events'),
+      summaryLifecycleScopes: 'summary', transcriptLifecycleScopes: 'transcript',
+      stopAllTmuxSessionStreamScopes(key) { calls.push(key); if (key === 'summary') throw failure; },
+      devAutoReloadSource: {close: () => calls.push('reload')},
+    };
+    vm.createContext(context);
+    vm.runInContext(core.slice(core.indexOf('function createLifecycleScope('), core.indexOf('function createLatestResource(')), context);
+    const start = transport.indexOf("registerTerminalAuthenticationRetirement('long-lived-browser-transports'");
+    vm.runInContext(transport.slice(start, transport.indexOf('\nif (typeof window', start)), context);
+    assert.throws(retire, error => error.name === 'AggregateError' && error.errors[0] === failure);
+    assert.deepStrictEqual(calls, ['latency', 'debug-stats', 'stats', 'events', 'summary', 'transcript', 'reload']);
+    assert.equal(context.devAutoReloadSource, null);
+    assert.equal(context.jsDebugCurrentStatsClientState.startPromise, null);
+    assert.equal(context.clientEventTransportState.enabled, false);
+  });
+
+  await testAsync('late transcript HTTP results cannot replace newer context or a retired session', async () => {
+    const boot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+    const bootstrap = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
+    for (const transition of ['retired', 'replaced', 'superseded', 'window', 'push', 'current']) {
+      for (const failed of [false, true]) {
+        const pending = [];
+        const original = {textContent: '', querySelector: () => null};
+        let preview = original, generation = 1, pane = '%1';
+        const paints = [];
+        const context = {
+          transcriptPreviewMessages: 20,
+          tmuxSessionLifecycleToken: () => generation,
+          tmuxSessionLifecycleTokenIsCurrent: token => token === generation,
+          document: {getElementById: () => preview}, transcriptDomId: session => session,
+          transcriptContextApiUrl: () => '/context?pane=' + pane,
+          apiFetchJson: () => new Promise((resolve, reject) => pending.push({resolve, reject})),
+          applyContextItemsPayloadFromPush: (_payload, options) => { paints.push(options.preview); return true; },
+          isApiPendingResponse: () => false,
+          userMessageSnapshot: error => ({message: error.message}),
+          renderTranscriptContextLoadError: node => paints.push(node),
+        };
+        vm.createContext(context);
+        vm.runInContext(bootstrap.slice(bootstrap.indexOf('function makeGenerationGuard('), bootstrap.indexOf('function fileEditorItemFor(')), context);
+        vm.runInContext(boot.slice(boot.indexOf('async function refreshTranscriptPreview('), boot.indexOf('function applyContextItemsPayloadFromPush(')), context);
+        const request = context.refreshTranscriptPreview('one', original);
+        if (transition === 'retired') generation += 1;
+        if (transition === 'replaced') preview = {};
+        if (transition === 'superseded') context.refreshTranscriptPreview('one', original);
+        if (transition === 'window') pane = '%2';
+        if (transition === 'push') original._transcriptContextLoadGuard.invalidate();
+        if (failed) pending[0].reject(new Error('old request failed'));
+        else pending[0].resolve({session: 'one', path: '/old-context', items: []});
+        await request;
+        assert.equal(paints.length, transition === 'current' ? 1 : 0, `${transition}, failed=${failed}`);
+        if (transition === 'current') assert.equal(paints[0], original);
+      }
+    }
+  });
+
+  test('authentication stream retirement attempts every session after a disposal failure', () => {
+    const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const boot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+    const context = {};
+    vm.createContext(context);
+    vm.runInContext(core.slice(core.indexOf('function createLifecycleScope('), core.indexOf('function createLatestResource(')), context);
+    vm.runInContext(boot.slice(boot.indexOf('function stopAllTmuxSessionStreamScopes('), boot.indexOf('function tmuxSessionStreamSurfaceVisible(')), context);
+    const calls = [];
+    const failure = new Error('session disposal failed');
+    const scopes = new Map([
+      ['one', {dispose(reason) { calls.push(['one', reason]); throw failure; }}],
+      ['two', {dispose(reason) { calls.push(['two', reason]); return true; }}],
+    ]);
+    assert.throws(() => context.stopAllTmuxSessionStreamScopes(scopes, 'authentication_required'), error => error.name === 'AggregateError' && error.errors[0] === failure);
+    assert.deepStrictEqual(calls, [['one', 'authentication_required'], ['two', 'authentication_required']]);
+  });
+
+  test('layout scroll restoration targets copied editors and independent file surfaces', () => {
+    const source = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
+    const editor = (item, id) => ({dataset: {filePath: '/a.md', layoutItem: item}, _cmView: {scrollDOM: {id}}});
+    const original = editor('file:/a.md', 'original');
+    const copy = editor('copy:/a.md', 'copy');
+    const surfaces = ['finder', 'differ', 'tabber'].map(view => {
+      const panel = new TestElement('', 'section');
+      panel.className = 'file-explorer-panel';
+      panel.dataset.panelItem = view;
+      const scroll = new TestElement('', 'div');
+      scroll.className = view === 'finder' ? 'file-explorer-tree-panel' : 'file-explorer-changes-panel';
+      panel.appendChild(scroll);
+      return scroll;
+    });
+    const context = {
+      fileExplorerMode: 'files', fileExplorerViewForItem: item => item,
+      fileExplorerModeFromUrlParam: view => ({finder: 'files', differ: 'diff', tabber: 'tabber'})[view] || '',
+      normalizeFileExplorerMode: mode => mode,
+      document: {querySelectorAll: selector => selector === '.file-editor-panel' ? [original, copy]
+        : surfaces.filter(node => selector === '.file-explorer-tree-panel' ? node === surfaces[0] : node !== surfaces[0])},
+    };
+    vm.createContext(context);
+    vm.runInContext(source.slice(source.indexOf('function layoutUrlFileSurfaceMode('), source.indexOf('function layoutUrlScrollPayloadForElement(')), context);
+    vm.runInContext(source.slice(source.indexOf('function layoutUrlScrollElementForPayload('), source.indexOf('function applyLayoutUrlScrollSnapshot(')), context);
+    assert.equal(context.layoutUrlScrollElementForPayload({target: 'editor:copy:/a.md:editor', path: '/a.md', item: 'copy:/a.md'}).element.id, 'copy');
+    assert.equal(context.layoutUrlScrollElementForPayload({target: 'editor:gone', path: '/a.md', item: 'gone'}), null);
+    for (const [index, mode] of ['files', 'diff', 'tabber'].entries()) {
+      const payload = context.layoutUrlScrollTargetForElement(surfaces[index]);
+      assert.equal(payload.target, `finder:${mode}`);
+      assert.equal(context.layoutUrlScrollElementForPayload(payload).element, surfaces[index]);
+    }
+  });
+
+  test('failed scoped installation releases resources and preserves its original error', () => {
+    const source = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const context = {};
+    vm.createContext(context);
+    vm.runInContext(source.slice(source.indexOf('const bindOnceRecords ='), source.indexOf('function createLatestResource(')), context);
+    const root = {};
+    const failure = new Error('installation failed');
+    let cleaned = false;
+    assert.throws(() => context.bindScopedOnce(root, 'fixture', scope => {
+      scope.replace('resource', {}, () => { cleaned = true; });
+      throw failure;
+    }), error => error === failure);
+    assert.equal(cleaned, true);
+    assert.equal(typeof context.bindScopedOnce(root, 'fixture', () => {}), 'function');
+  });
+
+  test('session retirement uses the lifecycle owner to clean every resource after a failure', () => {
+    const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const layout = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
+    const calls = [];
+    const failure = new Error('scope teardown failed');
+    const context = {DOMException, clearTimeout: timer => calls.push(timer)};
+    vm.createContext(context);
+    vm.runInContext(core.slice(core.indexOf('function createLifecycleScope('), core.indexOf('function createLatestResource(')), context);
+    vm.runInContext(layout.slice(layout.indexOf('function retireTmuxSessionLifecycleRecord('), layout.indexOf('function reconcileSupersededTmuxSessionLifecycleMutation(')), context);
+    const record = {phase: 'stable', controllers: new Set([{abort: () => calls.push('controller')}]),
+      lifecycleScopes: new Set([{dispose() { calls.push('scope'); throw failure; }}]),
+      sources: new Set([{close: () => calls.push('source')}]), timers: new Set(['timer'])};
+    assert.throws(() => context.retireTmuxSessionLifecycleRecord(record), error => error.name === 'AggregateError' && error.errors[0].errors[0] === failure);
+    assert.deepStrictEqual(calls, ['controller', 'scope', 'source', 'timer']);
+    assert.equal(record.phase, 'retired');
+    assert.equal(record.sources.size, 0);
+    assert.equal(record.lifecycleScopes.size, 0);
+  });
+
+  test('Quick Open preserves distinct files with equal names and sizes', () => {
+    const api = loadYomux();
+    const files = [{path: '/one/a.py', size: 4}, {path: '/two/a.py', size: 4},
+      {path: '/alias/a.py', realpath: '/one/a.py', size: 4}];
+    assert.deepStrictEqual(Array.from(api.dedupeFileSearchResults(files), file => file.path), ['/one/a.py', '/two/a.py']);
+  });
+
+  test('lifecycle disposal retires every resource when a sibling cleanup fails', () => {
+    const source = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const context = {};
+    vm.createContext(context);
+    vm.runInContext(source.slice(source.indexOf('const bindOnceRecords ='), source.indexOf('function createLatestResource(')), context);
+    const calls = [];
+    const failure = new Error('installer cleanup failed');
+    const root = {};
+    const dispose = context.bindScopedOnce(root, 'fixture', scope => {
+      scope.replace('first', 1, () => calls.push('first'));
+      scope.replace('second', 2, () => calls.push('second'));
+      return () => { calls.push('installer'); throw failure; };
+    });
+    assert.throws(dispose, error => error.name === 'AggregateError' && error.errors[0] === failure);
+    assert.deepStrictEqual(calls, ['installer', 'second', 'first']);
+    assert.equal(dispose(), false);
+    assert.equal(typeof context.bindScopedOnce(root, 'fixture', () => {}), 'function');
+  });
+
+  test('work summaries select the focused linked worktree before its shared repository', () => {
+    const api = loadYomux();
+    const graph = {
+      version: 1,
+      git_worktrees: {
+        a: {id: 'a', root: '/repo/a', local_repository_id: 'r', current_branch_id: 'ba'},
+        b: {id: 'b', root: '/repo/b', local_repository_id: 'r', current_branch_id: 'bb'},
+      },
+      local_repositories: {r: {id: 'r', local_branch_ids: ['ba', 'bb']}},
+      local_branches: {ba: {id: 'ba', name: 'A'}, bb: {id: 'bb', name: 'B'}},
+      hosted_repositories: {}, pull_requests: {}, linear_issues: {}, runtime_actors: {},
+      tmux_sessions: {}, tmux_windows: {}, worktree_branch_activity: {},
+      path_observations: {o: {git_worktree_id: 'b', path: '/repo/b', last_observed_at: 1}},
+      tmux_panes: {p: {id: 'p', target: '%1', path_observation_ids: ['o']}},
+    };
+    const summary = api.sessionWorkSummaryForTest('session', {work_graph: graph}, {tmuxTarget: '%1'});
+    assert.equal(summary.selectedRepo.root, '/repo/b');
+    assert.equal(summary.git.branch, 'B');
+  });
+
+  test('fuzzy highlighting preserves original Unicode characters and their match positions', () => {
+    const api = loadYomux();
+    for (const [query, value, expected] of [
+      ['a', '\u{1f600}a', '\u{1f600}<mark class="fuzzy-match">a</mark>'],
+      ['\u{1f600}a', '\u{1f600} xa', '<mark class="fuzzy-match">\u{1f600}</mark> x<mark class="fuzzy-match">a</mark>'],
+      ['x', '\u0130x', '\u0130<mark class="fuzzy-match">x</mark>'],
+      ['i', '\u0130x', '<mark class="fuzzy-match">\u0130</mark>x'],
+    ]) assert.equal(api.fuzzyHighlightHtml(query, value), expected);
+  });
+
   test('refill confirmation warning uses the themed danger text treatment', () => {
     const dialogSource = fs.readFileSync('static_src/js/yomux/45_file_explorer_actions.js', 'utf8');
     const refillSource = fs.readFileSync('static_src/js/yomux/84_stats_current.js', 'utf8');
@@ -87,7 +497,7 @@ async function runCrossSurfaceStateSuite() {
     let deferredFocus;
     const textarea = {};
     const context = {
-      window, document: {activeElement: textarea},
+      window, document: {activeElement: textarea}, tabSwitchHighlightGeneration: 1, focusedPanelItem: '1',
       terminals: new Map([['1', {term: {focus() { focusCalls++; }}, container: {querySelector: () => textarea}}]]),
       recordTerminalMobileInputTrace() {}, setTimeout: callback => { deferredFocus = callback; },
     };
@@ -1430,8 +1840,10 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(multiMetaHtml.indexOf('data-repo-cycle="repo-cycle"') < multiMetaHtml.indexOf('/repo/lib'), 'C9: the repo carousel is the leftmost metadata control before path/description text');
     api.cycleSessionRepoDisplayForTest('repo-cycle', multiRepoInfo, 1);
     const cycledMetaHtml = api.projectMetaHtml('repo-cycle', multiRepoInfo);
-    assert.ok(cycledMetaHtml.includes('/repo/lib'), 'C9: the next arrow cycles from the active checkout to the next backend-ordered repo');
-    assert.ok(cycledMetaHtml.includes('>2/2</button>'), 'C9: the repo control updates the current repo position');
+    assert.ok(cycledMetaHtml.includes('/repo/app'), 'C9: the first next arrow advances from the displayed active checkout');
+    assert.ok(cycledMetaHtml.includes('>1/2</button>'), 'C9: the repo control wraps from the final displayed checkout');
+    api.cycleSessionRepoDisplayForTest('repo-cycle', multiRepoInfo, -1);
+    assert.ok(api.projectMetaHtml('repo-cycle', multiRepoInfo).includes('>2/2</button>'), 'C9: previous returns to the final checkout');
     const secondaryPrInfo = {
       agents: [{kind: 'shell', pane_target: '%secondary-pr'}],
       selected_pane: {target: '%secondary-pr', window: '0', pane: '0', current_path: '/home/test/dynamo/dynamo4'},
@@ -1625,8 +2037,8 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.fileExplorerLabel(), 'File Explorer');
     assert.ok(filesTab.includes('File Explorer'));
     assert.ok(appSource.includes("const editorViewModes = new Set(['edit', 'preview', 'split', 'diff'])"), 'file editor registers diff as a real view mode');
-    assert.ok(appSource.includes('new api.MergeView'), 'wide diff mode uses CodeMirror MergeView');
-    assert.ok(appSource.includes('api.unifiedMergeView'), 'narrow diff mode uses CodeMirror unified merge view');
+    assert.equal(appSource.includes('new api.MergeView'), false, 'retired side-by-side renderer is removed');
+    assert.ok(appSource.includes('api.unifiedMergeView'), 'diff mode uses CodeMirror unified merge view at every width');
     assert.ok(appSource.includes('function reconfigureCodeMirrorPanelEditorOptions'), 'word wrap and line-number toggles live-reconfigure CodeMirror instead of rebuilding');
     assert.ok(appSource.includes('function codeMirrorLineWrappingExtension'), 'word wrap has an explicit CodeMirror line-wrapping helper');
     assert.ok(appSource.includes("api.EditorView?.contentAttributes?.of?.({class: 'cm-lineWrapping'})"), 'word wrap falls back to CodeMirror contentAttributes when EditorView.lineWrapping is not exported');
@@ -1638,7 +2050,8 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.codeMirrorWrapMarkerRowsForBlock({height: 60, widget: {}}, 20), 1, 'wrap marker skips widget-backed blocks even when type metadata is missing');
     const wrapApplyStart = appSource.indexOf('function applyEditorWrapPreference');
     const wrapApplyBody = appSource.slice(wrapApplyStart, appSource.indexOf('function setEditorWrapEnabled', wrapApplyStart));
-    assert.ok(wrapApplyBody.includes('codeMirrorCurrentText(panel)'), 'wrap toggles capture the live CodeMirror document before any fallback render');
+    assert.ok(wrapApplyBody.includes('syncOpenFileContentFromPanels(path)'), 'wrap toggles commit pending native documents through the canonical copied-buffer owner');
+    assert.ok(wrapApplyBody.indexOf('syncOpenFileContentFromPanels(path)') < wrapApplyBody.indexOf('panels.forEach('), 'wrap toggles capture each shared document before reconfiguring any copy');
     assert.ok(wrapApplyBody.indexOf('reconfigureCodeMirrorPanelEditorOptions(panel)') > 0, 'wrap toggles try the live CodeMirror reconfigure path');
     assert.ok(wrapApplyBody.indexOf('reconfigureCodeMirrorPanelEditorOptions(panel)') < wrapApplyBody.indexOf('renderFileEditorPanel(panel'), 'wrap toggles reconfigure before falling back to a full render');
     assert.equal(appSource.includes('allowInlineDiffs: true'), false, 'unified diff uses native deleted chunks so removed lines are not editable doc lines');
@@ -1669,7 +2082,7 @@ async function runCrossSurfaceStateSuite() {
     // the right overview is one linear-gradient derived from CodeMirror's rendered diff-row sequence.
     assert.ok(/function buildDiffOverviewGradientFromBands[\s\S]*linear-gradient\(to bottom/.test(appSource), 'diff overview builds one linear-gradient from non-overlapping row bands');
     assert.ok(/function diffOverviewCodeMirrorChunks[\s\S]*view\?\.state\?\.values[\s\S]*fromA[\s\S]*fromB/.test(appSource), 'diff overview reads CodeMirror merge chunks from the live EditorView state');
-    assert.ok(/function updateCodeMirrorDiffOverview[\s\S]*const chunks = diffOverviewCodeMirrorChunks\(view, panel\)[\s\S]*diffOverviewRowsFromCodeMirrorRenderedWeights\(view, chunks, currentText, original, container\)[\s\S]*\|\| diffOverviewRowsFromCodeMirrorChunks\(chunks, currentText, original\)/.test(appSource), 'diff overview derives the right rail from CodeMirror chunk rows, with text visual-row weights for wrap');
+    assert.ok(/function updateCodeMirrorDiffOverview[\s\S]*const chunks = diffOverviewCodeMirrorChunks\(view\)[\s\S]*diffOverviewRowsFromCodeMirrorRenderedWeights\(view, chunks, currentText, original, container\)[\s\S]*\|\| diffOverviewRowsFromCodeMirrorChunks\(chunks, currentText, original\)/.test(appSource), 'diff overview derives the right rail from CodeMirror chunk rows, with text visual-row weights for wrap');
     assert.ok(/function updateCodeMirrorDiffOverview[\s\S]*if \(!chunkRows && view\) \{[\s\S]*scheduleDiffOverviewReadinessRebuild\(panel\);[\s\S]*return;/.test(appSource), '#50: live CodeMirror diff views wait for chunks instead of drawing the raw-diff fallback rail');
     assert.ok(/function diffOverviewScrollLooksCurrentOnly[\s\S]*scrollTarget\.scrollHeight[\s\S]*diffOverviewLineHeight[\s\S]*return scrollRows < threshold/.test(appSource), '#55/#56/#57: diff overview detects CodeMirror current-side-only scroll geometry before deleted widgets are mounted');
     assert.ok(/function updateCodeMirrorDiffOverview[\s\S]*diffOverviewScrollLooksCurrentOnly\(chunkRows, scrollTarget, view, container\)[\s\S]*scheduleDiffOverviewSettledRebuild\(panel\)[\s\S]*return;/.test(appSource), '#55/#56/#57: pre-snap current-side-only editors defer the rail until CodeMirror mounts deleted rows');
@@ -1741,7 +2154,6 @@ async function runCrossSurfaceStateSuite() {
       {
         _cmMode: 'diff',
         _diffOverviewWaitingForDeletedRows: true,
-        _cmMergeView: {chunks: [largeChunk]},
         _cmView: {
           scrollDOM: currentOnlyScroller,
           defaultLineHeight: 20,
@@ -1812,7 +2224,6 @@ async function runCrossSurfaceStateSuite() {
     };
     const screenshotPanel = {
       _cmMode: 'diff',
-      _cmMergeView: {chunks: [screenshotChunk]},
       _cmView: {
         scrollDOM: screenshotScroller,
         state: {doc: screenshotDoc, values: [[screenshotChunk]]},
@@ -2057,7 +2468,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, untracked: true, diff: 'diff --git a/a b/a\n--- /dev/null\n+++ b/a\n@@\n+x'}), true, '#43: an untracked/all-added Differ row reports a displayable diff');
     assert.ok(/function openDraggedFilesInEditor[\s\S]*await refreshOpenFileDiff\(path[\s\S]*openFileDiffAvailable\(draggedState\)[\s\S]*setFileEditorViewMode\(path, 'diff'/.test(appSource), '#39: a dragged CHANGED file opens in the same unified diff view as double-click (routes through the shared refreshOpenFileDiff/diff path)');
     assert.ok(appSource.includes('data-file-explorer-new-folder'), 'Finder header exposes new-folder action');
-    const focusPanelBody = appSource.slice(appSource.indexOf('function setFocusedPanelItem('), appSource.indexOf('let autoFocusNavTimer'));
+    const focusPanelBody = appSource.slice(appSource.indexOf('function setFocusedPanelItem('), appSource.indexOf('function clearPendingFileEditorFocusExcept('));
     assert.equal(/switchFileExplorerChangesSession/.test(focusPanelBody), false, 'passive focus/hover no longer switches the Finder Modified-files session');
     assert.ok(focusPanelBody.includes('previousItem !== item && !dockviewLayoutActive()'), 'global focus changes do not mark a different Dockview pane as pre-detached');
     assert.equal(appSource.includes('sessionFilesTargetSession({followActive: true})'), false, 'Finder Modified-files session selection never follows passive hover/autofocus');
@@ -2087,7 +2498,7 @@ async function runCrossSurfaceStateSuite() {
     const dockviewCommitBody = appSource.slice(dockviewCommitStart, appSource.indexOf('function dockviewSetPendingUserPanelActivation', dockviewCommitStart));
     assert.ok(dockviewCommitBody.includes('const focusOptions = isTmuxSession(panelItem) && userInitiated')
       && dockviewCommitBody.includes('acknowledgeUserTerminalTabActivation(panelItem, options, sharedGesture)')
-      && dockviewCommitBody.includes('else setFocusedPanelItem(panelItem, {...options, userInitiated, deferSideSync: userInitiated})')
+      && dockviewCommitBody.includes('setFocusedPanelItem(panelItem, {...options, userInitiated, deferSideSync: userInitiated})')
       && dockviewCommitBody.includes('commitUserTerminalTabActivation(panelItem, focusOptions, generation, sharedGesture)'), 'Dockview focus reuses the already-acknowledged click through the shared activation owner');
     const paneActivationBody = appSource.slice(appSource.indexOf('function activatePaneTab('), appSource.indexOf('async function selectSession('));
     assert.ok(paneActivationBody.includes('commitUserTerminalTabActivation(session, focusOptions, generation)'), 'clicking a tmux pane tab routes through the shared deferred Finder owner');
@@ -2130,7 +2541,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/function terminalDataShouldAcknowledgeAttention\(data, options = \{\}\)[\s\S]*terminalDataWithoutPassiveReports\(data, options\)\.length > 0/.test(appSource), 'terminal byte handling filters passive xterm reports before acknowledging attention');
     assert.ok(/function handleTerminalData\(session, data, options = \{\}\)[\s\S]*acknowledgeTerminalAttentionFromTransportInput\(session, filtered, options\)/.test(appSource), 'terminal byte handling acknowledges red/yellow attention from real typed xterm input');
     assert.ok(/fetchSessionFiles\(\{destination: 'differ', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded\}\)/.test(appSource), 'a cached Differ session switch preserves last-known-good rows and lets the server coalesce stale refreshes');
-    assert.ok(/function sessionFilesCacheKey\(session, destination = 'differ'\)[\s\S]*sessionFilesRequestQueryString\(destination\)/.test(appSource), 'each session-files cache is keyed by session plus its destination comparison');
+    assert.notEqual(api.sessionFilesCacheKeyForTest('8002'), api.sessionFilesCacheKeyForTest('8003'), 'session-files caches keep different sessions distinct');
     assert.ok(/const cached = fileExplorerSessionFilesCache\.get\(sessionFilesCacheKey\(session, 'differ'\)\)/.test(appSource), 'Differ session switches do not reuse payloads from a different ref pair');
     assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*if \(cachedPayloadIsLoaded\) \{[\s\S]*setSessionFilesPayloadForDestination\('differ', cached\.payload\)/.test(appSource), 'Differ session switches apply cached target payloads immediately before a coalesced refresh');
     assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);[\s\S]*if \(itemInLayout\(tabberItemId\) && focusedPanelItem === tabberItemId\)/.test(appSource), 'Finder session switches sync the root from tmux metadata before choosing the lightweight Tabber or session-files path');
@@ -2222,9 +2633,16 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/function sessionFilesPayloadHasVisibleDifferResult\(payload, files = null\)[\s\S]*sessionFilesPayloadIsRefreshing\(payload\)[\s\S]*return false/.test(appSource), 'a rooted local-refresh placeholder remains loading until real files, warnings, or errors arrive');
     assert.ok(/function applySessionFilesPayloadToDestination\(destination, payload, request, session, options = \{\}\)[\s\S]*const wasLoading = sessionFilesLoadingForDestination\(destination\);[\s\S]*options\.clearLoading !== false && wasLoading[\s\S]*setSessionFilesLoadingForDestination\(destination, false\)/.test(appSource), 'accepted session-files pushes clear each destination stale foreground loading flag before rerendering');
     assert.ok(/if \(backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent\(nextPayload, destination\)\) return;/.test(appSource), 'background refreshes cannot blank a rooted destination payload with a rootless empty result');
-    assert.ok(/function sessionFilesRelevantDiffRefRepos\([\s\S]*sessionFilesRepoRoots\(payload\)[\s\S]*function sessionFilesRefsQuery\([\s\S]*relevantRepos\.has\(normalizedRepo\)[\s\S]*nextRefs\.from === globalRefs\.from/.test(appSource), 'session-files requests prune stale per-repo refs before calling the API');
+    staleRefApi.setSessionFilesPayloadForTest({session: '8002', loaded: false, repos: [], files: [], errors: []});
+    const loadingRefs = JSON.parse(new URLSearchParams(staleRefApi.sessionFilesCacheKeyForTest('8002').split('\x1f')[1]).get('refs'));
+    assert.deepStrictEqual(loadingRefs, sessionFilesRefs, 'retiring displayed rows preserves the same-session comparison scope');
+    assert.equal(staleRefApi.sessionFilesRequestForDestinationForTest('differ', 'other-session').repo_refs, null, 'explicit requests cannot borrow another session comparison scope');
+    assert.equal(new URLSearchParams(staleRefApi.sessionFilesCacheKeyForTest('other-session').split('\x1f')[1]).get('refs'), null, 'cache identities use the requested session scope');
     assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)[\s\S]*fileExplorerChangesSelectedSession = session;[\s\S]*document\.querySelector\('\.file-explorer-changes-panel'\)[\s\S]*switchFileExplorerChangesSession\(session\)/.test(appSource), 'committing a session refreshes the mounted Finder/Differ surface without a parallel global-mode branch');
-    assert.ok(/function sessionFilesRequestQueryString\(destination = 'differ'\)[\s\S]*destination === 'finder'[\s\S]*[`']from=HEAD&to=current[\s\S]*diffRefQueryString\(\)/.test(appSource), 'Finder is pinned to HEAD/current while Differ follows selected global and per-repo refs');
+    const finderRequest = staleRefApi.sessionFilesRequestForDestinationForTest('finder', '8002');
+    assert.equal(finderRequest.from_ref, 'HEAD');
+    assert.equal(finderRequest.to_ref, 'current');
+    assert.equal(finderRequest.repo_refs, null, 'Finder remains independent of Differ comparison choices');
     assert.ok(/function sessionFilesRepoRoots\(payload = fileExplorerFinderSessionFilesState\.payload\)/.test(appSource), 'Finder Sync root planning defaults to the working-tree record rather than the active Differ comparison');
     assert.ok(/const destination = fileExplorerViewForItem\(panel\.dataset\.panelItem\) === 'finder' \? 'finder' : 'differ';[\s\S]*destination === 'finder' \? fileExplorerFinderTargetSession\(\) : fileExplorerSessionFilesTargetSession\(\)/.test(appSource), 'the shared Reload handler targets the mounted Finder or Differ record instead of treating both panels as Finder');
     assert.ok(/function setFileExplorerMode\(mode\)[\s\S]*fileExplorerItemForView\(mode\)[\s\S]*openFileSurface\(item\)/.test(appSource), 'the legacy mode entry point now activates the matching independent surface instead of maintaining a second renderer mode');
@@ -2329,8 +2747,14 @@ async function runCrossSurfaceStateSuite() {
   assert.deepStrictEqual([...watchApi.backgroundFileEditorWatchFilesForTest()], [], 'the previously visible clean editor does not move to the slower watch list');
   watchApi.setDocumentVisibilityForTest('hidden');
   assert.deepStrictEqual(canonical(watchApi.clientServerWatchStateForTest()), {
-    client_id: watchApi.clientServerWatchStateForTest().client_id, roots: [], search_roots: [], root_surfaces_version: 1, root_surfaces: [], files: [], background_files: [], context_items: [], activity_summary: {visible: false}, session_files: [],
-  }, 'hidden documents unregister every pane watch and producer request');
+    client_id: watchApi.clientServerWatchStateForTest().client_id, roots: [], search_roots: [], root_surfaces_version: 1, root_surfaces: [], files: [], open_files: [], background_files: [], context_items: [], activity_summary: {visible: false}, session_files: [],
+  }, 'hidden documents unregister pane polling and producer requests before file identities are loaded');
+  watchApi.setOpenFileStateForTest(visiblePath, {dirty: false, fileId: '1:1'});
+  watchApi.setOpenFileStateForTest(backgroundPath, {dirty: false, fileId: '1:2'});
+  assert.deepStrictEqual(canonical(watchApi.clientServerWatchStateForTest().open_files), [
+    {path: backgroundPath, file_id: '1:2', tracking_id: '', revision: 0},
+    {path: visiblePath, file_id: '1:1', tracking_id: '', revision: 0},
+  ], 'hidden documents retain clean foreground and background files for relocation');
 
   const transcriptWatchApi = loadYomux('', ['1', '2']);
   const transcriptWatchSlots = transcriptWatchApi.emptyLayoutSlots();
@@ -2486,6 +2910,9 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(delayHtml.includes('data-preference-section="performance"'), 'delay search shows Performance');
     assert.equal(/data-preference-section="performance"[\s\S]*preferences-settings" hidden/.test(delayHtml), false, 'search expands matching collapsed sections');
     assert.ok(delayHtml.includes('Server SSE: editor file-change poll'), 'delay search surfaces server SSE timing settings');
+    assert.equal(api.preferenceItemMatches({label: 'Theme'}, '\u4e0d\u5b58\u5728'), false, 'unmatched Unicode search does not admit every setting');
+    assert.equal(api.preferenceItemMatches({label: 'Theme'}, '???'), false, 'unmatched punctuation does not admit every setting');
+    assert.equal(api.preferenceItemMatches({label: '\u4e3b\u9898 \u989c\u8272'}, '\u989c\u8272 \u4e3b\u9898'), true, 'Unicode search terms match independently of word order');
     preferencesCss = fs.readFileSync('static/yomux.css', 'utf8');
     const preferencesJs = fs.readFileSync('static/yomux.js', 'utf8');
     assert.ok(preferencesCss.startsWith('/* GENERATED by tools/static_build.py from static_src/'), 'generated CSS has a do-not-edit header');
@@ -2585,11 +3012,10 @@ async function runCrossSurfaceStateSuite() {
       assert.equal(paneSpacingSrc.includes('paneSpacing / 5'), false, '#261: the active green box width is NOT a separate scaled value — it uses --pane-split-gap directly');
       assert.ok(/preferenceSettingItem\('appearance\.pane_spacing', \{type: 'number', min: 0, max: 20/.test(paneSpacingSrc), '#261: Preferences exposes a 0-20px pane spacing field through the shared setting builder');
       assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['pref.appearance.pane_spacing.label'], 'Pane spacing', '#261: the pane spacing field has a localized label');
-      // The terminal "follow" theme option reads "Follow global color theme" (NOT "app theme"), matching
-      // the "Global color theme" setting it follows; the help references the global color theme too.
+      // Terminal follow mode names the same Global appearance control it follows.
       const enT = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
-      assert.equal(enT['pref.appearance.terminal_theme.follow-app'], 'Follow global color theme', 'terminal follow option reads "Follow global color theme"');
-      assert.ok(enT['pref.appearance.terminal_theme.help'].includes('global color theme'), 'terminal theme help references the global color theme');
+      assert.equal(enT['pref.appearance.terminal_theme.follow-app'], 'Follow global appearance', 'terminal follow option reads "Follow global appearance"');
+      assert.ok(enT['pref.appearance.terminal_theme.help'].includes('global appearance'), 'terminal theme help references the global appearance');
     }
     assert.ok(/\.grid\.drop-preview-root::before\s*\{[\s\S]*left:\s*var\(--drop-preview-left[\s\S]*width:\s*var\(--drop-preview-width[\s\S]*height:\s*var\(--drop-preview-height/.test(preferencesCss), '#36: root previews consume the one measured rectangle that preserves the triplet home branch');
     assert.ok(/\.layout-column\s*\{[\s\S]*gap:\s*var\(--pane-split-gap\)/.test(preferencesCss), 'pane split layout reads the compact gap token');
@@ -2730,11 +3156,11 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(fullBleedRule, 'the full-bleed box-shadow/clip-path rule for block diff lines exists');
     assert.equal(/\.cm-insertedLine\b/.test(fullBleedRule[1]), false, 'the full-bleed box-shadow rule must not list the inline cm-insertedLine mark (it buries wrapped rows)');
     assert.equal(/\.cm-deletedLine\b/.test(fullBleedRule[1]), false, 'the full-bleed box-shadow rule must not list the inline cm-deletedLine mark (it buries wrapped rows)');
-    // #44: diffs render as full-line red/green only (highlightChanges:false in both merge views). The old
+    // #44: diffs render as full-line red/green only (highlightChanges:false in the unified view). The old
     // YOmux intra-line token overlay stays gone; CodeMirror still emits its built-in changed/deleted
     // text spans, which we only style for light-theme contrast.
     diffBundle = fs.readFileSync('static/yomux.js', 'utf8');
-    assert.equal((diffBundle.match(/highlightChanges: false/g) || []).length, 2, '#44: both merge views disable intra-line change highlighting');
+    assert.equal((diffBundle.match(/highlightChanges: false/g) || []).length, 1, '#44: unified diff disables intra-line change highlighting');
     assert.equal(diffBundle.includes('highlightChanges: true'), false, '#44: no merge view re-enables intra-line highlighting');
     assert.equal(preferencesCss.includes('cm-insertedText'), false, '#44: the dead intra-line token rules are removed');
     assert.equal(preferencesCss.includes('--diff-add-text-bg'), false, '#44: the unused intra-line text-bg token is removed');
@@ -2807,7 +3233,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(performanceHtml.includes('Notification pulse duration'), false, 'Performance does not own the notification pulse duration');
     assert.ok(notificationsHtml.includes('Status ball pulse period'), 'Notifications labels the status ball pulse period');
     assert.ok(notificationsHtml.includes('Notification pulse duration'), 'Notifications labels the shared notification pulse duration');
-    assert.ok(notificationsHtml.includes('branch, PR, status, or CI badges') && notificationsHtml.includes('0 keeps transition balls visible but static.'), 'Notifications explains that one duration applies to status transitions and badges');
+    assert.ok(notificationsHtml.includes('status changes and metadata badges pulse') && notificationsHtml.includes('Zero keeps status balls static'), 'Notifications explains the shared pulse duration and static option');
     assert.equal(performanceHtml.includes('Client pull: file-change/Differ fallback'), false, 'Performance no longer exposes the removed client file-change fallback interval');
     for (const removedPath of [
       'file_explorer.refresh_seconds',
@@ -2851,7 +3277,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/data-setting-path="uploads\.max_bytes"[\s\S]*?preferences-setting-suffix">MB</.test(largeUploadPreferencesHtml), 'file transfer size cap labels its unit as MB');
     assert.equal(/data-setting-path="uploads\.max_bytes"[\s\S]*?preferences-setting-suffix">bytes</.test(largeUploadPreferencesHtml), false, 'file transfer size cap no longer shows a raw bytes suffix');
     assert.ok(preferencesHtml.includes('Auto-focus active pane'), 'auto-focus setting names the whole active pane/view');
-    assert.ok(preferencesHtml.includes('enable hover-open menus'), 'auto-focus help covers menu hover behavior');
+    assert.ok(preferencesHtml.includes('open menus on hover'), 'auto-focus help covers menu hover behavior');
     assert.ok(preferencesHtml.includes('Off by default'), 'auto-focus help explains the default');
     assert.equal(preferencesHtml.includes('Auto-focus terminals'), false, 'auto-focus setting is not terminal-only');
     assert.ok(preferencesHtml.includes('data-setting-path="appearance.theme"'), 'preferences expose the global app theme setting');
@@ -2868,10 +3294,10 @@ async function runCrossSurfaceStateSuite() {
     {
       const cursorSrc = fs.readFileSync('static/yomux.js', 'utf8');
       assert.ok(/const DEFAULT_CURSOR_COLOR\s*=\s*'yellow'/.test(cursorSrc), 'cursor color: yellow remains the named default');
-      assert.ok(/const NEON_CURSOR_COLOR_CHOICES\s*=\s*\['laser-lime', 'neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange'\]/.test(cursorSrc), 'cursor color: neon choices are cursor-only, not active-color choices');
-      assert.ok(/'laser-lime':\s*\{cursorLabelKey:\s*'pref\.appearance\.editor_cursor_color\.laser-lime',\s*cursor:\s*\{dark:\s*'#ccff00',\s*light:\s*'#6b8f00'\}\}/.test(cursorSrc), 'cursor color: Laser lime is the first neon cursor preset with a readable light-mode variant');
-      assert.ok(/function editorCursorColorForScheme[\s\S]*value === 'theme' \? scheme\.cursor : cursorColorForPreset\(value, scheme\?\.dark === false\)/.test(cursorSrc), 'cursor color: theme uses the scheme cursor, color choices use the shared UI color parent');
-      assert.ok(/function activeTerminalCursorColorForTheme[\s\S]*resolvedTerminalThemeMode\(\) === 'light'[\s\S]*value === 'theme' \? baseTheme\.cursor : cursorColorForPreset\(value, resolvedTerminalThemeMode\(\) === 'light'\)/.test(cursorSrc), 'cursor color: active terminal uses the light display cursor with the shared UI color parent');
+      assert.ok(/const NEON_CURSOR_COLOR_CHOICES\s*=\s*\['neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange'\]/.test(cursorSrc), 'cursor color: neon choices are cursor-only, not active-color choices');
+      assert.ok(/'neon-green':\s*\{cursorLabelKey:\s*'pref\.appearance\.editor_cursor_color\.neon-green',\s*cursor:\s*\{dark:\s*'#ccff00',\s*light:\s*'#6b8f00'\}\}/.test(cursorSrc), 'cursor color: Neon green uses the laser-lime palette with a readable light-mode variant');
+      assert.ok(cursorSrc.includes('return configuredCursorColorForMode(scheme?.dark === false);'), 'editor cursors resolve the shared choice using the editor appearance');
+      assert.ok(cursorSrc.includes("return configuredCursorColorForMode(resolvedTerminalThemeMode() === 'light');"), 'terminal cursors resolve the same choice using the terminal appearance');
       const moonWhite = api.uiColorVisualPresetForTest('white', true);
       assert.equal(moonWhite.accent, '#64748b', 'Moon white uses a darker light-mode strip color instead of blending into the light app chrome');
       assert.equal(moonWhite.bright, '#aeb8c5', 'Moon white uses a darker light-mode active tab color');
@@ -2929,7 +3355,7 @@ async function runCrossSurfaceStateSuite() {
       ['appearance.terminal_theme', ['follow-app', 'dark', 'light']],
       ['appearance.date_time_hour_cycle', ['24', '12']],
       ['appearance.editor_cursor_style', ['line', 'block']],
-      ['appearance.editor_cursor_color', ['green', 'blue', 'orange', 'yellow', 'purple', 'white', 'laser-lime', 'neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange', 'theme']],
+      ['appearance.editor_cursor_color', ['neon-green', 'neon-cyan', 'neon-orange', 'yellow', 'neon-magenta', 'white', 'theme']],
       ['yolo.prompt_source', ['hybrid', 'pane']],
       ['file_explorer.root_mode', ['fixed', 'sync']],
       ['file_explorer.image_open_mode', ['same-tab', 'new-tab']],
@@ -2945,9 +3371,6 @@ async function runCrossSurfaceStateSuite() {
     }
     assert.ok(preferencesHtml.includes('>Same tab<'), 'string radio labels use their localized descriptor');
     assert.equal(/data-setting-path="appearance\.theme"[\s\S]{0,180}preferences-radio-swatches/.test(preferencesHtml), false, 'Global color theme radios do not show color swatches');
-    assert.equal(/<select[^>]*data-setting-path="appearance\.active_color"/.test(preferencesHtml), false, 'Active color renders as radios, not a select');
-    assert.equal(/<select[^>]*data-setting-path="appearance\.separator_color"/.test(preferencesHtml), false, 'Separator color renders as radios, not a select');
-    assert.ok(preferencesHtml.includes('data-setting-path="appearance.separator_color"'), 'Preferences expose separator color for pane separators and drop previews');
     assert.ok(new RegExp(`preferences-radio-swatches joined[\\s\\S]*--preferences-radio-swatch:${UI_PINS.activeAccentBright}[\\s\\S]*--preferences-radio-swatch:${UI_PINS.activeAccentBrightLight}`).test(preferencesHtml), 'Active color Green radio shows joined actual dark/light accent swatches');
     assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#f97316[\s\S]*--preferences-radio-swatch:#b91c1c/.test(preferencesHtml), 'Active color Blood orange light swatch is redder than Solar gold');
     assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#eab308[\s\S]*--preferences-radio-swatch:#d6a400/.test(preferencesHtml), 'Active color Solar gold light swatch is a brighter gold');
@@ -2975,7 +3398,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(preferencesHtml.includes('Deterministic'), false, 'Preferences do not expose the internal deterministic backend label');
     assert.equal(/data-setting-path="yoagent\.invocation"[\s\S]*?value="api-key"/.test(preferencesHtml), false, 'Preferences do not expose the reserved API-key invocation mode');
     assert.ok(/data-setting-path="yoagent\.invocation"[\s\S]*?>\s*<span>Local process<\/span>/.test(preferencesHtml), 'Preferences labels YO!agent invocation as a local process transport, not a generic CLI toggle');
-    assert.ok(preferencesHtml.includes('persistent local app-server') && preferencesHtml.includes('stream-json CLI subprocess'), 'Preferences help explains Codex app-server and Claude stream-json transport');
+    assert.ok(preferencesHtml.includes('Codex keeps a local process running') && preferencesHtml.includes('Claude starts one per reply'), 'Preferences help briefly explains the local process behavior');
     // #41: the YO!agent backend defaults to auto (codex -> claude -> No agent) and Preferences offers it.
     assert.ok(/value="auto"[^>]*data-setting-path="yoagent\.backend"[\s\S]*?>\s*<span>Auto \(Codex → Claude\)<\/span>/.test(preferencesHtml), '#41: the YO!agent backend radios offer the Auto option');
     assert.equal(preferencesHtml.includes('data-setting-path="appearance.editor_color_scheme"'), false, 'preferences do not show the legacy single mixed editor scheme setting');
@@ -3052,8 +3475,12 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(unfocusedLightTheme.cursorAccent, '#ffffff', 'unfocused light terminal keeps the complete light cursor pair');
     api.setFileEditorCursorColorForTest('theme');
     const themeFocusedLightTheme = api.terminalThemeForSession('light-cursor-focused', lightRenderTheme);
-    assert.equal(themeFocusedLightTheme.cursor, '#0f172a', 'Theme cursor uses the light display cursor instead of the dark render cursor');
+    assert.equal(themeFocusedLightTheme.cursor, '#9a6700', 'Inverse global theme uses the dark yellow cursor palette in light mode');
     assert.equal(themeFocusedLightTheme.cursorAccent, '#ffffff', 'Theme cursor and cursorAccent remain one readable light display pair');
+    for (const [legacy, expected] of [['green', '#6b8f00'], ['blue', '#0e7490'], ['orange', '#b45309'], ['purple', '#a21caf'], ['laser-lime', '#6b8f00']]) {
+      api.setFileEditorCursorColorForTest(legacy);
+      assert.equal(api.terminalThemeForSession('light-cursor-focused', lightRenderTheme).cursor, expected, `${legacy} maps to the shared light cursor palette`);
+    }
     api.setFileEditorCursorColorForTest('yellow');
     api.setFocusedPanelItemValueForTest(previousFocusedItem);
     assert.match(preferencesCss, /\.terminal\[data-terminal-theme="light"\] \.xterm-rows\s*\{[^}]*filter:\s*invert\(1\) hue-rotate\(180deg\)/, 'light terminal rows apply one hue-preserving lightness conversion');
@@ -3424,7 +3851,6 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.effectiveViewportWidthForTest({width: 240}), 320, 'MV-7: viewport widths share the same minimum floor');
     const uiSource = fs.readFileSync('static/yomux.js', 'utf8');
     assert.ok(/function effectiveViewportWidth\(/.test(uiSource), 'MV-7: effective viewport width is owned by one helper');
-    assert.ok(/function paneDragPreviewMetrics[\s\S]*const viewportWidth = effectiveViewportWidth\(viewport\)/.test(uiSource), 'MV-7: pane drag preview routes viewport width through the shared helper');
     assert.ok(/function positionDiffRefPopover[\s\S]*const viewportWidth = effectiveViewportWidth\(viewport\)/.test(uiSource), 'MV-7: diff-ref popover routes viewport width through the shared helper');
     assert.equal(/Math\.max\(320,\s*(?:Number\()?viewport\.width/.test(uiSource), false, 'MV-7: raw viewport width floors stay out of feature code');
     api.setAppViewportOverrideForTest(null);
@@ -3602,7 +4028,6 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/\.brand-title \.brand-mark\s*\{[\s\S]*background:\s*var\(--brand-mark-bg\)/.test(brandCss), 'topbar mark background uses the active-color brand token');
     assert.ok(/--brand-primary-green:\s*var\(--brand-green,\s*#76b900\)/.test(brandCss), 'topbar YOmux LO stays brand green regardless of active color');
     assert.equal(/--brand-primary-green:\s*var\(--active-control-bg/.test(brandCss), false, 'topbar YOmux LO is not routed through the active color preference');
-    assert.equal(api.testElementForId('closeModal').textContent || 'X', 'X', 'About modal close button is an X');
     const shellHtml = fs.readFileSync('yomux_lib/web.py', 'utf8');
     assert.ok(shellHtml.includes('<section id="modal" class="modal app-modal-overlay">'), 'HTML shell routes About and transcript through the shared modal overlay parent');
     assert.ok(shellHtml.includes('<div class="modal-dialog">'), 'HTML shell gives the shared app modal a bounded dialog child');
@@ -3610,6 +4035,8 @@ async function runCrossSurfaceStateSuite() {
   });
 
   test('cross-surface host state 17: File/View/Tabs/Help menu labels localize; tmux (a tool name) stays as-is', () => {
+    api.setClientSettingsPatchForTest({general: {enable_experimental_features: true}});
+    menus = api.appMenuTree();
     // File/View/Tabs/Help menu labels localize; tmux (a tool name) stays as-is.
     const zhHantMenu = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
     api.i18nSetCatalogForTest('zh-Hant', zhHantMenu);
@@ -3645,11 +4072,11 @@ async function runCrossSurfaceStateSuite() {
     const destinationLabels = fileMenu.items
       .slice(fileMenu.items.findIndex(item => item.type === 'separator') + 1, fileMenu.items.findLastIndex(item => item.type === 'separator'))
       .map(item => item.label);
-    assert.deepStrictEqual(canonical(destinationLabels), [api.t('yoagent.capability.finderDifferTabber.name'), 'Open file', 'Preferences', 'Search & Runs', 'YO!agent', 'YO!chat', 'YO!info', 'YO!stats'], 'File navigation destinations are alphabetized by their localized visible labels');
+    assert.deepStrictEqual(canonical(destinationLabels), [api.fileSurfaceGroupLabel(), 'Open file', 'Preferences', 'Search & Runs', 'YO!agent', 'YO!chat', 'YO!info', 'YO!stats'], 'File navigation destinations are alphabetized by their localized visible labels');
     const yoLabels = destinationLabels.filter(label => label.startsWith('YO!'));
     assert.deepStrictEqual(canonical(yoLabels), ['YO!agent', 'YO!chat', 'YO!info', 'YO!stats'], 'File menu keeps the YO!* destinations in alphabetical order');
     assert.deepStrictEqual(canonical(fileMenu.items.slice(-2).map(item => item.type === 'separator' ? '---' : item.label)), ['---', 'Log out'], 'Log out remains in its own final group');
-    const tripletLabel = api.t('yoagent.capability.finderDifferTabber.name');
+    const tripletLabel = api.fileSurfaceGroupLabel();
     for (const label of [tripletLabel, 'YO!info', 'Search & Runs', 'YO!agent', 'Open file', 'Preferences', 'YO!stats', 'Log out']) {
       const item = fileMenu.items.find(candidate => candidate.label === label);
       assert.ok(item?.iconHtml, `File menu ${label} uses the shared icon row`);
@@ -3658,7 +4085,7 @@ async function runCrossSurfaceStateSuite() {
     const finderMenuItem = fileMenu.items.find(candidate => candidate.label === tripletLabel);
     assert.equal(finderMenuItem.detail, api.t('menu.file.browseFiles'), 'wide File navigation explains the one-line triplet command');
     const macFileMenuApi = loadYomux('?platform=mac', ['1'], 'http:', 'MacIntel');
-    const macFinderMenuItem = macFileMenuApi.appMenuTree().find(menu => menu.id === 'file')?.items.find(candidate => candidate.label === macFileMenuApi.t('yoagent.capability.finderDifferTabber.name'));
+    const macFinderMenuItem = macFileMenuApi.appMenuTree().find(menu => menu.id === 'file')?.items.find(candidate => candidate.label === macFileMenuApi.fileSurfaceGroupLabel());
     assert.equal(macFinderMenuItem?.detail, macFileMenuApi.t('menu.file.browseFiles'), 'wide File navigation keeps the same compact triplet detail on Mac');
     assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!agent').iconHtml.includes('app-menu-ui-icon-robot'));
     assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!chat').iconHtml.includes('app-menu-ui-icon-chat-bubble'));
@@ -3683,6 +4110,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/fileExplorerFilesystemKeyframeMs = 60001/.test(bootstrapSource), 'filesystem watch keyframes retain their odd cadence');
     assert.ok(/autoApproveDisconnectedPollMs:\s*5003/.test(timingSource), 'the disconnected auto-approve fallback poll stays in the shared timing owner');
     assert.equal(/const autoApproveDisconnectedPollMs = 5003/.test(bootstrapSource), false, 'bootstrap does not duplicate the fallback timing literal');
+    api.setClientSettingsPatchForTest({general: {enable_experimental_features: false}});
   });
 
   test('cross-surface host state 20: New-session items use explicit commands in File; Tabs is only the sorted tab navigator', () => {
@@ -3937,7 +4365,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(helpMenuLabels.includes('Open README'));
     const shortcutsMenu = helpMenu.items.find(item => item.label === 'Keyboard Shortcuts and Legends');
     assert.equal(shortcutsMenu.type, 'command');
-    assert.equal(shortcutsMenu.detail, '?');
+    assert.equal(shortcutsMenu.keybinding, '?');
     assert.ok(source.includes('function keyboardShortcutCatalog()'), 'shortcut help is driven from one catalog');
     assert.ok(api.keyboardShortcutsHtml().includes('Open YO!agent in a right pane'), 'shortcut overlay documents the YO!agent pane shortcut');
     assert.ok(api.keyboardShortcutsHtml().includes('Pin / unpin active tab'), 'shortcut overlay lists the Pin Tab chord');
@@ -3987,7 +4415,7 @@ async function runCrossSurfaceStateSuite() {
     // The bridge takes an options bag so the context-menu button can anchor copy feedback (a20cbebf8).
     assert.ok(source.includes('async function copyTmuxSelectionToClipboard(session, term = null, container = null, options = {})'), 'terminal tmux copy-mode selection can bridge to the browser clipboard and clear visible terminal selection');
     assert.ok(source.includes("apiFetchJson(`/api/tmux-copy-selection?session=${encodeURIComponent(session)}`, {method: 'POST'})"), 'tmux copy bridge calls the authenticated tmux-copy endpoint');
-    assert.ok(source.includes("new ClipboardItem({'text/plain': textBlob})"), 'tmux copy bridge starts deferred clipboard writes during the shortcut activation');
+    assert.ok(source.includes("await writeClipboardItem({'text/plain': textBlob})"), 'tmux copy bridge starts deferred clipboard writes through the shared promise owner during the shortcut activation');
     assert.ok(/function terminalSelectedText\(term, container = null\)[\s\S]*browserSelectionTextInside\(container\)/.test(source), 'terminal copy shortcuts prefer visible browser selection before tmux copy-mode fallback');
     assert.ok(source.includes("container?.addEventListener?.('keydown'"), 'terminal copy guard runs in DOM capture before xterm/TUI handlers');
     assert.ok(/function handleFocusedTerminalCopyShortcut\(event\)[\s\S]*handleTerminalCopyShortcutKeydown\(session, item\.term, item\.container, event\)[\s\S]*stopImmediatePropagation/.test(source), 'focused-terminal copy guard runs at window capture before terminal internals');
@@ -5087,14 +5515,19 @@ async function runCrossSurfaceStateSuite() {
     contextMenu = contextMenuNode();
     const pinTabRow = Array.from(contextMenu.children).find(child => child.getAttribute('aria-label') === 'Pin Tab');
     assert.ok(contextMenu.children[0].classList.contains('tab-action-description'), 'tab context menu starts with the shared one-line tab description');
-    assert.ok(contextMenu.children[0].textContent.startsWith('More desc: 1'), 'tab context menu describes the target without opening a second details surface');
+    assert.ok(contextMenu.children[0].getAttribute('aria-label').startsWith('More desc: 1'), 'tab context menu describes the target without opening a second details surface');
     assert.ok(pinTabRow?.innerHTML.includes('context-menu-check'), 'Pin Tab context menu row has the shared pin icon');
     assert.equal((pinTabRow?.innerHTML.match(/context-menu-check/g) || []).length, 1, 'Pin Tab uses one stateful pin icon instead of duplicating its checked indicator');
     assert.equal(pinTabRow?.getAttribute('aria-label'), 'Pin Tab', 'Pin Tab context menu row has an accessible label');
     assert.equal(Array.from(contextMenu.children).some(child => child.getAttribute('aria-label') === 'Pop out'), false, 'live terminal tabs do not expose unsupported Pop out');
-    assert.deepStrictEqual(canonical(Array.from(contextMenu.querySelectorAll('button')).map(button => button.textContent).filter(Boolean)), ['More desc: 1 — /repo/workspace · workspace', 'Expand pane', "Rename tmux session '1'", "Kill tmux session '1'"]);
+    const tabContextLabels = Array.from(contextMenu.children).map(button => button.getAttribute('aria-label')?.split(' - ')[0] || '').filter(Boolean);
+    const renameIndex = tabContextLabels.findIndex(label => label === "Rename tmux session '1'");
+    const killIndex = tabContextLabels.findIndex(label => label === "Kill tmux session '1'");
+    assert.equal(tabContextLabels[0], 'More desc: 1 — /repo/workspace · workspace');
+    assert.equal(tabContextLabels[renameIndex + 1], 'Expand pane', 'Rename immediately precedes Expand pane');
+    assert.equal(killIndex, tabContextLabels.length - 1, 'Kill remains the final context action');
     assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), true);
-    const contextButtons = Array.from(contextMenu.children).filter(child => child.textContent);
+    const contextButtons = Array.from(contextMenu.children).filter(child => child.getAttribute('aria-label'));
     assert.equal(contextButtons[contextButtons.length - 1].classList.contains('danger'), true, 'Kill is styled as the final destructive action');
     api.setPinnedTabsForTest(['1']);
     api.showSessionContextMenu('1', 20, 20);

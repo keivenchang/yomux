@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 from collections.abc import Callable
 from collections.abc import MutableMapping
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ from typing import Any
 import uuid
 
 from .atomic_file import atomic_write_text
+from .numeric import is_finite_number
+from .atomic_file import file_lock
 from .atomic_file import is_atomic_write_temp
 from .host_identity import current_host_identity
 from .host_identity import HostIdentity
@@ -187,9 +190,9 @@ def _read_record(record_path: Path) -> dict[str, Any]:
 def _record_heartbeat(record: dict[str, Any], record_path: Path) -> float:
     try:
         heartbeat = float(record.get("heartbeat_at") or 0.0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         heartbeat = 0.0
-    if heartbeat > 0.0:
+    if is_finite_number(heartbeat) and heartbeat > 0.0:
         return heartbeat
     try:
         return float(record_path.stat().st_mtime)
@@ -363,6 +366,23 @@ def _writer_record(identity: HostIdentity, *, token: str, purpose: str, now: flo
     }
 
 
+@contextlib.contextmanager
+def _writer_transition(slot: Path, environ: MutableMapping[str, str]):
+    try:
+        with file_lock(slot):
+            yield
+    except OSError as error:
+        if product_env('CHECK_IN_CONTAINER', environ=environ) == "1" and (
+            isinstance(error, PermissionError) or error.errno in {errno.EACCES, errno.EPERM, errno.EROFS}
+        ):
+            inherited = str(product_env('WORKTREE_WRITER_TOKEN', environ=environ) or "")
+            raise WorktreeWriterContainerRefusal(
+                CONTAINER_REFUSAL_STALE_TOKEN if inherited else CONTAINER_REFUSAL_NO_TOKEN,
+                inherited_token=inherited,
+            ) from error
+        raise
+
+
 class WorktreeWriterLease:
     def __init__(
         self,
@@ -401,12 +421,13 @@ class WorktreeWriterLease:
     def _heartbeat_loop(self) -> None:
         while not self._stop.wait(self.heartbeat_interval_seconds):
             try:
-                current = _read_record(self.record_path)
-                if str(current.get("token") or "") != self.token:
-                    return
-                current["heartbeat_at"] = float(self.clock())
-                atomic_write_text(self.record_path, json.dumps(current, sort_keys=True) + "\n", mode=0o600)
-                self.record = current
+                with _writer_transition(self.slot_dir, self.environ):
+                    current = _read_record(self.record_path)
+                    if str(current.get("token") or "") != self.token:
+                        return
+                    current["heartbeat_at"] = float(self.clock())
+                    atomic_write_text(self.record_path, json.dumps(current, sort_keys=True) + "\n", mode=0o600)
+                    self.record = current
             except Exception as error:
                 self._heartbeat_error = error
                 return
@@ -415,26 +436,27 @@ class WorktreeWriterLease:
         with self._release_lock:
             if self._released:
                 return
-            self._released = True
             self._stop.set()
             if self._heartbeat_thread is not None:
                 self._heartbeat_thread.join(timeout=max(1.0, self.heartbeat_interval_seconds + 1.0))
                 if self._heartbeat_thread.is_alive():
                     raise WorktreeWriterReleaseError("writer heartbeat did not stop during release")
             if not self.borrowed:
-                try:
-                    current = _read_record(self.record_path)
-                except FileNotFoundError:
-                    current = {}
-                except (OSError, ValueError, json.JSONDecodeError) as error:
-                    raise WorktreeWriterReleaseError(f"cannot verify writer token during release: {error}") from error
-                if str(current.get("token") or "") == self.token:
-                    _remove_exact_slot(self.slot_dir)
+                with _writer_transition(self.slot_dir, self.environ):
+                    try:
+                        current = _read_record(self.record_path)
+                    except FileNotFoundError:
+                        current = {}
+                    except (OSError, ValueError, json.JSONDecodeError) as error:
+                        raise WorktreeWriterReleaseError(f"cannot verify writer token during release: {error}") from error
+                    if str(current.get("token") or "") == self.token:
+                        _remove_exact_slot(self.slot_dir)
             if product_env('WORKTREE_WRITER_TOKEN', environ=self.environ) == self.token:
                 if self.previous_token is None:
                     clear_yomux_environment_assignments(self.environ, WRITER_TOKEN_ENV)
                 else:
                     apply_yomux_environment_assignments(self.environ, {WRITER_TOKEN_ENV: self.previous_token})
+            self._released = True
             if self._heartbeat_error is not None:
                 raise WorktreeWriterReleaseError(
                     f"writer heartbeat failed: {type(self._heartbeat_error).__name__}: {self._heartbeat_error}"
@@ -465,17 +487,25 @@ def acquire_worktree_writer(
     slot = Path(slot_dir) if slot_dir is not None else worktree_declaration_slot(worktree_root)
     values = os.environ if environ is None else environ
     active_clock = time.time if clock is None else clock
+
+    def current_status(now: float) -> WorktreeWriterStatus:
+        return inspect_worktree_writer(
+            worktree_root, host_identity=identity, slot_dir=slot, now=now,
+            stale_after_seconds=stale_after_seconds, start_identity_reader=start_identity_reader,
+        )
+
     inherited_token = str(product_env('WORKTREE_WRITER_TOKEN', environ=values) or "").strip()
     if inherited_token:
-        status = inspect_worktree_writer(
-            worktree_root,
-            host_identity=identity,
-            slot_dir=slot,
-            now=active_clock(),
-            stale_after_seconds=stale_after_seconds,
-            start_identity_reader=start_identity_reader,
+        now = float(active_clock())
+        status = current_status(now)
+        delegated = (
+            product_env('CHECK_IN_CONTAINER', environ=values) == "1"
+            and status.record is not None
+            and status.record.get("stable_host_id") == identity.stable_host_id
+            and status.record.get("boot_id") == identity.boot_id
+            and now - _record_heartbeat(status.record, _slot_record_path(slot)) <= stale_after_seconds
         )
-        if status.record is not None and str(status.record.get("token") or "") == inherited_token:
+        if (status.active or delegated) and status.record is not None and str(status.record.get("token") or "") == inherited_token:
             return WorktreeWriterLease(
                 token=inherited_token,
                 slot_dir=slot,
@@ -489,63 +519,58 @@ def acquire_worktree_writer(
     token = uuid.uuid4().hex
     for _attempt in range(4):
         now = float(active_clock())
-        status = inspect_worktree_writer(
-            worktree_root,
-            host_identity=identity,
-            slot_dir=slot,
-            now=now,
-            stale_after_seconds=stale_after_seconds,
-            start_identity_reader=start_identity_reader,
-        )
+        status = current_status(now)
         if status.active:
             raise WorktreeWriterBusy(status)
-        if status.stale:
-            try:
-                _reclaim_stale_slot(slot, token)
-            except FileNotFoundError:
-                continue
-        try:
+        with _writer_transition(slot, values):
+            now = float(active_clock())
+            status = current_status(now)
+            if status.active:
+                raise WorktreeWriterBusy(status)
+            if status.stale:
+                try:
+                    _reclaim_stale_slot(slot, token)
+                except FileNotFoundError:
+                    continue
             slot.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             claimed = _claim_slot_leaf(slot)
-        except PermissionError as error:
-            # React to the real failure rather than guessing from the environment alone. A busy
-            # or stale existing slot never reaches here (it was raised or reclaimed above without
-            # creating anything new), and a caller-owned writable `slot_dir` such as a test's own
-            # `tmp_path` is never the shared read-only mount, so its mkdir simply succeeds. Only a
-            # genuinely fresh declaration against a read-only directory lands here, which is the
-            # in-container case this refusal exists for. `environ` is injectable, so read the
-            # marker off `values` rather than `tools.docker_image.running_inside_container`.
-            if product_env('CHECK_IN_CONTAINER', environ=values) == "1":
-                raise WorktreeWriterContainerRefusal(
-                    CONTAINER_REFUSAL_STALE_TOKEN if inherited_token else CONTAINER_REFUSAL_NO_TOKEN,
-                    inherited_token=inherited_token,
-                ) from error
-            raise
-        if not claimed:
-            continue
-        record = _writer_record(identity, token=token, purpose=purpose, now=now)
-        try:
-            atomic_write_text(_slot_record_path(slot), json.dumps(record, sort_keys=True) + "\n", mode=0o600)
-        except Exception as error:
+            if not claimed:
+                continue
+            record = _writer_record(identity, token=token, purpose=purpose, now=now)
             try:
-                _remove_exact_slot(slot)
-            except (OSError, WorktreeWriterReleaseError) as cleanup_error:
-                raise WorktreeWriterReleaseError(
-                    f"writer claim failed and its incomplete slot could not be removed: {cleanup_error}"
-                ) from error
-            raise
-        previous_token = product_env('WORKTREE_WRITER_TOKEN', environ=values)
-        apply_yomux_environment_assignments(values, {WRITER_TOKEN_ENV: token})
-        return WorktreeWriterLease(
-            token=token,
-            slot_dir=slot,
-            record=record,
-            borrowed=False,
-            clock=active_clock,
-            heartbeat_interval_seconds=heartbeat_interval_seconds,
-            environ=values,
-            previous_token=previous_token,
-        )
+                atomic_write_text(_slot_record_path(slot), json.dumps(record, sort_keys=True) + "\n", mode=0o600)
+            except Exception as error:
+                try:
+                    _remove_exact_slot(slot)
+                except (OSError, WorktreeWriterReleaseError) as cleanup_error:
+                    raise WorktreeWriterReleaseError(
+                        f"writer claim failed and its incomplete slot could not be removed: {cleanup_error}"
+                    ) from error
+                raise
+            previous_token = product_env('WORKTREE_WRITER_TOKEN', environ=values)
+            apply_yomux_environment_assignments(values, {WRITER_TOKEN_ENV: token})
+            lease = None
+            try:
+                lease = WorktreeWriterLease(
+                    token=token,
+                    slot_dir=slot,
+                    record=record,
+                    borrowed=False,
+                    clock=active_clock,
+                    heartbeat_interval_seconds=heartbeat_interval_seconds,
+                    environ=values,
+                    previous_token=previous_token,
+                )
+                return lease
+            finally:
+                if lease is None:
+                    try:
+                        _remove_exact_slot(slot)
+                    finally:
+                        if previous_token is None:
+                            clear_yomux_environment_assignments(values, WRITER_TOKEN_ENV)
+                        else:
+                            apply_yomux_environment_assignments(values, {WRITER_TOKEN_ENV: previous_token})
     raise WorktreeWriterBusy(
         WorktreeWriterStatus(
             "claim_race",

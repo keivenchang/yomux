@@ -2,12 +2,10 @@ from tests.helpers.fixture_tools import fixture_executable
 import io
 import os
 from pathlib import Path
-import re
 import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 
@@ -171,7 +169,7 @@ def test_live_composer_bracketed_paste_preserves_text_until_return(monkeypatch, 
     completed = []
     data = iter(("\x1b[200~" + payload + "\x1b[201~" if bracketed else payload) + "\r")
 
-    def read_byte():
+    def read_character(_fd):
         byte = next(data)
         if byte == "\r":
             assert completed == []
@@ -185,7 +183,7 @@ def test_live_composer_bracketed_paste_preserves_text_until_return(monkeypatch, 
     monkeypatch.setattr(mock_agent_common.tty, "setraw", lambda _fd: None)
     monkeypatch.setattr(mock_agent_common.select, "select", lambda *_args: ([0], [], []))
     monkeypatch.setattr(mock_agent_common, "_has_more", lambda: True)
-    monkeypatch.setattr(mock_agent_common, "_read_byte", read_byte)
+    monkeypatch.setattr(mock_agent_common, "read_input_character", read_character)
     monkeypatch.setattr(mock_agent_common, "render_live_composer", lambda text, *_args, **_kwargs: rendered.append(text))
     monkeypatch.setattr(mock_agent_common, "finish_live_composer", lambda text, *_args: completed.append(text))
     monkeypatch.setattr(mock_agent_common, "set_output_region_above_live_composer", lambda **_kwargs: None)

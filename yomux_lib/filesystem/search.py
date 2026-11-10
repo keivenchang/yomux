@@ -1060,8 +1060,10 @@ def _search_files_from_safe_root(
                             kind = "file"
                         else:
                             continue
+                        if configured_exclusions and index_policy["exclude_path"](root / name):
+                            continue
                         direct_entries.append((name, kind, sort_key))
-                        if not tokens and len(direct_entries) >= max_results:
+                        if not tokens and len(direct_entries) > max_results:
                             break
             except OSError as error:
                 raise error
@@ -1069,8 +1071,6 @@ def _search_files_from_safe_root(
             admitted = 0
             for name, kind, sort_key in direct_entries:
                 path = root / name
-                if configured_exclusions and index_policy["exclude_path"](path):
-                    continue
                 results.append(_direct_search_entry(root, path, kind=kind, sort_key=sort_key))
                 admitted += 1
                 if admitted >= max_results:

@@ -87,6 +87,23 @@ def test_bazel_source_check_requires_one_matching_rules_go_version(tmp_path, ver
     assert (result.returncode == 0) is accepted, result.stderr
 
 
+def test_bazel_source_check_includes_every_build_definition():
+    root = Path(__file__).resolve().parents[1]
+    definitions = {"BUILD.bazel", "MODULE.bazel"}
+    for directory in ("cmd", "internal", "tools"):
+        for pattern in ("BUILD.bazel", "*.bzl"):
+            definitions.update(path.relative_to(root).as_posix() for path in (root / directory).rglob(pattern))
+    tree = ast.parse((root / "BUILD.bazel").read_bytes())
+    group = next(node.value for node in tree.body if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "filegroup"
+        and any(keyword.arg == "name" and ast.literal_eval(keyword.value) == "bazel_build_sources"
+            for keyword in node.value.keywords))
+    sources = ast.literal_eval(next(keyword.value for keyword in group.keywords if keyword.arg == "srcs"))
+    admitted = {source.removeprefix("//").replace(":", "/") for source in sources}
+    assert definitions <= admitted, f"Bazel formatter omits definitions: {sorted(definitions - admitted)}"
+
+
 def assert_launchd_job_creation_denied(tmp_path, envelope=()):
     label = "org.yomux.denied." + uuid.uuid4().hex
     service = "gui/" + str(os.getuid()) + "/" + label

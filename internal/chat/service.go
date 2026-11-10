@@ -196,7 +196,13 @@ func (s *Service) Bootstrap(ctx context.Context, username, browser string) (Boot
 	if err != nil {
 		return BootstrapPayload{}, err
 	}
-	newer, err := s.codec.Encode(ctx, "newer", result.LatestID)
+	newerID := result.LatestID
+	if len(result.Unread) > 0 {
+		// The unread batch is bounded; its continuation must not skip unread
+		// messages between the last returned row and the current room tail.
+		newerID = result.Unread[len(result.Unread)-1].ID
+	}
+	newer, err := s.codec.Encode(ctx, "newer", newerID)
 	if err != nil {
 		return BootstrapPayload{}, err
 	}

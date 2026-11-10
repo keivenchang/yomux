@@ -135,18 +135,14 @@ func newGoHealthLifecycle(path, epoch string, pid int, startedAt time.Time, star
 			current.DemandStartCount++
 		} else if !current.LastCleanShutdown {
 			current.UnexpectedRestartCount++
-		} else if startReason != "demand" {
-			// The restart itself is known, but this process did not identify its
-			// launch cause. Keep the two classifications unavailable rather than
-			// assigning a false demand or unexpected bucket.
+		}
+		snapshot.HistoryCoverage = "full"
+		if current.DemandStartCount+current.UnexpectedRestartCount < current.RestartCount {
+			// Unclassified prior restarts remain unknown across later launches.
 			snapshot.DemandAvailable = false
 			snapshot.UnexpectedAvailable = false
 			snapshot.HistoryCoverage = "partial"
 			snapshot.HistoryResetReason = "start_reason_unknown"
-		}
-		snapshot.HistoryCoverage = "full"
-		if snapshot.HistoryResetReason == "start_reason_unknown" {
-			snapshot.HistoryCoverage = "partial"
 		}
 	} else if resetReason != "" {
 		// A missing file establishes a measured baseline. A malformed file is

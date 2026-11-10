@@ -23,7 +23,6 @@ const (
 	maxHostInputBytes = 1 << 20
 	maxProcessEntries = 32768
 	pageSizeBytes     = 4096
-	clockTicksPerSec  = 100
 )
 
 // HostFactContext is the common timing and ownership context for one host poll.
@@ -306,7 +305,7 @@ func pythonFloatHex(value float64) string {
 	exponent := int((bits >> 52) & 0x7ff)
 	mantissa := bits & ((uint64(1) << 52) - 1)
 	if exponent == 0 {
-		exponent = -1022
+		return fmt.Sprintf("%s0x0.%013xp-1022", sign, mantissa)
 	} else {
 		mantissa |= uint64(1) << 52
 		exponent -= 1023
@@ -540,7 +539,14 @@ func ParseLinuxCPU(text string) (CPUHostCounters, bool) {
 		var total, idle uint64
 		for i, field := range fields[1:] {
 			value, err := strconv.ParseUint(field, 10, 64)
-			if err != nil || total > ^uint64(0)-value {
+			if err != nil {
+				return CPUHostCounters{}, false
+			}
+			// Linux already includes guest and guest_nice in user and nice.
+			if i >= 8 {
+				continue
+			}
+			if total > ^uint64(0)-value {
 				return CPUHostCounters{}, false
 			}
 			total += value
@@ -725,24 +731,15 @@ func ParseIOAcceleratorJSON(data []byte) []GPUDevice {
 		if !ok {
 			continue
 		}
-		value, ok := firstNumber(stats, "Device Utilization %", "GPU Activity(%)", "GPU Activity")
+		value, ok := plistNumber(stats, "Device Utilization %", "GPU Activity(%)", "GPU Activity")
 		if !ok {
 			continue
 		}
-		used, _ := firstNumber(stats, "In use system memory", "In use video memory")
+		used, _ := plistNumber(stats, "In use system memory", "In use video memory")
 		if !finite(value) || !finite(used) {
 			continue
 		}
-		if value < 0 {
-			value = 0
-		}
-		if value > 100 {
-			value = 100
-		}
-		if used < 0 {
-			used = 0
-		}
-		devices = append(devices, GPUDevice{SourceID: fmt.Sprintf("gpu:%d", index), Label: fmt.Sprintf("GPU %d", index), Utilization: value, MemoryUsedBytes: uint64(used)})
+		devices = append(devices, GPUDevice{SourceID: fmt.Sprintf("gpu:%d", index), Label: fmt.Sprintf("GPU %d", index), Utilization: clamp(value), MemoryUsedBytes: nonNegativeBytes(used)})
 	}
 	return devices
 }
@@ -981,19 +978,6 @@ func boundedRead(read func(string) ([]byte, error), name string) ([]byte, error)
 		return nil, errors.New("host input exceeds bound")
 	}
 	return data, nil
-}
-func firstNumber(m map[string]any, keys ...string) (float64, bool) {
-	for _, key := range keys {
-		switch value := m[key].(type) {
-		case float64:
-			return value, true
-		case string:
-			if parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil {
-				return parsed, true
-			}
-		}
-	}
-	return 0, false
 }
 func firstString(m map[string]any, key string) string {
 	if value, ok := m[key].(string); ok {

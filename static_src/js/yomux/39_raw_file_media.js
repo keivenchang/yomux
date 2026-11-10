@@ -130,6 +130,11 @@ function rawFileImageReadiness(media, path, installed, options = {}) {
 async function installRawFileMediaSource(media, path, options = {}) {
   if (!media || !path) return {ok: false, status: 0, error: null};
   releaseRawFileMediaSource(media);
+  if (options.snapshot === true) {
+    // Copied previews outlive the scratch document's Blob URL ownership.
+    media.src = rawFileUrl(path, options.params || {});
+    return {ok: true, status: 200};
+  }
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   media._rawFileAbortController = controller;
   const result = await fetchRawFileBlob(path, {params: options.params, signal: controller?.signal, deadlineMs: options.deadlineMs});

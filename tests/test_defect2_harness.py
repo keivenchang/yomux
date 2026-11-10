@@ -534,6 +534,45 @@ def test_attribution_never_breaks_the_run_it_observes(tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.parametrize("phase", ["setup", "call", "teardown"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_attribution_keeps_its_admitted_destination_across_fixture_environment_changes(tmp_path, monkeypatch, phase, enabled):
+    conftest = _conftest_module()
+    canonical = tmp_path / "canonical"
+    external = tmp_path / "fixture-destination"
+    monkeypatch.setenv("YOMUX_E2E_EVIDENCE_DIR", str(canonical) if enabled else "")
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw4")
+    item = SimpleNamespace(nodeid="fixture::test_path", stash=pytest.Stash(), funcargs={},
+                           get_closest_marker=lambda _name: None)
+    protocol = conftest.pytest_runtest_protocol(item, None)
+    next(protocol)
+    try:
+        if phase == "call":
+            conftest.pytest_runtest_call(item)
+        monkeypatch.setenv("YOMUX_E2E_EVIDENCE_DIR", str(external))
+        monkeypatch.setenv("PYTEST_XDIST_WORKER", "fixture-worker")
+        report = pytest.TestReport(nodeid=item.nodeid, location=("fixture", 0, "test_path"),
+                                   keywords={}, outcome="failed", longrepr="fixture failure", when=phase)
+        hook = conftest.pytest_runtest_makereport(item, None)
+        next(hook)
+        with pytest.raises(StopIteration):
+            hook.send(SimpleNamespace(get_result=lambda: report))
+        wire = json.loads(json.dumps(report._to_json()))
+        conftest.pytest_runtest_logreport(pytest.TestReport._from_json(wire))
+    finally:
+        with pytest.raises(StopIteration):
+            next(protocol)
+
+    assert not external.exists(), "fixture-mutated roots cannot own recorder output"
+    path = canonical / "defect2-attempt/worker-gw4.jsonl"
+    if enabled:
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        assert rows[-1]["phase"] == phase and rows[-1]["outcome"] == "failed"
+        assert all(row["worker"] == "gw4" for row in rows)
+    else:
+        assert not canonical.exists()
+
+
 @pytest.mark.parametrize("worker", ["master", "gw3"])
 def test_attribution_uses_a_stable_encoder_when_shared_json_is_patched(tmp_path, monkeypatch, worker):
     """A test that patches json.dumps must not make the pytest report hook fail too."""

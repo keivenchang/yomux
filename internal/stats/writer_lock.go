@@ -104,16 +104,6 @@ func validateWriterFence(path string) error {
 	return nil
 }
 
-func writerReadOnlyURI(path string) string {
-	abs, _ := filepath.Abs(path)
-	// `mode=ro` still reads a committed WAL after an owner is terminated. Do not
-	// use `immutable=1` here: immutable connections ignore the WAL, so a clean
-	// schema created immediately before a crash can look like an incompatible
-	// empty database on the next writer startup. Read-only mode prevents this
-	// preflight from checkpointing or otherwise mutating the store.
-	return "file:" + filepath.ToSlash(abs) + "?mode=ro&_busy_timeout=5000"
-}
-
 func publishWriterFenceVersion(path string, version int64, protocol int) error {
 	fence := writerFence{ApplicationID: ApplicationID, DatabaseFilename: filepath.Base(path), SchemaVersion: version, MinimumWriterProtocol: int64(protocol), MinimumWriterBuild: writerBuild}
 	data, err := json.Marshal(fence)

@@ -4,6 +4,8 @@ import time
 from urllib.parse import quote
 from urllib.parse import urlencode
 
+from selenium.webdriver.common.keys import Keys
+
 from tests.browser_helpers.browser_console import acknowledge_and_consume_only_expected_js_debug_failures
 from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
@@ -12,6 +14,78 @@ from tests.gate_harness import assert_fixture_client_event_demand_claimed
 from tests.gate_harness import claim_fixture_client_event_demand
 from tests.gate_harness import release_fixture_client_event_demand
 from tests.tmux_runtime import run_isolated_tmux
+
+
+@pytest.mark.parametrize('platform, modifier', [('mac', '⌘'), ('pc', 'Ctrl')])
+@pytest.mark.parametrize('theme', ['dark', 'light'])
+def test_file_menu_shortcuts_and_surface_labels_follow_mode(browser, tmp_path, platform, modifier, theme):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, f'?platform={platform}&sessions=one&layout=left&tabs=left:one',
+        sessions=['one'], grid_width=1500, settings={'general': {'default_tabber_mode': 'normal', 'enable_experimental_features': True}})
+    set_browser_visual_profile(browser, theme=theme)
+    for mode in ['normal', 'advanced', 'normal']:
+        toggle = next(control for control in browser.find_elements('css selector', '[data-tabber-advanced]') if control.is_displayed())
+        if toggle.is_selected() != (mode == 'advanced'):
+            toggle.click()
+        WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
+            "return !pendingLayoutRender && !pendingLayoutRenderFrame && !runtimeState.pendingLayoutMutationGeneration"))
+        browser.find_element('css selector', '.app-menu[data-app-menu="file"] > .app-menu-button').click()
+        finder = 'Finder' if platform == 'mac' else 'File Explorer'
+        expected = f'{finder} / Differ / Tabber' if mode == 'advanced' else f'{finder} / Tabber'
+        WebDriverWait(browser, 10).until(lambda driver: driver.find_element('css selector',
+            '.app-menu[data-app-menu="file"] [data-menu-target-item="__finder__"] .app-menu-label').text == expected)
+        group = browser.find_element('css selector', '.app-menu[data-app-menu="file"] [data-menu-target-item="__finder__"]')
+        assert group.find_element('css selector', '.app-menu-label').text == expected
+        assert group.find_element('css selector', '.app-menu-detail').text == modifier + '+B'
+        prefs = browser.find_element('css selector', '.app-menu[data-app-menu="file"] [data-menu-target-item="__prefs__"]')
+        assert prefs.find_element('css selector', '.app-menu-detail').text == modifier + '+,'
+        shortcuts = browser.execute_script("""
+          return [...document.querySelectorAll('.app-menu[data-app-menu="file"] .app-menu-command')]
+            .filter(button => button.querySelector('.app-menu-detail')?.textContent.startsWith(arguments[0]))
+            .map(button => {
+              const label = button.querySelector('.app-menu-line').getBoundingClientRect();
+              const shortcut = button.querySelector('.app-menu-detail').getBoundingClientRect();
+              return {text: button.textContent, gap: shortcut.left - label.right,
+                centerOffset: Math.abs(shortcut.y + shortcut.height / 2 - label.y - label.height / 2),
+                right: shortcut.right};
+            });
+        """, modifier)
+        assert len(shortcuts) == 4, shortcuts
+        assert all(shortcut['gap'] > 0 and shortcut['centerOffset'] <= 1 for shortcut in shortcuts), shortcuts
+        assert max(shortcut['right'] for shortcut in shortcuts) - min(shortcut['right'] for shortcut in shortcuts) <= 1, shortcuts
+        assert browser.execute_script("return keyboardShortcutsHtml().includes('Differ')") == (mode == 'advanced')
+        browser.find_element('css selector', '.app-menu[data-app-menu="file"] > .app-menu-button').send_keys(Keys.ESCAPE)
+
+
+def test_experimental_features_preference_controls_file_and_tabs_menus(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, '?sessions=one&layout=left&tabs=left:one',
+        sessions=['one'], grid_width=1500, settings={'general': {'default_tabber_mode': 'advanced'}})
+    browser.execute_async_script("selectSession(prefsItemId,{userInitiated:true}).then(arguments[0])")
+    wait = WebDriverWait(browser, 10)
+    toggle = wait.until(lambda driver: driver.find_element('css selector', '[data-setting-path="general.enable_experimental_features"]'))
+    assert not toggle.is_selected()
+    assert browser.execute_script("return preferenceSections().at(-1).items.at(-1).path") == 'general.enable_experimental_features'
+    for enabled in [False, True, False]:
+        toggle = browser.find_element('css selector', '[data-setting-path="general.enable_experimental_features"]')
+        if toggle.is_selected() != enabled:
+            click_visible_selector(browser, '[data-setting-path="general.enable_experimental_features"]')
+        wait.until(lambda driver: driver.execute_script("return initialSetting('general.enable_experimental_features',false) === arguments[0]", enabled))
+        result = browser.execute_script("""
+          const ids=[chatItemId,yoagentItemId,infoItemId];
+          const file=fileMenuPanelCommands().map(item=>item.targetItem);
+          const tabs=flattenMenuCommands(tabMenuItems(ids)).map(item=>item.targetItem);
+          return {file:ids.map(id=>file.includes(id)),tabs:ids.map(id=>tabs.includes(id))};
+        """)
+        assert result == {'file': [enabled] * 3, 'tabs': [enabled] * 3}
+        for menu in ['file', 'tabs']:
+            selector = f'.app-menu[data-app-menu="{menu}"]'
+            click_visible_selector(browser, selector + ' > .app-menu-button')
+            wait.until(lambda driver: driver.find_element('css selector', selector).get_attribute('class').endswith('open'))
+            for item in ['__chat__', '__yoagent__', '__info__']:
+                entries = browser.find_elements('css selector', selector + f' [data-menu-target-item="{item}"]')
+                assert bool(entries) == enabled, (menu, item, enabled)
+                if enabled:
+                    wait.until(lambda driver: driver.find_element('css selector', selector + f' [data-menu-target-item="{item}"]').is_displayed())
+            browser.find_element('css selector', selector + ' > .app-menu-button').send_keys(Keys.ESCAPE)
 
 
 def test_advanced_mode_navigation_and_balanced_transition(browser, tmp_path):
@@ -1243,6 +1317,14 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
         const menuWidth = menu?.getBoundingClientRect().width || 0;
         const menuCapacity = rootCssLengthPx('--context-menu-compact-inline-size');
         const initial = Array.from(menu?.querySelectorAll('button') || []).map(button => button.textContent.trim());
+        const actionIcons = Array.from(menu?.querySelectorAll('button:not(.tab-split-action)') || []).map(button => ({
+          label: button.textContent.trim(),
+          icon: button.querySelector('.file-context-menu-icon-svg')?.dataset.menuIcon || '',
+          leadingIcon: Boolean(button.querySelector('.context-menu-icon')),
+          checked: button.getAttribute('aria-checked'),
+          danger: button.classList.contains('danger'),
+          labelLeft: button.querySelector('.context-menu-label')?.getBoundingClientRect().left || 0,
+        }));
         const description = menu?.querySelector('.tab-action-description')?.textContent.trim() || '';
         const descriptionNode = menu?.querySelector('.tab-action-description');
         const descriptionStyle = descriptionNode ? (() => {
@@ -1268,6 +1350,8 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
           keyboardPrevented: keyEvent.defaultPrevented,
           active: activeItemForSide('left'),
           initial,
+          iconRows: menu?.classList.contains('context-menu-icon-rows') === true,
+          actionIcons,
           menuWidth,
           menuCapacity,
           description,
@@ -1304,9 +1388,22 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
     assert result["active"] == "1", result
     assert result["description"].startswith("More desc: 2"), result
     description_index = result["initial"].index(result["description"])
-    if "Expand pane" in result["initial"] or "Restore pane" in result["initial"]:
-        expand_index = next(index for index, label in enumerate(result["initial"]) if label in {"Expand pane", "Restore pane"})
+    expand_label = next((label for label in result["initial"] if label in {"Expand pane", "Restore pane"}), None)
+    if expand_label:
+        expand_index = result["initial"].index(expand_label)
         assert expand_index == description_index + 1, result
+        rename_index = next(index for index, label in enumerate(result["initial"]) if label.startswith("Rename tmux session"))
+        assert rename_index == expand_index - 1, result
+    assert result["iconRows"] is True, result
+    description_action = next(action for action in result["actionIcons"] if action["label"].startswith("More desc:"))
+    rename_action = next(action for action in result["actionIcons"] if action["label"].startswith("Rename tmux session"))
+    assert description_action["icon"] == "info", result
+    assert rename_action["icon"] == "rename", result
+    label_positions = [action["labelLeft"] for action in result["actionIcons"] if action["labelLeft"]]
+    assert max(label_positions) - min(label_positions) <= 1, result
+    kill_action = next(action for action in result["actionIcons"] if action["label"].startswith("Kill tmux session"))
+    assert kill_action["danger"] is True and kill_action["icon"] == "delete", result
+    assert all(action["leadingIcon"] for action in result["actionIcons"]), result
     assert 0 < result["menuWidth"] <= result["menuCapacity"] + 1, result
     assert result["descriptionTag"] == "BUTTON" and result["descriptionOpensDetail"] is True, result
     assert result["detailClosesOnTerminalEngagement"] is True, result
@@ -1325,6 +1422,49 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
             assert geometry["actions"][zone]["paneBorderRadius"] == "2px", geometry
         assert max(geometry["actions"][zone]["top"] for zone in ("left", "right", "top", "bottom")) - min(geometry["actions"][zone]["top"] for zone in ("left", "right", "top", "bottom")) <= 1, geometry
         assert geometry["actions"]["left"]["left"] < geometry["actions"]["right"]["left"] < geometry["actions"]["top"]["left"] < geometry["actions"]["bottom"]["left"], geometry
+
+
+def test_dockview_tab_rename_sits_before_expand_with_finder_style_rows(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2",
+        sessions=["1", "2"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_script(
+        """
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
+        const rect = tab.getBoundingClientRect();
+        tab.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: Math.round(rect.left + rect.width / 2),
+          clientY: Math.round(rect.bottom),
+        }));
+        const menu = document.querySelector('.session-context-menu');
+        const buttons = Array.from(menu.querySelectorAll('button'));
+        const labels = buttons.map(button => button.textContent.trim());
+        const action = label => buttons.find(button => button.textContent.trim() === label);
+        const rename = buttons.find(button => button.textContent.trim().startsWith('Rename tmux session'));
+        const expand = action('Expand pane');
+        const kill = buttons.find(button => button.textContent.trim().startsWith('Kill tmux session'));
+        return {
+          labels,
+          sharedRows: menu.classList.contains('context-menu-icon-rows'),
+          renameIcon: rename?.querySelector('.file-context-menu-icon-svg')?.dataset.menuIcon || '',
+          expandIcon: expand?.querySelector('.file-context-menu-icon-svg')?.dataset.menuIcon || '',
+          killIcon: kill?.querySelector('.file-context-menu-icon-svg')?.dataset.menuIcon || '',
+          killDanger: kill?.classList.contains('danger') === true,
+        };
+        """
+    )
+    rename_index = next(index for index, label in enumerate(result["labels"]) if label.startswith("Rename tmux session"))
+    assert result["labels"][rename_index + 1] == "Expand pane", result
+    assert result["sharedRows"] is True, result
+    assert result["renameIcon"] == "rename", result
+    assert result["expandIcon"] == "expand", result
+    assert result["killIcon"] == "delete" and result["killDanger"] is True, result
 
 
 def test_dockview_touch_long_press_opens_sheet_without_activating_tab(browser, tmp_path):
@@ -2014,6 +2154,10 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
             };
             """
         )
+        print('Tabber activation metrics:', {key: result[key] for key in (
+            "p95", "commitP95", "commitWorkP95", "commitWorkMax", "commitWorkSamples", "commitChromeCalls",
+            "layoutSyncs", "fromJsonCalls", "activationFullRefreshCalls", "activationPaintMax", "longTasks", "immediate",
+        )})
         assert result["fromJsonCalls"] == 0, result
         print('Tabber full refresh producers:', result["fullRefreshStacks"])
         assert result["activationFullRefreshCalls"] == 0, result
@@ -2038,7 +2182,6 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
         deferred = browser.execute_script("return {tabs: window.__tabSwitchPerf.tabRefreshCalls(), reservations: window.__tabSwitchPerf.reservationCalls()};")
         assert deferred["tabs"] > 0 and deferred["reservations"] > 0, deferred
         assert_fixture_client_event_demand_claimed(browser)
-        print({key: result[key] for key in ("p95", "commitP95", "commitWorkP95", "commitWorkMax", "activationPaintMax", "longTasks", "immediate")})
         if os.environ.get("PYTEST_XDIST_WORKER"):
             # Shared browser workers can deschedule a renderer after pointerdown but before Dockview's
             # activation callback, just as they can before requestAnimationFrame. Keep that end-to-end
@@ -2693,6 +2836,32 @@ def test_dockview_tab_hover_does_not_show_session_detail_popover(browser, tmp_pa
     assert browser.execute_script("return document.querySelector('.pane-tab-detached-popover.popover-open, .dockview-pane-tab.popover-open > .session-popover') === null;")
 
 
+def test_info_bar_popover_waits_for_shared_hover_delay(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
+    wait_for_dockview(browser, min_tabs=1)
+    wait_for_dockview_tab_geometry(browser, min_tabs=1)
+    zone = browser.find_element("css selector", ".panel-popover-zone")
+    browser.execute_script("""
+      const zone=arguments[0];
+      window.__infoHoverTiming={delay:popoverShowDelayMs};
+      zone.addEventListener('pointerenter',()=>{
+        window.__infoHoverTiming.started=performance.now();
+      },{once:true});
+      const observer=new MutationObserver(()=>{
+        if(!zone.classList.contains('popover-open'))return;
+        window.__infoHoverTiming.elapsed=performance.now()-window.__infoHoverTiming.started;
+        observer.disconnect();
+      });
+      observer.observe(zone,{attributes:true,attributeFilter:['class']});
+    """, zone)
+    fast_pointer_actions(browser).move_to_element(zone).perform()
+    WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
+        "return Number.isFinite(window.__infoHoverTiming.elapsed)"))
+    timing = browser.execute_script("return window.__infoHoverTiming")
+    assert timing["delay"] == 1300, timing
+    assert timing["elapsed"] >= timing["delay"] - 20, timing
+
+
 def test_dockview_tab_hover_does_not_reopen_after_tab_refresh(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
@@ -2774,7 +2943,7 @@ def test_dockview_separator_inactive_tab_and_preview_colors_match_tokens(browser
         const panelStyle = panel ? getComputedStyle(panel) : null;
         const stripStyle = strip ? getComputedStyle(strip) : null;
         const tabStyle = inactiveTab ? getComputedStyle(inactiveTab) : null;
-        const separatorHover = getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hover-bg').trim();
+        const separatorHover = window.__yomuxTestHelpers.probePaint('background-color: var(--pane-resizer-hover-bg)').background;
         const separatorLineSize = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-line-size')) || 0;
         const previewStyle = getComputedStyle(group, '::before');
         const sashStyle = sash ? getComputedStyle(sash, '::before') : null;
@@ -2808,7 +2977,7 @@ def test_dockview_separator_inactive_tab_and_preview_colors_match_tokens(browser
             const docStyle = getComputedStyle(document.documentElement);
             const result = {
               sashBg: sashStyle.backgroundColor,
-              hoverBg: docStyle.getPropertyValue('--pane-resizer-hover-bg').trim(),
+              hoverBg: window.__yomuxTestHelpers.probePaint('background-color: var(--pane-resizer-hover-bg)').background,
               sashBeforeWidth: parseFloat(sashStyle.width) || 0,
               hoverLineSize: parseFloat(docStyle.getPropertyValue('--pane-resizer-hover-line-size')) || 0,
             };
@@ -3062,7 +3231,7 @@ def test_dockview_complex_layout_sash_hit_targets_stay_transparent(browser, tmp_
         const transparent = new Set(['rgba(0, 0, 0, 0)', 'transparent']);
         const docStyle = getComputedStyle(document.documentElement);
         const lineSize = parseFloat(docStyle.getPropertyValue('--pane-resizer-line-size')) || 0;
-        const separatorBg = docStyle.getPropertyValue('--pane-resizer-bg').trim();
+        const separatorBg = window.__yomuxTestHelpers.probePaint('background-color: var(--pane-resizer-bg)').background;
         const rectFor = node => {
           const rect = node.getBoundingClientRect();
           return {width: rect.width, height: rect.height, left: rect.left, top: rect.top};
@@ -3123,7 +3292,7 @@ def test_dockview_complex_layout_sash_hit_targets_stay_transparent(browser, tmp_
             const style = getComputedStyle(sash);
             const before = getComputedStyle(sash, '::before');
             const docStyle = getComputedStyle(document.documentElement);
-            const hoverBg = docStyle.getPropertyValue('--pane-resizer-hover-bg').trim();
+            const hoverBg = window.__yomuxTestHelpers.probePaint('background-color: var(--pane-resizer-hover-bg)').background;
             const hoverLineSize = parseFloat(docStyle.getPropertyValue('--pane-resizer-hover-line-size')) || 0;
             const split = sash.closest('.dv-split-view-container')?.className || '';
             if (before.backgroundColor !== hoverBg) return false;
@@ -6653,238 +6822,14 @@ def test_dockview_tab_drag_over_panel_chrome_shows_no_split_or_tab_preview(brows
 
 
 def test_dockview_pane_drag_removed(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser, tmp_path,
+        "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2",
+        sessions=["1", "2"], grid_width=1200, grid_height=620,
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    wait_for_dockview_tab_geometry(browser, min_tabs=2)
     assert browser.execute_script("return document.querySelectorAll('.pane-drag-handle, .pane-drag-source').length") == 0
-
-
-def _retired_pane_drag_shows_dotted_pane_preview(browser, tmp_path):
-    load_dockview_runtime_boot_fixture(
-        browser,
-        tmp_path,
-        "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2",
-        sessions=["1", "2"],
-        grid_width=1200,
-        grid_height=620,
-    )
-    wait_for_dockview(browser, min_tabs=2)
-    wait_for_dockview_tab_geometry(browser, min_tabs=2)
-    points = browser.execute_script(
-        """
-        const rectPoint = (rect, x = 0.5, y = 0.5) => ({x: Math.round(rect.left + rect.width * x), y: Math.round(rect.top + rect.height * y)});
-        const sourceGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
-        const targetGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]').closest('.dv-groupview');
-        const header = sourceGroup.querySelector('.dv-tabs-and-actions-container');
-        const tabs = sourceGroup.querySelector('.dv-tabs-container').getBoundingClientRect();
-        const tab = sourceGroup.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-tab').getBoundingClientRect();
-        const headerRect = header.getBoundingClientRect();
-        const x = Math.round(Math.min(headerRect.right - 84, Math.max(tab.right + 36, tabs.left + 230)));
-        const y = Math.round(headerRect.top + Math.min(12, headerRect.height / 2));
-        return {
-          start: {x, y},
-          end: rectPoint(targetGroup.getBoundingClientRect(), 0.55, 0.5),
-        };
-        """
-    )
-    try:
-        cdp_drag_hold(browser, points["start"], points["end"], steps=28)
-        WebDriverWait(browser, 5).until(
-            lambda driver: driver.execute_script("return Boolean(document.querySelector('.pane-drag-image.drag-image'))")
-        )
-        metrics = browser.execute_script(
-            """
-            const ghost = document.querySelector('.pane-drag-image.drag-image');
-            const style = getComputedStyle(ghost);
-            const rect = ghost.getBoundingClientRect();
-            return {
-              slot: ghost.dataset.dragSlot || '',
-              borderStyle: style.borderTopStyle,
-              borderColor: style.borderTopColor,
-              separatorColor: getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hover-bg').trim(),
-              width: Math.round(rect.width),
-              height: Math.round(rect.height),
-              text: ghost.textContent,
-            };
-            """
-        )
-        assert metrics["slot"] == "left", metrics
-        assert metrics["borderStyle"] == "dotted", metrics
-        assert metrics["borderColor"] == metrics["separatorColor"], metrics
-        assert metrics["width"] >= 180 and metrics["height"] >= 120, metrics
-        assert "1 tab" in metrics["text"], metrics
-    finally:
-        cdp_release(browser, points["end"])
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return !document.querySelector('.pane-drag-image.drag-image')")
-    )
-
-
-def _retired_panel_detail_row_drags_whole_pane(browser, tmp_path):
-    load_dockview_runtime_boot_fixture(
-        browser,
-        tmp_path,
-        "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2",
-        sessions=["1", "2"],
-        grid_width=1200,
-        grid_height=620,
-    )
-    wait_for_dockview(browser, min_tabs=2)
-    wait_for_dockview_tab_geometry(browser, min_tabs=2)
-    points = browser.execute_script(
-        """
-        const rectPoint = (rect, x = 0.5, y = 0.5) => ({x: Math.round(rect.left + rect.width * x), y: Math.round(rect.top + rect.height * y)});
-        const sourceGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
-        const targetGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]').closest('.dv-groupview');
-        const detail = sourceGroup.querySelector('.panel-detail-row');
-        const detailRect = detail.getBoundingClientRect();
-        const start = {x: Math.round(detailRect.left + Math.min(220, detailRect.width * 0.45)), y: Math.round(detailRect.top + detailRect.height / 2)};
-        const hit = document.elementFromPoint(start.x, start.y);
-        return {
-          start,
-          end: rectPoint(targetGroup.getBoundingClientRect(), 0.55, 0.5),
-          detailDragSlot: detail.dataset.paneDragSlot || '',
-          hitExcluded: Boolean(hit?.closest?.('button, input, textarea, select, a')),
-        };
-        """
-    )
-    assert points["detailDragSlot"] == "left", points
-    assert points["hitExcluded"] is False, points
-    try:
-        cdp_drag_hold(browser, points["start"], points["end"], steps=28)
-        WebDriverWait(browser, 5).until(
-            lambda driver: driver.execute_script("return Boolean(document.querySelector('.pane-drag-image.drag-image'))")
-        )
-        preview = browser.execute_script(
-            """
-            const ghost = document.querySelector('.pane-drag-image.drag-image');
-            const style = getComputedStyle(ghost);
-            return {
-              slot: ghost.dataset.dragSlot || '',
-              borderStyle: style.borderTopStyle,
-              text: ghost.textContent.trim().replace(/\\s+/g, ' '),
-            };
-            """
-        )
-        assert preview["slot"] == "left", preview
-        assert preview["borderStyle"] == "dotted", preview
-        assert "1 tab" in preview["text"], preview
-    finally:
-        cdp_release(browser, points["end"])
-    WebDriverWait(browser, 5).until(
-        lambda driver: [group["tabs"] for group in sorted(dockview_layout_metrics(driver)["groups"], key=lambda item: item["rect"]["left"])] == [["2"], ["1"]]
-    )
-
-
-def _retired_file_editor_toolbar_drags_whole_pane(browser, tmp_path):
-    encoded_file = "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2FDONE.md"
-    file_item = "file:/home/test/yolomux.dev/DONE.md"
-    load_dockview_runtime_boot_fixture(
-        browser,
-        tmp_path,
-        f"?sessions=2,{encoded_file}&layout=row@50(left,right)&tabs=left:{encoded_file};right:2",
-        sessions=["2"],
-        grid_width=1200,
-        grid_height=620,
-    )
-    wait_for_dockview(browser, min_tabs=2)
-    wait_for_dockview_tab_geometry(browser, min_tabs=2, min_width=60)
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return Boolean(document.querySelector('.file-editor-toolbar:not([hidden])'))")
-    )
-    points = browser.execute_script(
-        """
-        const rectPoint = (rect, x = 0.5, y = 0.5) => ({x: Math.round(rect.left + rect.width * x), y: Math.round(rect.top + rect.height * y)});
-        const sourceGroup = document.querySelector('.file-editor-panel').closest('.dv-groupview');
-        const targetGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]').closest('.dv-groupview');
-        const toolbar = sourceGroup.querySelector('.file-editor-toolbar');
-        const toolbarRect = toolbar.getBoundingClientRect();
-        const excluded = hit => Boolean(hit?.closest?.('button, input, textarea, select, a, [data-diff-ref-input]'));
-        const candidates = [0.28, 0.38, 0.48, 0.58, 0.68, 0.78].map(ratio => ({
-          x: Math.round(toolbarRect.left + toolbarRect.width * ratio),
-          y: Math.round(toolbarRect.top + toolbarRect.height / 2),
-        }));
-        const start = candidates.find(point => !excluded(document.elementFromPoint(point.x, point.y))) || candidates[0];
-        const hit = document.elementFromPoint(start.x, start.y);
-        return {
-          start,
-          end: rectPoint(targetGroup.getBoundingClientRect(), 0.55, 0.5),
-          toolbarDragSlot: toolbar.dataset.paneDragSlot || '',
-          hitExcluded: excluded(hit),
-          hitClass: String(hit?.className || ''),
-        };
-        """
-    )
-    assert points["toolbarDragSlot"] == "left", points
-    assert points["hitExcluded"] is False, points
-    try:
-        cdp_drag_hold(browser, points["start"], points["end"], steps=28)
-        WebDriverWait(browser, 5).until(
-            lambda driver: driver.execute_script("return Boolean(document.querySelector('.pane-drag-image.drag-image'))")
-        )
-        preview = browser.execute_script(
-            """
-            const ghost = document.querySelector('.pane-drag-image.drag-image');
-            const style = getComputedStyle(ghost);
-            return {
-              slot: ghost.dataset.dragSlot || '',
-              borderStyle: style.borderTopStyle,
-              text: ghost.textContent.trim().replace(/\\s+/g, ' '),
-            };
-            """
-        )
-        assert preview["slot"] == "left", preview
-        assert preview["borderStyle"] == "dotted", preview
-        assert "1 tab" in preview["text"], preview
-    finally:
-        cdp_release(browser, points["end"])
-    WebDriverWait(browser, 5).until(
-        lambda driver: [group["tabs"] for group in sorted(dockview_layout_metrics(driver)["groups"], key=lambda item: item["rect"]["left"])] == [["2"], [file_item]]
-    )
-
-
-def _retired_tab_container_background_swaps_whole_panes(browser, tmp_path):
-    load_dockview_runtime_boot_fixture(
-        browser,
-        tmp_path,
-        "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2",
-        sessions=["1", "2"],
-        grid_width=1200,
-        grid_height=620,
-    )
-    wait_for_dockview(browser, min_tabs=2)
-    wait_for_dockview_tab_geometry(browser, min_tabs=2)
-    points = browser.execute_script(
-        """
-        const rectPoint = (rect, x = 0.5, y = 0.5) => ({x: Math.round(rect.left + rect.width * x), y: Math.round(rect.top + rect.height * y)});
-        const sourceGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
-        const targetGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]').closest('.dv-groupview');
-        const header = sourceGroup.querySelector('.dv-tabs-and-actions-container');
-        const tabs = sourceGroup.querySelector('.dv-tabs-container').getBoundingClientRect();
-        const tab = sourceGroup.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-tab').getBoundingClientRect();
-        const headerRect = header.getBoundingClientRect();
-        const x = Math.round(Math.min(headerRect.right - 84, Math.max(tab.right + 36, tabs.left + 230)));
-        const y = Math.round(headerRect.top + Math.min(12, headerRect.height / 2));
-        const hit = document.elementFromPoint(x, y);
-        return {
-          start: {x, y},
-          end: rectPoint(targetGroup.getBoundingClientRect()),
-          hitClass: hit?.className || '',
-          hitTab: Boolean(hit?.closest?.('.dv-tab, .dockview-pane-tab, button, [data-pane-drag]')),
-          headerDragSlot: header.dataset.paneDragSlot || '',
-          headerDraggable: header.draggable === true,
-          headerDragSource: header.classList.contains('pane-drag-source'),
-        };
-        """
-    )
-    assert points["headerDragSlot"] == "left", points
-    assert points["headerDraggable"] is False, points
-    assert points["headerDragSource"] is True, points
-    assert points["hitTab"] is False, points
-    cdp_drag(browser, points["start"], points["end"], steps=28)
-    WebDriverWait(browser, 5).until(
-        lambda driver: [group["tabs"] for group in sorted(dockview_layout_metrics(driver)["groups"], key=lambda item: item["rect"]["left"])] == [["2"], ["1"]]
-    )
-    after = dockview_layout_metrics(browser)
-    assert after["slots"]["left"]["tabs"] == ["2"], after
-    assert after["slots"]["right"]["tabs"] == ["1"], after
 
 
 def test_dockview_pane_swap_rejects_too_small_target(browser, tmp_path):
@@ -7176,30 +7121,19 @@ def test_dockview_drag_moves_tab_to_other_pane(browser, tmp_path):
     start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="1"]', 0.5, 0.5)
     end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="2"]', 0.68, 0.5)
     cdp_drag(browser, start, end)
-    browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        requestAnimationFrame(() => requestAnimationFrame(done));
-        """
-    )
-    browser.execute_script(
-        """
-        const next = cloneLayoutSlots(layoutSlots);
-        next.left = emptyPaneState();
-        next.right = paneStateWithTabs(['2', '1'], '1');
-        dockviewLayoutState.syncQueued = false;
-        layoutSlots = normalizeLayoutSlots(next);
-        activeSessions = sessionsFromLayout();
-        updateActiveSessionParam();
-        dockviewLoadLayout(layoutSlots);
-        """
-    )
     WebDriverWait(browser, 5).until(
-        lambda driver: any(group["tabs"] == ["2", "1"] for group in dockview_layout_metrics(driver)["groups"])
+        lambda driver: any(group["tabs"] == ["2", "1"] for group in dockview_layout_metrics(driver)["groups"]),
+        message="cross-pane gesture did not move tab",
     )
     metrics = dockview_layout_metrics(browser)
     assert any(group["tabs"] == ["2", "1"] for group in metrics["groups"])
     assert any(state.get("tabs") == ["2", "1"] for key, state in metrics["slots"].items() if key != "__tree")
+
+
+def test_cross_pane_drag_gate_rejects_noop_gesture(browser, tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "cdp_drag", lambda *args, **kwargs: None)
+    with pytest.raises(TimeoutException, match="cross-pane gesture did not move tab"):
+        test_dockview_drag_moves_tab_to_other_pane(browser, tmp_path)
 
 
 def test_dockview_drag_splits_tab_to_right_pane_and_measures_geometry(browser, tmp_path):
@@ -7475,7 +7409,7 @@ def test_dockview_root_left_drag_shows_full_span_preview_before_drop(browser, tm
               left: grid.classList.contains('drop-preview-left'),
               label: grid.dataset.dropLabel || '',
               borderColor: style.borderLeftColor,
-              separatorHover: getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hover-bg').trim(),
+              separatorHover: window.__yomuxTestHelpers.probePaint('background-color: var(--pane-resizer-hover-bg)').background,
             };
             """
         )
@@ -7525,7 +7459,7 @@ def test_dockview_root_right_drag_shows_full_span_preview_before_drop(browser, t
               right: grid.classList.contains('drop-preview-right'),
               label: grid.dataset.dropLabel || '',
               borderColor: style.borderLeftColor,
-              separatorHover: getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hover-bg').trim(),
+              separatorHover: window.__yomuxTestHelpers.probePaint('background-color: var(--pane-resizer-hover-bg)').background,
             };
             """
         )
@@ -8314,7 +8248,7 @@ def test_dockview_root_bottom_preview_preserves_docked_finder_column(browser, tm
           top: parseFloat(previewStyle.top) || 0,
           height: parseFloat(previewStyle.height) || 0,
           borderColor: previewStyle.borderLeftColor,
-          separatorHover: getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hover-bg').trim(),
+          separatorHover: window.__yomuxTestHelpers.probePaint('background-color: var(--pane-resizer-hover-bg)').background,
         };
         clearDropPreview();
         const finderContent = finderGroup.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
@@ -8425,7 +8359,7 @@ def test_dockview_root_top_drag_preview_preserves_docked_finder_column(browser, 
               left: parseFloat(style.left) || 0,
               width: parseFloat(style.width) || 0,
               borderColor: style.borderLeftColor,
-              separatorHover: getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hover-bg').trim(),
+              separatorHover: window.__yomuxTestHelpers.probePaint('background-color: var(--pane-resizer-hover-bg)').background,
               nativeOverlays,
               coversFinder,
               gridRect: {left: gridRect.left, width: gridRect.width},
@@ -8497,7 +8431,7 @@ def test_dockview_root_top_bottom_preview_preserves_nested_triplet_home(browser,
             left: parseFloat(style.left) || 0,
             width: parseFloat(style.width) || 0,
             borderColor: style.borderLeftColor,
-            separatorHover: getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hover-bg').trim(),
+            separatorHover: window.__yomuxTestHelpers.probePaint('background-color: var(--pane-resizer-hover-bg)').background,
           };
           clearDropPreview();
               const finderContent = finderGroup.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
@@ -10368,7 +10302,7 @@ def test_dockview_file_drag_from_finder_opens_in_target_pane_with_preview(browse
           left: group.classList.contains('drop-preview-left'),
           label: group.dataset.dropLabel || '',
           borderColor: getComputedStyle(group, '::before').borderLeftColor,
-          separatorHover: getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hover-bg').trim(),
+          separatorHover: window.__yomuxTestHelpers.probePaint('background-color: var(--pane-resizer-hover-bg)').background,
         };
         const drop = fire('drop', Math.round(rect.left + 8), Math.round(rect.top + rect.height / 2));
         return {over, preview, drop, opened: window.__dockviewFileOpen};

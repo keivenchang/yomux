@@ -48,30 +48,40 @@ function activeColorPreferenceChoices() {
   return UI_COLOR_CHOICES.map(value => activeColorPreferenceChoice(value, t(UI_COLOR_PRESETS[value].labelKey)));
 }
 
+function editorCursorBlinkDelayChoices() {
+  const current = Number(initialSetting('editor.cursor_blink_delay_ms', 600));
+  return [...new Set([0, 300, 500, 600, 800, 1000, 1500, 2000, current])]
+    .sort((left, right) => left - right)
+    .map(value => ({value, label: value === 0 ? t('pref.editor.cursor_blink_delay_ms.static') : `${value} ms`}));
+}
+
 function cursorColorPreferenceChoice(value) {
   const preset = UI_COLOR_PRESETS[value];
+  const light = resolvedGlobalThemeMode() === 'light';
+  const labelKey = light
+    ? `pref.appearance.editor_cursor_color.dark-${value.replace(/^neon-/, '')}`
+    : preset?.cursorLabelKey;
   const label = value === 'theme'
-    ? t('pref.appearance.editor_cursor_color.theme')
-    : preset?.cursorLabelKey ? t(preset.cursorLabelKey) : preferenceChoiceLabel(value);
-  if (value === 'theme') return {value, label, swatches: [activeEditorScheme().cursor]};
-  const dark = cursorColorForPreset(value, false);
-  const light = cursorColorForPreset(value, true);
-  if (dark && light && dark !== light) return {value, label, swatches: [dark, light], joinedSwatches: true};
-  return dark ? {value, label, swatches: [dark]} : {value, label};
+    ? t('pref.appearance.inverse_global_theme_color')
+    : labelKey ? t(labelKey) : preferenceChoiceLabel(value);
+  if (value === 'theme') return {value, label};
+  const color = cursorColorForPreset(value, light);
+  return color ? {value, label, swatches: [color]} : {value, label};
 }
 
 function cursorColorPreferenceChoices() {
   const choices = Array.isArray(clientSettingsPayload?.choices?.['appearance.editor_cursor_color'])
     ? clientSettingsPayload.choices['appearance.editor_cursor_color']
     : CURSOR_COLOR_CHOICES;
-  return choices
-    .filter(value => value === 'theme' || UI_COLOR_PRESETS[value]?.cursor)
+  return ['theme', ...UI_COLOR_CHOICES.map(normalizeEditorCursorColor)]
+    .filter(value => choices.includes(value))
     .map(cursorColorPreferenceChoice);
 }
 
 function separatorColorPreferenceChoice(value) {
-  if (value === 'theme') return {value, label: t('pref.appearance.editor_cursor_color.theme')};
-  return activeColorPreferenceChoice(value, t(UI_COLOR_PRESETS[value].labelKey));
+  if (value === 'theme') return {value, label: t('pref.appearance.inverse_global_theme_color')};
+  const color = uiColorVisualPreset(value, resolvedGlobalThemeMode() === 'light').bright;
+  return {value, label: t(UI_COLOR_PRESETS[value].plainLabelKey), swatches: [color]};
 }
 
 function separatorColorPreferenceChoices() {
@@ -81,6 +91,19 @@ function separatorColorPreferenceChoices() {
   return choices
     .filter(value => value === 'theme' || UI_COLOR_PRESETS[value])
     .map(separatorColorPreferenceChoice);
+}
+
+function refreshPreferenceColorChoices() {
+  for (const control of document.querySelectorAll('[data-setting-path="appearance.editor_cursor_color"], [data-setting-path="appearance.separator_color"]')) {
+    const choice = control.dataset.settingPath === 'appearance.separator_color'
+      ? separatorColorPreferenceChoice(control.value)
+      : cursorColorPreferenceChoice(control.value);
+    const label = control.closest('.preferences-radio');
+    if (!label) continue;
+    label.lastElementChild.textContent = choice.label;
+    const swatches = label.querySelectorAll('.preferences-radio-swatch');
+    choice.swatches?.forEach((color, index) => swatches[index]?.style.setProperty('--preferences-radio-swatch', color));
+  }
 }
 
 function updateNotifyLevelPreferenceChoices() {
@@ -295,19 +318,15 @@ function preferenceSections() {
     ]},
     {id: PREFERENCE_SECTION_IDS.colors, title: t('pref.section.colors'), items: [
       preferenceSettingItem('appearance.theme', {type: 'radio', choices: globalThemePreferenceChoices()}),
+      preferenceSettingItem('appearance.active_color', {type: 'radio', choices: activeColorPreferenceChoices()}),
       preferenceSettingItem('appearance.terminal_theme', {type: 'radio', choices: [
         {value: 'follow-app', label: t('pref.appearance.terminal_theme.follow-app')},
         {value: 'dark', label: t('common.theme.dark')},
         {value: 'light', label: t('common.theme.light')},
       ]}),
+      preferenceSettingItem('appearance.editor_cursor_color', {type: 'radio', choices: cursorColorPreferenceChoices()}),
       preferenceSettingItem('appearance.editor_dark_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: true})}),
       preferenceSettingItem('appearance.editor_light_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: false})}),
-      preferenceSettingItem('appearance.editor_cursor_color', {type: 'radio', choices: cursorColorPreferenceChoices()}),
-      preferenceSettingItem('appearance.editor_cursor_style', {type: 'radio', choices: [
-        {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
-        {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
-      ]}),
-      preferenceSettingItem('appearance.active_color', {type: 'radio', choices: activeColorPreferenceChoices()}),
       preferenceSettingItem('appearance.separator_color', {type: 'radio', choices: separatorColorPreferenceChoices()}),
       preferenceSettingItem('appearance.pane_ring_opacity', {type: 'range', min: 5, max: 100, step: 5, suffix: '%'}),
       preferenceSettingItem('appearance.inactive_pane_opacity', {type: 'range', min: 0, max: 100, step: 5, suffix: '%'}),
@@ -319,12 +338,12 @@ function preferenceSections() {
       preferenceSettingItem('appearance.terminal_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
       preferenceSettingItem('appearance.file_explorer_font_size', {type: 'number', min: 1, max: 24, step: 1, suffix: 'px', labelParams: {name: fileExplorerLabel()}, whenSyncFontSizes: false}),
       preferenceSettingItem('appearance.editor_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
-      preferenceSettingItem('appearance.preview_font_size', {type: 'number', min: 6, max: 32, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.preview_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
       preferenceSettingItem('appearance.tab_width', {type: 'number', min: 120, max: 420, step: 5, suffix: 'px'}),
       preferenceSettingItem('appearance.pane_spacing', {type: 'number', min: 0, max: 20, step: 1, suffix: 'px'}),
       preferenceSettingItem('appearance.max_tabs_per_pane', {type: 'number', min: 2, max: 30, step: 1}),
     ]},
-    {id: PREFERENCE_SECTION_IDS.terminal, title: t('pref.section.terminal'), items: [
+    {id: PREFERENCE_SECTION_IDS.terminal, title: t('pref.section.terminal'), colorSettingsLink: true, items: [
       preferenceSettingItem('appearance.tmux_status_bar', {type: 'radio', choices: [
         {value: 'off', label: t('pref.appearance.tmux_status_bar.off')},
         {value: 'top', label: t('pref.appearance.tmux_status_bar.top')},
@@ -332,7 +351,12 @@ function preferenceSections() {
       ]}),
       preferenceSettingItem('terminal_editor.scrollback', {type: 'number', min: 1000, max: 50000, step: 500, suffix: t('unit.line.other')}),
     ]},
-    {id: PREFERENCE_SECTION_IDS.editorOptions, title: t('pref.section.editor_options'), items: [
+    {id: PREFERENCE_SECTION_IDS.editorOptions, title: t('pref.section.editor_options'), colorSettingsLink: true, items: [
+      preferenceSettingItem('appearance.editor_cursor_style', {type: 'radio', choices: [
+        {value: 'block', label: t('pref.appearance.editor_cursor_style.block'), exampleHtml: '<span class="preferences-cursor-example block" aria-hidden="true"></span>'},
+        {value: 'line', label: t('pref.appearance.editor_cursor_style.line'), exampleHtml: '<span class="preferences-cursor-example line" aria-hidden="true"></span>'},
+      ]}),
+      preferenceSettingItem('editor.cursor_blink_delay_ms', {type: 'select', choices: editorCursorBlinkDelayChoices()}),
       preferenceSettingItem('terminal_editor.word_wrap', {type: 'boolean'}),
       preferenceSettingItem('terminal_editor.line_numbers', {type: 'boolean'}),
       preferenceSettingItem('editor.autosave', {type: 'boolean'}),
@@ -430,7 +454,11 @@ function preferenceSections() {
       ]}),
     ]},
   ];
-  return orderedPreferenceSections(sections);
+  return [...orderedPreferenceSections(sections), {
+    id: 'experimental', title: t('pref.section.experimental'), items: [
+      preferenceSettingItem('general.enable_experimental_features', {type: 'boolean'}),
+    ],
+  }];
 }
 
 function preferenceItemByPath(path) {
@@ -442,7 +470,9 @@ function preferenceItemByPath(path) {
 }
 
 function preferenceValue(path) {
+  if (path === 'appearance.editor_cursor_color') return normalizeEditorCursorColor(initialSetting(path, DEFAULT_CURSOR_COLOR));
   if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionEntries(clientSettings);
+  if (path === 'appearance.preview_font_size') return nestedSetting(clientSettings, 'appearance.editor_font_size', 14);
   return nestedSetting(clientSettings, path, nestedSetting(clientSettingsDefaults, path, ''));
 }
 
@@ -549,7 +579,7 @@ for (const group of preferenceSearchAliasGroups) {
 }
 
 function preferenceSearchTokens(query) {
-  return String(query || '').toLowerCase().match(/[a-z0-9_./-]+/g) || [];
+  return String(query || '').toLowerCase().match(/[\p{L}\p{M}\p{N}_./-]+/gu) || [];
 }
 
 function preferenceSearchAliasesForToken(token) {
@@ -610,7 +640,8 @@ function textMatchesPreferenceQuery(value, query) {
   const normalized = String(query || '').trim().toLowerCase();
   if (!normalized) return true;
   if (haystack.includes(normalized)) return true;
-  return preferenceSearchTokens(normalized).every(token => (
+  const tokens = preferenceSearchTokens(normalized);
+  return tokens.length > 0 && tokens.every(token => (
     preferenceSearchAliasesForToken(token).some(alias => haystack.includes(alias))
   ));
 }
@@ -710,7 +741,7 @@ function preferenceControlHtml(item, query = '') {
         : '';
       return `<label class="preferences-radio${swatches ? ' has-swatches' : ''}" for="${esc(radioId)}">
         <input type="radio" id="${esc(radioId)}" name="${esc(controlId)}" value="${esc(choiceValue)}" data-setting-path="${esc(item.path)}" data-setting-type="radio"${selected ? ' checked' : ''}${disabled}>
-        ${swatches}<span>${esc(preferenceChoiceLabel(choice))}</span>
+        ${swatches}${choice.exampleHtml || ''}<span>${esc(preferenceChoiceLabel(choice))}</span>
       </label>`;
     }).join('');
     control = `<div class="preferences-radio-group${groupHasSwatches ? ' has-swatches' : ''}" role="radiogroup" aria-label="${esc(item.label)}">${radios}</div>`;
@@ -778,7 +809,9 @@ function preferencesPanelHtml() {
       const titleMatches = textMatchesPreferenceQuery(section.title, query);
        const visibleItems = section.items.filter(item => preferenceItemIsVisible(item, query) && (titleMatches || preferenceItemMatches(item, query)));
       const collapsed = !query && collapsedPreferenceSections.has(section.id);
-      const sectionIntro = section.id === PREFERENCE_SECTION_IDS.yolo && (!query || textMatchesPreferenceQuery('yolo rules rule file yaml auto approve approval', query))
+      const sectionIntro = section.colorSettingsLink
+        ? `<div class="preferences-setting-row preferences-setting-note"><span>${esc(t('pref.colorsSectionHint', {section: '__COLORS_LINK__'})).replace('__COLORS_LINK__', `<a href="#preferences-colors" data-action="preferences-section-open" data-preference-section-target="${esc(PREFERENCE_SECTION_IDS.colors)}">${esc(t('pref.section.colors'))}</a>`)}</span></div>`
+        : section.id === PREFERENCE_SECTION_IDS.yolo && (!query || textMatchesPreferenceQuery('yolo rules rule file yaml auto approve approval', query))
         ? preferencesYoloRulesPathHtml()
         : '';
       const rows = `${sectionIntro}${visibleItems.map(item => preferenceControlHtml(item)).join('')}`;
@@ -950,6 +983,11 @@ function autosizePreferenceTextareas(root) {
   root.querySelectorAll?.('textarea[data-setting-autosize="true"]').forEach(autosizePreferenceTextarea);
 }
 
+function setPreferencesSearchState(value) {
+  preferencesSearchText = value || '';
+  preferencesResetConfirmVisible = false;
+}
+
 function bindPreferencesPanel(panel) {
   if (!panel) return null;
   return bindOnce(panel, 'preferences-panel', () => {
@@ -957,8 +995,7 @@ function bindPreferencesPanel(panel) {
     scope.ownEvent('input', panel, 'input', event => {
     const search = event.target.closest('[data-preferences-search]');
     if (search && panel.contains(search)) {
-      preferencesSearchText = search.value || '';
-      preferencesResetConfirmVisible = false;
+      setPreferencesSearchState(search.value);
       renderPreferencesPanels({force: true, focusSearch: true});
       return;
     }
@@ -1007,7 +1044,7 @@ function bindPreferencesPanel(panel) {
   });
     const disposeActions = bindActionDispatcher(panel, {
     'preferences-search': () => {
-      preferencesResetConfirmVisible = false;
+      setPreferencesSearchState(preferencesSearchText);
       renderPreferencesPanels({force: true});
       focusPreferencesSearch(panel);
     },
@@ -1021,22 +1058,33 @@ function bindPreferencesPanel(panel) {
       }, 0);
     },
     'preferences-reset-confirm': () => {
-      preferencesResetConfirmVisible = false;
+      setPreferencesSearchState(preferencesSearchText);
       resetAllPreferences();
     },
     'preferences-reset-cancel': () => {
-      preferencesResetConfirmVisible = false;
+      setPreferencesSearchState(preferencesSearchText);
       renderPreferencesPanels({force: true});
     },
     'preferences-copy-text': (_event, target) => {
       void copyTextWithFeedback(target.dataset.copyText || '', {button: target, statusText: t('status.copiedText')});
     },
     'preferences-yolo-rule-open': () => {
-      preferencesResetConfirmVisible = false;
+      setPreferencesSearchState(preferencesSearchText);
       openYoloRuleFile();
     },
+    'preferences-section-open': (event, target) => {
+      event.preventDefault();
+      const sectionId = target.dataset.preferenceSectionTarget;
+      setPreferencesSearchState('');
+      collapsedPreferenceSections.delete(sectionId);
+      writeStoredCollapsedPreferenceSections();
+      renderPreferencesPanels({force: true});
+      const heading = panel.querySelector(`[data-preference-section="${sectionId}"] .preferences-section-toggle`);
+      heading?.focus({preventScroll: true});
+      heading?.scrollIntoView({block: 'start'});
+    },
     'preferences-section-toggle': (_event, sectionToggle) => {
-      preferencesResetConfirmVisible = false;
+      setPreferencesSearchState(preferencesSearchText);
       const sectionId = sectionToggle.dataset.preferenceSectionToggle || '';
       if (collapsedPreferenceSections.has(sectionId)) collapsedPreferenceSections.delete(sectionId);
       else collapsedPreferenceSections.add(sectionId);

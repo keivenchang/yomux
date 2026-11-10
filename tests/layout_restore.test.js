@@ -39,6 +39,44 @@ function layoutItemsAfterQueryRoundTrip(api, slots) {
 }
 
 async function runLayoutRestoreSuite() {
+  test('topbar activity renders one fresh count snapshot per update', () => {
+    const source = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
+    const htmlStart = source.indexOf('function globalActivityStatusLineHtml(');
+    const htmlEnd = source.indexOf('\nfunction topbarActivityUsesMobileCountBalls(', htmlStart);
+    const updateStart = source.indexOf('function updateTopbarActivityStatus(');
+    const updateEnd = source.indexOf('\nconst attentionAnimationDelayProperty', updateStart);
+    let calculations = 0;
+    let running = 1;
+    const node = {classList: {toggle() {}}, innerHTML: '', hidden: false};
+    const context = vm.createContext({
+      globalActivityCounts: () => { calculations += 1; return {total: 3, running, ask: 0, blocked: 0, attention: 0, idle: 3 - running}; },
+      topbarActivityCountBallHtml: (count, tone) => `${tone}:${count}`,
+      statusIndicatorInlineClasses: () => '', esc: String, t: (_key, args) => args.count,
+      STATE_KEY: {working: 'working'}, document: {getElementById: () => node},
+      topbarActivityUsesMobileCountBalls: () => false, topbarActivityVisibleCount: () => 3,
+      syncTopbarActivityPlacement() {}, scheduleTopbarActionCapacity() {},
+    });
+    vm.runInContext(source.slice(htmlStart, htmlEnd) + '\n' + source.slice(updateStart, updateEnd), context);
+    context.updateTopbarActivityStatus();
+    assert.equal(calculations, 1, 'one update must not classify every agent window twice');
+    assert.ok(node.innerHTML.startsWith('working:1'));
+    running = 2;
+    context.updateTopbarActivityStatus();
+    assert.equal(calculations, 2, 'the next update must read a fresh snapshot');
+    assert.ok(node.innerHTML.startsWith('working:2'));
+    assert.ok(context.globalActivityStatusLineHtml().startsWith('working:2'));
+    assert.equal(calculations, 3, 'standalone formatting still owns its snapshot');
+  });
+
+  test('JSONL rows preserve own prototype-named fields and keep missing cells empty', () => {
+    const api = loadYomux();
+    const source = '{"constructor":"explicit","__proto__":{"value":9}}\n{"ordinary":1}';
+    const preview = api.jsonLinesTablePreview('/repo/keys.jsonl', source);
+    assert.equal(preview.rows[1].cells[0].text, '');
+    assert.equal(preview.rows[1].cells[1].text, '');
+    const overflow = api.jsonLinesTablePreview('/repo/keys.jsonl', source, {maxColumns: 1});
+    assert.equal(overflow.rows[0].overflow.title, '{"__proto__":{"value":9}}');
+  });
   test('legacy browser storage keys migrate before reads and remain coordinated during transition', () => {
     const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       localStorage: {
@@ -820,7 +858,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function codeMirrorSearchScrollFix[\s\S]*const scrollTop = view\.scrollDOM\?\.scrollTop \|\| 0;[\s\S]*view\.state\.selection\.main\.head !== head[\s\S]*scrollTop\) > 1[\s\S]*scrollIntoView\(head/.test(fileActionsSource), 'a delayed Find centering pass yields to a newer manual scroll or selection');
     assert.ok(/\.cm-searchMatch-selected[\s\S]*backgroundColor: 'var\(--editor-cursor\)'/.test(fileActionsSource), 'selected Find match reuses the live editor cursor color');
     const changesEditorSource = fs.readFileSync('static_src/js/yomux/86_changes_editor.js', 'utf8');
-    assert.ok(/function preserveFileEditorPanelPassiveViewState[\s\S]*updateCodeMirrorViewPreservingState[\s\S]*scrollSnapshot[\s\S]*captureFileEditorPanelViewState[\s\S]*function restoreFileEditorPanelViewState\(item, panel, options = \{\}\)[\s\S]*options\.restoreFocused !== true && options\.restoreFresh !== true[\s\S]*preserveFileEditorPanelPassiveViewState\(item, panel\)/.test(changesEditorSource), 'ordinary editor rerenders keep every live selection/scroll authoritative through the shared passive owner');
+    assert.ok(/function preserveFileEditorPanelPassiveViewState[\s\S]*const scrollTop = scrollDOM.scrollTop[\s\S]*scrollDOM.scrollTop = scrollTop[\s\S]*captureFileEditorPanelViewState[\s\S]*function restoreFileEditorPanelViewState\(item, panel, options = \{\}\)[\s\S]*options\.restoreFocused !== true && options\.restoreFresh !== true[\s\S]*preserveFileEditorPanelPassiveViewState\(item, panel\)/.test(changesEditorSource), 'ordinary editor rerenders keep every live selection/scroll authoritative through the shared passive owner');
     assert.equal((fileActionsSource.match(/restoreFileEditorPanelViewState\(item, panel, \{restoreFocused: true\}\)/g) || []).length, 2, 'explicit disk replacement alone opts into restoring the captured focused editor snapshot');
     assert.ok(fileActionsSource.includes("t('editor.codemirrorBundleLoadFailed', {url: script.src})") && fileActionsSource.includes("t('editor.codemirrorBundleMissingExports')") && fileActionsSource.includes("t('editor.codemirrorBundleUnavailable', {detail, path: '/static/codemirror.js'})"), 'CodeMirror loader errors localize each leaf reason while retaining URL and path parameters');
     assert.equal(/CodeMirror bundle failed to load:|CodeMirror bundle missing critical exports|CodeMirror local bundle is unavailable or incomplete/.test(fileActionsSource), false, 'CodeMirror loader retains no raw-English visible reason');
@@ -1735,6 +1773,10 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.previewKindForPath('/repo/app.py'), 'text', 'known code files get the code-preview fallback');
     assert.equal(api.previewRendererForPath('/repo/config.json').id, 'structured', 'preview dispatch comes from the shared renderer registry');
     assert.equal(api.previewRendererForPath('/repo/events.jsonl').id, 'json-lines-table', 'JSONL table dispatch comes from the shared renderer registry');
+    assert.equal(api.defaultFileEditorViewModeForPath('/repo/README.md', 'text'), 'preview', 'Markdown opens in ViewEdit by default');
+    assert.equal(api.defaultFileEditorViewModeForPath('/repo/page.html', 'text'), 'preview', 'HTML opens in ViewEdit by default');
+    assert.equal(api.defaultFileEditorViewModeForPath('/repo/app.py', 'text'), 'edit', 'other text files keep the TextEditor default');
+    assert.equal(api.defaultFileEditorViewModeForPath('/repo/photo.png', 'image'), 'preview', 'non-text preview defaults remain registry-owned');
     assert.equal(api.defaultFileEditorViewModeForPath('/repo/events.jsonl', 'text'), 'preview', 'JSONL opens in table Preview by default');
     assert.equal(api.defaultFileEditorViewModeForPath('/repo/events.ndjson', 'text'), 'preview', 'NDJSON opens in table Preview by default');
     assert.equal(api.previewPathIsPreviewable('/repo/app.py'), true, 'generic code uses the shared syntax-highlighted Preview mode');
@@ -2533,7 +2575,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(updateApi.updateNotificationAllowsVersionForTest('1.0.0', '0.9.0', 'major'), true, 'major threshold prompts for server/client major rollback mismatches');
     assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '0.3.24', 'minor'), false, 'minor threshold still suppresses patch-only mismatches');
     assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '1.0.0', 'none'), false, 'none threshold suppresses update notifications');
-    assert.ok(/function applyUpdateAvailable\(status\)[\s\S]*status\.notify === false[\s\S]*return/.test(source), 'origin/main update cue respects the server-side notify threshold');
+    assert.ok(/function applyUpdateAvailable\(status, revision = null\)[\s\S]*status\.notify === false[\s\S]*return/.test(source), 'origin/main update cue respects the server-side notify threshold');
     assert.ok(/function reloadIsSafe\(\)[\s\S]*file\?\.dirty[\s\S]*isContentEditable/.test(source), 'reloadIsSafe refuses when an editor buffer is dirty or the user is typing');
     // YO!info and YO!agent are independent virtual tabs. YO!info owns repo metadata; YO!agent owns chat/activity.
     const createInfoPanelSource = source.slice(source.indexOf('function createInfoPanel()'), source.indexOf('function createYoagentPanel()'));
@@ -2582,7 +2624,7 @@ async function runLayoutRestoreSuite() {
     // #73: the item-keyed editor maps are cleaned up on close + migrated on rename (no unbounded growth),
     // and the per-pane LRU timestamp survives a session rename.
     assert.ok(/function removeFilePanelOwner[\s\S]*?fileEditorViewState\.delete\(item\)[\s\S]*?tabLastActivatedAt\.delete\(item\)/.test(source), '#73: editor view-state + LRU timestamp are dropped on tab close');
-    assert.ok(/function renameOpenFilePath[\s\S]*?fileEditorViewState\.set\(newKey[\s\S]*?tabLastActivatedAt\.set\(newKey/.test(source), '#73: editor view-state + LRU timestamp are migrated on rename');
+    assert.ok(/function renameOpenFilePath[\s\S]*?for \(const map of \[state\.viewMode, state\.previewZoom, fileEditorViewState, fileEditorDiffExpandOverrides, tabLastActivatedAt\]\)[\s\S]*?map\.set\(newKey, map\.get\(oldKey\)\)/.test(source), '#73: editor view-state + LRU timestamp are migrated on rename');
     assert.ok(/function replaceSessionMetadata[\s\S]*?tabLastActivatedAt,\s*\n\s*\]\)/.test(source), '#73: the LRU timestamp is rekeyed across a session rename');
     const infoCss = fs.readFileSync('static/yomux.css', 'utf8');
     assert.equal(/\.info-subview\s*\{/.test(infoCss), false, 'old merged sub-view CSS is removed');
@@ -2597,7 +2639,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/\.info-tree-record\s*\{[\s\S]*?border:\s*1px solid var\(--info-tree-record-border\)/.test(infoCss), 'YO!info tree records use the shared tree border token');
     assert.ok(/\.info-tree-group-children > \.info-tree-item::before\s*\{[\s\S]*?background:\s*var\(--info-tree-line\)/.test(infoCss), 'YO!info tree connectors use the shared tree line token');
     assert.equal(infoCss.includes('--info-column-resizer-hit-width'), false, 'old YO!info column resize tokens are removed');
-    assert.ok(/\.pane-drag-image-frame,\s*\.preferences-panel,[\s\S]*?\.panel,[\s\S]*?\.summary\s*\{[^}]*grid-template-rows:\s*var\(--three-row-panel-layout\)/.test(infoCss), 'info-style panels inherit the shared three-row action scaffold');
+    assert.ok(/\.preferences-panel,[\s\S]*?\.panel,[\s\S]*?\.summary\s*\{[^}]*grid-template-rows:\s*var\(--three-row-panel-layout\)/.test(infoCss), 'info-style panels inherit the shared three-row action scaffold');
     assert.ok(/\.info-panel\.details-collapsed\s*\{[^}]*grid-template-rows:\s*var\(--three-row-panel-layout\)/.test(infoCss), 'action row survives a collapsed detail header through the shared scaffold token');
     // #50: a language switch force-re-renders every localized surface and fires applyLocale optimistically.
     assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?renderPreferencesPanels\(\{force: true\}\)[\s\S]*?renderBrandWordmark\(\)/.test(source), '#50: rerenderForLocale force-re-renders Preferences + the wordmark');
@@ -2696,8 +2738,8 @@ async function runLayoutRestoreSuite() {
     const refreshEnd = source.indexOf('function watchedFileExplorerDirectories(', refreshStart);
     assert.ok(refreshStart > 0 && refreshEnd > refreshStart, 'could not locate refreshOpenFilesIfChanged body');
     const refreshBody = source.slice(refreshStart, refreshEnd);
-    assert.ok(refreshBody.includes('const fetched = await fetchFileEntryStatus(path);'), 'open-file refresh uses a structured file lookup');
-    assert.ok(refreshBody.includes('refreshOpenFileFromFetchedStatus(path, state, fetched)'), 'open-file polling routes structured status through the shared refresh helper');
+    assert.ok(refreshBody.includes('const fetched = await fetchFileEntryStatus(path, {fresh: requested && options.fresh === true});'), 'open-file refresh uses a structured file lookup');
+    assert.ok(refreshBody.includes('refreshOpenFileFromFetchedStatus(path, state, fetched, relocationRevision)'), 'open-file polling routes structured status and its relocation fence through the shared refresh helper');
     const statusRefreshStart = source.indexOf('async function refreshOpenFileFromFetchedStatus(');
     const statusRefreshEnd = source.indexOf('async function refreshOpenFilesIfChanged(', statusRefreshStart);
     assert.ok(statusRefreshStart > 0 && statusRefreshEnd > statusRefreshStart, 'could not locate refreshOpenFileFromFetchedStatus body');
@@ -3561,10 +3603,11 @@ async function runLayoutRestoreSuite() {
     assert.ok(/\.file-tree-repo-ahead/.test(css) && /\.file-tree-repo-dirty/.test(css), 'inline ahead/dirty markers are styled');
   });
 
-  testAsync('per-pane tab cap normalizes, refuses, and applies settings', async () => {
+  await testAsync('per-pane tab cap normalizes, refuses, and applies settings', async () => {
     // Max tabs per pane + LRU eviction (Preference).
     const api = loadYomux('', ['1', '2', '3', '4', '5', 'file:/x/draft.txt']);
     const source = fs.readFileSync('static/yomux.js', 'utf8');
+    assert.equal(api.maxTabsPerPane(), 12, 'tab cap defaults to twelve tabs per pane');
     api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 3}});
     assert.equal(api.maxTabsPerPane(), 3, 'tab cap reads appearance.max_tabs_per_pane');
     api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 999}});
@@ -5102,7 +5145,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/'editor-theme': \(\) => cycleEditorThemeMode\(\{includeVanilla: fileEditorPanelState\(panel\)\?\.kind === 'text'\}\)/.test(source), 'editor theme button selects vanilla only for text previews');
     assert.ok(/function updateImageViewerThemeButton\(button\)[\s\S]*updateEditorThemeButton\(button, \{includeVanilla: false\}\)/.test(source), 'image editor theme button renders two-state labels');
     assert.ok(!/file-editor-gutter-panel|file-editor-find-panel|file-editor-diff-ref-panel|file-editor-wrap-panel/.test(source.slice(editorFrameActionsIdx, editorFrameControlsEnd)), '#42: only frame controls remain before the shared toolbar slot');
-    assert.ok(/\.pane-drag-image-frame,\s*\.preferences-panel,[\s\S]*?\.panel,[\s\S]*?\.summary\s*\{[^}]*grid-template-rows:\s*var\(--three-row-panel-layout\)/.test(css), '#42: the editor panel inherits the shared three-row toolbar scaffold');
+    assert.ok(/\.preferences-panel,[\s\S]*?\.panel,[\s\S]*?\.summary\s*\{[^}]*grid-template-rows:\s*var\(--three-row-panel-layout\)/.test(css), '#42: the editor panel inherits the shared three-row toolbar scaffold');
     assert.equal(/\.panel\.file-editor-panel\s*\{[^}]*grid-template-rows:/.test(css), false, '#42: the editor panel does not restate the shared grid locally');
     assert.ok(/\.file-editor-toolbar\[hidden\]\s*\{\s*display:\s*none/.test(css), '#42: the editor toolbar row collapses when no controls are visible');
     // Editor toolbar alignment: left/center/right are owned by parent groups, not per-button spacer hacks.
@@ -5642,7 +5685,9 @@ async function runLayoutRestoreSuite() {
 
   test('editor focus restoration preserves CodeMirror selection', () => {
     const api = loadYomux('', ['1']);
-    const item = api.registerFileEditorLayoutItem('/home/test/AGENTS.md');
+    const item = api.registerFileEditorLayoutItem('/home/test/focus.js');
+    api.setOpenFileStateForTest('/home/test/focus.js', {kind: 'text', content: '', original: '', dirty: false});
+    api.setFileEditorViewMode('/home/test/focus.js', 'edit', item);
     let focusCount = 0;
     const panel = {
       _cmView: {

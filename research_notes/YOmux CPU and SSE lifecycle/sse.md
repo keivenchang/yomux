@@ -23,7 +23,7 @@ The supplied 53-second browser sample reports 92 SSE frames (1.74 frames/s) and 
 ## Why do `fs_changed` and `files_changed` arrive as pairs?
 
 ### Takeaway
-The pair is intentional: both events carry the same change payload but have separate event types and separate browser refresh owners. In the supplied capture, 40 of each means 40 notification pairs, or about 20 pairs per minute; this is moderate churn, but the log omits payload paths and watch-client IDs, so it cannot establish whether those 40 underlying notifications represent distinct filesystem changes or overlapping watches reporting the same change.
+The pair is intentional: both events carry the same change payload but have separate event types and separate browser refresh owners. In the supplied capture, 40 of each means 40 notification pairs over 53 seconds, or about 45 pairs per minute; this is moderate churn, but the log omits payload paths and watch-client IDs, so it cannot establish whether those 40 underlying notifications represent distinct filesystem changes or overlapping watches reporting the same change.
 
 ### Cited Findings
 - The Finder watch poll iterates watch records independently and, for every record whose signature paths changed, builds one payload containing paths, roots, client ID, reason, token, and revision. [Finder `pollWatches`](../../internal/finder/service.go#L1394)

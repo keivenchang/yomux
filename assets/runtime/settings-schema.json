@@ -8,7 +8,8 @@
       "language": "system",
       "reload_on_update": true,
       "reload_on_update_auto": false,
-      "startup_tips": true
+      "startup_tips": true,
+      "enable_experimental_features": false
     },
     "appearance": {
       "theme": "dark",
@@ -33,7 +34,7 @@
       "inactive_pane_opacity": 60,
       "active_color": "green",
       "separator_color": "theme",
-      "max_tabs_per_pane": 10
+      "max_tabs_per_pane": 12
     },
     "performance": {
       "latency_refresh_ms": 3000,
@@ -84,7 +85,8 @@
       "autosave_delay_seconds": 6,
       "blame_all_lines": false,
       "trim_trailing_whitespace_on_save": false,
-      "ensure_final_newline_on_save": false
+      "ensure_final_newline_on_save": false,
+      "cursor_blink_delay_ms": 600
     },
     "file_explorer": {
       "root_mode": "sync",
@@ -256,7 +258,7 @@
     ],
     "appearance.preview_font_size": [
       6,
-      32
+      28
     ],
     "appearance.file_explorer_font_size": [
       1,
@@ -397,6 +399,10 @@
     "summary.timeout_seconds": [
       30,
       3600
+    ],
+    "editor.cursor_blink_delay_ms": [
+      0,
+      2000
     ]
   },
   "STRING_ALLOW_EMPTY": [],
@@ -536,7 +542,6 @@
     "appearance.editor_cursor_color": [
       "blue",
       "green",
-      "laser-lime",
       "neon-cyan",
       "neon-green",
       "neon-magenta",
@@ -668,7 +673,6 @@
       "yellow",
       "purple",
       "white",
-      "laser-lime",
       "neon-green",
       "neon-cyan",
       "neon-magenta",
@@ -815,7 +819,7 @@
     "updates.notify_level": "major | minor | patch | none. Minimum YOMUX_VERSION change that triggers the origin/main update notification; version format is major.minor.patch, such as 0.2.345. patch means any semver version bump; none disables update checks and notifications.",
     "appearance.theme": "system | dark | light. Global UI theme for menus, panes, Finder/File Explorer, Preferences, Differ, and editor defaults.",
     "appearance.active_color": "green | blue | orange | yellow | purple | white. Accent color for ACTIVE/FOCUSED UI (active tab, focused-pane ring/glow, chrome strip, file selection, Markdown headings, YO markers, and tmux status/pane chrome). Green is the default.",
-    "appearance.separator_color": "theme | green | blue | orange | yellow | purple | white. Color for pane separators and dashed tab/file/root drop previews. Theme preserves the dark/light defaults.",
+    "appearance.separator_color": "theme | green | blue | orange | yellow | purple | white. Color for pane separators and dashed tab/file/root drop previews. Inverse global theme color is the default and pairs green to yellow, blue to yellow, yellow to blue, orange/red to blue, and violet/white-gray in both directions.",
     "appearance.terminal_theme": "dark | light | follow-app. Terminal color theme. Defaults to follow-app (matches the global color theme); a light terminal raises xterm minimumContrastRatio so dark-tuned agent output stays legible.",
     "appearance.tmux_status_bar": "off | top | bottom. Native tmux status bar position for new sessions. The YOmux Info Bar remains at the top of each pane.",
     "appearance.date_time_hour_cycle": "24 | 12. Controls date/time displays in Finder/File Explorer and Differ. Default 24.",
@@ -825,15 +829,15 @@
     "appearance.sync_font_sizes": "true/false. When true, all UI, terminal, editor, preview, and File Explorer font sizes follow appearance.global_font_size. Default true.",
     "appearance.terminal_font_size": "Pixels, 6-28. Applied live to xterm.js terminals.",
     "appearance.editor_font_size": "Pixels, 6-28. Applied live to editor and preview panes.",
-    "appearance.preview_font_size": "Pixels, 6-32. Applied live to rendered Preview panes and split-preview surfaces.",
+    "appearance.preview_font_size": "Pixels, 6-28. Paired with appearance.editor_font_size for rendered Preview panes and split-preview surfaces.",
     "appearance.editor_color_scheme": "Legacy active editor color scheme. Kept for compatibility; new UI uses separate dark/light scheme defaults.",
     "appearance.editor_dark_color_scheme": "Dark editor scheme used by the editor dark/light toggle.",
-    "appearance.editor_light_color_scheme": "Light editor scheme used by the editor dark/light toggle. Default is Popular IDE Light+.",
-    "appearance.editor_cursor_style": "line | block. CodeMirror cursor shape.",
-    "appearance.editor_cursor_color": "green | blue | orange | yellow | purple | white | laser-lime | neon-green | neon-cyan | neon-magenta | neon-orange | theme. Default yellow. Applies to the active terminal cursor, editor cursor, and pane scrollbar thumb; theme uses each surface's scheme cursor.",
-    "appearance.file_explorer_font_size": "Pixels, 6-24. Applied live to File Explorer/Finder.",
+    "appearance.editor_light_color_scheme": "Light editor scheme used by the editor dark/light toggle. Default is YOmux Light.",
+    "appearance.editor_cursor_style": "line | block. Cursor shape for TextEditor and ViewEditor.",
+    "appearance.editor_cursor_color": "green | blue | orange | yellow | purple | white | neon-green | neon-cyan | neon-magenta | neon-orange | theme. Default yellow. Applies to the active terminal cursor, editor cursor, and pane scrollbar thumb; theme uses the inverse Global theme color. Laser lime is a legacy alias for Neon green.",
+    "appearance.file_explorer_font_size": "Pixels, 1-24. Applied live to File Explorer/Finder.",
     "appearance.tab_width": "Pixels, 120-420. Drives the pane tab width CSS variable.",
-    "appearance.pane_spacing": "Pixels, 0-20. Gap between panes; at 0 they touch and the green active outline covers the divider. The active outline thickens as spacing grows.",
+    "appearance.pane_spacing": "Pixels, 0-20. Gap between panes; at 0 they touch and the active outline covers the divider. The active outline thickens as spacing grows.",
     "appearance.pane_ring_opacity": "Percent, 5-100. Opacity of the green/red pane ring drawn over the content edge.",
     "appearance.inactive_pane_opacity": "Percent, 0-100. Strength of inactive pane gray-out.",
     "appearance.max_tabs_per_pane": "Caps open tabs per pane (2-30); the oldest unused tabs auto-close (LRU) when the limit is exceeded (dirty editors are kept).",
@@ -895,7 +899,9 @@
     "yoagent.format": "Output-format instruction added before the user's question.",
     "yolo.rule_file_path": "Path to the YOLO rule YAML file. The file's top-level default: value controls fallback behavior.",
     "yolo.dry_run": "true/false. Log rule decisions without acting.",
-    "yolo.prompt_source": "pane | hybrid. pane uses visible tmux detection only; hybrid lets recent transcript JSONL rescue prompt type/command only when a selectable prompt is visible."
+    "yolo.prompt_source": "pane | hybrid. pane uses visible tmux detection only; hybrid lets recent transcript JSONL rescue prompt type/command only when a selectable prompt is visible.",
+    "editor.cursor_blink_delay_ms": "Milliseconds between cursor blink phases for TextEditor, ViewEditor, and cursor examples. 0 keeps the cursor static. Default 600.",
+    "general.enable_experimental_features": "Show YO!chat, YO!agent, and YO!info in File and Tabs."
   },
   "SETTING_GUI_SECTIONS": {
     "general.language": "General",
@@ -906,7 +912,7 @@
     "appearance.editor_dark_color_scheme": "Colors",
     "appearance.editor_light_color_scheme": "Colors",
     "appearance.editor_cursor_color": "Colors",
-    "appearance.editor_cursor_style": "Colors",
+    "appearance.editor_cursor_style": "Editor options",
     "appearance.active_color": "Colors",
     "appearance.separator_color": "Colors",
     "appearance.pane_ring_opacity": "Colors",
@@ -919,8 +925,8 @@
     "appearance.tab_width": "UI sizes",
     "appearance.pane_spacing": "UI sizes",
     "appearance.max_tabs_per_pane": "UI sizes",
-    "appearance.tmux_status_bar": "Terminal",
-    "terminal_editor.scrollback": "Terminal",
+    "appearance.tmux_status_bar": "Terminal options",
+    "terminal_editor.scrollback": "Terminal options",
     "appearance.editor_font_size": "Sizes",
     "appearance.preview_font_size": "Sizes",
     "terminal_editor.word_wrap": "Editor options",
@@ -989,7 +995,9 @@
     "yoagent.codex_effort": "YO!agent",
     "yoagent.system_prompt": "YO!agent",
     "yoagent.intro": "YO!agent",
-    "yoagent.format": "YO!agent"
+    "yoagent.format": "YO!agent",
+    "editor.cursor_blink_delay_ms": "Editor options",
+    "general.enable_experimental_features": "Experimental"
   },
   "SETTING_GUI_SECTION_LOCALE_KEYS": {
     "Appearance": "pref.section.sizes",
@@ -1001,13 +1009,14 @@
     "Notifications": "pref.section.notifications",
     "Performance": "pref.section.performance",
     "Editor options": "pref.section.editor_options",
-    "Terminal": "pref.section.terminal",
+    "Terminal options": "pref.section.terminal",
     "UI sizes": "pref.section.ui_sizes",
     "Uploads/Downloads": "pref.section.uploads",
     "YO!agent": "brand.tab.agent",
     "YO!chat": "brand.tab.chat",
     "YO!cost": "pref.section.cost",
-    "YOLO": "brand.yolo"
+    "YOLO": "brand.yolo",
+    "Experimental": "pref.section.experimental"
   },
   "SETTING_LOCALE_KEY_OVERRIDES": {
     "appearance.preview_font_size": {
@@ -1071,6 +1080,9 @@
       "gpt-5.4": "gpt-6-sol",
       "gpt-5.4-mini": "gpt-6-luna",
       "gpt-5.5": "gpt-6.1-sol"
+    },
+    "appearance.editor_cursor_color": {
+      "laser-lime": "neon-green"
     }
   },
   "IMAGE_DROP_ACTION_ORDER_SPECS": [
@@ -1191,10 +1203,18 @@
     }
   },
   "YOAGENT_CLAUDE_MODEL_CATALOG": {
-    "claude-fable-5-1": {"display_name": "Claude Fable 5.1"},
-    "claude-opus-5-5": {"display_name": "Claude Opus 5.5"},
-    "claude-sonnet-5-5": {"display_name": "Claude Sonnet 5.5"},
-    "claude-haiku-5-5": {"display_name": "Claude Haiku 5.5"}
+    "claude-fable-5-1": {
+      "display_name": "Claude Fable 5.1"
+    },
+    "claude-opus-5-5": {
+      "display_name": "Claude Opus 5.5"
+    },
+    "claude-sonnet-5-5": {
+      "display_name": "Claude Sonnet 5.5"
+    },
+    "claude-haiku-5-5": {
+      "display_name": "Claude Haiku 5.5"
+    }
   },
   "RETIRED_HOVER_TIMING_KEYS": [
     "menu_hover_open_delay_ms",

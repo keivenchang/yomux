@@ -98,7 +98,7 @@ function capabilityNameForRequest(url, options = {}) {
   if (pathname.startsWith('/api/tmux-') || pathname === '/api/transcript' || pathname === '/api/context' || pathname === '/api/context-items' || pathname === '/api/context-stream' || pathname === '/api/events') return 'terminal.status.v1';
 	if (pathname.startsWith('/api/fs/') || pathname === '/api/watch/roots' || pathname === '/api/upload' || pathname.startsWith('/api/batch/')) {
 		if (['/api/fs/diff', '/api/fs/git-history', '/api/fs/git-commit', '/api/batch/blame'].includes(pathname)) return 'finder.git.v1';
-		if (['/api/fs/write', '/api/fs/delete', '/api/fs/rename', '/api/fs/mkdir', '/api/upload'].includes(pathname)) return 'finder.write.v1';
+		if (['/api/fs/write', '/api/fs/delete', '/api/fs/rename', '/api/fs/move', '/api/fs/mkdir', '/api/fs/chmod', '/api/upload'].includes(pathname)) return 'finder.write.v1';
 		if (['/api/fs/search', '/api/fs/search-stream', '/api/fs/index-status', '/api/fs/unindex', '/api/batch/search'].includes(pathname)) return 'finder.search.v1';
 		if (['/api/watch/roots', '/api/fs/watch-diff'].includes(pathname)) return 'finder.watch.v1';
     if (['/api/batch/zip', '/api/batch/html-preview'].includes(pathname)) return 'finder.preview.v1';
@@ -394,9 +394,9 @@ function previewRendererStrategy(specification) {
   });
 }
 const PREVIEW_RENDERERS = Object.freeze([
-  previewRendererStrategy({id: 'markdown', kind: 'markdown', extensions: ['.md', '.markdown'], textBacked: true, defaultMode: 'edit', language: 'markdown', surfaceClasses: ['markdown-body'], cleanup: cleanupMarkdownPreviewStrategy, signature: markdownPreviewStrategySignature, render: renderMarkdownPreviewStrategy}),
-  previewRendererStrategy({id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'edit', language: 'xml', sandbox: true, surfaceClasses: ['html-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: htmlPreviewStrategySignature, render: renderHtmlPreviewStrategy}),
-  previewRendererStrategy({id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['image-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderImagePreviewStrategy, mimeByExtension: {
+  previewRendererStrategy({id: 'markdown', kind: 'markdown', extensions: ['.md', '.markdown'], textBacked: true, defaultMode: 'preview', language: 'markdown', surfaceClasses: ['markdown-body'], cleanup: cleanupMarkdownPreviewStrategy, signature: markdownPreviewStrategySignature, render: renderMarkdownPreviewStrategy}),
+  previewRendererStrategy({id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'preview', language: 'xml', sandbox: true, surfaceClasses: ['html-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: htmlPreviewStrategySignature, render: renderHtmlPreviewStrategy}),
+  previewRendererStrategy({id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, previewOnly: true, defaultMode: 'preview', raw: true, surfaceClasses: ['image-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderImagePreviewStrategy, mimeByExtension: {
     '.png': 'image/png',
     '.apng': 'image/apng',
     '.jpg': 'image/jpeg',
@@ -679,12 +679,14 @@ let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 // historical comparison can never repaint live working-tree annotations.
 const fileExplorerSessionFilesState = {
   payload: {session: '', files: [], repos: [], errors: []},
+  comparisonScope: {session: '', repos: []},
   streamRepos: null,
   signature: '',
   loading: false,
   guard: makeGenerationGuard(),
   abortController: null,
   completionWaiter: null,
+  preparationTimer: null,
 };
 const fileExplorerFinderSessionFilesState = {
   payload: {session: '', files: [], repos: [], errors: [], from_ref: 'HEAD', to_ref: 'current'},
@@ -698,6 +700,7 @@ const fileExplorerFinderSessionFilesState = {
   guard: makeGenerationGuard(),
   abortController: null,
   completionWaiter: null,
+  preparationTimer: null,
 };
 // One program-wide owner for the pane the user explicitly clicked or typed in. Passive hover and
 // auto-focus never change this; Finder, Differ, Tabber, and tmux menus consume this same state.
@@ -940,7 +943,11 @@ const uploadRsyncRecommendationBytes = 50 * 1024 * 1024;
 let terminalFontSize = initialSetting('appearance.terminal_font_size', 14);
 const terminalFontFamily = '"YOmux Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
 let editorFontSize = initialSetting('appearance.editor_font_size', 14);
-let editorPreviewFontSize = initialSetting('appearance.preview_font_size', 14);
+let editorPreviewFontSize = initialSetting('appearance.editor_font_size', 14);
+function setEditorAndPreviewFontSizes(size) {
+  editorFontSize = size;
+  editorPreviewFontSize = size;
+}
 let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 14);
 let terminalScrollback = initialSetting('terminal_editor.scrollback');
 let autoFocusEnabled = initialSetting('general.auto_focus');
@@ -1077,6 +1084,12 @@ function fileExplorerItemLabel(item) {
   if (view === 'differ') return t('brand.tab.changes');
   if (view === 'tabber') return t('tabber.title');
   return fileExplorerLabel();
+}
+function availableFileSurfaceItems() {
+  return fileSurfaceItems.filter(item => paneItemCapabilityAvailable(item) && (tabberIsAdvanced() || item !== differItemId));
+}
+function fileSurfaceGroupLabel() {
+  return availableFileSurfaceItems().map(fileExplorerItemLabel).join(' / ');
 }
 const searchHistoryItemId = '__search_history__';
 function searchHistoryTabLabel() { return t('tab.searchHistory'); }
@@ -2275,10 +2288,8 @@ class RuntimeState {
 const runtimeState = new RuntimeState();
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
-// one global editor navigation history (Popular IDE-style back/forward through visited files).
-// stack holds file paths; index points at the current entry; `navigating` suppresses recording while a
-// back/forward re-open is in flight (so it doesn't push a new entry).
-const editorNav = {stack: [], index: -1, navigating: false};
+// Page-local tab-instance recency and a traversal cursor; rendering never records visits.
+const editorNav = {stack: [], index: -1, navigating: false, visitGeneration: 0, liveItems: new Set(), focusedItem: null, pendingFocus: null};
 // One interaction record owns hover detail, context actions, and touch long-press for every tab
 // surface.  Keeping these together prevents a mobile action gesture from drifting into a tab click.
 let tabInteractionController = null;

@@ -25,6 +25,27 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # guard rejects stale entries, so this is an audit trail rather than a blanket
 # opt-out for a file or class of tests.
 TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
+    "tests/test_browser_editor_lifecycle.py:test_editor_display_toggle_preserves_pending_native_buffer": "A real editor display toggle must preserve the original disk bytes while the same test checks the pending native document, dirty state and editor identity.",
+    "tests/test_browser_editor_lifecycle.py:test_new_file_action_preserves_existing_bytes": "The real New File action must preserve an existing file's exact disk bytes while refusing its replacement and creating a distinct empty file.",
+    "tests/test_atomic_file.py:test_exclusive_atomic_publication_keeps_the_existing_complete_file": "A refused exclusive publication must preserve the actual complete first file content and private mode without leaving a staging file.",
+    "tests/test_browser_editor_lifecycle.py:test_finder_delete_preserves_native_unsaved_edits": "After a rejected native Finder delete, the exact original on-disk text must remain while the browser retains unsaved edits; the same test checks both live editor ownership and dirty state.",
+    "tests/test_browser_editor_lifecycle.py:test_native_retired_conflict_dialog_preserves_reopened_dirty_editor": "A retired native conflict callback must preserve the actual replacement disk content as well as the reopened dirty browser document checked in the same test.",
+    "tests/test_check_runner.py:test_run_tests_sh_retains_auto_evidence_only_after_a_failed_container": "The executed Docker wrapper must retain the exact fixture evidence payload after failure and remove its automatic evidence directory after success.",
+    "tests/test_fixture_content_root.py:test_identical_worker_sequence_and_name_are_isolated_by_process_root": "Reading each emitted page proves two fixture owners with identical worker and file names preserve their distinct content rather than overwrite one another.",
+    "tests/test_fixture_content_root.py:test_process_crash_leaves_no_repository_fixture_artifact": "The crashed child must leave its actual page content in the private fixture root while leaving the repository empty, checked alongside the child's exit status and root identity.",
+    "tests/test_gate_agent_state.py:test_f6_record_does_not_claim_the_retired_clause_for_a_current_failure": "The emitted diagnostic record must omit the retired verdict at every nesting level while preserving the actual stalled-consumer evidence checked in adjacent assertions.",
+    "tests/test_live_browser_soak.py:test_write_artifact_preserves_identity_and_failure_shape": "The emitted private soak artifact must retain the concrete failed request ID alongside the file mode and complete identity contract exercised by this writer test.",
+    "tests/test_local_services_launch.py:test_registry_reclaims_dead_legacy_record_for_inert_socket_without_signalling": "Registry cleanup must preserve the actual inert socket placeholder content while removing only the stale record and sending no signals.",
+    "tests/test_migrate_yomux_data.py:test_apply_backups_then_rollback_restores_roots_without_losing_sidecars": "A completed migration and rollback must preserve the actual original authentication file text, database sidecars and recovery tree signature.",
+    "tests/test_migrate_yomux_data.py:test_partial_apply_keeps_recovery_mapping_and_can_roll_back": "After an injected second-root move failure, rollback must restore the original first-root file content and remove only its moved target.",
+    "tests/test_migrate_yomux_data.py:test_repeat_apply_is_idempotent_after_completed_mapping": "Repeating an already completed migration must preserve its actual destination file content while reporting the recorded applied mapping.",
+    "tests/test_migrate_yomux_data.py:test_rollback_refuses_destination_modified_after_apply": "A refused rollback must preserve the user's actual post-cutover file content in its destination and leave the legacy source absent.",
+    "tests/test_migrate_yomux_data.py:test_symlinked_source_root_is_refused_before_apply": "Refusing a symlinked source root must leave its external target's actual file content untouched and produce neither a destination nor a recovery mapping.",
+    "tests/test_product_root_safety.py:test_boot_checks_absolute_log_sink_before_stopping_existing_listener": "A refused real boot must preserve the invalid log-root blocker content and the existing listener process, proving validation occurs before mutation.",
+    "tests/test_settings.py:test_legacy_settings_use_normal_tabber_default_without_rewrite": "Reading legacy settings must return the new in-memory default while retaining the exact original settings file text on disk.",
+    "tests/test_settings.py:test_settings_round_trip_with_atomic_template": "The persisted settings template's user-facing heading is an intentional format contract alongside the test's parsed settings round-trip assertions.",
+    "tests/test_static_build.py:test_write_asset_removes_temporary_file_after_write_or_fsync_failure": "Injected write and fsync failures must leave the actual published asset content unchanged and remove every staged temporary file.",
+    "tests/test_yostats_active_browser_window.py:test_active_browser_window_reads_service_records_without_starting_another_app": "The capture tool must inspect existing service records through the exercised runtime_service_pids owner and must not regain the retired app-starting runtime-report source path.",
     "tests/test_stats_current_prune_schedule.py:test_preferences_panel_offers_the_schedule_in_the_stats_section": "The client must render the server-owned prune-time choices and must never spell its own copy of the default; that wiring is the contract, and the values themselves are proven behaviourally at test_default_prune_time_is_half_past_two_and_is_offered.",
     "tests/test_auth_config.py:test_missing_auth_yaml_creates_commented_starter": "The shipped starter-file comments are the user-facing configuration contract.",
     "tests/test_auth_config.py:test_legacy_placeholder_auth_yaml_is_replaced_with_commented_starter": "The migration writes the same documented starter-file contract.",
@@ -82,7 +103,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "2a1c5a3cea068a76aa68dea6784ce106613cd7d0c46a7336035943265152d409"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "397412d74a77afd9ac0b2a09eb9ee5d138a7d724a36209272d3ae686c1730c0b"
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,8 +223,6 @@ def find_textshape_assertions(test_root: Path, *, repo_root: Path) -> list[TextS
             if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) or not function.name.startswith("test_"):
                 continue
             names = _text_derived_names(function)
-            if not names:
-                continue
             sequence = 0
             for assertion in ast.walk(function):
                 if isinstance(assertion, ast.Assert) and _is_textshape_predicate(assertion.test, names):

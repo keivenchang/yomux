@@ -29,6 +29,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from tests.helpers.agent_client_fixtures import TEST_MODELS, write_client_config
+from tests.helpers.fixture_tools import run_fixture_cleanup_phases
+from tools.instance_isolation import synthetic_test_environment
 from tools.product_environment import product_env
 from yomux_lib.approval import prompt_detector
 
@@ -154,7 +156,44 @@ def _require_capability(client: str) -> None:
 
 
 def _tmux(binary: str, socket_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([binary, "-S", str(socket_path), *args], text=True, capture_output=True, check=False, timeout=8)
+    return subprocess.run([binary, "-f", os.devnull, "-S", str(socket_path), *args], env=synthetic_test_environment(), text=True, capture_output=True, check=False, timeout=8)
+
+
+def _process_inventory(*owned_pids) -> str:
+    listing = subprocess.run(["ps", "-eo", "pid,ppid,stat,comm"], text=True, capture_output=True, check=True, timeout=8).stdout.splitlines()
+    rows = [line.split(None, 3) for line in listing[1:]]
+    owned = {str(pid) for pid in owned_pids if str(pid).isdecimal()}
+    while True:
+        descendants = {row[0] for row in rows if len(row) == 4 and row[1] in owned}
+        if descendants <= owned:
+            break
+        owned.update(descendants)
+    return "\n".join([listing[0], *(" ".join(row) for row in rows if len(row) == 4 and row[0] in owned)]) if listing else ""
+
+
+def test_agent_process_inventory_excludes_arguments_and_unowned_processes():
+    child = subprocess.Popen([sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(20)", "yomux-inert-argv-sentinel"], env={"PATH": os.environ["PATH"]}, stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline() == "ready\n"
+        inventory = _process_inventory(child.pid)
+        assert str(child.pid) in inventory
+        assert "yomux-inert-argv-sentinel" not in inventory
+        assert str(os.getpid()) not in {line.split()[0] for line in inventory.splitlines()[1:]}
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+
+
+def test_agent_tmux_launch_does_not_inherit_credentials_or_operator_roots(monkeypatch, tmp_path):
+    monkeypatch.setenv("GH_TOKEN", "inert-credential-sentinel")
+    monkeypatch.setenv("YOMUX_ROOT", str(tmp_path / "operator-root"))
+    captured = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: captured.append((command, kwargs.get("env", dict(os.environ)))))
+    _tmux("tmux", tmp_path / "private-socket", "list-sessions")
+    command, environment = captured[0]
+    inherited = {"GH_TOKEN", "YOMUX_ROOT"} & environment.keys()
+    assert not inherited, inherited
+    assert command[1:3] == ["-f", os.devnull], "tmux must not load operator configuration"
 
 
 def _cleanup_tmux_session(binary: str, socket_path: Path, session: str) -> None:
@@ -182,16 +221,20 @@ def _cleanup_tmux_server(binary: str, socket_path: Path) -> None:
 
 
 def _cleanup_all_tmux_sessions(binary: str, socket_path: Path) -> None:
-    """Retire every session on this private server, then prove the server is gone."""
+    def retire_sessions():
+        listing = _tmux(binary, socket_path, "list-sessions", "-F", "#{session_name}")
+        if listing.returncode not in (0, 1):
+            detail = listing.stderr.strip() or listing.stdout.strip() or f"list-sessions exited {listing.returncode}"
+            raise AssertionError(f"could not enumerate private tmux sessions: {detail}")
+        run_fixture_cleanup_phases("private agent sessions", [
+            (session, lambda session=session: _cleanup_tmux_session(binary, socket_path, session))
+            for session in listing.stdout.splitlines() if session
+        ])
 
-    listing = _tmux(binary, socket_path, "list-sessions", "-F", "#S")
-    if listing.returncode not in (0, 1):
-        detail = listing.stderr.strip() or listing.stdout.strip() or f"list-sessions exited {listing.returncode}"
-        raise AssertionError(f"could not enumerate private tmux sessions: {detail}")
-    for listed in listing.stdout.splitlines():
-        if listed:
-            _cleanup_tmux_session(binary, socket_path, listed)
-    _cleanup_tmux_server(binary, socket_path)
+    run_fixture_cleanup_phases("private agent tmux", [
+        ("sessions", retire_sessions),
+        ("server", lambda: _cleanup_tmux_server(binary, socket_path)),
+    ])
 
 
 def _stop_process(process: subprocess.Popen | None, label: str) -> None:
@@ -286,20 +329,23 @@ def _run_failure_recovery(client: str, failure: str, tmp_path: Path) -> dict[str
     socket_dir = Path(tempfile.mkdtemp(prefix="yo-t-"))
     socket_path = socket_dir / "s"
     session = f"yolo-recovery-{uuid.uuid4().hex[:8]}"
-    port = _free_port()
-    fake_env = {
-        **os.environ,
+    fake_env = synthetic_test_environment({
         "FAKE_LLM_LOG": str(log),
         "FAKE_LLM_TIMESTAMP_START": "2000",
         "FAKE_LLM_TIMESTAMP_STEP": "1",
         "FAKE_LLM_TIMESTAMP_SEQUENCE": "0",
-    }
-    fake = _start_fake(fake_env, port)
-    health = ThreadingHTTPServer(("127.0.0.1", 0), _HealthHandler)
-    health_thread = threading.Thread(target=health.serve_forever, daemon=True)
-    health_thread.start()
-    evidence: dict[str, object] = {"client": client, "failure": failure, "session": session, "port": port}
+    })
+    fake = health = health_thread = None
+    health_started = False
+    evidence: dict[str, object] = {"client": client, "failure": failure, "session": session}
     try:
+        port = _free_port()
+        evidence["port"] = port
+        fake = _start_fake(fake_env, port)
+        health = ThreadingHTTPServer(("127.0.0.1", 0), _HealthHandler)
+        health_thread = threading.Thread(target=health.serve_forever, daemon=True)
+        health_thread.start()
+        health_started = True
         _wait_for_stream(fake.stdout)
         failure_scenario = AgentScenario("failure", failure, f"/scenario/{failure}", SAFE_PROMPT, (), "failed", 4.0, "")
         config = write_client_config(client, config_dir, port, failure_scenario.fake_path)
@@ -308,7 +354,6 @@ def _run_failure_recovery(client: str, failure: str, tmp_path: Path) -> dict[str
             client_env = {**client_env, "OPENCODE_E2E_OUTPUT": str(root / "opencode-events.jsonl")}
         endpoint = f"http://127.0.0.1:{port}{failure_scenario.fake_path}"
         env = {
-            **os.environ,
             "HOME": str(home),
             "XDG_CONFIG_HOME": str(xdg / "config"),
             "XDG_DATA_HOME": str(xdg / "data"),
@@ -340,9 +385,7 @@ def _run_failure_recovery(client: str, failure: str, tmp_path: Path) -> dict[str
         assert failed_records, f"fake provider did not log the {failure} request: {log}; records={_request_records(log)}"
         _assert_scenario_paths(failed_records, failure_scenario)
         evidence.update({"failure_records": failed_records, "health_probe_seconds": probe_latency, "pane_before_cleanup": _capture(tmux_binary, socket_path, session)})
-        evidence["processes_before_cleanup"] = subprocess.run(
-            ["ps", "-eo", "pid,ppid,stat,args"], text=True, capture_output=True, check=False
-        ).stdout
+        evidence["processes_before_cleanup"] = _process_inventory(client_process["pid"], fake.pid)
 
         # Exercise lifecycle loss independently from provider failure.  The pane PID is captured
         # before killing it so the evidence identifies the process that was intentionally retired.
@@ -430,9 +473,7 @@ def _run_failure_recovery(client: str, failure: str, tmp_path: Path) -> dict[str
             # empty by the time the provider record is observed. The provider record is the
             # durable recovery proof in that case.
             evidence.update({"recovery_session": recovery_session, "recovery_pane": recovery_pane, "recovery_records": recovery_records, "recovered": bool(recovery_records)})
-            evidence["processes_after_recovery"] = subprocess.run(
-                ["ps", "-eo", "pid,ppid,stat,args"], text=True, capture_output=True, check=False
-            ).stdout
+            evidence["processes_after_recovery"] = _process_inventory(restarted.pid)
             _cleanup_tmux_session(tmux_binary, socket_path, recovery_session)
         finally:
             _stop_process(restarted, "restarted fake LLM server")
@@ -441,15 +482,21 @@ def _run_failure_recovery(client: str, failure: str, tmp_path: Path) -> dict[str
         evidence["evidence_path"] = str(evidence_path)
         return evidence
     finally:
-        _cleanup_tmux_session(tmux_binary, socket_path, session)
-        _cleanup_tmux_server(tmux_binary, socket_path)
-        _stop_process(fake, "fake LLM server")
-        _remove_owned_directory(socket_dir, "tmux socket directory")
-        health.shutdown()
-        health.server_close()
-        health_thread.join(timeout=5)
-        if health_thread.is_alive():
-            raise AssertionError("health server thread survived cleanup")
+        def join_health():
+            if health_started:
+                health_thread.join(timeout=5)
+                if health_thread.is_alive():
+                    raise AssertionError("health server thread survived cleanup")
+
+        run_fixture_cleanup_phases("agent recovery", [
+            ("session", lambda: _cleanup_tmux_session(tmux_binary, socket_path, session)),
+            ("server", lambda: _cleanup_tmux_server(tmux_binary, socket_path)),
+            ("provider", lambda: _stop_process(fake, "fake LLM server")),
+            ("socket", lambda: _remove_owned_directory(socket_dir, "tmux socket directory")),
+            ("health shutdown", lambda: health.shutdown() if health_started else None),
+            ("health close", lambda: health.server_close() if health is not None else None),
+            ("health join", join_health),
+        ])
 
 
 def _client_command(client: str, model: str, config: Path, prompt: str) -> tuple[list[str], dict[str, str]]:
@@ -621,12 +668,12 @@ def _wait_for_mock_input_ready(ready_file: Path, tmux_binary: str, socket_path: 
         time.sleep(0.05)
     pane = _tmux(tmux_binary, socket_path, "capture-pane", "-p", "-t", f"{session}:")
     processes = _tmux(tmux_binary, socket_path, "list-panes", "-t", session, "-F", "#{pane_pid}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}")
-    process_rows = subprocess.run(["ps", "-eo", "pid,ppid,stat,comm"], capture_output=True, text=True, check=False, timeout=8)
+    process_rows = _process_inventory(processes.stdout.partition("\t")[0].strip())
     diagnostics = {
         "ready_file": str(ready_file), "ready_file_exists": ready_file.exists(),
         "pane": pane.stdout, "pane_error": pane.stderr,
         "pane_process": processes.stdout, "pane_process_error": processes.stderr,
-        "processes": process_rows.stdout,
+        "processes": process_rows,
     }
     pane_pid = processes.stdout.partition("\t")[0].strip()
     if pane_pid.isdecimal():
@@ -686,8 +733,10 @@ def test_mock_tmux_state_lane_classifies_active_done_ask_and_query(client: str, 
         assert state.get("key") == "idle", evidence
         assert response_marker in transcript.lower(), evidence
     finally:
-        _cleanup_all_tmux_sessions(tmux_binary, socket_path)
-        _remove_owned_directory(socket_dir, "tmux socket directory")
+        run_fixture_cleanup_phases("mock agent states", [
+            ("tmux", lambda: _cleanup_all_tmux_sessions(tmux_binary, socket_path)),
+            ("socket", lambda: _remove_owned_directory(socket_dir, "tmux socket directory")),
+        ])
 
 
 def _request_records(log: Path) -> list[dict]:
@@ -923,18 +972,18 @@ def _run_scenario(client: str, scenario: AgentScenario, tmp_path: Path, *, requi
     socket_dir = Path(tempfile.mkdtemp(prefix="yo-t-"))
     socket_path = socket_dir / "s"
     session = f"yolo-agent-e2e-{uuid.uuid4().hex[:8]}"
-    fake_env = {
-        **os.environ,
+    fake_env = synthetic_test_environment({
         "FAKE_LLM_LOG": str(log),
         "FAKE_LLM_EVENT_LOG": str(tmp_path / "fake-llm-events.jsonl"),
         "FAKE_LLM_SCENARIO": scenario.fake_scenario,
         "FAKE_LLM_TIMESTAMP_START": "1000",
         "FAKE_LLM_TIMESTAMP_STEP": "10",
-    }
-    fake = _start_fake(fake_env, _free_port())
+    })
+    fake = None
     pane_samples: list[dict[str, object]] = []
     evidence: dict[str, object] = {"client": client, "scenario": scenario.name, "expected_state": scenario.expected_state, "socket": str(socket_path)}
     try:
+        fake = _start_fake(fake_env, _free_port())
         port = int(_wait_for_stream(fake.stdout))
         config = write_client_config(client, config_dir, port, scenario.fake_path)
         command, client_env = _client_command(client, scenario.model or TEST_MODELS[client], config, scenario.prompt)
@@ -950,7 +999,7 @@ def _run_scenario(client: str, scenario: AgentScenario, tmp_path: Path, *, requi
         if client == "opencode":
             client_env = {**client_env, "OPENCODE_E2E_OUTPUT": str(opencode_output_path)}
         endpoint = f"http://127.0.0.1:{port}{scenario.fake_path}"
-        env = {**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(xdg / "config"), "XDG_DATA_HOME": str(xdg / "data"), "XDG_STATE_HOME": str(xdg / "state"), "YOLOMUX_STATE_DIR": str(state_dir), "YOLOMUX_TMUX_SOCKET": str(socket_path), "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost", "OPENAI_API_KEY": "yomux-test-only", "ANTHROPIC_API_KEY": "yomux-test-only", "HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9", **client_env, **_endpoint_environment(client, endpoint)}
+        env = {"HOME": str(home), "XDG_CONFIG_HOME": str(xdg / "config"), "XDG_DATA_HOME": str(xdg / "data"), "XDG_STATE_HOME": str(xdg / "state"), "YOLOMUX_STATE_DIR": str(state_dir), "YOLOMUX_TMUX_SOCKET": str(socket_path), "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost", "OPENAI_API_KEY": "yomux-test-only", "ANTHROPIC_API_KEY": "yomux-test-only", "HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9", **client_env, **_endpoint_environment(client, endpoint)}
         if client == "opencode":
             env["XDG_CONFIG_HOME"] = str(config.parent.parent)
         passed = {"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "YOLOMUX_STATE_DIR", "YOLOMUX_TMUX_SOCKET", "NO_PROXY", "no_proxy", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "HTTP_PROXY", "HTTPS_PROXY", *client_env, *_endpoint_environment(client, endpoint)}
@@ -1001,7 +1050,7 @@ def _run_scenario(client: str, scenario: AgentScenario, tmp_path: Path, *, requi
         records = _request_records(log)
         pane = _capture(tmux_binary, socket_path, session) if _tmux(tmux_binary, socket_path, "has-session", "-t", session).returncode == 0 else ""
         listing = _tmux(tmux_binary, socket_path, "list-sessions", "-F", "#{session_name}:#{pane_pid}")
-        process_listing = subprocess.run(["ps", "-eo", "pid,ppid,stat,args"], text=True, capture_output=True, check=False).stdout
+        process_listing = _process_inventory(initial_process["pid"], fake.pid)
         token_evidence = _token_evidence(records)
         timestamps = token_evidence["request_timestamps"]
         token_evidence["yostats_snapshot"] = _yostats_snapshot(
@@ -1040,10 +1089,12 @@ def _run_scenario(client: str, scenario: AgentScenario, tmp_path: Path, *, requi
             assert matched, f"{client}/{scenario.name}: expected evidence/state was not observed; evidence: {evidence_path}"
         return evidence
     finally:
-        _cleanup_tmux_session(tmux_binary, socket_path, session)
-        _cleanup_tmux_server(tmux_binary, socket_path)
-        _stop_process(fake, "fake LLM server")
-        _remove_owned_directory(socket_dir, "tmux socket directory")
+        run_fixture_cleanup_phases("agent scenario", [
+            ("session", lambda: _cleanup_tmux_session(tmux_binary, socket_path, session)),
+            ("server", lambda: _cleanup_tmux_server(tmux_binary, socket_path)),
+            ("provider", lambda: _stop_process(fake, "fake LLM server")),
+            ("socket", lambda: _remove_owned_directory(socket_dir, "tmux socket directory")),
+        ])
 
 
 @pytest.mark.e2e
@@ -1209,3 +1260,112 @@ def test_opted_in_missing_client_fails_instead_of_skipping(monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda _name: None)
     with pytest.raises(pytest.fail.Exception, match="required executable"):
         _require_capability("codex")
+
+
+@pytest.mark.parametrize("recovery", [False, True])
+def test_agent_journey_retires_all_resources_after_tmux_cleanup_failure(monkeypatch, tmp_path, recovery):
+    retired = []
+    monkeypatch.setenv("GH_TOKEN", "inert-credential-sentinel")
+    monkeypatch.setenv("YOMUX_ROOT", str(tmp_path / "operator-root"))
+    provider_environments = []
+
+    def fail_session(*_args):
+        retired.append("session")
+        raise RuntimeError("session cleanup sentinel")
+
+    def fail_body(*_args):
+        raise ValueError("provider startup sentinel")
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(shutil, "which", lambda _name: "tmux")
+    monkeypatch.setattr(module, "_start_fake", lambda environment, _port: provider_environments.append(environment) or SimpleNamespace(stdout=None))
+    monkeypatch.setattr(module, "_wait_for_stream", fail_body)
+    monkeypatch.setattr(module, "_cleanup_tmux_session", fail_session)
+    monkeypatch.setattr(module, "_cleanup_tmux_server", lambda *_args: retired.append("server"))
+    monkeypatch.setattr(module, "_stop_process", lambda *_args: retired.append("provider"))
+    remove = _remove_owned_directory
+    monkeypatch.setattr(module, "_remove_owned_directory", lambda *args: (retired.append("socket"), remove(*args)))
+    monkeypatch.setattr(module, "ThreadingHTTPServer", lambda *_args: SimpleNamespace(
+        serve_forever=lambda: None, shutdown=lambda: retired.append("health shutdown"),
+        server_close=lambda: retired.append("health close")))
+    monkeypatch.setattr(threading, "Thread", lambda **_kwargs: SimpleNamespace(
+        start=lambda: None, join=lambda **_kwargs: retired.append("health join"), is_alive=lambda: False))
+    with pytest.raises(RuntimeError, match="session cleanup sentinel"):
+        if recovery:
+            _run_failure_recovery("claude", "error", tmp_path)
+        else:
+            _run_scenario("claude", SCENARIOS[1], tmp_path)
+    expected = ["session", "server", "provider", "socket"]
+    if recovery:
+        expected += ["health shutdown", "health close", "health join"]
+    assert retired == expected
+    inherited = {"GH_TOKEN", "YOMUX_ROOT"} & provider_environments[0].keys()
+    assert not inherited, inherited
+
+
+def test_private_agent_sessions_cleanup_continues_after_one_failure(monkeypatch, tmp_path):
+    retired = []
+
+    def retire_session(_binary, _socket, session):
+        retired.append(session)
+        if session == "first":
+            raise RuntimeError("first session cleanup sentinel")
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_tmux", lambda *_args: subprocess.CompletedProcess("tmux", 0, "first\nsecond\n", ""))
+    monkeypatch.setattr(module, "_cleanup_tmux_session", retire_session)
+    monkeypatch.setattr(module, "_cleanup_tmux_server", lambda *_args: retired.append("server"))
+    with pytest.raises(RuntimeError, match="first session cleanup sentinel"):
+        _cleanup_all_tmux_sessions("tmux", tmp_path / "private-socket")
+    assert retired == ["first", "second", "server"]
+
+
+@pytest.mark.parametrize("listing_raises", [False, True])
+def test_private_agent_server_cleanup_survives_session_enumeration_failure(monkeypatch, tmp_path, listing_raises):
+    retired = []
+    failure = RuntimeError("session enumeration sentinel")
+
+    def listing(*_args):
+        if listing_raises:
+            raise failure
+        return subprocess.CompletedProcess("tmux", 2, "", "session enumeration sentinel")
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_tmux", listing)
+    monkeypatch.setattr(module, "_cleanup_tmux_server", lambda *_args: retired.append("server"))
+    with pytest.raises((RuntimeError, AssertionError), match="session enumeration sentinel") as raised:
+        _cleanup_all_tmux_sessions("tmux", tmp_path / "private-socket")
+    if listing_raises:
+        assert raised.value is failure
+    assert retired == ["server"]
+
+
+@pytest.mark.parametrize("stage", ["scenario-provider", "recovery-port", "recovery-provider", "recovery-health"])
+def test_agent_startup_failure_retires_allocated_resources(monkeypatch, tmp_path, stage):
+    socket_dir = tmp_path / "socket"
+    socket_dir.mkdir()
+    stopped = []
+    fake = SimpleNamespace(stdout=None)
+    failure = RuntimeError("agent startup sentinel")
+
+    def fail(*_args, **_kwargs):
+        raise failure
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(shutil, "which", lambda _name: "tmux")
+    monkeypatch.setattr(tempfile, "mkdtemp", lambda **_kwargs: str(socket_dir))
+    monkeypatch.setattr(module, "_start_fake", fail if stage.endswith("provider") else lambda *_args: fake)
+    monkeypatch.setattr(module, "ThreadingHTTPServer", fail)
+    if stage.endswith("port"):
+        monkeypatch.setattr(module, "_free_port", fail)
+    monkeypatch.setattr(module, "_cleanup_tmux_session", lambda *_args: None)
+    monkeypatch.setattr(module, "_cleanup_tmux_server", lambda *_args: None)
+    monkeypatch.setattr(module, "_stop_process", lambda process, _label: stopped.append(process) if process is not None else None)
+    with pytest.raises(RuntimeError) as raised:
+        if stage.startswith("recovery"):
+            _run_failure_recovery("claude", "error", tmp_path)
+        else:
+            _run_scenario("claude", SCENARIOS[1], tmp_path)
+    assert raised.value is failure
+    assert not socket_dir.exists()
+    assert stopped == ([fake] if stage.endswith("health") else [])

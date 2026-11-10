@@ -163,3 +163,13 @@ def test_measurement_retires_first_client_when_second_client_startup_fails(monke
         tool.run_measurement(monkeypatch, tmp_path)
 
     assert retired == [first_driver]
+
+
+def test_retired_python_finder_cli_refuses_before_creating_runtime_or_output(monkeypatch, tmp_path):
+    def launch(*_args, **_kwargs):
+        raise AssertionError("retired Python measurement launched resources")
+
+    monkeypatch.setattr(tool, "run_measurement", launch)
+    with pytest.raises(SystemExit, match="native Go Finder browser regression tests"):
+        tool.main(["--output", str(tmp_path / "report.json")])
+    assert list(tmp_path.iterdir()) == []

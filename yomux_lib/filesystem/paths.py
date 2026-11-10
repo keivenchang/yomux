@@ -138,11 +138,11 @@ def metadata_descriptor_flags() -> int:
 
 
 def descriptor_open_flags(flags: int) -> int:
-    """Add the platform's descriptor-safe leaf flags without defeating ``O_SYMLINK``."""
+    """Prevent leaf type checks from waiting on a FIFO while preserving ``O_SYMLINK``."""
 
     symlink_flag = getattr(os, "O_SYMLINK", 0)
     nofollow = 0 if symlink_flag and flags & symlink_flag else nofollow_flag()
-    return flags | nofollow | getattr(os, "O_CLOEXEC", 0)
+    return flags | nofollow | getattr(os, "O_CLOEXEC", 0) | os.O_NONBLOCK
 
 
 def symlink_target_from_descriptor(

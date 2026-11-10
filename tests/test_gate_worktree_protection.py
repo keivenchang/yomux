@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
 from typing import Any
 
 import pytest
@@ -465,13 +466,18 @@ def test_static_build_and_check_runner_acquire_the_shared_writer_parent(
     tmp_path: Path,
 ) -> None:
     purposes: list[str] = []
+    active: list[str] = []
     environments: list[dict[str, str] | None] = []
 
     @contextmanager
     def acquire(_root: Path, *, purpose: str, environ: dict[str, str] | None = None, **_kwargs: Any) -> Any:
         purposes.append(purpose)
         environments.append(environ)
-        yield object()
+        active.append(purpose)
+        try:
+            yield object()
+        finally:
+            active.pop()
 
     monkeypatch.setattr(static_build.worktree_writer, "acquire_worktree_writer", acquire)
     monkeypatch.setattr(static_build, "lint_light_mode_pairs", lambda: [])
@@ -490,6 +496,12 @@ def test_static_build_and_check_runner_acquire_the_shared_writer_parent(
         assert output_root == check.lane_output_root(report)
         return []
 
+    def build_once(assets):
+        assert active == ["test-gate"]
+        assert assets == sorted(static_build.ASSETS)
+        return []
+
+    monkeypatch.setattr(static_build, "build_once", build_once)
     monkeypatch.setattr(check, "run_serial", run_serial)
     assert check.main(["--serial", "--lane", "whitespace", "--no-tool-guard", "--performance-report", str(report)]) == 0
     assert purposes == ["static-build", "static-build", "test-gate"]
@@ -576,3 +588,122 @@ def test_a_genuinely_foreign_entry_still_blocks_removing_a_writer_slot(tmp_path:
 
     assert "someone-elses-file" in str(caught.value)
     assert (slot / "someone-elses-file").exists()
+
+
+def test_lagged_stale_reclaimer_cannot_steal_a_new_writer(tmp_path, monkeypatch):
+    identity = _identity('local')
+    slot = tmp_path / 'writer'
+    _write_slot(slot, _record(_identity('foreign'), token='old', heartbeat_at=1.0))
+    captured = threading.Event()
+    winner_ready = threading.Event()
+    inspect = worktree_writer.inspect_worktree_writer
+    outcomes = []
+    first_read = True
+
+    def inspect_with_lag(*args, **kwargs):
+        nonlocal first_read
+        status = inspect(*args, **kwargs)
+        if threading.current_thread().name == 'lagged-reclaimer' and first_read:
+            first_read = False
+            assert status.stale
+            captured.set()
+            assert winner_ready.wait(5)
+        return status
+
+    def acquire():
+        try:
+            outcomes.append(worktree_writer.acquire_worktree_writer(
+                tmp_path, purpose='lagged', slot_dir=slot, host_identity=identity,
+                clock=lambda: 100.0, heartbeat_interval_seconds=0.0,
+                start_identity_reader=lambda _pid: identity.process_start_identity, environ={},
+            ))
+        except worktree_writer.WorktreeWriterBusy:
+            outcomes.append('busy')
+
+    monkeypatch.setattr(worktree_writer, 'inspect_worktree_writer', inspect_with_lag)
+    worker = threading.Thread(target=acquire, name='lagged-reclaimer')
+    worker.start()
+    winner = None
+    try:
+        assert captured.wait(5)
+        winner = worktree_writer.acquire_worktree_writer(
+            tmp_path, purpose='winner', slot_dir=slot, host_identity=identity,
+            clock=lambda: 100.0, heartbeat_interval_seconds=0.0,
+            start_identity_reader=lambda _pid: identity.process_start_identity, environ={},
+        )
+        winner_ready.set()
+        worker.join(5)
+        assert not worker.is_alive()
+        assert outcomes == ['busy']
+        assert json.loads((slot / 'owner.json').read_bytes())['token'] == winner.token
+    finally:
+        winner_ready.set()
+        worker.join(5)
+        for outcome in outcomes:
+            if outcome != 'busy':
+                outcome.release()
+        if winner is not None:
+            winner.release()
+
+
+def test_expired_inherited_writer_token_cannot_borrow_stale_authority(tmp_path):
+    identity = _identity('local')
+    slot = tmp_path / 'writer'
+    _write_slot(slot, _record(_identity('foreign'), token='expired', heartbeat_at=1.0))
+    with worktree_writer.acquire_worktree_writer(
+        tmp_path, purpose='successor', slot_dir=slot, host_identity=identity,
+        clock=lambda: 100.0, heartbeat_interval_seconds=0.0,
+        start_identity_reader=lambda _pid: identity.process_start_identity,
+        environ={worktree_writer.WRITER_TOKEN_ENV: 'expired'},
+    ) as lease:
+        assert not lease.borrowed
+        assert lease.token != 'expired'
+
+
+def test_writer_heartbeat_start_failure_rolls_back_slot_and_environment(tmp_path, monkeypatch):
+    identity = _identity('local')
+    slot = tmp_path / 'writer'
+    environ = {}
+
+    def refuse_start(_thread):
+        raise RuntimeError('writer thread sentinel')
+
+    monkeypatch.setattr(threading.Thread, 'start', refuse_start)
+    with pytest.raises(RuntimeError, match='writer thread sentinel'):
+        worktree_writer.acquire_worktree_writer(
+            tmp_path, purpose='failed', slot_dir=slot, host_identity=identity,
+            clock=lambda: 100.0, heartbeat_interval_seconds=1.0, environ=environ,
+        )
+    assert not slot.exists()
+    assert worktree_writer.product_env('WORKTREE_WRITER_TOKEN', environ=environ) is None
+
+
+def test_writer_release_failure_can_retry_owned_cleanup(tmp_path, monkeypatch):
+    identity = _identity('local')
+    slot = tmp_path / 'writer'
+    environ = {}
+    lease = worktree_writer.acquire_worktree_writer(
+        tmp_path, purpose='release', slot_dir=slot, host_identity=identity,
+        clock=lambda: 100.0, heartbeat_interval_seconds=0.0, environ=environ,
+    )
+    remove = worktree_writer._remove_exact_slot
+    calls = 0
+
+    def fail_first(target):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PermissionError('release sentinel')
+        remove(target)
+
+    monkeypatch.setattr(worktree_writer, '_remove_exact_slot', fail_first)
+    try:
+        with pytest.raises(PermissionError, match='release sentinel'):
+            lease.release()
+        assert slot.exists()
+        lease.release()
+        assert not slot.exists()
+        assert worktree_writer.product_env('WORKTREE_WRITER_TOKEN', environ=environ) is None
+    finally:
+        if slot.exists():
+            remove(slot)

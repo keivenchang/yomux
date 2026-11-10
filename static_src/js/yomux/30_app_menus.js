@@ -250,7 +250,6 @@ function menuTabRowHtml(item, options = {}) {
   const info = transcriptMetadataState.payload.sessions?.[item];
   const auto = autoApproveStates.get(item)?.enabled === true;
   const state = sessionState(item, info);
-  const pr = displayPullRequest(info);
   const desc = sessionTabDescription(item, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
   return `<span class="pane-tab-core">${sessionTabLeadingActivityContainerHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, state})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
@@ -751,10 +750,15 @@ function sortTabItemsForMenu(items) {
   ];
 }
 
+function menuPaneItemAvailable(item) {
+  return boolSetting('general.enable_experimental_features', false)
+    || !['chat', 'yoagent', 'info'].includes(tabTypeForItem(item)?.key);
+}
+
 function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   const query = tabsMenuSearchText.trim();
   const allItems = Array.from(new Set([...openItems, ...paneItems(), ...allTabItems()]));
-  const sortedItems = sortTabItemsForMenu(filterTabItemsForSearch(allItems, query));
+  const sortedItems = sortTabItemsForMenu(filterTabItemsForSearch(allItems.filter(menuPaneItemAvailable), query));
   const tmuxItems = sortedItems.filter(isTmuxSession);
   const yoloItems = sortedItems.filter(item => !isTmuxSession(item));
   const groupedItems = menuGroups(
@@ -800,6 +804,7 @@ function fileMenuVirtualCommand(item, detail) {
   return menuCommand(itemLabel(item), () => selectSession(item, {userInitiated: true}), {
     checked: itemInLayout(item),
     detail,
+    keybinding: item === yoagentItemId ? appShortcutText('B', {alt: true}) : '',
     iconHtml: tabTypeIconHtml(item, {menu: true}),
     targetItem: item,
   });
@@ -811,8 +816,7 @@ function fileSurfaceMenuItems() {
   const finder = typeof finderItemId !== 'undefined' ? finderItemId : fileExplorerItemId;
   const differ = typeof differItemId !== 'undefined' ? differItemId : '';
   const tabber = typeof tabberItemId !== 'undefined' ? tabberItemId : '';
-  const items = (Array.isArray(fileSurfaceItems) ? fileSurfaceItems : [finder])
-    .filter(item => typeof paneItemCapabilityAvailable !== 'function' || paneItemCapabilityAvailable(item));
+  const items = availableFileSurfaceItems();
   const detailFor = item => {
     if (item === finder) return t('menu.file.browseFiles');
     if (item === differ) return t('changes.show');
@@ -822,7 +826,8 @@ function fileSurfaceMenuItems() {
   return items.map(item => menuCommand(itemLabel(item), () => openFileSurfaceFromMenu(item), {
     checked: itemInLayout(item),
     disabled: typeof openFileSurfaceFromMenu !== 'function',
-    detail: item === finder ? `${detailFor(item)} · ${appShortcutText('B')}` : detailFor(item),
+    detail: detailFor(item),
+    keybinding: item === finder ? appShortcutText('B') : '',
     iconHtml: tabTypeIconHtml(item, {menu: true}),
     targetItem: item,
     className: 'app-menu-file-destination',
@@ -832,6 +837,7 @@ function fileSurfaceMenuItems() {
 function fileMenuPanelCommands() {
   const virtualCommands = FILE_MENU_PANEL_DEFINITIONS
   .filter(({itemId}) => itemId !== fileExplorerItemId)
+    .filter(({itemId}) => menuPaneItemAvailable(itemId))
     .filter(({itemId}) => typeof paneItemCapabilityAvailable !== 'function' || paneItemCapabilityAvailable(itemId))
     .map(({itemId}) => fileMenuVirtualCommand(itemId, tabTypeForItem(itemId)?.detail?.() || ''));
   const fileSurfaces = fileSurfaceMenuItems();
@@ -841,11 +847,13 @@ function fileMenuPanelCommands() {
       // distinct instead of implying all three can be visible at once.
       virtualCommands.unshift(...fileSurfaces);
     } else {
-      virtualCommands.unshift(menuCommand(t('yoagent.capability.finderDifferTabber.name'), () => openFileSurfaceFromMenu(finderItemId), {
-        checked: fileSurfaceItems.every(item => itemInLayout(item)),
-        partial: fileSurfaceItems.some(item => itemInLayout(item)) && !fileSurfaceItems.every(item => itemInLayout(item)),
+      const items = availableFileSurfaceItems();
+      virtualCommands.unshift(menuCommand(fileSurfaceGroupLabel(), () => openFileSurfaceFromMenu(finderItemId), {
+        checked: items.every(item => itemInLayout(item)),
+        partial: items.some(item => itemInLayout(item)) && !items.every(item => itemInLayout(item)),
         disabled: typeof openFileSurfaceFromMenu !== 'function',
         detail: t('menu.file.browseFiles'),
+        keybinding: appShortcutText('B'),
         iconHtml: tabTypeIconHtml(finderItemId, {menu: true}),
         targetItem: finderItemId,
         className: 'app-menu-file-destination',
@@ -860,13 +868,14 @@ function appMenuTree() {
   const openItems = orderedPaneItems(activePaneItems());
   const fileDestinationCommands = sortMenuCommandsByLabel([
     menuCommand(t('common.openFile'), openFileQuickOpen, {
-      detail: appShortcutText('P'),
+      keybinding: appShortcutText('P'),
       iconHtml: appMenuUiIcon('document'),
     }),
     ...fileMenuPanelCommands(),
     menuCommand(t('common.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
       checked: itemInLayout(prefsItemId),
       detail: compactHomePath(settingsConfigPath()),
+      keybinding: appShortcutText(','),
       iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
       targetItem: prefsItemId,
     }),
@@ -942,7 +951,7 @@ function appMenuTree() {
       label: t('menu.help'),
       items: menuGroups(
         [menuCommand(t('common.commandPalette'), openCommandPalette, {
-          detail: appShortcutText('P', {shift: true}),
+          keybinding: appShortcutText('P', {shift: true}),
         })],
         [
           menuCommand(t('brand.version', {version: bootstrap.version || ''}).trim(), null, {
@@ -950,7 +959,7 @@ function appMenuTree() {
             detail: bootstrap.versionCommitTime ? t('menu.help.lastCommit', {time: bootstrap.versionCommitTime}) : '',
           }),
           menuCommand(t('common.keyboardShortcuts'), openKeyboardShortcutsOverlay, {
-            detail: '?',
+            keybinding: '?',
           }),
           menuCommand(t('menu.help.openReadme'), openProjectReadme, {
             disabled: !projectReadmePath(),
@@ -1803,16 +1812,17 @@ function createAppSubmenu(item) {
 }
 
 function createAppMenuCommand(item, options = {}) {
-  const ariaLabel = item.ariaLabel || [item.label, item.detail].filter(Boolean).join(' - ');
+  const ariaLabel = item.ariaLabel || [item.label, item.detail, item.keybinding].filter(Boolean).join(' - ');
   const richHtml = item.html ? stripTitleAttrs(item.html) : '';
   const iconHtml = item.iconHtml ? stripTitleAttrs(item.iconHtml) : '';
   const contentHtml = richHtml
     ? `<span class="app-menu-rich">${richHtml}</span>`
     : `<span class="app-menu-line">${iconHtml ? `<span class="app-menu-icon">${iconHtml}</span>` : ''}<span class="app-menu-label">${esc(item.label)}</span></span>`;
   const detailClass = ['app-menu-detail', item.className === 'app-menu-file-destination' ? 'app-menu-label' : ''].filter(Boolean).join(' ');
-  const detailHtml = item.detail ? `<span class="${detailClass}" title="${esc(item.detail)}">${esc(item.detail)}</span>` : '';
+  const detail = item.keybinding || item.detail;
+  const detailHtml = detail ? `<span class="${detailClass}" title="${esc(detail)}">${esc(detail)}</span>` : '';
   const button = makeButton({
-    className: ['app-menu-command', item.className || '', item.partial === true ? 'partially-checked' : '', options.asSubmenu ? 'has-submenu' : ''].filter(Boolean).join(' '),
+    className: ['app-menu-command', item.className || '', item.keybinding ? 'app-menu-has-keybinding' : '', item.partial === true ? 'partially-checked' : '', options.asSubmenu ? 'has-submenu' : ''].filter(Boolean).join(' '),
     role: item.checked !== undefined ? 'menuitemcheckbox' : 'menuitem',
     checked: item.checked,
     disabled: item.disabled,
@@ -1851,18 +1861,21 @@ function runAppMenuCommand(item) {
   if (item.disabled || typeof item.action !== 'function') return;
   const keepOpen = item.keepOpen === true;
   if (!keepOpen) closeAppMenus();
+  const refreshMenu = () => {
+    if (!keepOpen || item.renderMenu === false) return;
+    refreshAppMenuForOpen(document.querySelector('.app-menu.open'));
+    renderSessionButtons({force: true});
+  };
   try {
     Promise.resolve(item.action())
-      .then(() => {
-        if (keepOpen && item.renderMenu !== false) renderSessionButtons({force: true});
-      })
+      .then(refreshMenu)
       .catch(error => {
         statusErr(localizedHtml('status.menuCommandFailed', {error}));
-        if (keepOpen && item.renderMenu !== false) renderSessionButtons({force: true});
+        refreshMenu();
       });
   } catch (error) {
     statusErr(localizedHtml('status.menuCommandFailed', {error}));
-    if (keepOpen) renderSessionButtons({force: true});
+    refreshMenu();
   }
 }
 
@@ -2025,11 +2038,20 @@ function openAppMenu(wrapper, options = {}) {
 }
 
 function refreshAppMenuForOpen(wrapper) {
-  if (wrapper?.dataset?.appMenu !== 'tmux') return;
-  const menu = appMenuTree().find(item => item.id === 'tmux');
+  if (!wrapper) return;
+  const menu = topbarMenuTree().find(item => item.id === wrapper.dataset.appMenu);
   const popover = wrapper.querySelector(':scope > .app-menu-popover');
   if (!menu || !popover) return;
+  const focusedIndex = [...popover.querySelectorAll('.app-menu-command')].indexOf(document.activeElement);
+  const openSubmenus = new Set([...popover.querySelectorAll('.app-menu-submenu-wrap.open > .app-submenu-popover')]
+    .map(submenu => submenu.getAttribute('aria-label')));
   popover.replaceChildren(...menu.items.map(createAppMenuItem));
+  for (const submenu of popover.querySelectorAll('.app-submenu-popover')) {
+    if (!openSubmenus.has(submenu.getAttribute('aria-label'))) continue;
+    submenu.parentElement.classList.add(CLS.open);
+    submenu.parentElement.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'true');
+  }
+  if (focusedIndex >= 0) popover.querySelectorAll('.app-menu-command')[focusedIndex]?.focus({preventScroll: true});
 }
 
 function closeAppMenus(keepOpen = null) {

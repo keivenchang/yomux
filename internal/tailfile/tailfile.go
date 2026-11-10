@@ -26,6 +26,13 @@ func ReadFile(file *os.File, lines int, byteLimit int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return readTail(file, info.Size(), lines, byteLimit)
+}
+
+func readTail(reader io.ReaderAt, size int64, lines int, byteLimit int64) (string, error) {
+	if lines < 1 {
+		return "", nil
+	}
 	maxBytes := int64(lines) * 64 * 1024
 	if maxBytes < 64*1024 {
 		maxBytes = 64 * 1024
@@ -33,14 +40,8 @@ func ReadFile(file *os.File, lines int, byteLimit int64) (string, error) {
 	if byteLimit > 0 && maxBytes > byteLimit {
 		maxBytes = byteLimit
 	}
-	start := info.Size() - maxBytes
-	if start < 0 {
-		start = 0
-	}
-	if _, err := file.Seek(start, io.SeekStart); err != nil {
-		return "", err
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxBytes))
+	start := max(int64(0), size-maxBytes)
+	data, err := io.ReadAll(io.NewSectionReader(reader, start, size-start))
 	if err != nil {
 		return "", err
 	}

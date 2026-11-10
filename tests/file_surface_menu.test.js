@@ -28,9 +28,9 @@ const coreUtils = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8'
 const layoutState = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
 
 test('File submenu restores the desktop triplet through the layout owner', () => {
-  assert.match(menus, /function fileSurfaceMenuItems\(\)[\s\S]*Array\.isArray\(fileSurfaceItems\)[\s\S]*openFileSurfaceFromMenu\(item\)/);
-  assert.match(menus, /if \(narrowSingleColumnMode\(\)\)[\s\S]*virtualCommands\.unshift\(\.\.\.fileSurfaces\)[\s\S]*else \{[\s\S]*menuCommand\(t\('yoagent\.capability\.finderDifferTabber\.name'\), \(\) => openFileSurfaceFromMenu\(finderItemId\)/);
-  assert.match(menus, /checked: fileSurfaceItems\.every\(item => itemInLayout\(item\)\),[\s\S]*partial: fileSurfaceItems\.some\(item => itemInLayout\(item\)\) && !fileSurfaceItems\.every\(item => itemInLayout\(item\)\)/);
+  assert.match(menus, /function fileSurfaceMenuItems\(\)[\s\S]*availableFileSurfaceItems\(\)[\s\S]*openFileSurfaceFromMenu\(item\)/);
+  assert.match(menus, /if \(narrowSingleColumnMode\(\)\)[\s\S]*virtualCommands\.unshift\(\.\.\.fileSurfaces\)[\s\S]*else \{[\s\S]*menuCommand\(fileSurfaceGroupLabel\(\), \(\) => openFileSurfaceFromMenu\(finderItemId\)/);
+  assert.match(menus, /checked: items\.every\(item => itemInLayout\(item\)\),[\s\S]*partial: items\.some\(item => itemInLayout\(item\)\) && !items\.every\(item => itemInLayout\(item\)\)/);
   assert.match(actions, /async function openFileSurfaceFromMenu\(item\)[\s\S]*sidePaneConstrainedMode\(\)[\s\S]*openFileSurfacePane\(resolved\)[\s\S]*fileSurfaceItems\.filter\(candidate => !itemInLayout\(candidate\)\)[\s\S]*layoutWithSidePaneItems\(layoutSlots, missing, \{[\s\S]*side: paneSideLeft[\s\S]*forceCreate: true[\s\S]*activatePaneTab/);
   assert.doesNotMatch(menus.slice(menus.indexOf('function fileSurfaceMenuItems()'), menus.indexOf('function appMenuTree()')), /toggleFinderPane\(|selectSession\(fileExplorerItemId\)/);
 });

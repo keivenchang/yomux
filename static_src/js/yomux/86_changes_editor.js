@@ -14,7 +14,7 @@ function scheduleFileEditorPreviewPropagation(panel, path) {
 
 function handleFileEditorContentChanged(panel, path, content, options = {}) {
   const state = fileEditorPanelState(panel);
-  if (!state || state.kind !== 'text' || state.historical === true) return;
+  if (!fileEditorStateWritable(state) || state.kind !== 'text') return;
   const nextContent = String(content ?? '');
   if (nextContent !== state.content) noteTabberItemActivity(fileEditorPanelItem(panel));
   state.content = nextContent;
@@ -29,9 +29,9 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   updateFileEditorPanelChrome(panel, path);
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
-  if (options.skipPreviewPanel !== panel?.querySelector?.('.file-editor-preview-pane-panel')) {
-    if (panel?._pmView && options.sourceSurface !== 'view-editor') syncProseMirrorPanelSource(panel, path, state);
-    else if (options.sourceSurface !== 'view-editor') renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+  if (!panel?._pmView && options.sourceSurface !== 'view-editor'
+      && options.skipPreviewPanel !== panel?.querySelector?.('.file-editor-preview-pane-panel')) {
+    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
   }
   if (panel?._pmView && options.sourceSurface !== 'view-editor') syncProseMirrorPanelSource(panel, path, state);
   if (options.sourceSurface === 'view-editor') syncCodeMirrorToCanonicalPanels(path, state.content, panel, 'view-editor');
@@ -617,9 +617,14 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
   else applyPreviewZoomSurface(imagePane, img, zoomOptions);
 }
 
-function requestFileEditorPanelFocus(item) {
-  if (!autoFocusCanFollowCursor()) return;
-  if (isFileEditorItem(item)) pendingFileEditorFocus.add(item);
+const explicitFileEditorFocus = new Set();
+
+function requestFileEditorPanelFocus(item, options = {}) {
+  if (!autoFocusCanFollowCursor() && options.explicit !== true) return;
+  if (isFileEditorItem(item)) {
+    pendingFileEditorFocus.add(item);
+    if (options.explicit === true) explicitFileEditorFocus.add(item);
+  }
 }
 
 function scheduleFileEditorPanelViewStateCapture(item, panel) {
@@ -637,38 +642,42 @@ function preserveFileEditorPanelPassiveViewState(item, panel, options = {}) {
     if (options.focus === true) view.focus?.();
     return true;
   }
-  const update = () => {
-    if (options.focus === true) view.focus?.();
-  };
-  if (typeof updateCodeMirrorViewPreservingState === 'function') {
-    updateCodeMirrorViewPreservingState(view, (selection, scrollSnapshot) => {
-      update();
-      if (scrollSnapshot) view.dispatch({effects: scrollSnapshot});
-      return selection;
-    }, {preserveSelection: false});
-  } else {
-    const scrollTop = scrollDOM.scrollTop;
-    const scrollLeft = scrollDOM.scrollLeft;
-    update();
-    scrollDOM.scrollTop = scrollTop;
-    scrollDOM.scrollLeft = scrollLeft;
-  }
+  const scrollTop = scrollDOM.scrollTop;
+  const scrollLeft = scrollDOM.scrollLeft;
+  // CodeMirror focus prevents scrolling. An asynchronous scroll snapshot here can
+  // replay an older viewport after a newer wheel or direct scroll.
+  if (options.focus === true) view.focus?.();
+  scrollDOM.scrollTop = scrollTop;
+  scrollDOM.scrollLeft = scrollLeft;
   captureFileEditorPanelViewState(item, panel);
   return true;
 }
 
 function focusFileEditorPanelIfReady(panel, item) {
-  if (!autoFocusCanFollowCursor()) {
+  if (!autoFocusCanFollowCursor() && !explicitFileEditorFocus.has(item)) {
     pendingFileEditorFocus.delete(item);
     return false;
   }
   if (!pendingFileEditorFocus.has(item) || focusedPanelItem !== item) return false;
-  if (panel?._cmView) {
-    preserveFileEditorPanelPassiveViewState(item, panel, {focus: true});
-    pendingFileEditorFocus.delete(item);
-    return true;
+  if (fileEditorStateForItem(fileItemPath(item), item)?.loading) return false;
+  const mode = editorViewModeFor(fileItemPath(item), item);
+  if (mode === 'preview' && panel?._pmView) panel._pmView.focus();
+  else if (panel?._cmView && mode !== 'preview') {
+    if (!panel._cmView.hasFocus) preserveFileEditorPanelPassiveViewState(item, panel, {focus: true});
   }
-  return false;
+  else {
+    const kind = fileEditorStateForItem(fileItemPath(item), item)?.kind;
+    if (mode !== 'preview' && kind !== 'image') return false;
+    if (mode === 'preview' && panel?._pmRequired && !panel._pmError) return false;
+    const selector = kind === 'image' ? '.file-editor-image-panel' : '.file-editor-preview-pane-panel';
+    const preview = panel?.querySelector?.(selector);
+    if (!preview) return false;
+    preview.tabIndex = -1;
+    preview.focus({preventScroll: true});
+  }
+  pendingFileEditorFocus.delete(item);
+  explicitFileEditorFocus.delete(item);
+  return true;
 }
 
 function fileEditorPanelViewStateCaptureHasLayout(panel, scrollDOM) {
@@ -701,10 +710,27 @@ function fileEditorVisibleLineNumber(view) {
 function captureFileEditorPanelViewState(item, panel) {
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
-  if (!isFileEditorItem(item) || !view || !scrollDOM) return;
+  const pmView = panel?._pmView;
+  if (!isFileEditorItem(item) || (!view || !scrollDOM) && !pmView) return;
+  if (pmView) {
+    const selection = pmView.state?.selection;
+    const pmScrollDOM = pmView.dom?.parentElement;
+    const previous = fileEditorViewState.get(item) || {};
+    fileEditorViewState.set(item, {
+      ...previous,
+      pmAnchor: Number(selection?.anchor || 0),
+      pmHead: Number(selection?.head || selection?.anchor || 0),
+      pmScrollTop: Number(pmScrollDOM?.scrollTop || 0),
+      pmScrollLeft: Number(pmScrollDOM?.scrollLeft || 0),
+      pmFocused: Boolean(pmView.hasFocus),
+    });
+  }
+  if (!view || !scrollDOM) return;
   if (!fileEditorPanelViewStateCaptureHasLayout(panel, scrollDOM)) return;
   const selection = view.state?.selection?.main;
+  const previous = fileEditorViewState.get(item) || {};
   fileEditorViewState.set(item, {
+    ...previous,
     scrollTop: scrollDOM.scrollTop || 0,
     scrollLeft: scrollDOM.scrollLeft || 0,
     anchor: Number(selection?.anchor || 0),
@@ -726,7 +752,12 @@ function restoreFileEditorPanelViewState(item, panel, options = {}) {
   const state = fileEditorViewState.get(item);
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
-  if (!state || !view || !scrollDOM) return;
+  if (!state) return;
+  if ((!view || !scrollDOM) && panel?._pmView) {
+    restoreProseMirrorPanelViewState(item, panel);
+    return;
+  }
+  if (!view || !scrollDOM) return;
   // A live pane owns its current viewport even when it is not focused: the user can scroll it and
   // a queued capture has not necessarily reached fileEditorViewState yet. Only a just-created view
   // or explicit disk replacement may replay saved selection/scroll state.
@@ -749,3 +780,43 @@ function restoreFileEditorPanelViewState(item, panel, options = {}) {
     try { view.dispatch({selection: {anchor, head}}); } catch (_) {}
   }
 }
+
+function restoreProseMirrorPanelViewState(item, panel) {
+  const state = fileEditorViewState.get(item);
+  const view = panel?._pmView;
+  if (!state || !view || !Number.isFinite(state.pmAnchor)) return false;
+  const scrollDOM = view.dom?.parentElement;
+  if (scrollDOM) {
+    scrollDOM.scrollTop = Number(state.pmScrollTop || 0);
+    scrollDOM.scrollLeft = Number(state.pmScrollLeft || 0);
+  }
+  const selection = prosemirrorSelectionForDocument(
+    window.YOmuxProseMirror,
+    view.state.doc,
+    state.pmAnchor,
+    state.pmHead,
+  );
+  if (selection) view.dispatch(view.state.tr.setSelection(selection));
+  if (state.pmFocused === true) view.focus();
+  if (scrollDOM) {
+    scrollDOM.scrollTop = Number(state.pmScrollTop || 0);
+    scrollDOM.scrollLeft = Number(state.pmScrollLeft || 0);
+  }
+  return true;
+}
+
+function installDirtyFileNavigationGuard() {
+  if (window.__yomuxDirtyFileNavigationGuard) return;
+  const guard = event => {
+    for (const state of fileState.values()) {
+      if (state?.dirty !== true) continue;
+      event.preventDefault();
+      event.returnValue = 'Unsaved file changes';
+      return event.returnValue;
+    }
+  };
+  window.addEventListener('beforeunload', guard);
+  window.__yomuxDirtyFileNavigationGuard = guard;
+}
+
+installDirtyFileNavigationGuard();

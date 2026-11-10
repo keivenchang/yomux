@@ -301,12 +301,12 @@ def _visible_directory_names(
         )
     finally:
         _record_elapsed(performance_details, "scan_resolve_ms", started)
-    started = _timing_started(performance_details)
     try:
-        entries = os.scandir(directory_descriptor)
-    finally:
-        _record_elapsed(performance_details, "scan_open_ms", started)
-    try:
+        started = _timing_started(performance_details)
+        try:
+            entries = os.scandir(directory_descriptor)
+        finally:
+            _record_elapsed(performance_details, "scan_open_ms", started)
         with entries:
             while True:
                 started = _timing_started(performance_details)
@@ -509,8 +509,6 @@ def _list_directory_from_pinned_root(
         )
     finally:
         _record_elapsed(performance_details, "scan_ms", started)
-    repo_info_cache: dict[Path, dict[str, Any]] = {}
-    repo_info_deadline = time.monotonic() + FINDER_REPO_INFO_BUDGET_SECONDS
     entries = []
     started = _timing_started(performance_details)
     try:

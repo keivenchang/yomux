@@ -334,7 +334,8 @@ func (s *Store) Search(ctx context.Context, room, query string, cursor *int64, l
 	cutoff := s.cutoff(days)
 	var messages []Message
 	if ftsQuery != "" {
-		messages, err = queryMessages(ctx, s.db, `SELECT `+messageColumns+` FROM chat_messages WHERE room_id=? AND id<? AND created_at_utc>=? AND (instr(lower(body),lower(?))>0 OR id IN (SELECT rowid FROM chat_messages_fts WHERE chat_messages_fts MATCH ?)) ORDER BY CASE WHEN instr(lower(body),lower(?))>0 THEN 0 ELSE 1 END ASC,id DESC LIMIT ?`, room, beforeID, cutoff, query, ftsQuery, query, limit+1)
+		// Search cursors carry an ID, so both match kinds must share ID ordering.
+		messages, err = queryMessages(ctx, s.db, `SELECT `+messageColumns+` FROM chat_messages WHERE room_id=? AND id<? AND created_at_utc>=? AND (instr(lower(body),lower(?))>0 OR id IN (SELECT rowid FROM chat_messages_fts WHERE chat_messages_fts MATCH ?)) ORDER BY id DESC LIMIT ?`, room, beforeID, cutoff, query, ftsQuery, limit+1)
 	} else {
 		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query)
 		messages, err = queryMessages(ctx, s.db, `SELECT `+messageColumns+` FROM chat_messages WHERE room_id=? AND id<? AND created_at_utc>=? AND body LIKE ? ESCAPE '\' ORDER BY id DESC LIMIT ?`, room, beforeID, cutoff, "%"+escaped+"%", limit+1)

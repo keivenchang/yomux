@@ -183,8 +183,11 @@ function renderChangesGroups(groupsEl, files, options = {}) {
   if (typeof fileExplorerSessionFilesState !== 'undefined'
     && options.payload === fileExplorerSessionFilesState.payload && fileExplorerSessionFilesState.streamRepos instanceof Map
     && (options.changedRepo || options.deferPreparation === true)) {
+    const streamRepos = fileExplorerSessionFilesState.streamRepos;
     files = (function* () {
-      for (const record of fileExplorerSessionFilesState.streamRepos.values()) yield* record.files;
+      for (const record of streamRepos.values()) {
+        yield* sessionFilesPreparedRows(record.files, record.savedFiles, options.payload.preparation?.partial === true);
+      }
     })();
   } else if (options.changedRepo) {
     // A new stream chunk must finish repositories interrupted by the preceding chunk.
@@ -217,9 +220,7 @@ function* renderChangesGroupsSteps(groupsEl, files, options = {}) {
   const renderOptions = view === 'differ' && options.deferPreparation === true
     ? {...options, loading: sessionFilesPanelIsLoading(payload, visibleFileCount ? [true] : [])}
     : options;
-  // Repository chunks retain stream insertion order while earlier trees finish.
-  const orderedGroups = options.changedRepo ? Array.from(groups)
-    : Array.from(groups).sort(([left], [right]) => compare(firstFiles.get(left), firstFiles.get(right)));
+  const orderedGroups = Array.from(groups).sort(([left], [right]) => compare(firstFiles.get(left), firstFiles.get(right)));
   groups.clear();
   for (const [repo, repoFiles] of orderedGroups) groups.set(repo, repoFiles);
   if (options.includeEmptyRepoSections === true) {
@@ -265,12 +266,12 @@ function* renderChangesGroupsSteps(groupsEl, files, options = {}) {
       : 0);
     const summary = groupsEl.parentElement?.querySelector?.('.changes-comparison-summary');
     if (summary && typeof changesSummaryHtml === 'function') {
-      summary.innerHTML = changesSummaryHtml(payload, null, payload?.session || '', renderOptions.loading === true, payload?.loaded === true, {
+      setInnerHtmlIfChanged(summary, changesSummaryHtml(payload, null, payload?.session || '', renderOptions.loading === true, payload?.loaded === true, {
         fileCount: visibleFileCount,
         repoCount,
-      });
+      }));
     }
-    if (!renderOptions.loading && visibleFileCount === 0 && groups.size === 0) {
+    if (!renderOptions.loading && payload?.preparation?.partial !== true && visibleFileCount === 0 && groups.size === 0) {
       groupsEl.innerHTML = `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>`;
     }
   }
@@ -341,7 +342,7 @@ function* renderChangesRepoSectionSteps(section, repo, repoFiles, repoInfo, opti
   setRowDataset(head, 'changesRepoToggle', repoIsMissing ? '' : repo);
   setAttributeIfChanged(head, 'aria-expanded', repoIsMissing ? null : (collapsed ? 'false' : 'true'));
   if (head.disabled !== repoIsMissing) head.disabled = repoIsMissing;
-  setInnerHtmlIfChanged(head, `${repoIsMissing ? '' : disclosureTriangleHtml(!collapsed, 'changes-repo-caret')}<span class="changes-repo-title">${esc(repoLabel)}</span>${repoIsMissing ? `<span class="changes-repo-missing">${esc(t('filetab.missingTitle'))}</span>` : ''}${changesRepoTotalsHtml(repoInfo, repoFiles)}`);
+  setInnerHtmlIfChanged(head, `${repoIsMissing ? '' : disclosureTriangleHtml(!collapsed, 'changes-repo-caret')}<span class="changes-repo-title">${esc(repoLabel)}</span>${repoIsMissing ? `<span class="changes-repo-missing">${esc(t('filetab.missingTitle'))}</span>` : ''}${changesRepoTotalsHtml(repoInfo, repoFiles, {partial: payload.preparation?.partial === true})}`);
   // Update "Comparing FROM TO" refs row (per-repo, only for git repos)
   let refsRow = section.querySelector(':scope > .changes-repo-refs');
   if (hasGit && !collapsed) {
@@ -418,7 +419,7 @@ function fileExplorerTreeDateButtonHtml(extraClass = '', view = 'finder') {
   const mode = fileExplorerTreeDateModeForView(surface);
   const active = mode !== 'none';
   const classes = ['file-explorer-header-action', 'file-explorer-date-toggle', extraClass, active ? 'active' : ''].filter(Boolean).join(' ');
-  return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-file-explorer-view="${esc(surface)}" data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeButtonLabel(mode))}</button>`;
+  return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-file-explorer-view="${esc(surface)}" data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeButtonLabel(mode))}</button>${surface === 'finder' ? `<button type="button" class="file-explorer-header-action" data-file-explorer-permissions title="Show size and permissions" aria-label="Show size and permissions" aria-pressed="${fileExplorerPermissionsVisible()}">ⓘ</button>` : ''}`;
 }
 
 function fileExplorerTreeSortSelectHtml(extraClass = '', view = 'finder') {
@@ -499,7 +500,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   const warningHtml = (payload.warnings || []).map(warning => `<div class="changes-warning">${esc(messageDescriptorText(warning, String(warning || '')))}</div>`).join('');
   const full = options.full === true || view === 'differ';
   const showEmptyRepoSections = full && !loading && !files.length && payloadHasRenderableRepoSections(payload);
-  const empty = options.deferPreparation !== true && !loading && loaded && !files.length && !showEmptyRepoSections
+  const empty = options.deferPreparation !== true && payload?.preparation?.partial !== true && !loading && loaded && !files.length && !showEmptyRepoSections
     ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
   if (full) {
     return `
@@ -639,7 +640,6 @@ function replaceChangesStaticHtml(root, html, options = {}) {
   if (groups && nextGroups) {
     const nextNodes = Array.from(next.children, child => child === nextGroups ? groups : child);
     // Keep the mounted tree while session summaries change; replacing it blocks input on large caches.
-    for (const child of Array.from(root.children)) if (child !== groups) child.remove();
     reconcileChildNodes(root, nextNodes);
   } else {
     root.innerHTML = html;
@@ -655,7 +655,7 @@ function renderChangesRoot(root, staticHtml, files, groupOptions = {}, options =
   const staticChanged = root.__changesStaticHtml !== staticHtml;
   const editingControl = activeChangesControl(root);
   // Stream chunks can change summary HTML while a user is editing FROM/TO; keep that input node alive.
-  if (options.force === true || groupsMissing || (staticChanged && !editingControl)) {
+  if (groupsMissing || (staticChanged && (options.force === true || !editingControl))) {
     replaceChangesStaticHtml(root, staticHtml, options);
   }
   const groups = root.querySelector?.('.changes-groups');
@@ -674,6 +674,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
     || (options.forceNewTab === true ? fileEditorCopyItemFor(path) : existingItem || reusableFileEditorDiffPreviewItem(path));
   let resolvedPath = path;
   const normalizedStatus = String(status || '').toUpperCase();
+  if (normalizedStatus === 'D') syncOpenFileContentFromPanels(path);
   const openDiffMode = options.openMode !== 'edit';
   if (openDiffMode) setFileEditorDiffExpandUnchangedForItem(path, item, false);
   const initialMode = openDiffMode ? 'diff' : 'edit';
@@ -705,7 +706,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
   const targetSlot = options.targetSlot || (options.userInitiated === false ? '' : fileEditorActivationSlot());
   if (targetSlot) openOptions.targetSlot = targetSlot;
   if (options.targetZone) openOptions.targetZone = options.targetZone;
-  if (normalizedStatus === 'D') {
+  if (normalizedStatus === 'D' && fileState.get(path)?.dirty !== true) {
     await openFilesSetAndShow(path, {
       mtime: 0,
       size: 0,
@@ -726,6 +727,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
       resolvedPath = fileItemPath(item) || path;
     }
     const openedState = fileState.get(resolvedPath);
+    if (normalizedStatus === 'D' && openedState?.dirty === true) openedState.externalMissing = true;
     if (openedState?.externalMissing === true && !['A', '?'].includes(normalizedStatus)) {
       // A tracked Differ row can vanish after the listing snapshot. Keep the missing warning, but
       // retain a text surface so /api/fs/diff can recover the committed side from Git.
@@ -781,10 +783,10 @@ function openDiffRefPickerForInput(input, controls) {
 
 function bindChangesPanel(panel) {
   if (!panel) return null;
+  bindFileExplorerHeaderActions(panel);
   return bindScopedOnce(panel, 'changes-panel', scope => {
   normalizeAppOwnedControls(panel);
   scope.ownEvent('change', panel, 'change', event => {
-    if (handleFileExplorerTreeToolbarChange(panel, event)) return;
     const sessionSelect = event.target.closest('[data-session-files-session]');
     if (sessionSelect && panel.contains(sessionSelect)) {
       const view = fileExplorerViewForItem(panel.dataset.panelItem) || 'finder';
@@ -837,7 +839,6 @@ function bindChangesPanel(panel) {
     differTreeInteractionController.handleKeydown(event, panel);
   });
   scope.ownEvent('actions-click', panel, 'click', async event => {
-    if (handleFileExplorerTreeToolbarAction(panel, event)) return;
     const collapseToggle = event.target.closest('[data-session-files-collapse-toggle]');
     if (collapseToggle && panel.contains(collapseToggle)) {
       event.preventDefault();

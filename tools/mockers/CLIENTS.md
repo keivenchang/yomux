@@ -15,6 +15,7 @@ Shared behavior:
 
 - Prompt format: `model[effort] cwd›`
 - Readline bindings: Ctrl-A start, Ctrl-E end, Ctrl-K kill to end, Ctrl-U kill line, Ctrl-W kill word, Ctrl-Y yank, Ctrl-P/Ctrl-N history, Ctrl-R history search, Alt-B/Alt-F move word, Alt-D kill word, Tab completes slash commands.
+- Terminal input: the text clients and shared mock composer decode complete UTF-8 characters before editing. Native key-by-key input such as `café 中` must match the real client, preserve adjacent arrow and Enter keys, and stop on EOF inside an incomplete character.
 - Prefixed gray output: codex.py reasoning (aka thinking), claude.py thinking (aka reasoning), tool events, thread/session hints, and metrics use the shared color helpers.
 - Shared metrics: TTFT, submit-to-first-token, first reasoning (aka thinking) or thinking (aka reasoning) event, first tool, total turn time, ISL, OSL, token/sec, answer chars/sec, tool counts, tool duration, approval counts, and event counts.
 - Shared config helpers: bool parsing, TOML-ish `key=value` parsing, config display, shell-safe resume command formatting.
@@ -139,7 +140,6 @@ Recommended implementation order if more parity is needed: first add Ctrl-C guar
 - `--remote-auth-token-env TOKEN_VAR`
 - `--strict-config`
 - `-i, --image FILE`
-- `-m, --model MODEL`
 - `--effort minimal|low|medium|high|xhigh`
 - `--oss`
 - `--local-provider OSS_PROVIDER`

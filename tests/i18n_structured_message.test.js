@@ -30,6 +30,18 @@ vm.runInNewContext(
 );
 const api = context.api;
 
+catalog['common.errorDetail'] = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'))['common.errorDetail'];
+const recoveryPath = '/workspace/.yolomux-mutation-retained';
+const recoveryMessage = `source restoration failed (retained as ${recoveryPath}): filesystem operation cancelled`;
+assert.equal(api.userMessageText({
+  state: 'failed',
+  error: {
+    code: 'restoration_failed',
+    message: {key: 'common.errorDetail', params: {error: recoveryMessage}, fallback: recoveryMessage},
+    details: {recovery_path: recoveryPath},
+  },
+}), `error: ${recoveryMessage}`, 'localized filesystem recovery errors retain the source location and chained cause');
+
 const eventHtml = api.eventItemHtml({
   time: '2026-01-01T00:00:00Z',
   type: 'test',

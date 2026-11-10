@@ -13,6 +13,7 @@ from tests.browser_helpers.browser_console import retire_browser_after_strict_di
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.browser_helpers.browser_layout import browser_auth_yaml
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
+from tests.gate_harness import run_fixture_cleanup_phases
 
 
 def test_empty_auth_recovery_and_read_only_config_preserve_browser_login(browser, isolated_dev_server_factory):
@@ -133,8 +134,10 @@ def test_native_tls_multiplexes_authenticated_streams_and_keeps_websocket(browse
                 assert headers.startswith(b"HTTP/1.1 101 Switching Protocols\r\n")
                 secured.sendall(b"\x88\x80\x00\x00\x00\x00")
     finally:
-        browser.execute_script("for (const stream of window.__tlsFixtureStreams || []) stream.close();")
-        server.stop()
+        run_fixture_cleanup_phases("native TLS browser", [
+            ("streams", lambda: browser.execute_script("for (const stream of window.__tlsFixtureStreams || []) stream.close();")),
+            ("server", server.stop),
+        ])
     assert "error" not in metrics, metrics
     assert metrics["opened"] == [1] * 6 and metrics["retained"] == [1] * 6, metrics
     assert metrics["ping"]["ok"] is True, metrics

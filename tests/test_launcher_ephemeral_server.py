@@ -18,11 +18,17 @@ import hmac
 from http import HTTPStatus
 from http.client import HTTPConnection
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+from tests import test_gate_daemon_monitor_statsd_recovery as recovery_contract
+from tests import test_system_status_latency_tool as latency_contract
 from tests.isolated_dev_server import build_paths
 from tests.isolated_dev_server import start_isolated_dev_server
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
+from tests.gate_harness import run_fixture_cleanup_phases
 from yomux_lib.auth import AUTH_COOKIE_NAME
 from yomux_lib.auth import read_auth_users
 
@@ -87,6 +93,33 @@ def test_row_probe_endpoint_authenticates_against_its_own_root_not_a_foreign_coo
         wrong = hmac.new(secret, f"{user.username}:not-the-password".encode("utf-8"), hashlib.sha256).hexdigest()
         assert _get(port, "/api/ping", cookie=f"{AUTH_COOKIE_NAME}_{port}={wrong}") != HTTPStatus.OK
     finally:
-        if server is not None:
-            server.stop()
-        stop_isolated_tmux_runtime(tmux_runtime)
+        run_fixture_cleanup_phases("authenticated row", [
+            ("server", lambda: server.stop() if server is not None else None),
+            ("tmux runtime", lambda: stop_isolated_tmux_runtime(tmux_runtime)),
+        ])
+
+
+@pytest.mark.parametrize("module,journey", [
+    (None, "test_row_probe_endpoint_authenticates_against_its_own_root_not_a_foreign_cookie"),
+    (recovery_contract, "test_go_stats_ignore_poisoned_legacy_statsd_record_end_to_end"),
+    (latency_contract, "test_standalone_probe_drives_an_ephemeral_authenticated_daemon"),
+], ids=["authenticated-row", "legacy-statsd-record", "standalone-probe"])
+def test_authenticated_row_fixture_retires_tmux_after_server_stop_failure(monkeypatch, tmp_path, module, journey):
+    retired = []
+
+    def fail_server_stop():
+        retired.append("server")
+        raise RuntimeError("server retirement sentinel")
+
+    def fail_body(*_args):
+        raise ValueError("body sentinel")
+
+    namespace = globals() if module is None else vars(module)
+    monkeypatch.setitem(namespace, "start_isolated_tmux_runtime", lambda *_args, **_kwargs: "private tmux")
+    monkeypatch.setitem(namespace, "stop_isolated_tmux_runtime", lambda runtime: retired.append(runtime))
+    monkeypatch.setitem(namespace, "start_isolated_dev_server", lambda *_args, **_kwargs: SimpleNamespace(port=12345, stop=fail_server_stop, assert_serving=fail_body))
+    monkeypatch.setitem(globals(), "_login_cookie", fail_body)
+    monkeypatch.setattr(latency_contract.probe, "auth_cookie", fail_body)
+    with pytest.raises(RuntimeError, match="server retirement sentinel"):
+        namespace[journey](monkeypatch, tmp_path)
+    assert retired == ["server", "private tmux"]

@@ -15,6 +15,7 @@ const allSuiteFiles = [
   'tests/layout_restore.test.js',
   'tests/gui_command_controls.test.js',
   'tests/drop_action_result.test.js',
+  'tests/finder_move.test.js',
   'tests/file_surface_menu.test.js',
   'tests/side_panes.test.js',
   'tests/cross_surface_state.test.js',
@@ -62,12 +63,22 @@ function runSuite(file, spawnChild = spawn, options = {}) {
     ? Math.max(1, Number(options.terminateGraceMs))
     : SHARD_TERMINATE_GRACE_MS;
   return new Promise(resolve => {
-    const child = spawnChild(process.execPath, [file], {cwd: process.cwd()});
+    const child = spawnChild(process.execPath, [file], {cwd: process.cwd(), detached: true});
     let output = '';
     let settled = false;
     let timedOut = false;
+    let closed = false;
     let watchdog = null;
     let terminateTimer = null;
+    const signalShard = signal => {
+      try {
+        // Each real shard owns a private group, including pipe-holding descendants.
+        if (child.pid) process.kill(-child.pid, signal);
+        else if (!closed) child.kill(signal);
+      } catch (error) {
+        if (error.code !== 'ESRCH') output += `\nshard ${signal} failed: ${error.stack || error}\n`;
+      }
+    };
     const finish = (code, signal, error = null) => {
       if (settled) return;
       settled = true;
@@ -85,7 +96,10 @@ function runSuite(file, spawnChild = spawn, options = {}) {
     child.stdout.on('data', chunk => { output += chunk; });
     child.stderr.on('data', chunk => { output += chunk; });
     child.on('error', error => finish(null, null, error));
-    child.on('close', (code, signal) => finish(code, signal));
+    child.on('close', (code, signal) => {
+      closed = true;
+      if (!timedOut) finish(code, signal);
+    });
     watchdog = setTimeout(() => {
       if (settled) return;
       timedOut = true;
@@ -93,9 +107,15 @@ function runSuite(file, spawnChild = spawn, options = {}) {
         ? 'after printing a suite summary'
         : 'without printing a suite summary';
       output += `\n✗ shard exceeded ${timeoutMs} ms watchdog ${summaryState}\n`;
-      child.kill('SIGTERM');
+      signalShard('SIGTERM');
       terminateTimer = setTimeout(() => {
-        if (!settled) child.kill('SIGKILL');
+        if (settled) return;
+        signalShard('SIGKILL');
+        // Escaped holders must not turn process termination into an unbounded EOF wait.
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.unref();
+        finish(null, 'SIGKILL');
       }, terminateGraceMs);
     }, timeoutMs);
   });

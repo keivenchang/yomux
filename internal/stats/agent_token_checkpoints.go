@@ -399,7 +399,12 @@ func (s *databaseTranscriptCursors) completedRootsCheckpoint(roots []string) (Ch
 	return Checkpoint{Key: "collector/completed-roots", Kind: "roots", Version: 1, ExpectedRevision: rev, State: raw}, nil
 }
 
-func (c *AgentTokenCollector) appendCheckpointBatch(ctx context.Context, batch AppendBatch, receipts []agentTokenReceipt) (AppendResult, error) {
+func (c *AgentTokenCollector) appendCheckpointBatch(ctx context.Context, batch AppendBatch, receipts []agentTokenReceipt) (result AppendResult, appendErr error) {
+	defer func() {
+		if appendErr == nil {
+			c.healthCommitted = true
+		}
+	}()
 	var checkpoints []Checkpoint
 	var retirement *CheckpointRetirement
 	for _, receipt := range receipts {

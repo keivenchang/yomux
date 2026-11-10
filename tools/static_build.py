@@ -86,9 +86,9 @@ NOVEL_COMPONENT_COLOR_ALLOWLIST: dict[str, tuple[frozenset[str], str]] = {
     ),
     "static_src/css/yomux/60_editor_file_panels.css": (
         frozenset({
-            "#0b0e14", "#0e1724", "#0f131b", "#17210f", "#202838", "#35d36f",
-            "#3b0a0a", "#59677d", "#6cb6df", "#9b2d33", "#a8e95a",
-            "#b9e7c2", "#b9e9ff", "#c69a15", "#d9ffe0", "#edf3ff",
+            "#0b0e14", "#0e1724", "#0f131b", "#17210f", "#35d36f",
+            "#3b0a0a", "#6cb6df", "#a8e95a",
+            "#b9e7c2", "#b9e9ff", "#c69a15", "#d9ffe0",
             "#f4b7b7", "#f6e6a8", "#ff5a6d", "#ffe0e4", "#fff8cc",
             "rgb(0 0 0 / 0.2)", "rgb(0 0 0 / 0.24)",
             "rgb(120 180 255 / 0.4)", "rgb(159 216 255 / 0.1)",
@@ -205,15 +205,6 @@ SHARED_UI_OWNERSHIP_FORBIDDEN_NEEDLES = ()
 # surfaces are deliberately separate.  The key is the stable sorted source-file pair plus the
 # normalized block digest emitted by lint_normalized_production_clones().
 NORMALIZED_PRODUCTION_CLONE_ALLOWLIST: dict[str, str] = {
-    # ChatStore and LoginRateLimiter both use the standard double-checked lazy-init guard
-    # (self._initialized flag + init lock + re-check) around a user_version WAL migration.
-    # The mechanical prologue (open, WAL-enable, BEGIN IMMEDIATE, read user_version) is
-    # already shared via atomic_file.open_wal_database/enable_wal_with_retry/begin_wal_migration;
-    # what remains is the lazy-init skeleton wrapping two deliberately separate schemas (chat's
-    # multi-step FTS ladder vs the throttle's single bucket table), each raising its own
-    # migration-error type. Collapsing further would couple two unrelated schemas.
-    "yomux_lib/chat/chat_store.py, yomux_lib/login_rate_limit.py:2e5bfc1edef9": "shared lazy-init guard; schemas deliberately separate",
-    "yomux_lib/chat/chat_store.py, yomux_lib/login_rate_limit.py:e53fcf7e7da8": "shared lazy-init guard; schemas deliberately separate",
     "yomux_lib/stats_current/migration.py, yomux_lib/stats_current/storage.py:08ee56a6d225": "SQLite migration and storage transaction wrappers are separate boundaries",
     "yomux_lib/stats_current/migration.py, yomux_lib/stats_current/storage.py:197895be7a90": "SQLite migration and storage transaction wrappers are separate boundaries",
     "yomux_lib/stats_current/migration.py, yomux_lib/stats_current/storage.py:566ab5821680": "SQLite migration and storage transaction wrappers are separate boundaries",
@@ -672,9 +663,10 @@ I18N_ALLOWED_IDENTICAL_KEYS = frozenset({
     "shortcuts.section.finderDiffer",
 })
 I18N_ALLOWED_IDENTICAL_LOCALE_KEYS: dict[str, frozenset[str]] = {
-    "de": frozenset({"transcript.role.system"}),
-    "fr": frozenset({"common.message"}),
-    "it": frozenset({"menu.file"}),
+    "de": frozenset({"transcript.role.system", "pref.appearance.editor_cursor_color.orange"}),
+    "fr": frozenset({"common.message", "pref.appearance.editor_cursor_color.orange"}),
+    "es": frozenset({"finder.move.no"}),
+    "it": frozenset({"menu.file", "finder.move.no"}),
     "pl": frozenset({"transcript.role.system"}),
 }
 _PSEUDO_SPEC = json.loads((REPO_ROOT / "static_src/pseudo-locale.json").read_text(encoding="utf-8"))
@@ -692,7 +684,6 @@ I18N_ALLOWED_DUPLICATE_KEY_GROUPS: dict[frozenset[str], str] = {
     frozenset({"branch.current", "summary.state.active"}): "current branch and active work are different states",
     frozenset({"finder.dateMode.none", "info.group.none"}): "no date and no grouping are different choices",
     frozenset({"git.status.copied", "status.copied"}): "git copied status and clipboard completion are different events",
-    frozenset({"menu.view.theme", "pref.appearance.editor_cursor_color.theme"}): "theme heading and inherit-theme cursor option are different concepts",
     frozenset({"pref.section.terminal", "shortcuts.section.terminal"}): "Preferences and shortcut sections need separate locale ownership",
     frozenset({"pr.approved", "pr.review.approvedShort"}): "full review state and compact badge have different display constraints",
     frozenset({"state.blocked", "state.short.blocked"}): "full and compact blocked states have different display constraints",
@@ -761,10 +752,11 @@ def build_asset(asset: str) -> str:
     return text
 
 
-def write_asset(asset: str) -> bool:
+def write_asset(asset: str, next_text: str | None = None) -> bool:
     output_path = OUTPUT_ROOT / asset
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    next_text = build_asset(asset)
+    if next_text is None:
+        next_text = build_asset(asset)
     try:
         current = read_text(output_path)
     except FileNotFoundError:
@@ -806,7 +798,10 @@ def check_css_braces() -> None:
             continue
         for part in parts:
             text = read_text(repo_path(part))
-            stripped = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+            try:
+                stripped = _css_without_comments(text)
+            except BuildError as error:
+                raise BuildError(f"{part}: {error}") from error
             stripped = re.sub(r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'", "", stripped)
             opens, closes = stripped.count("{"), stripped.count("}")
             if opens != closes:
@@ -898,13 +893,23 @@ def _iter_css_rules(css: str):
 
 
 def _css_without_comments(css: str) -> str:
-    """Remove comments without changing line numbers used by structural lint diagnostics."""
-    return re.sub(
-        r"/\*.*?\*/",
-        lambda match: "\n" * match.group(0).count("\n"),
-        css,
-        flags=re.DOTALL,
+    """Remove comments while preserving quoted values, positions, and valid boundaries."""
+    tokens = re.compile(
+        r'''(?P<string>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(?P<comment>/\*.*?\*/)|(?P<invalid>\*/|/\*)''',
+        re.DOTALL,
     )
+
+    def replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if match.lastgroup == "invalid":
+            line = 1 + css.count("\n", 0, match.start())
+            reason = "unterminated CSS comment" if token == "/*" else "unmatched CSS comment terminator"
+            raise BuildError(f"line {line}: {reason}")
+        if match.lastgroup == "string":
+            return token
+        return re.sub(r"[^\n]", " ", token)
+
+    return tokens.sub(replace, css)
 
 
 def _css_without_functions(css: str, function_names: set[str]) -> str:
@@ -1071,6 +1076,9 @@ def lint_css_structure() -> list[str]:
         try:
             css = _css_without_comments(read_text(path))
         except FileNotFoundError:
+            continue
+        except BuildError as error:
+            errors.append(f"{part}: {error}")
             continue
         last_rule_end = css.rfind("}")
         trailing = css[last_rule_end + 1:] if last_rule_end >= 0 else ""
@@ -1933,8 +1941,7 @@ def expected_locale_outputs() -> dict[str, str]:
     return outputs
 
 
-def write_locales() -> bool:
-    outputs = expected_locale_outputs()
+def write_locales(outputs: dict[str, str]) -> bool:
     if not outputs:
         return False
     LOCALES_OUT.mkdir(parents=True, exist_ok=True)
@@ -2585,9 +2592,14 @@ def lint_unowned_z_indexes() -> list[str]:
         for part in ASSETS.get(asset, []):
             path = repo_path(part)
             try:
-                source = _css_without_comments(read_text(path))
+                source = read_text(path)
             except FileNotFoundError:
                 continue
+            # JavaScript regex literals can contain */ without ending a comment.
+            # Only CSS inputs belong to the strict CSS lexical validator.
+            source = _css_without_comments(source) if asset == "yomux.css" else re.sub(
+                r"/\*.*?\*/", lambda match: "\n" * match.group(0).count("\n"), source, flags=re.DOTALL,
+            )
             if not part.endswith("00_tokens_base.css"):
                 for definition in token_definition_re.finditer(source):
                     name = definition.group(1)
@@ -2690,8 +2702,11 @@ def build_once(assets: list[str]) -> list[str]:
     if unknown:
         raise BuildError(f"unknown assets: {unknown}")
     check_css_braces()
-    changed = [asset for asset in assets if write_asset(asset)]
-    if write_locales():
+    # Match the native builder: reject every input before publishing any candidate file.
+    candidates = {asset: build_asset(asset) for asset in assets}
+    locales = expected_locale_outputs()
+    changed = [asset for asset, text in candidates.items() if write_asset(asset, text)]
+    if write_locales(locales):
         changed.append("locales")
     return changed
 
@@ -2740,15 +2755,17 @@ def watch_loop(assets: list[str], interval: float = 0.4, *, all_assets: bool = F
     return 0
 
 
-def _main(argv: list[str] | None = None) -> int:
+def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, epilog="--source-root PATH selects inputs; --output-directory PATH selects generated outputs (defaults: checkout and checkout/static).")
     parser.add_argument("assets", nargs="*", choices=sorted(ASSETS), help="assets to build; defaults to all")
     parser.add_argument("--check", action="store_true", help="fail if generated static files are stale")
     parser.add_argument("--watch", action="store_true", help="rebuild on source change (mtime poll) until interrupted")
     parser.add_argument("--lint-light", action="store_true", help="report dark/extreme literal colors lacking a body.theme-light override")
     parser.add_argument("--i18n-untranslated-report", action="store_true", help="print every non-allowlisted locale value that still equals en.json")
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
 
+
+def _main(args: argparse.Namespace) -> int:
     assets = args.assets or sorted(ASSETS)
     if args.lint_light:
         violations = lint_light_mode_pairs()
@@ -2839,12 +2856,13 @@ def main(argv: list[str] | None = None, *, environ: dict[str, str] | None = None
     except BuildError as error:
         print(str(error), file=sys.stderr)
         return 1
+    args = _parse_arguments(remaining)
     try:
         # Declared Bazel outputs are private to the action, so no checkout writer is involved.
         if OUTPUT_ROOT != REPO_ROOT / "static":
-            return _main(remaining)
+            return _main(args)
         with worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="static-build", environ=environ):
-            return _main(remaining)
+            return _main(args)
     except worktree_writer.WorktreeWriterBusy as error:
         print(f"STATIC BUILD REFUSED: {error}", file=sys.stderr)
         return 3

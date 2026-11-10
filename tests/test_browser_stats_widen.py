@@ -3,7 +3,7 @@
 """Retained YO!stats range-transition regressions."""
 
 from tests.helpers.fixture_tools import fixture_script
-import copy
+import ast
 import json
 import os
 from pathlib import Path
@@ -16,32 +16,26 @@ import sqlite3
 import sys
 import time
 import urllib.request
-from http import HTTPStatus
-from typing import Any
 
 import pytest
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import TimeoutException
 from selenium.common.exceptions import WebDriverException
 
-from tests.browser_helpers.browser_console import acknowledge_and_consume_only_expected_js_debug_failures
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
-from tests.gate_harness import wait_for_fixture_api_quiescence
+from tests.gate_harness import run_fixture_cleanup_phases
 from tests.gate_harness import HttpPortLease
-from yomux_lib.stats_current import storage
 from tests.tmux_runtime import stop_isolated_tmux_runtime
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tools.verify_go_agent_status_live import copy_live_jsonl
 from tools.verify_go_agent_status_live import make_opencode_database
 from tools.instance_isolation import synthetic_test_environment
-from tools.generate_go_version import generate_go_version_overlay
+from tests.isolated_dev_server import go_test_server_binary
 
 
 pytest_plugins = ("tests.e2e_browser_harness",)
 pytestmark = [pytest.mark.browser, pytest.mark.socket, pytest.mark.e2e]
 
-CPU_GRAPH_SAMPLE_COUNT = 8
-CPU_GRAPH_PERCENT = 37.0
 GO_STATS_SERIES = {
     "activity": [
         ("ask_agents", "askAgents"),
@@ -61,33 +55,6 @@ GO_STATS_SNAPSHOT_SERIES = tuple(
     for names in GO_STATS_SERIES.values()
     for snapshot_name, _dom_name in names
 ) + ("system_memory_capacity_bytes", "system_cpu_percent")
-
-_PRODUCT_ROOT_ENV_KEYS = (
-    "HOME",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_STATE_HOME",
-    "XDG_CACHE_HOME",
-    "XDG_RUNTIME_DIR",
-    "CODEX_HOME",
-    "CLAUDE_CONFIG_DIR",
-    "TMPDIR",
-    "YOLOMUX_ROOT",
-    "YOLOMUX_RUNTIME_DIR",
-    "YOLOMUX_CONFIG_DIR",
-    "YOLOMUX_STATE_DIR",
-    "YOLOMUX_CACHE_DIR",
-    "YOLOMUX_CODEX_HOME",
-    "YOLOMUX_HOST_ARTIFACT_DIR",
-    "YOLOMUX_START_LOCK_DIR",
-    "YOLOMUX_LOG_DIR",
-    "YOLOMUX_CA_DIR",
-    "YOLOMUX_TOOL_LOCK_PATH",
-    "PYTHONPYCACHEPREFIX",
-    "YOLOMUX_OPENCODE_DATABASE",
-    "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT",
-    "YOLOMUX_CODEX_TRANSCRIPT_ROOT",
-)
 
 
 def _synthetic_server_environment() -> dict[str, str]:
@@ -367,10 +334,6 @@ def _raise_login_page_diagnostic(driver):
     )
 
 
-def _register_stats_route_instrumentation(harness: Any) -> None:
-    register_browser_new_document_script(harness.driver, _STATS_ROUTE_INSTRUMENTATION)
-
-
 def _assert_native_stats_range_journey(browser, terminal_session):
     """Exercise Chromium's native range input and restore the fixture page selection."""
     original = browser.execute_script("return {range: debugRuntimeState.graphRangeSeconds, resolution: debugRuntimeState.graphResolutionOverrideSeconds, zoom: jsDebugGraphZoomDomain}")
@@ -555,6 +518,37 @@ def test_disk_usage_over_ninety_has_bold_red_text(browser, tmp_path, theme, used
         set_browser_visual_profile(browser, theme=previous_theme)
 
 
+def test_dynamic_stats_legend_hover_clears_with_interaction(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof debugGraphSetHoverLegendItems === 'function' && typeof debugGraphClearInteractionLines === 'function'"
+    ))
+    result = browser.execute_script("""
+      const panel = document.createElement('div');
+      panel.innerHTML = '<div class="js-debug-graph--hovering"><div data-js-debug-chart="hover-cleanup-fixture"><span data-js-debug-legend="active">Agent</span><div data-js-debug-hover-tooltip></div></div></div>';
+      document.body.append(panel);
+      const graph = panel.firstElementChild, chart = graph.firstElementChild;
+      jsDebugGraphHoverChartData.set('hover-cleanup-fixture', {
+        group: {dynamicAgentTokens: true},
+        buckets: [{startMs: 1000, durationMs: 1000}],
+        groupSeries: [{key: 'active', agentTokenSeries: true, hasDataValues: [true]}],
+      });
+      try {
+        debugGraphSetHoverLegendItems(chart, 1500);
+        const active = chart.querySelector('[data-js-debug-legend]');
+        const before = active.classList.contains('js-debug-legend-item--hovered');
+        debugGraphClearInteractionLines(panel, graph);
+        return {before, after: active.classList.contains('js-debug-legend-item--hovered'),
+          tooltipHidden: chart.querySelector('[data-js-debug-hover-tooltip]').hidden,
+          graphHovered: graph.classList.contains('js-debug-graph--hovering')};
+      } finally {
+        jsDebugGraphHoverChartData.delete('hover-cleanup-fixture');
+        panel.remove();
+      }
+    """)
+    assert result == {"before": True, "after": False, "tooltipHidden": True, "graphHovered": False}, result
+
+
 def test_stats_area_legend_key_is_a_thick_block(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug&layout=left&tabs=left:__debug__")
     WebDriverWait(browser, 8).until(
@@ -592,6 +586,49 @@ def test_stats_area_legend_key_is_a_thick_block(browser, tmp_path):
     }, result
 
 
+def _retire_stats_runtime(browser, port_lease, process, server_log, tmux_runtime, *,
+                          script_timeout=None, script_id=None, all_windows=False):
+    def retire_page(handle):
+        if handle is not None:
+            browser.switch_to.window(handle)
+        browser.get("about:blank")
+        WebDriverWait(browser, 3, poll_frequency=0.05).until(
+            lambda driver: str(driver.current_url) == "about:blank"
+        )
+
+    def retire_pages():
+        handles = list(browser.window_handles) if all_windows else [None]
+        run_fixture_cleanup_phases("stats browser pages", [
+            ("browser page", lambda handle=handle: retire_page(handle)) for handle in handles
+        ])
+
+    def stop_server():
+        if process is None:
+            return
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+    phases = []
+    if script_timeout is not None:
+        phases.append(("script timeout", lambda: browser.set_script_timeout(script_timeout)))
+    if script_id is not None:
+        phases.append(("browser instrumentation", lambda: browser.execute_cdp_cmd(
+            "Page.removeScriptToEvaluateOnNewDocument", {"identifier": script_id})))
+    phases.extend([
+        ("browser pages", retire_pages),
+        ("port lease", port_lease.close),
+        ("server log", lambda: server_log.close() if server_log is not None else None),
+        ("server process", stop_server),
+        ("tmux runtime", lambda: stop_isolated_tmux_runtime(tmux_runtime)),
+    ])
+    run_fixture_cleanup_phases("stats browser runtime", phases)
+
+
 def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser, tmp_path, monkeypatch, request):
     """Exercise the shipped JS validator against the live Go stats endpoint."""
     source_root = Path(__file__).resolve().parents[1]
@@ -602,42 +639,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
     for relative in ("static", "tools", "yomux_lib", "assets"):
         shutil.copytree(source_root / relative, private_source_root / relative)
     configured_binary = os.environ.get("YOLOMUX_GO_BINARY", "").strip()
-    binary = Path(configured_binary) if configured_binary else tmp_path / "yolomux-go"
-    if not configured_binary:
-        go_binary = shutil.which("go")
-        if not go_binary:
-            pytest.skip("Go browser regression requires the Go toolchain")
-        generated_version = tmp_path / "product_version_generated.go"
-        go_overlay = tmp_path / "go-overlay.json"
-        generate_go_version_overlay(
-            source_root / "version.yaml",
-            generated_version,
-            go_overlay,
-            source_root / "cmd" / "yomux-go" / "product_version_generated.go",
-        )
-        go_environment = {
-            **os.environ,
-            "GOTOOLCHAIN": "local",
-            "GOWORK": "off",
-            "GO111MODULE": "on",
-        }
-        image_module_cache = Path("/opt/yomux-go-mod-cache")
-        if image_module_cache.is_dir():
-            go_environment.update(
-                {
-                    "GOMODCACHE": str(image_module_cache),
-                    "GOPROXY": "off",
-                    "GOSUMDB": "off",
-                    "GOCACHE": str(tmp_path / "go-cache"),
-                    "GOPATH": str(tmp_path / "go-path"),
-                }
-            )
-        subprocess.run(
-            [go_binary, "build", "-buildvcs=false", "-overlay", str(go_overlay), "-o", str(binary), "./cmd/yomux-go"],
-            cwd=source_root,
-            check=True,
-            env=go_environment,
-        )
+    binary = Path(configured_binary) if configured_binary else go_test_server_binary(source_root)
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "auth.yaml").write_text(
@@ -1225,37 +1227,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
         assert result["unrelatedRouteCounts"].get("/api/activity", 0) == 1, result
         _assert_native_stats_range_journey(browser, tmux_runtime.sessions[0])
     finally:
-        active_error = sys.exc_info()[1]
-        browser_retirement_error = None
-        try:
-            # This test owns a Go listener, not the fixture HTTP server. Retire the shared browser
-            # page while that listener is still alive so EventSource/fetch teardown cannot turn into
-            # connection-refused noise in the autouse browser reset.
-            browser.get("about:blank")
-            WebDriverWait(browser, 3, poll_frequency=0.05).until(
-                lambda driver: str(driver.current_url) == "about:blank"
-            )
-        except WebDriverException as error:
-            browser_retirement_error = AssertionError(
-                f"Go stats browser page did not retire before server shutdown: {error}"
-            )
-        port_lease.close()
-        if server_log is not None:
-            server_log.close()
-        if process is not None:
-            if process.poll() is None:
-                process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        stop_isolated_tmux_runtime(tmux_runtime)
-        if browser_retirement_error is not None:
-            if active_error is not None:
-                print(f"Go stats browser cleanup also failed: {browser_retirement_error}", file=sys.stderr)
-            else:
-                raise browser_retirement_error
+        _retire_stats_runtime(browser, port_lease, process, server_log, tmux_runtime)
 
 
 def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_path, monkeypatch, request):
@@ -1272,42 +1244,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
     for relative in ("static", "tools", "yomux_lib", "assets"):
         shutil.copytree(source_root / relative, private_source_root / relative)
     configured_binary = os.environ.get("YOLOMUX_GO_BINARY", "").strip()
-    binary = Path(configured_binary) if configured_binary else tmp_path / "yolomux-go"
-    if not configured_binary:
-        go_binary = shutil.which("go")
-        if not go_binary:
-            pytest.skip("Go collector browser regression requires the Go toolchain")
-        build_environment = {
-            **os.environ,
-            "GOTOOLCHAIN": "local",
-            "GOWORK": "off",
-            "GO111MODULE": "on",
-        }
-        image_module_cache = Path("/opt/yomux-go-mod-cache")
-        if image_module_cache.is_dir():
-            build_environment.update(
-                {
-                    "GOMODCACHE": str(image_module_cache),
-                    "GOPROXY": "off",
-                    "GOSUMDB": "off",
-                    "GOCACHE": str(tmp_path / "go-cache"),
-                    "GOPATH": str(tmp_path / "go-path"),
-                }
-            )
-        generated_version = tmp_path / "product_version_generated.go"
-        go_overlay = tmp_path / "go-overlay.json"
-        generate_go_version_overlay(
-            source_root / "version.yaml",
-            generated_version,
-            go_overlay,
-            source_root / "cmd" / "yomux-go" / "product_version_generated.go",
-        )
-        subprocess.run(
-            [go_binary, "build", "-buildvcs=false", "-overlay", str(go_overlay), "-o", str(binary), "./cmd/yomux-go"],
-            cwd=source_root,
-            check=True,
-            env=build_environment,
-        )
+    binary = Path(configured_binary) if configured_binary else go_test_server_binary(source_root)
     home, opencode_database, opencode_interpreter = _prepare_go_collector_sources(tmp_path)
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -1605,32 +1542,8 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
         assert "ready" in history_retry["retryStreamEvents"], history_retry
         _assert_go_refill_browser_journey(browser, tmp_path, home, opencode_database)
     finally:
-        browser.set_script_timeout(original_script_timeout)
-        active_error = sys.exc_info()[1]
-        browser_retirement_error = None
-        if active_error is not None:
-            print(server_log_path.read_text(encoding="utf-8")[-8000:], flush=True)
-        try:
-            if stats_stream_script_id is not None:
-                browser.execute_cdp_cmd("Page.removeScriptToEvaluateOnNewDocument", {"identifier": stats_stream_script_id})
-            browser.get("about:blank")
-            WebDriverWait(browser, 3, poll_frequency=0.05).until(lambda driver: str(driver.current_url) == "about:blank")
-        except WebDriverException as error:
-            browser_retirement_error = AssertionError(f"Go collector browser page did not retire: {error}")
-        port_lease.close()
-        if server_log is not None:
-            server_log.close()
-        if process is not None:
-            if process.poll() is None:
-                process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        stop_isolated_tmux_runtime(tmux_runtime)
-        if browser_retirement_error is not None and active_error is None:
-            raise browser_retirement_error
+        _retire_stats_runtime(browser, port_lease, process, server_log, tmux_runtime,
+                              script_timeout=original_script_timeout, script_id=stats_stream_script_id)
 
 
 def test_go_codex_completion_acknowledges_through_live_activity_and_client_events(browser, tmp_path, monkeypatch):
@@ -1640,20 +1553,7 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
     for relative in ("static", "tools", "yomux_lib", "assets"):
         shutil.copytree(source_root / relative, private_source_root / relative)
     configured_binary = os.environ.get("YOLOMUX_GO_BINARY", "").strip()
-    binary = Path(configured_binary) if configured_binary else tmp_path / "yolomux-go"
-    if not configured_binary:
-        go_binary = shutil.which("go")
-        if not go_binary:
-            pytest.skip("Go Codex lifecycle browser regression requires the Go toolchain")
-        build_environment = {**os.environ, "GOTOOLCHAIN": "local", "GOWORK": "off", "GO111MODULE": "on"}
-        image_module_cache = Path("/opt/yomux-go-mod-cache")
-        if image_module_cache.is_dir():
-            build_environment.update({"GOMODCACHE": str(image_module_cache), "GOPROXY": "off", "GOSUMDB": "off", "GOCACHE": str(tmp_path / "go-cache"), "GOPATH": str(tmp_path / "go-path")})
-        generated_version = tmp_path / "product_version_generated.go"
-        go_overlay = tmp_path / "go-overlay.json"
-        generate_go_version_overlay(source_root / "version.yaml", generated_version, go_overlay, source_root / "cmd" / "yomux-go" / "product_version_generated.go")
-        subprocess.run([go_binary, "build", "-buildvcs=false", "-overlay", str(go_overlay), "-o", str(binary), "./cmd/yomux-go"], cwd=source_root, check=True, env=build_environment)
-
+    binary = Path(configured_binary) if configured_binary else go_test_server_binary(source_root)
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "auth.yaml").write_text("users:\n  - username: lifecycle-admin\n    password: fixture-only-password\n    role: admin\n", encoding="utf-8")
@@ -1712,6 +1612,7 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
     server_log_path = tmp_path / "go-codex-lifecycle.log"
     server_log = server_log_path.open("w", encoding="utf-8")
     process = None
+    script_id = None
     try:
         subprocess.run(
             [tmux_runtime.tmux_binary, "-S", str(tmux_runtime.socket_path), "new-window", "-d", "-t", codex_session, "-n", "attention", f"bash -c {shlex.quote(attention_screen_command)}"],
@@ -1981,34 +1882,8 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
         errors = [entry for entry in browser.get_log("browser") if "Uncaught" in entry["message"]]
         assert not errors, errors
     finally:
-        active_error = sys.exc_info()[1]
-        browser_retirement_error = None
-        for window_handle in list(browser.window_handles):
-            try:
-                browser.switch_to.window(window_handle)
-                browser.get("about:blank")
-                WebDriverWait(browser, 3, poll_frequency=0.05).until(lambda driver: str(driver.current_url) == "about:blank")
-            except WebDriverException as error:
-                browser_retirement_error = AssertionError(f"Go Codex lifecycle browser page did not retire: {error}")
-        if 'script_id' in locals():
-            try:
-                browser.execute_cdp_cmd("Page.removeScriptToEvaluateOnNewDocument", {"identifier": script_id})
-            except WebDriverException:
-                pass
-        port_lease.close()
-        if server_log is not None:
-            server_log.close()
-        if process is not None:
-            if process.poll() is None:
-                process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        stop_isolated_tmux_runtime(tmux_runtime)
-        if browser_retirement_error is not None and active_error is None:
-            raise browser_retirement_error
+        _retire_stats_runtime(browser, port_lease, process, server_log, tmux_runtime,
+                              script_id=script_id, all_windows=True)
 
 
 def _assert_go_refill_browser_journey(browser, tmp_path, home, opencode_database):
@@ -2089,7 +1964,7 @@ def _assert_go_refill_browser_journey(browser, tmp_path, home, opencode_database
         assert attached["operation_id"] == running["operation_id"], attached
         # Begin navigation while running; the same job subsequently fails
         # its bounded writer wait, and the new page must retain that outcome.
-        browser.execute_cdp_cmd("Page.reload", {})
+        browser.refresh()
         wait_for_status("Couldn’t refill agent history. Your previous data is unchanged.")
         blocker.rollback()
     reloaded = browser.execute_async_script("const done=arguments[0]; fetch('/api/stats-refill').then(r=>r.json()).then(done);")
@@ -2149,330 +2024,6 @@ def _go_server_http_is_ready(port: int) -> bool:
             return response.status == 200
     except OSError:
         return False
-
-
-def _start_production_stats_server(
-    *,
-    kind: str,
-    binary: Path,
-    source_root: Path,
-    root: Path,
-    project_root: Path,
-    database: Path,
-    config_dir: Path,
-    tmux_socket: Path,
-    session: str,
-    runtime_dir: Path,
-    log_path: Path,
-):
-    """Start one production stats server with a private, already-seeded store."""
-
-    if kind != "go":
-        raise ValueError("production stats browser fixtures use the Go server")
-    port_lease = HttpPortLease.reserve()
-    environment = _synthetic_server_environment()
-    environment.update({
-        "HOME": str(root / "home"),
-        "YOMUX_ROOT": str(root),
-        "YOLOMUX_CONFIG_DIR": str(config_dir),
-        "YOLOMUX_STATE_DIR": str(root / "state"),
-        "YOLOMUX_CACHE_DIR": str(root / "cache"),
-        "YOLOMUX_RUNTIME_DIR": str(runtime_dir),
-        "XDG_CONFIG_HOME": str(root / "xdg-config"),
-        "XDG_DATA_HOME": str(root / "xdg-data"),
-        "XDG_STATE_HOME": str(root / "xdg-state"),
-        "XDG_CACHE_HOME": str(root / "xdg-cache"),
-        "XDG_RUNTIME_DIR": str(root / "xdg-runtime"),
-        "CODEX_HOME": str(root / "codex-home"),
-        "CLAUDE_CONFIG_DIR": str(root / "claude-config"),
-        "TMPDIR": str(root / "tmp"),
-        "YOLOMUX_TMUX_SOCKET": str(tmux_socket),
-        "YOLOMUX_STATS_DISABLE_COLLECTORS": "1",
-        "PYTHONPATH": str(source_root),
-        "PYTHONDONTWRITEBYTECODE": "1",
-    })
-    for private_path in (
-        environment["HOME"], environment["XDG_CONFIG_HOME"], environment["XDG_DATA_HOME"],
-        environment["XDG_STATE_HOME"], environment["XDG_CACHE_HOME"], environment["XDG_RUNTIME_DIR"],
-        environment["CODEX_HOME"], environment["CLAUDE_CONFIG_DIR"], environment["TMPDIR"],
-    ):
-        Path(private_path).mkdir(parents=True, exist_ok=True)
-    command = [
-        str(binary),
-        "--http",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        str(port_lease.port),
-        "--root",
-        str(project_root),
-        "--config",
-        str(config_dir),
-        "--stats",
-        str(database),
-    ]
-    cwd = root
-    ready = _go_server_http_is_ready
-    log_file = log_path.open("w", encoding="utf-8")
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        env=environment,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-    )
-    log_file.close()
-    port_lease.release()
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise AssertionError(f"{kind} production server exited: {log_path.read_text(encoding='utf-8')[-6000:]}")
-        if ready(port_lease.port):
-            return process, port_lease, f"http://127.0.0.1:{port_lease.port}"
-        time.sleep(0.1)
-    process.terminate()
-    process.wait(timeout=10)
-    raise AssertionError(f"{kind} production server did not become healthy: {log_path.read_text(encoding='utf-8')[-6000:]}")
-
-
-def _stop_production_stats_server(process, port_lease: HttpPortLease) -> None:
-    if process.poll() is None:
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-    port_lease.close()
-
-
-def _production_stats_browser_pass(browser, base_url: str, session: str, request, *, stats_only: bool = False) -> dict[str, Any]:
-    """Run one identical authenticated browser journey and return stable wire evidence."""
-
-    register_browser_new_document_script(browser, _STATS_ROUTE_INSTRUMENTATION)
-    browser.get(f"{base_url}/login")
-    login_form = WebDriverWait(browser, 15, poll_frequency=0.05).until(
-        lambda driver: driver.find_elements(By.CSS_SELECTOR, 'form[action="/login"]')
-        or driver.find_elements(By.CSS_SELECTOR, 'input[name="username"]')
-        or (_raise_login_page_diagnostic(driver))
-    )[0]
-    login_form.find_element(By.NAME, "username").send_keys("e2e-admin")
-    login_form.find_element(By.NAME, "password").send_keys("fixture-only-password")
-    login_form.find_element(By.CSS_SELECTOR, "button[type=submit]").click()
-    WebDriverWait(browser, 15, poll_frequency=0.05).until(
-        lambda driver: driver.current_url.split("?", 1)[0].rstrip("/") == base_url
-    )
-    request.node._yomux_skip_reused_browser_diagnostic = True
-    stats_only_query = "&stats_only=1" if stats_only else ""
-    browser.get(
-        f"{base_url}/?sessions={session},debug&layout=left&tabs=left:{session},__debug__*&debug=1{stats_only_query}"
-    )
-    WebDriverWait(browser, 15, poll_frequency=0.05).until(
-        lambda driver: driver.execute_script(
-            "return document.readyState === 'complete' && document.querySelector('#grid') !== null"
-        )
-    )
-    try:
-        # The Go lifecycle repairs the cold ring in bounded 64-cell runs.  The
-        # fixture intentionally starts with all four rings empty, so this wait
-        # covers the measured repair queue rather than treating a still-pending
-        # product as a browser failure.
-        WebDriverWait(browser, 60, poll_frequency=0.05).until(
-            lambda driver: driver.execute_script(
-                "return typeof jsDebugHistoryReadiness !== 'undefined' "
-                "&& jsDebugHistoryReadiness.phase === 'ready' "
-                "&& jsDebugCurrentStatsClientState?.client?.controller?.()?.generation?.() !== null"
-            )
-        )
-    except TimeoutException as error:
-        diagnostic = browser.execute_async_script(
-            """
-            const done = arguments[arguments.length - 1];
-            const inspect = async path => {
-              const response = await fetch(path, {cache: 'no-store'});
-              const text = await response.text();
-              let body;
-              try { body = JSON.parse(text); } catch (_) { body = text; }
-              return {status: response.status, body};
-            };
-            Promise.all([
-              inspect('/api/stats-agent-status'),
-              inspect('/api/stats-capabilities'),
-              inspect('/api/stats-snapshot?range_seconds=300&resolution=AUTO&client_id=production-browser'),
-              inspect('/api/system-status'),
-            ]).then(([status, capabilities, snapshot, system]) => done({
-              url: location.href,
-              readiness: globalThis.jsDebugHistoryReadinessSnapshot?.() || null,
-              stream: globalThis.jsDebugCurrentStatsStreamEvidence?.() || null,
-              body: document.body?.innerText?.slice(0, 1600) || '',
-              failures: typeof jsDebugFailureEvents === 'function' ? jsDebugFailureEvents() : [],
-              status,
-              capabilities,
-              snapshot,
-              system,
-            })).catch(error => done({error: String(error?.stack || error)}));
-            """
-        )
-        raise AssertionError(f"{base_url} browser stats did not become ready: {diagnostic}") from error
-    evidence = browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        const inspect = async path => {
-          const response = await fetch(path, {cache: 'no-store'});
-          const text = await response.text();
-          let body;
-          try { body = JSON.parse(text); } catch (_) { body = text; }
-          return {status: response.status, body};
-        };
-        const snapshotPath = '/api/stats-snapshot?range_seconds=300&resolution=AUTO&client_id=production-browser';
-        const waitForSnapshot = async () => {
-          const deadline = Date.now() + 60000;
-          let latest;
-          while (Date.now() < deadline) {
-            latest = await inspect(snapshotPath);
-            if (latest.status === 200) return latest;
-            await new Promise(resolve => setTimeout(resolve, 250));
-          }
-          return {error: 'snapshot did not converge before deadline', latest};
-        };
-        Promise.all([
-          inspect('/api/stats-capabilities'),
-          inspect('/api/stats-agent-status'),
-          waitForSnapshot(),
-        ]).then(([capabilities, status, snapshot]) => done({
-          error: snapshot.error || null,
-          capabilitiesStatus: capabilities.status,
-          statusStatus: status.status,
-          snapshotStatus: snapshot.status || 0,
-          capabilities: capabilities.body,
-          status: status.body,
-          snapshot: snapshot.body,
-          snapshotDiagnostic: snapshot.latest || null,
-        })).catch(error => done({error: String(error?.stack || error)}));
-        """
-    )
-    assert evidence.get("error") is None, evidence
-    assert evidence["capabilitiesStatus"] == 200, evidence
-    assert evidence["snapshotStatus"] == 200, evidence
-    snapshot = evidence["snapshot"]
-    values = [
-        (name, float(item.get("value", 0)))
-        for bucket in snapshot.get("buckets", [])
-        for name, item in bucket.get("series", {}).items()
-        if isinstance(item, dict)
-    ]
-    assert any(name == "system_cpu_percent" and value > 0 for name, value in values), evidence
-    assert any(name == "system_memory_used_bytes" and value > 0 for name, value in values), evidence
-    assert any(name.startswith("agent_tokens_per_minute:") and value > 0 for name, value in values), evidence
-    charts = browser.execute_script(
-        """
-        return Object.fromEntries(['cpu', 'memory', 'activity', 'agentTokens'].map(name => {
-          const chart = document.querySelector(`[data-js-debug-chart="${name}"]`);
-          const geometry = [...(chart?.querySelectorAll('[data-js-debug-series], [data-js-debug-area-series], [data-js-debug-bar-series]') || [])]
-            .filter(node => node.getAttribute('d') || node.getAttribute('points') || Number(node.getAttribute('height') || 0)).length;
-          const rect = chart?.getBoundingClientRect();
-          return [name, {present: Boolean(chart), visible: Boolean(rect && rect.width > 0 && rect.height > 0), geometry, waiting: chart?.textContent?.includes('Waiting for server stats') || false}];
-        }));
-        """
-    )
-    assert all(item["present"] and item["visible"] and item["geometry"] > 0 and not item["waiting"] for item in charts.values()), {"evidence": evidence, "charts": charts}
-    stream_events = browser.execute_script(
-        "return (globalThis.__yomuxStatsStreamEvents || []).map(item => ({event: item.event, data: item.data}));"
-    )
-    # EventSource can report a connection error before its first successful open. The protocol
-    # handshake is the ordered ack/snapshot/ready sequence; a transient pre-open error does not
-    # invalidate a generation that subsequently became ready.
-    handshake = [item["event"] for item in stream_events if item["event"] in {"ack", "snapshot", "ready"}][:3]
-    if handshake != ["ack", "snapshot", "ready"]:
-        raise AssertionError(f"initial stats stream did not settle to ack/snapshot/ready: {stream_events}")
-    route_counts = browser.execute_script(
-        "return {stats: {...(globalThis.__yomuxStatsRouteCounts || {})}, unrelated: {...(globalThis.__yomuxStatsUnrelatedRouteCounts || {})}};"
-    )
-    return {
-        "capabilities": evidence["capabilities"],
-        "status": evidence["status"],
-        "snapshot": {
-            "protocol_version": snapshot.get("protocol_version"),
-            "range_seconds": snapshot.get("range_seconds"),
-            "requested_resolution": snapshot.get("requested_resolution"),
-            "resolution_seconds": snapshot.get("resolution_seconds"),
-            "buckets": [
-                {
-                    "duration": bucket.get("duration"),
-                    "series": {
-                        name: item.get("value")
-                        for name, item in bucket.get("series", {}).items()
-                        if isinstance(item, dict)
-                    },
-                }
-                for bucket in snapshot.get("buckets", [])
-            ],
-            "no_data": [
-                {
-                    key: span.get(key)
-                    for key in ("family", "source_id", "reason", "source_cadence_seconds")
-                }
-                for span in snapshot.get("no_data", [])
-            ],
-            "cost_report": snapshot.get("cost_report"),
-        },
-        # Compare the initial browser journey only. Later ready/delta frames are
-        # wall-clock dependent: Go may publish the next open bucket while the
-        # browser is collecting chart evidence, whereas Python can still be on
-        # the same generation. Raw initial SSE parity is covered independently
-        # by cmd/yomux-go/http_server_parity_test.go.
-        "stream_events": stream_events[:3],
-        "stream_events_observed": stream_events,
-        "stream_handshake": handshake,
-        "route_counts": route_counts,
-    }
-
-
-def _normalize_stats_capabilities_for_parity(payload: Any) -> Any:
-    """Compare the route contract while ignoring each server's request UUID."""
-    if not isinstance(payload, dict):
-        return payload
-    normalized = copy.deepcopy(payload)
-    request_record = normalized.get("request")
-    if isinstance(request_record, dict) and "id" in request_record:
-        request_record["id"] = "<request-id>"
-    return normalized
-
-
-def _normalize_stats_snapshot_for_parity(payload: Any) -> Any:
-    """Compare seeded facts while excluding backend-specific live browser telemetry."""
-    if not isinstance(payload, dict):
-        return payload
-    normalized = copy.deepcopy(payload)
-    buckets = normalized.get("buckets")
-    if isinstance(buckets, list):
-        comparable = []
-        for bucket in buckets:
-            if not isinstance(bucket, dict):
-                continue
-            series = bucket.get("series")
-            if not isinstance(series, dict):
-                continue
-            bucket["series"] = {name: item for name, item in series.items() if not str(name).startswith("browser_")}
-            if bucket["series"]:
-                comparable.append(bucket)
-        normalized["buckets"] = comparable
-    return normalized
-
-
-def _stats_route_counts(harness: Any) -> dict[str, int]:
-    return harness.driver.execute_script("return {...globalThis.__yomuxStatsRouteCounts};")
-
-
-def _browser_failure_fingerprint(client: Any, signature: str, minimum_count: int) -> dict[str, Any] | bool:
-    response = client.browser_diagnostics()
-    status = response.get("observation_status", {})
-    for fingerprint in status.get("fingerprints", ()):
-        if fingerprint.get("signature") == signature and int(fingerprint.get("count") or 0) >= minimum_count:
-            return {"fingerprint": fingerprint, "status": status}
-    return False
 
 
 def test_stats_authentication_expiry_paints_signed_out_and_stops_real_browser_polling(browser, tmp_path):
@@ -2830,309 +2381,97 @@ def test_retained_stats_widen_fetches_and_paints_the_full_exact_window(browser, 
         assert transition["overlayVisible"] is False, transition
 
 
-def _open_real_stats_graph(harness: Any, *, include_finder: bool = True) -> None:
-    session = str(harness.runtime.tmux.sessions[0])
-    if include_finder:
-        harness.load(tabs=("files", "__debug__", session))
-    else:
-        harness.driver.get(
-            f"{harness.base_url}/?sessions={session}&layout=left&tabs=left:__debug__,{session}"
-        )
-        WebDriverWait(harness.driver, 12, poll_frequency=0.05).until(
-            lambda driver: driver.execute_script(
-                "return document.readyState === 'complete' "
-                "&& typeof syncJsDebugCurrentStatsClient === 'function' "
-                "&& document.querySelector('#grid') !== null;"
-            )
-        )
-    harness.switch_session("__debug__")
-    result = harness.driver.execute_async_script(
-        r"""
-        const done = arguments[arguments.length - 1];
-        const graphTab = document.querySelector('[data-js-debug-subtab="graph"]');
-        graphTab?.click();
-        window.__yomuxTestWaitFor(() => {
-          const client = jsDebugCurrentStatsClientState?.client;
-          const select = document.querySelector('.js-debug-panel [data-js-debug-resolution-override]');
-          return client?.controller?.()?.generation?.() && select ? true : null;
-        }, {timeoutMs: 12000, description: 'real YO!stats generation and interval picker'})
-          .then(() => done({ok: true}), error => done({error: String(error?.stack || error)}));
-        """
-    )
-    assert result == {"ok": True}, result
+@pytest.mark.parametrize("consumer", [
+    "test_go_stats_capabilities_validate_and_load_fifteen_minute_history",
+    "test_go_collectors_drive_browser_stats_without_seeded_facts",
+    "test_go_codex_completion_acknowledges_through_live_activity_and_client_events",
+])
+def test_stats_browser_consumers_use_complete_native_fixture_builder(tmp_path, monkeypatch, consumer):
+
+    class BuilderReached(Exception):
+        pass
+
+    def complete_builder(source_root):
+        assert source_root == Path(__file__).resolve().parents[1]
+        raise BuilderReached()
+
+    original_run = subprocess.run
+
+    def reject_private_recipe(command, **kwargs):
+        if len(command) > 1 and command[1] == "build":
+            raise AssertionError("consumer bypassed the complete native fixture builder")
+        return original_run(command, **kwargs)
+
+    monkeypatch.delenv("YOMUX_GO_BINARY", raising=False)
+    monkeypatch.delenv("YOLOMUX_GO_BINARY", raising=False)
+    monkeypatch.setitem(globals(), "go_test_server_binary", complete_builder)
+    monkeypatch.setattr(shutil, "copytree", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(subprocess, "run", reject_private_recipe)
+    arguments = {"browser": None, "tmp_path": tmp_path, "monkeypatch": monkeypatch}
+    if consumer != "test_go_codex_completion_acknowledges_through_live_activity_and_client_events":
+        arguments["request"] = None
+    with pytest.raises(BuilderReached):
+        globals()[consumer](**arguments)
 
 
-def _wait_for_real_stats_fixture_jobs(harness: Any) -> dict[str, Any]:
-    def settled(_driver):
-        status = harness.runtime.app.job_client.runtime_status()
-        queues = status.get("queues") if isinstance(status.get("queues"), dict) else {}
-        if status.get("active_records") or any(int(count or 0) for count in queues.values()):
-            return False
-        return status
+@pytest.mark.shared_tooling
+@pytest.mark.parametrize("consumer", [
+    "test_go_stats_capabilities_validate_and_load_fifteen_minute_history",
+    "test_go_collectors_drive_browser_stats_without_seeded_facts",
+    "test_go_codex_completion_acknowledges_through_live_activity_and_client_events",
+])
+@pytest.mark.parametrize("failure", ["server", "browser"])
+def test_stats_browser_cleanup_retires_tmux_after_failure(monkeypatch, consumer, failure):
+    events = []
 
-    return WebDriverWait(harness.driver, 20, poll_frequency=0.1).until(settled)
+    class Process:
+        def poll(self):
+            return None
 
+        def terminate(self):
+            events.append("terminate")
 
-def _flush_and_stop_real_stats_graph(harness: Any, *, require_client: bool = False) -> dict[str, Any]:
-    try:
-        receipt = harness.driver.execute_async_script(
-            """
-            const done = arguments[arguments.length - 1];
-            const client = jsDebugCurrentStatsClientState.client;
-            const startPromise = jsDebugCurrentStatsClientState.startPromise;
-            const lifecycle = {
-              hadClient: Boolean(client),
-              startPending: Boolean(startPromise),
-              hadGeneration: Boolean(client?.controller?.()?.generation?.()),
-            };
-            const errors = [];
-            (async () => {
-              try {
-                if (startPromise) await startPromise;
-              } catch (error) {
-                errors.push({phase: 'start', error: String(error?.stack || error)});
-              } finally {
-                try {
-                  client?.stop?.();
-                } catch (error) {
-                  errors.push({phase: 'stop', error: String(error?.stack || error)});
-                }
-              }
-              try {
-                await flushJsDebugCurrentObservations();
-              } catch (error) {
-                errors.push({phase: 'flush', error: String(error?.stack || error)});
-              }
-              const barrier = jsDebugCurrentObservationReceiptBarrier();
-              done({lifecycle, errors, barrier});
-            })().catch(error => done({fatalError: String(error?.stack || error), lifecycle, errors}));
-            """
-        )
-    finally:
-        try:
-            wait_for_fixture_api_quiescence(harness.driver)
-        finally:
-            _wait_for_real_stats_fixture_jobs(harness)
-    if receipt.get("fatalError") is not None or receipt["errors"]:
-        raise AssertionError(f"real stats cleanup failed: {json.dumps(receipt, sort_keys=True)}")
-    assert receipt["barrier"]["quiescent"] is True, receipt
-    if require_client:
-        assert receipt["lifecycle"]["hadClient"] is True, receipt
-    return receipt
+        def wait(self, **_kwargs):
+            if failure == "server":
+                raise RuntimeError("fixture process wait failed")
 
+    class Browser:
+        current_url = "about:blank"
+        @property
+        def window_handles(self):
+            if failure == "browser":
+                raise RuntimeError("fixture browser failed")
+            return []
 
-def _exercise_real_stats_interval_round_trip(harness: Any) -> dict[str, Any]:
-    return harness.driver.execute_async_script(
-        r"""
-        const done = arguments[arguments.length - 1];
-        (async () => {
-          const capabilitiesResponse = await fetch('/api/stats-capabilities', {cache: 'no-store'});
-          const capabilities = await capabilitiesResponse.json();
-          const capability = capabilities.ranges.find(row => row.range_seconds === 300);
-          if (capabilitiesResponse.status !== 200 || !capability) {
-            throw new Error(`5-minute stats capability missing: ${capabilitiesResponse.status}`);
-          }
-          const waitForSelection = async rangeSeconds => {
-            await window.__yomuxTestWaitFor(() => {
-              const controller = jsDebugCurrentStatsClientState?.client?.controller?.();
-              const selection = controller?.selection?.();
-              const generation = controller?.generation?.();
-              const select = document.querySelector('.js-debug-panel [data-js-debug-resolution-override]');
-              return selection?.range_seconds === rangeSeconds
-                && generation?.range_seconds === rangeSeconds
-                && jsDebugHistoryReadiness?.phase === 'ready'
-                && select ? true : null;
-            }, {timeoutMs: 12000, description: `real YO!stats ${rangeSeconds}s selection`});
-          };
-          const setRange = async rangeSeconds => {
-            const options = [...document.querySelectorAll('.js-debug-panel #js-debug-range-options option')];
-            const index = options.findIndex(option => Number(option.dataset.jsDebugRange) === rangeSeconds);
-            if (index < 0) throw new Error(`range ${rangeSeconds}s is not offered`);
-            const slider = document.querySelector('.js-debug-panel [data-js-debug-range-slider]');
-            slider.focus({preventScroll: true});
-            slider.value = String(index);
-            slider.dispatchEvent(new Event('input', {bubbles: true}));
-            slider.dispatchEvent(new Event('change', {bubbles: true}));
-            await waitForSelection(rangeSeconds);
-          };
-          const setResolution = async resolutionSeconds => {
-            const select = document.querySelector('.js-debug-panel [data-js-debug-resolution-override]');
-            if (![...select.options].some(option => Number(option.value) === resolutionSeconds)) {
-              throw new Error(`resolution ${resolutionSeconds}s is not offered`);
-            }
-            select.focus({preventScroll: true});
-            select.value = String(resolutionSeconds);
-            select.dispatchEvent(new Event('change', {bubbles: true}));
-            await window.__yomuxTestWaitFor(() => {
-              const controller = jsDebugCurrentStatsClientState?.client?.controller?.();
-              const generation = controller?.generation?.();
-              return controller?.selection?.()?.resolution === resolutionSeconds
-                && generation?.requested_resolution === resolutionSeconds
-                && jsDebugHistoryReadiness?.phase === 'ready' ? true : null;
-            }, {timeoutMs: 12000, description: `real YO!stats ${resolutionSeconds}s resolution`});
-          };
-          const pickerState = label => {
-            const controller = jsDebugCurrentStatsClientState.client.controller();
-            const generation = controller.generation();
-            const select = document.querySelector('.js-debug-panel [data-js-debug-resolution-override]');
-            return {
-              label,
-              options: [...select.options].map(option => option.value),
-              selected: select.value,
-              selection: controller.selection(),
-              generation: {
-                range_seconds: generation.range_seconds,
-                requested_resolution: generation.requested_resolution,
-                resolution_seconds: generation.resolution_seconds,
-                buckets: generation.buckets.length,
-                source_generation: generation.source_generation,
-              },
-            };
-          };
+        def get(self, _url):
+            if failure == "browser":
+                raise RuntimeError("fixture browser failed")
 
-          await setRange(300);
-          await setResolution(1);
-          const before = pickerState('before');
-          await setRange(3600);
-          const widened = pickerState('widened');
-          await setRange(300);
-          const returned = pickerState('returned');
-          done({
-            expected: ['0', ...capability.explicit_resolution_seconds.map(String)],
-            before,
-            widened,
-            returned,
-          });
-        })().catch(error => done({error: String(error?.stack || error)}));
-        """
-    )
+        def set_script_timeout(self, _timeout):
+            if failure == "browser":
+                raise RuntimeError("fixture browser failed")
 
+    class Lease:
+        def close(self):
+            events.append("lease")
 
-def _real_stats_picker_state(harness: Any) -> dict[str, Any]:
-    return harness.driver.execute_script(
-        """
-        const controller = jsDebugCurrentStatsClientState.client.controller();
-        const generation = controller.generation();
-        const select = document.querySelector('.js-debug-panel [data-js-debug-resolution-override]');
-        return {
-          options: [...select.options].map(option => option.value),
-          selected: select.value,
-          range_seconds: generation.range_seconds,
-          resolution_seconds: generation.resolution_seconds,
-          buckets: generation.buckets.length,
-          source_generation: generation.source_generation,
-        };
-        """
-    )
+    class Wait:
+        def __init__(self, *_args, **_kwargs):
+            pass
 
+        def until(self, predicate):
+            return predicate(Browser())
 
-def _wait_for_ring_publication(harness: Any, source_generation: int) -> dict[str, Any]:
-    client = harness.runtime.app.stats_current_client
-
-    def published(_driver):
-        status = client.status()
-        ring = status.get("ring_writer") if isinstance(status, dict) else None
-        if not isinstance(ring, dict):
-            return False
-        if int(ring.get("publications") or 0) < 1:
-            return False
-        if int(ring.get("last_source_generation") or 0) < source_generation:
-            return False
-        return status
-
-    return WebDriverWait(harness.driver, 20, poll_frequency=0.1).until(published)
-
-
-def _cpu_graph_state(harness: Any) -> dict[str, Any]:
-    return harness.driver.execute_script(
-        r"""
-        const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
-        const cpuChart = document.querySelector('.js-debug-panel [data-js-debug-chart="cpu"]');
-        const cpuAxisMax = Number(cpuChart?.dataset?.jsDebugChartAxisMax || 0);
-        const lines = [...document.querySelectorAll('.js-debug-panel polyline[data-js-debug-series]')];
-        const cpuLines = lines.filter(line => line.dataset.jsDebugSeries === 'systemCpu');
-        const systemLine = cpuLines[0] || null;
-        const systemStyle = systemLine ? getComputedStyle(systemLine) : null;
-        const colorProbe = document.createElement('span');
-        colorProbe.style.color = systemStyle?.getPropertyValue('--js-debug-agent-token-rose') || '';
-        document.body.append(colorProbe);
-        const expectedSystemStroke = getComputedStyle(colorProbe).color;
-        colorProbe.remove();
-        const points = cpuLines.flatMap(line => String(line.getAttribute('points') || '')
-          .trim().split(/\s+/).filter(Boolean).map(point => {
-            const [x, y] = point.split(',').map(Number);
-            return {x, y, percent: (116 - y) / 108 * cpuAxisMax};
-          }));
-        const overlay = graph?.querySelector('[data-js-debug-history-overlay]');
-        const warnings = (typeof jsDebugEvents !== 'undefined' ? jsDebugEvents : [])
-          .filter(event => event?.type === 'stats_history' && event?.level === 'warning')
-          .map(event => String(event.message || ''));
-        return {
-          lineCount: lines.length,
-          seriesKeys: [...new Set(lines.map(line => line.dataset.jsDebugSeries))],
-          cpuPointCount: points.length,
-          cpuAxisMax,
-          points,
-          systemStroke: systemStyle?.stroke || '',
-          expectedSystemStroke,
-          systemDasharray: systemStyle?.strokeDasharray || '',
-          systemLinePattern: systemLine?.dataset?.jsDebugLinePattern || '',
-          historyState: graph?.dataset?.jsDebugHistoryState || '',
-          busy: graph?.getAttribute('aria-busy') || '',
-          overlayHidden: overlay?.hidden === true,
-          warnings,
-        };
-        """
-    )
-
-
-def _assert_seeded_cpu_graph(state: dict[str, Any]) -> None:
-    assert state["lineCount"] > 0, state
-    assert "systemCpu" in state["seriesKeys"], state
-    assert state["cpuPointCount"] >= CPU_GRAPH_SAMPLE_COUNT - 1, state
-    assert state["cpuAxisMax"] == 50, state
-    assert all(8 <= point["y"] <= 116 for point in state["points"]), state
-    assert all(abs(point["percent"] - CPU_GRAPH_PERCENT) < 0.2 for point in state["points"]), state
-    assert state["systemStroke"] == state["expectedSystemStroke"], state
-    assert state["systemLinePattern"] == "dot", state
-    assert state["systemDasharray"] not in {"", "none", "0px"}, state
-    assert state["historyState"] == "ready", state
-    assert state["busy"] == "false", state
-    assert state["overlayHidden"] is True, state
-    assert state["warnings"] == [], state
-
-
-def _wait_for_cpu_points(harness: Any) -> dict[str, Any] | bool:
-    state = _cpu_graph_state(harness)
-    return state if state["cpuPointCount"] >= CPU_GRAPH_SAMPLE_COUNT - 1 else False
-
-
-def _wait_for_stats_warning(harness: Any) -> dict[str, Any] | bool:
-    state = _cpu_graph_state(harness)
-    return state if state["warnings"] else False
-
-
-
-
-
-
-
-
-def _select_one_second_five_minute_graph(harness: Any) -> None:
-    result = harness.driver.execute_async_script(
-        r"""
-        const done = arguments[arguments.length - 1];
-        setDebugGraphRange(300);
-        setDebugGraphResolutionOverride(1);
-        window.__yomuxTestWaitFor(() => {
-          const controller = jsDebugCurrentStatsClientState?.client?.controller?.();
-          const generation = controller?.generation?.();
-          return generation?.range_seconds === 300
-            && generation?.requested_resolution === 1
-            && generation?.resolution_seconds === 1
-            && jsDebugHistoryReadiness?.phase === 'ready' ? true : null;
-        }, {timeoutMs: 12000, description: 'real YO!stats five-minute one-second generation'})
-          .then(() => done({ok: true}), error => done({error: String(error?.stack || error)}));
-        """
-    )
-    assert result == {"ok": True}, result
+    source = ast.parse(Path(__file__).read_text())
+    target = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == consumer)
+    boundary = next(node for node in target.body if isinstance(node, ast.Try) and node.finalbody)
+    monkeypatch.setitem(globals(), "WebDriverWait", Wait)
+    monkeypatch.setitem(globals(), "stop_isolated_tmux_runtime", lambda _runtime: events.append("tmux"))
+    scope = dict(globals(), browser=Browser(), port_lease=Lease(), process=Process(), server_log=None,
+                 tmux_runtime=object(), original_script_timeout=30, stats_stream_script_id=None, script_id=None,
+                 WebDriverWait=Wait, stop_isolated_tmux_runtime=lambda _runtime: events.append("tmux"))
+    with pytest.raises((RuntimeError, ExceptionGroup)) as raised:
+        exec(compile(ast.Module(body=boundary.finalbody, type_ignores=[]), __file__, "exec"), scope)
+    expected_error = "fixture process wait failed" if failure == "server" else "fixture browser failed"
+    assert expected_error in repr(raised.value)
+    assert events == ["lease", "terminate", "tmux"], events

@@ -3891,6 +3891,65 @@ test('isolated current-stats escaping and UTF-8 validation retain their fail-clo
   }
 });
 
+test('stopping a controller retires pending snapshot work across a restart', async () => {
+  for (const [restart, outcome] of [[false, 'success'], [true, 'success'], [false, 'error'], [true, 'error']]) {
+    const clock = new FakeClock();
+    const pending = [];
+    const published = [];
+    const failures = [];
+    const controller = loadController({
+      capabilities: capabilities(), savedRange: 300, savedResolution: 1, clientId: 'retirement', clock,
+      fetchSnapshot: () => new Promise((resolve, reject) => pending.push({resolve, reject})),
+      onGeneration: generation => published.push(generation.cache_generation),
+      onFailure: failure => failures.push(failure),
+    });
+    controller.start();
+    await clock.advance(0);
+    assert.equal(pending.length, 1);
+    controller.stop();
+    if (restart) controller.start();
+    const retired = pending.shift();
+    if (outcome === 'success') retired.resolve(snapshot({requested: 1}));
+    else retired.reject(Object.assign(new Error('retired contract failure'), {statsContractViolation: true}));
+    await flushPromises();
+    assert.deepStrictEqual(published, [], 'a retired request must not publish into the stopped or restarted controller');
+    assert.deepStrictEqual(failures, [], 'a retired request must not report a failure into a later lifecycle');
+    assert.equal(controller.generation(), null);
+    if (restart) {
+      await clock.advance(0);
+      assert.equal(pending.length, 1, 'restart issues a new request after the retired one settles');
+      pending.shift().resolve(snapshot({requested: 1, cache: 2}));
+      await flushPromises();
+      assert.deepStrictEqual(published, [2]);
+    }
+    controller.stop();
+    assert.equal(clock.timers.size, 0);
+  }
+});
+
+test('stopping a controller retires errors from an outstanding tick across a restart', async () => {
+  for (const restart of [false, true]) {
+    const clock = new FakeClock();
+    const failures = [];
+    let rejectTick;
+    const controller = loadController({
+      capabilities: capabilities(), savedRange: 300, savedResolution: 1, clientId: 'tick-retirement', clock,
+      onTick: () => new Promise((_resolve, reject) => { rejectTick = reject; }),
+      onFailure: failure => failures.push(failure),
+    });
+    controller.acceptSnapshot(snapshot({requested: 1}));
+    controller.start();
+    await clock.advance(1000);
+    controller.stop();
+    if (restart) controller.start();
+    rejectTick(Object.assign(new Error('retired tick contract failure'), {statsContractViolation: true}));
+    await flushPromises();
+    assert.deepStrictEqual(failures, []);
+    controller.stop();
+    assert.equal(clock.timers.size, 0);
+  }
+});
+
 (async () => {
   let passed = 0;
   for (const {name, body} of tests) {

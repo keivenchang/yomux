@@ -75,6 +75,7 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
           selectedShadow: getComputedStyle(document.querySelector('#selected-match')).boxShadow,
           addToken: getComputedStyle(document.querySelector('#host')).getPropertyValue('--diff-add-line-bg').trim(),
           removeToken: getComputedStyle(document.querySelector('#host')).getPropertyValue('--diff-remove-line-bg').trim(),
+          expectedAdded: probePaint('background-color:var(--diff-add-line-bg)', document.querySelector('#host')).background,
           expectedMatchColor: probePaint('color:var(--diff-search-match-fg)', document.querySelector('#host')).color,
         };
         document.body.classList.remove('editor-theme-dark');
@@ -87,11 +88,14 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
           matchShadow: getComputedStyle(document.querySelector('#added-match')).boxShadow,
           selectedBg: bg('#selected-match'),
           addToken: getComputedStyle(document.querySelector('#host')).getPropertyValue('--diff-add-line-bg').trim(),
+          expectedAdded: probePaint('background-color:var(--diff-add-line-bg)', document.querySelector('#host')).background,
           expectedMatchColor: probePaint('color:var(--diff-search-match-fg)', document.querySelector('#host')).color,
         };
         return {dark, light};
         """
     )
+    for theme in ("dark", "light"):
+        assert metrics[theme]["added"] == metrics[theme]["expectedAdded"], f"missing added-line paint: {metrics}"
     assert metrics["dark"]["added"] == metrics["dark"]["activeAdded"], metrics
     assert metrics["dark"]["plainActive"] in ("rgba(0, 0, 0, 0)", "transparent"), metrics
     assert metrics["dark"]["matchBg"] != metrics["dark"]["added"], metrics
@@ -107,6 +111,13 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
     assert metrics["light"]["matchShadow"] != "none", metrics
     assert metrics["light"]["selectedBg"] != metrics["light"]["added"], metrics
     assert metrics["light"]["addToken"] == "#bfeac8", metrics
+
+
+def test_added_diff_line_gate_rejects_missing_line_background(browser, tmp_path, monkeypatch):
+    css = app_css()
+    monkeypatch.setitem(globals(), "app_css", lambda: css + "\n.file-editor-diff-codemirror .cm-editor .cm-line.cm-insertedLine { background-color: transparent !important; }")
+    with pytest.raises(AssertionError, match="missing added-line paint"):
+        test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path)
 
 
 def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_path):
@@ -657,6 +668,9 @@ def test_markdown_prosemirror_async_init_keeps_latest_state_and_cancels_detached
             releaseDetached();
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
             window.loadProseMirrorApi = originalLoader;
+            const latestState = fileState.get(path);
+            latestState.original = latestState.content;
+            latestState.dirty = false;
             done({
               latestText: panel._pmView?.state?.doc?.textContent || '',
               oldVisible: panel._pmView?.dom?.textContent?.includes('Old state') || false,
@@ -1751,6 +1765,7 @@ def test_markdown_prosemirror_click_enter_and_delayed_source_sync(browser, tmp_p
               }
               return originalFetch(input, options);
             };
+            resumedView.dispatch(resumedView.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(resumedView.state.doc, 1)));
             resumedView.dispatch(resumedView.state.tr.insertText('Y'));
             resumedView.someProp('handleKeyDown', handler => handler(resumedView, new KeyboardEvent('keydown', {key: 's', ctrlKey: true})));
             await waitFor(() => saveRequests.length === 1);
@@ -1766,6 +1781,8 @@ def test_markdown_prosemirror_click_enter_and_delayed_source_sync(browser, tmp_p
             const endConnectedNow = resumedView.dom.isConnected;
             await new Promise(resolve => setTimeout(resolve, 1400));
             const endSource = fileEditorPanelState(panel).content;
+            const finalSaveResult = await saveFileEditor(path, panel, {force: true});
+            const finalSavedContent = saveRequests.at(-1)?.content || '';
             done({
               clickEditable,
               middleSelection,
@@ -1783,6 +1800,9 @@ def test_markdown_prosemirror_click_enter_and_delayed_source_sync(browser, tmp_p
               sameView: panel._pmView === resumedView,
               endSelectionAfter: resumedView.state.selection.head,
               endSource,
+              finalSaveResult,
+              finalSavedContent,
+              dirtyAfterSave: fileState.get(path).dirty,
               cmSource: panel._cmView.state.doc.toString(),
               pmConnected: resumedView.dom.isConnected,
               errors: jsDebugFailureEvents('error'),
@@ -1810,6 +1830,9 @@ def test_markdown_prosemirror_click_enter_and_delayed_source_sync(browser, tmp_p
     assert metrics["endSerializedNow"].endswith("Xworld\n\n\n"), metrics
     assert metrics["endSource"].endswith("Xworld\n\n\n"), metrics
     assert "\\\n" not in metrics["endSource"], metrics
+    assert metrics["finalSaveResult"] is True, metrics
+    assert metrics["finalSavedContent"] == metrics["endSource"], metrics
+    assert metrics["dirtyAfterSave"] is False, metrics
     assert metrics["cmSource"] == metrics["endSource"], metrics
     assert metrics["pmConnected"] is True, metrics
     assert metrics["errors"] == [], metrics
@@ -3339,6 +3362,7 @@ def test_markdown_viewedit_copy_image_uses_clipboard_formats(browser, tmp_path):
         """
         const done = arguments[arguments.length - 1];
         (async () => {
+          const originalWrite = navigator.clipboard.write;
           try {
             const path = '/home/test/yolomux.dev/IMAGE_COPY.md';
             const source = '![table](table.png)';
@@ -3348,17 +3372,17 @@ def test_markdown_viewedit_copy_image_uses_clipboard_formats(browser, tmp_path):
             const panel = createFileEditorPanel(item); panel.classList.add('active-pane'); panelNodes.set(item, panel); document.getElementById('grid').append(panel); renderFileEditorPanel(panel, item);
             await window.__yomuxTestWaitFor(() => panel._pmView?.dom.querySelector('img'));
             const image = panel._pmView.dom.querySelector('img');
+            await window.__yomuxTestWaitFor(() => image.complete && image.naturalWidth > 0, {description: 'decoded ViewEditor image'});
             const writes = [];
-            const originalWrite = navigator.clipboard.write;
-            navigator.clipboard.write = async items => { writes.push(items[0].types.slice()); };
+            navigator.clipboard.write = async items => { await Promise.all(items[0].types.map(type => items[0].getType(type))); writes.push(items[0].types.slice()); };
             image.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20}));
             const labels = [...document.querySelectorAll('.markdown-preview-context-menu button')].map(node => node.textContent.trim());
             const button = [...document.querySelectorAll('.markdown-preview-context-menu button')].find(node => node.textContent.trim() === 'Copy image');
             button?.click();
-            await new Promise(resolve => setTimeout(resolve, 100));
-            navigator.clipboard.write = originalWrite;
+            await window.__yomuxTestWaitFor(() => writes.length === 1, {description: "decoded image clipboard write"});
             done({labels, writes, src: image.src, currentSrc: image.currentSrc, complete: image.complete, naturalWidth: image.naturalWidth, secure: globalThis.isSecureContext, hasClipboardItem: Boolean(globalThis.ClipboardItem), hasWrite: Boolean(navigator.clipboard?.write), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           } catch (error) { done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}); }
+          finally { navigator.clipboard.write = originalWrite; }
         })();
         """
     )
@@ -3368,12 +3392,68 @@ def test_markdown_viewedit_copy_image_uses_clipboard_formats(browser, tmp_path):
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+@pytest.mark.parametrize("kind", ["image", "selection"])
+@pytest.mark.parametrize("failure", ["permission", "decode"])
+def test_markdown_clipboard_failures_are_visible_without_unhandled_rejections(browser, tmp_path, kind, failure):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const kind = arguments[0], failure = arguments[1], done = arguments[arguments.length - 1];
+        (async () => {
+          const originalWrite = navigator.clipboard.write;
+          const originalFetch = window.fetch;
+          try {
+            const path = '/home/test/yolomux.dev/CLIPBOARD_FAILURE.md';
+            const source = 'Before ![table](table.png) after';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'split', item); addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item); panel.classList.add('active-pane');
+            panelNodes.set(item, panel); document.getElementById('grid').append(panel); renderFileEditorPanel(panel, item);
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom.querySelector('img')?.naturalWidth > 0);
+            const image = panel._pmView.dom.querySelector('img');
+            if (failure === 'decode') window.fetch = (input, options) => new URL(String(input), location.href).pathname === '/api/fs/raw'
+              ? Promise.resolve(new Response('invalid clipboard image', {headers: {'Content-Type': 'image/webp'}}))
+              : originalFetch(input, options);
+            navigator.clipboard.write = async items => {
+              if (failure === 'permission') throw new DOMException('clipboard permission sentinel', 'NotAllowedError');
+              await Promise.all(items[0].types.map(type => items[0].getType(type)));
+            };
+            if (kind === 'image') {
+              image.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20}));
+            } else {
+              const range = document.createRange(); range.selectNodeContents(panel._pmView.dom.querySelector('p'));
+              const selection = document.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+              panel._pmView.dom.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20}));
+            }
+            const label = kind === 'image' ? 'Copy image' : 'Copy with format';
+            [...document.querySelectorAll('.markdown-preview-context-menu button')].find(node => node.textContent.trim() === label).click();
+            await window.__yomuxTestWaitFor(() => jsDebugFailureEvents('rejection').length
+              || document.querySelector('#status .err')?.textContent.includes('copy failed'),
+              {description: 'clipboard failure outcome'});
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            return {notices: document.querySelector('#status .err')?.textContent || '',
+              errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')};
+          } finally {
+            navigator.clipboard.write = originalWrite;
+            window.fetch = originalFetch;
+          }
+        })().then(done, error => done({failure: String(error?.stack || error), rejections: jsDebugFailureEvents('rejection')}));
+        """, kind, failure,
+    )
+    assert "failure" not in metrics, metrics
+    assert "copy failed" in metrics["notices"], metrics
+    assert ("clipboard permission sentinel" if failure == "permission" else "decoded") in metrics["notices"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_markdown_viewedit_copy_mixed_text_and_image_uses_rich_clipboard(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
         (async () => {
+          const originalWrite = navigator.clipboard.write;
           try {
             const path = '/home/test/yolomux.dev/MIXED_COPY.md';
             const source = 'Before ![table](table.png) after';
@@ -3383,16 +3463,18 @@ def test_markdown_viewedit_copy_mixed_text_and_image_uses_rich_clipboard(browser
             const panel = createFileEditorPanel(item); panel.classList.add('active-pane'); panelNodes.set(item, panel); document.getElementById('grid').append(panel); renderFileEditorPanel(panel, item);
             await window.__yomuxTestWaitFor(() => panel._pmView?.dom.querySelector('img'));
             const view = panel._pmView; const paragraph = view.dom.querySelector('p');
+            await window.__yomuxTestWaitFor(() => [...paragraph.querySelectorAll('img')].every(image => image.complete && image.naturalWidth > 0), {description: 'decoded ViewEditor selection images'});
             const range = document.createRange(); range.selectNodeContents(paragraph);
             const selection = document.getSelection(); selection.removeAllRanges(); selection.addRange(range);
-            const writes = []; const originalWrite = navigator.clipboard.write;
-            navigator.clipboard.write = async items => { writes.push(items[0].types.slice()); };
+            const writes = [];
+            navigator.clipboard.write = async items => { await Promise.all(items[0].types.map(type => items[0].getType(type))); writes.push(items[0].types.slice()); };
             const event = new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20});
             view.dom.dispatchEvent(event);
             const button = [...document.querySelectorAll('.markdown-preview-context-menu button')].find(node => node.textContent.trim() === 'Copy with format');
-            button?.click(); await new Promise(resolve => setTimeout(resolve, 150)); navigator.clipboard.write = originalWrite;
+            button?.click(); await window.__yomuxTestWaitFor(() => writes.length === 1, {description: "decoded rich clipboard write"});
             done({writes, text: selection.toString(), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           } catch (error) { done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}); }
+          finally { navigator.clipboard.write = originalWrite; }
         })();
         """
     )
@@ -3476,8 +3558,8 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
         """
         const done = arguments[arguments.length - 1];
         (async () => {
+        const originalFetch = window.fetch;
         try {
-        const originalFetch = window.fetch.bind(window);
                 const rawRequests = [];
                 const fixturePng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
                 const externalDataUrl = `data:image/png;base64,${btoa(String.fromCharCode(...fixturePng))}`;
@@ -3549,6 +3631,8 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
         ];
         const pendingPanes = imagePanes.concat(mediaPanes);
         await Promise.all(pendingPanes.map(pane => pane?._previewAsync).filter(Boolean));
+        await window.__yomuxTestWaitFor(() => mediaPanes.every(pane => pane.querySelector('audio, video')?.readyState >= 1),
+          {description: 'decoded native audio and video metadata'});
         await Promise.all(imagePanes.map(pane => waitImage(pane?.querySelector('img'))));
         const refreshedPngImage = png.panel.querySelector('.file-editor-image-panel img.file-editor-image');
         const imageInfo = ({panel}) => {
@@ -3636,7 +3720,7 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
         done(result);
         } catch (error) {
           done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
-        }
+        } finally { window.fetch = originalFetch; }
         })();
         """
     )
@@ -3896,6 +3980,61 @@ def test_markdown_vieweditor_renders_mermaid_code_blocks_read_only(browser, tmp_
     assert metrics["rejections"] == [], metrics
 
 
+def test_editor_opens_markdown_and_html_in_viewedit_by_default(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const {frame} = window.__yomuxTestHelpers;
+            const originals = new Map([
+              ['/home/test/repo/README.md', {name: 'README.md', content: '# Hello ViewEdit'}],
+              ['/home/test/repo/page.html', {name: 'page.html', content: '<h1>Hello ViewEdit</h1>'}],
+            ]);
+            const originalFetch = window.fetch.bind(window);
+            window.fetch = async (input, options = {}) => {
+              const url = new URL(String(input), 'https://localhost');
+              const path = url.searchParams.get('path') || '';
+              const entry = originals.get(path);
+              if (url.pathname === '/api/fs/info') {
+                if (!entry) return new Response(JSON.stringify({error: 'unexpected fixture path'}), {status: 404});
+                return new Response(JSON.stringify({path, name: entry.name, kind: 'file', realpath: path}), {status: 200, headers: {'Content-Type': 'application/json'}});
+              }
+              if (url.pathname === '/api/fs/read') {
+                if (!entry) return new Response(JSON.stringify({error: 'unexpected fixture path'}), {status: 404});
+                return new Response(JSON.stringify({path, name: entry.name, size: entry.content.length, mtime: 20, content: entry.content}), {status: 200, headers: {'Content-Type': 'application/json'}});
+              }
+              return originalFetch(input, options);
+            };
+            const opened = [];
+            for (const [path, entry] of originals) {
+              const item = await openFileInEditor(path, {name: entry.name, size: entry.content.length, mtime: 20}, {userInitiated: true});
+              await frame();
+              const panel = panelNodes.get(item);
+              const preview = panel?.querySelector('.file-editor-preview-pane-panel');
+              opened.push({
+                name: entry.name,
+                mode: editorViewModeFor(path, item),
+                previewVisible: preview?.hidden === false,
+                editorHidden: panel?.querySelector('.file-editor-codemirror-panel')?.hidden === true,
+              });
+            }
+            done({opened, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          } catch (error) {
+            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["opened"] == [
+        {"name": "README.md", "mode": "preview", "previewVisible": True, "editorHidden": True},
+        {"name": "page.html", "mode": "preview", "previewVisible": True, "editorHidden": True},
+    ], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_editor_opens_jsonl_table_preview_by_default_and_keeps_raw_edit(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
@@ -4068,7 +4207,7 @@ def test_direct_mermaid_network_topology_uses_native_svg_labels(browser, tmp_pat
         mermaid_uri,
         mermaid_source,
     )
-    browser.save_screenshot("/tmp/yolomux-mermaid-network-topology-after.png")
+    browser.save_screenshot(str(tmp_path / "yolomux-mermaid-network-topology-after.png"))
     assert "error" not in metrics, metrics
     assert metrics["rawForeignObjects"] == 0, metrics
     assert metrics["previewForeignObjects"] == 0, metrics
@@ -6549,7 +6688,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
         browser,
         tmp_path,
         "?sessions=1",
-        settings={"appearance": {"preview_font_size": 16, "sync_font_sizes": False}},
+        settings={"appearance": {"editor_font_size": 14, "preview_font_size": 16, "sync_font_sizes": False}},
         sessions=["1"],
     )
     metrics = browser.execute_async_script(
@@ -6752,6 +6891,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               popupValue: popupValue(),
               editorValue: editorValue(),
               popupStyle: popupDoc.body.getAttribute('style') || '',
+              editorFontSize: getComputedStyle(document.documentElement).getPropertyValue('--editor-font-size').trim(),
             };
             handleFileEditorContentChanged(panel, path, updated, {syntax: false});
             await waitFor(() => (popupDoc.querySelector('[data-preview-root]')?.textContent || '').includes('Updated pop-out text'));
@@ -6905,6 +7045,9 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               editorTop: editorScroller?.scrollTop || 0,
               editorMax: maxScrollTop(editorScroller),
             };
+            setEditorPreviewFontSize(14);
+            await frame();
+            await frame();
             const splitPath = '/home/test/repo/SPLIT_SCROLL.md';
             const splitTail = Array.from({length: 120}, (_, index) => `Split paragraph ${index + 1} smooth scroll text`).join('\\n\\n');
             const splitOriginal = `# Split Scroll\n\n${splitTail}\n`;
@@ -7097,8 +7240,8 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
     assert metrics["afterPopoutButtonClick"]["openedUrl"].startswith("/preview-popout?path="), metrics
     assert metrics["afterPopoutButtonClick"]["editorThemeText"] == "Bright", metrics
     assert "theme-with-label" in metrics["afterPopoutButtonClick"]["editorThemeClass"], metrics
-    assert metrics["initial"]["popupValue"] == "16", metrics
-    assert metrics["initial"]["editorValue"] == "16", metrics
+    assert metrics["initial"]["popupValue"] == "14", metrics
+    assert metrics["initial"]["editorValue"] == "14", metrics
     assert "Original pop-out text" in metrics["initial"]["popupText"], metrics
     assert metrics["initial"]["popupThemeText"] == "Bright", metrics
     assert "hljs" in metrics["initial"]["popupCodeClass"], metrics
@@ -7114,6 +7257,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
     assert metrics["afterEditorFont"]["popupValue"] == "19", metrics
     assert metrics["afterEditorFont"]["editorValue"] == "19", metrics
     assert "--editor-preview-font-size: 19px" in metrics["afterEditorFont"]["popupStyle"], metrics
+    assert metrics["afterEditorFont"]["editorFontSize"] == "19px", metrics
     assert "Updated pop-out text" in metrics["afterEditorContent"], metrics
     assert "editor-theme-light" in metrics["afterEditorTheme"]["popupBodyClass"], metrics
     assert "theme-light" in metrics["afterEditorTheme"]["popupThemeClass"], metrics
@@ -7279,7 +7423,7 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
         browser,
         tmp_path,
         "?sessions=1",
-        settings={"appearance": {"preview_font_size": 16}},
+        settings={"appearance": {"editor_font_size": 16, "preview_font_size": 16}},
         sessions=["1"],
     )
     metrics = browser.execute_async_script(

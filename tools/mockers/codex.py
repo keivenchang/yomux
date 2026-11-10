@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import selectors
 import shlex
 import shutil
 import subprocess
@@ -53,7 +52,7 @@ from yomux_lib.agent_comms.json_rpc import json_rpc_notification
 from yomux_lib.agent_comms.json_rpc import json_rpc_request
 from yomux_lib.agent_comms.json_rpc import json_rpc_response
 from yomux_lib.agent_comms.stream_events import normalize_codex_app_server_message
-from text_client_common import (
+from tools.mockers.text_client_common import (
     CODEX_CONFIG_KEYS,
     CODEX_OUTPUT_TERMS,
     CLIENT_PERMISSION_DEFAULTS,
@@ -414,28 +413,14 @@ def build_config_help(model_rows: list[dict[str, Any]] | None = None, catalog_er
 
 
 def read_help_model_message(process: subprocess.Popen[str], deadline: float) -> dict[str, Any]:
-    if process.stdout is None:
-        raise RuntimeError("codex app-server stdout is not available")
-    timeout = max(0.0, deadline - time.monotonic())
-    with selectors.DefaultSelector() as selector:
-        selector.register(process.stdout, selectors.EVENT_READ)
-        if not selector.select(timeout):
-            raise TimeoutError("timed out waiting for codex app-server model catalog")
-    line = process.stdout.readline()
-    if not line:
-        raise RuntimeError("codex app-server exited while fetching model catalog")
-    message = json.loads(line)
-    if not isinstance(message, dict):
-        raise RuntimeError("codex app-server emitted a non-object model catalog message")
-    return message
+    return CodexAppServerProtocol().read_message(process, deadline)
 
 
 def help_model_request(process: subprocess.Popen[str], request_id: str, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     if process.stdin is None:
         raise RuntimeError("codex app-server stdin is not available")
-    process.stdin.write(json.dumps(json_rpc_request(request_id, method, params), separators=(",", ":")) + "\n")
-    process.stdin.flush()
     deadline = time.monotonic() + HELP_MODEL_QUERY_TIMEOUT_SECONDS
+    CodexAppServerProtocol().write_message(process, json_rpc_request(request_id, method, params), deadline=deadline)
     while True:
         message = read_help_model_message(process, deadline)
         if message.get("id") == request_id and ("result" in message or "error" in message):
@@ -464,8 +449,7 @@ def fetch_help_model_catalog() -> tuple[list[dict[str, Any]], str]:
         help_model_request(process, "help-initialize", "initialize", initialize_params())
         if process.stdin is None:
             raise RuntimeError("codex app-server stdin is not available")
-        process.stdin.write(json.dumps(json_rpc_notification("initialized"), separators=(",", ":")) + "\n")
-        process.stdin.flush()
+        CodexAppServerProtocol().write_message(process, json_rpc_notification("initialized"), deadline=time.monotonic() + HELP_MODEL_QUERY_TIMEOUT_SECONDS)
         rows: list[dict[str, Any]] = []
         cursor = None
         request_index = 0
@@ -486,13 +470,7 @@ def fetch_help_model_catalog() -> tuple[list[dict[str, Any]], str]:
         return [], str(exc)
     finally:
         if process is not None:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=1)
+            CodexAppServerProtocol().terminate_process(process)
 
 
 def normalize_option_name(name: str) -> str:
@@ -575,8 +553,7 @@ class CodexTextClient(TextClientBase):
             return
         process = self.process
         self.process = None
-        if process.poll() is None:
-            self.app_server_protocol.terminate_process(process)
+        self.app_server_protocol.terminate_process(process)
 
     def app_server_exit_details(self) -> str:
         process = self.process
@@ -587,7 +564,9 @@ class CodexTextClient(TextClientBase):
         if exit_code is not None:
             parts.append(f"exit={exit_code}")
             if process.stderr is not None:
-                stderr_text = process.stderr.read().strip()
+                state = getattr(process, "_yomux_rpc_pipe_state", None)
+                captured_stderr = state.stderr if state is not None else ""
+                stderr_text = (captured_stderr + process.stderr.read()).strip()
                 if stderr_text:
                     tail = "\n".join(stderr_text.splitlines()[-20:])
                     parts.append(f"stderr:\n{tail}")
@@ -721,7 +700,7 @@ class CodexTextClient(TextClientBase):
         if self.process.poll() is not None:
             raise RuntimeError(self.app_server_exit_details())
         try:
-            self.app_server_protocol.write_message(self.process, message)
+            self.app_server_protocol.write_message(self.process, message, deadline=time.monotonic() + self.args.timeout)
         except (BrokenPipeError, ConnectionResetError) as exc:
             raise RuntimeError(self.app_server_exit_details()) from exc
         if self.args.debug_json:
@@ -1028,20 +1007,21 @@ class CodexTextClient(TextClientBase):
             print(f"Permissions: {self.permissions_text()}")
             print(f"Usage: /{command} [read-only|workspace-write|{DEFAULT_SANDBOX}|untrusted|on-failure|on-request|never|{CODEX_YOLO_ALIAS}]")
             return
+        sandbox, approval_policy = self.args.sandbox, self.args.approval_policy
         for value in parts:
             normalized = value.strip().lower()
             if normalized == CODEX_YOLO_ALIAS:
-                self.args.sandbox = DEFAULT_SANDBOX
-                self.args.approval_policy = DEFAULT_APPROVAL_POLICY
+                sandbox, approval_policy = DEFAULT_SANDBOX, DEFAULT_APPROVAL_POLICY
                 continue
             if normalized in SANDBOX_MODES:
-                self.args.sandbox = normalized
+                sandbox = normalized
                 continue
             if normalized in APPROVAL_POLICIES:
-                self.args.approval_policy = normalized
+                approval_policy = normalized
                 continue
             print(f"unknown permissions value: {value}")
             return
+        self.args.sandbox, self.args.approval_policy = sandbox, approval_policy
         self.update_thread_settings(
             approvalPolicy=self.args.approval_policy,
             sandboxPolicy=self.sandbox_policy_param(),

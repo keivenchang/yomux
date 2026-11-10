@@ -453,7 +453,7 @@ func usageCodexTokenUsageRecord(timestamp float64, threadID string, input, cache
 		"reasoning_output_tokens": threadOutput, "total_tokens": threadInput + threadOutput,
 	}
 	return map[string]any{"timestamp": timestamp, "type": "token_usage_record", "payload": map[string]any{
-		"thread_id": threadID, "turn_id": "turn-synthetic", "response_id": "response-synthetic",
+		"thread_id": threadID, "turn_id": "turn-synthetic", "response_id": fmt.Sprintf("response-%.0f", timestamp),
 		"usage": usage, "turn_token_usage": usage, "thread_token_usage": threadUsage,
 	}}
 }
@@ -614,6 +614,89 @@ func TestScanTranscriptCodexOrdinaryHandoffPreservesCumulativeThreadBaseline(t *
 	}
 	if !reflect.DeepEqual(quantitiesByTime, wantByTime) {
 		t.Fatalf("incremental Codex usage deltas = %#v, want %#v", quantitiesByTime, wantByTime)
+	}
+}
+
+func TestScanTranscriptCodexMixedLegacyAndThreadTotalsDoNotReemitMirroredUsage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-token-usage-mixed.jsonl")
+	threadID := "thread-mixed-format"
+	writeJSONL(t, path,
+		map[string]any{"type": "session_meta", "payload": map[string]any{"id": threadID, "model": "gpt-synthetic"}},
+		usageCodexTokenUsageRecord(1, threadID, 1000, 900, 100, 1000, 900, 100),
+		usageCodex(2, 900, 800, 90),
+		usageCodexTokenUsageRecord(3, threadID, 10, 5, 2, 1010, 905, 102),
+	)
+
+	result, err := ScanTranscript(TranscriptSource{Path: path, Provider: "codex", ThreadID: threadID}, &TranscriptScannerState{}, TranscriptScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quantities := make(map[float64]float64)
+	for _, atom := range result.Atoms {
+		quantities[atom.ObservedAt] += atom.Payload["quantity"].(float64)
+	}
+	want := map[float64]float64{1: 1100, 3: 12}
+	if !reflect.DeepEqual(quantities, want) {
+		t.Fatalf("mixed Codex usage totals = %#v, want mirrored legacy snapshot suppressed: %#v", quantities, want)
+	}
+}
+
+func TestScanTranscriptCodexTurnOnlySnapshotsUseTurnBaseline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-token-usage-turn-only.jsonl")
+	writeJSONL(t, path,
+		map[string]any{"type": "session_meta", "payload": map[string]any{"id": "thread-turn-only"}},
+		map[string]any{"timestamp": 1, "type": "token_usage_record", "payload": map[string]any{
+			"thread_id": "thread-turn-only", "turn_id": "turn-one",
+			"turn_token_usage": map[string]any{"input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 2},
+		}},
+		map[string]any{"timestamp": 2, "type": "token_usage_record", "payload": map[string]any{
+			"thread_id": "thread-turn-only", "turn_id": "turn-one",
+			"turn_token_usage": map[string]any{"input_tokens": 20, "cached_input_tokens": 4, "output_tokens": 4},
+		}},
+		map[string]any{"timestamp": 3, "type": "token_usage_record", "payload": map[string]any{
+			"thread_id": "thread-turn-only", "turn_id": "turn-two",
+			"turn_token_usage": map[string]any{"input_tokens": 3, "cached_input_tokens": 1, "output_tokens": 1},
+		}},
+	)
+
+	result, err := ScanTranscript(TranscriptSource{Path: path, Provider: "codex", ThreadID: "thread-turn-only"}, &TranscriptScannerState{}, TranscriptScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quantities := make(map[float64]float64)
+	for _, atom := range result.Atoms {
+		quantities[atom.ObservedAt] += atom.Payload["quantity"].(float64)
+	}
+	want := map[float64]float64{1: 12, 2: 12, 3: 4}
+	if !reflect.DeepEqual(quantities, want) {
+		t.Fatalf("turn-only Codex usage totals = %#v, want %#v", quantities, want)
+	}
+}
+
+func TestScanTranscriptCodexResponseDedupDoesNotDropCumulativeThreadProgress(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-token-usage-response-dedup.jsonl")
+	threadID := "thread-response-dedup"
+	first := usageCodexTokenUsageRecord(1, threadID, 100, 50, 10, 100, 50, 10)
+	second := usageCodexTokenUsageRecord(2, threadID, 10, 5, 2, 110, 55, 12)
+	second["payload"].(map[string]any)["response_id"] = "response-shared"
+	first["payload"].(map[string]any)["response_id"] = "response-shared"
+	writeJSONL(t, path,
+		map[string]any{"type": "session_meta", "payload": map[string]any{"id": threadID}},
+		first,
+		second,
+	)
+
+	result, err := ScanTranscript(TranscriptSource{Path: path, Provider: "codex", ThreadID: threadID}, &TranscriptScannerState{}, TranscriptScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quantities := make(map[float64]float64)
+	for _, atom := range result.Atoms {
+		quantities[atom.ObservedAt] += atom.Payload["quantity"].(float64)
+	}
+	want := map[float64]float64{1: 110, 2: 12}
+	if !reflect.DeepEqual(quantities, want) {
+		t.Fatalf("cumulative progress sharing response identity = %#v, want %#v", quantities, want)
 	}
 }
 
@@ -1500,17 +1583,17 @@ func TestScanTranscriptClaudeAndCodexIncrementalPartialAndReceipt(t *testing.T) 
 		t.Fatal("fixture did not append a partial transcript record")
 	}
 	partial.Receipt.Commit()
-	if _, err := os.OpenFile(claude, os.O_APPEND|os.O_WRONLY, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	file, err := os.OpenFile(claude, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := file.Write(remaining); err != nil {
+		_ = file.Close()
 		t.Fatal(err)
 	}
-	file.Close()
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
 	completed, err := ScanTranscript(claudeSource, claudeState, TranscriptScanOptions{})
 	if err != nil || completed.RecordsParsed != 1 || len(completed.Atoms) != 2 {
 		t.Fatalf("completed scan = %+v, err = %v", completed, err)
@@ -2973,7 +3056,7 @@ func TestCodexForkRepairFrontierRejectsPathsOutsideCatalogAndNonRepairSources(t 
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			frontier := valid
+			frontier := codexForkRepairFrontierState{Roots: map[string]codexForkRepairCatalogState{rootID: valid.Roots[rootID]}}
 			catalog := frontier.Roots[rootID]
 			catalog.PendingDirs = append([]string(nil), catalog.PendingDirs...)
 			catalog.PendingFiles = append([]string(nil), catalog.PendingFiles...)
@@ -3017,5 +3100,31 @@ func TestScanTranscriptRepairOptionCannotBypassSessionsRootValidation(t *testing
 				t.Fatalf("rejected repair scan mutated cursor state: got=%+v want=%+v", state, before)
 			}
 		})
+	}
+}
+
+func TestScanTranscriptCodexLastOnlyUsagePreservesCumulativeBaseline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	first := usageCodex(125, 100, 20, 10)
+	lastOnly := usageCodex(126, 0, 0, 0)
+	info := lastOnly["payload"].(map[string]any)["info"].(map[string]any)
+	delete(info, "total_token_usage")
+	info["last_token_usage"] = map[string]any{"input_tokens": 12.0, "cached_input_tokens": 2.0, "output_tokens": 3.0}
+	next := usageCodex(127, 105, 21, 12)
+	writeJSONL(t, path, first, lastOnly, next)
+	state := &TranscriptScannerState{}
+	scan, err := ScanTranscript(TranscriptSource{Path: path, Provider: "codex"}, state, TranscriptScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byTime := map[float64][]UsageAtom{}
+	for _, atom := range scan.Atoms {
+		byTime[atom.ObservedAt] = append(byTime[atom.ObservedAt], atom)
+	}
+	if got := atomQuantities(byTime[126]); got["input:none"] != 10 || got["input:read"] != 2 || got["output:none"] != 3 {
+		t.Fatalf("last-only usage lost: %v", got)
+	}
+	if got := atomQuantities(byTime[127]); got["input:none"] != 4 || got["input:read"] != 1 || got["output:none"] != 2 {
+		t.Fatalf("cumulative baseline clobbered: %v", got)
 	}
 }

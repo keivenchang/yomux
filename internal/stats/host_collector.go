@@ -225,6 +225,7 @@ var hostCollectorFamilies = [...]string{"cpu", "system_memory", "system_disk", "
 // is also safe for deterministic callers, but must not be called concurrently
 // with Start.
 type HostCollector struct {
+	health       CollectorHealthTracker
 	sources      HostSources
 	writer       BatchWriter
 	clock        HostCollectorClock
@@ -533,10 +534,6 @@ func (c *HostCollector) RunOnce(parent context.Context) {
 	c.counters.lastDuration.Store(c.clock.Now().Sub(started).Nanoseconds())
 }
 
-func (c *HostCollector) factContext(at time.Time, cadence time.Duration) HostFactContext {
-	return HostFactContext{EpochID: c.config.EpochID, EpochStartedAt: c.config.EpochStartedAt, ObservedAt: float64(at.UnixNano()) / 1e9, CadenceSeconds: cadence.Seconds(), OwnerGeneration: c.config.OwnerGeneration, SourceID: c.config.SourceID}
-}
-
 func (c *HostCollector) familyFactContext(family string, at time.Time, cadence time.Duration) HostFactContext {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
@@ -628,11 +625,23 @@ func (c *HostCollector) collectDisk(parent context.Context, fact HostFactContext
 }
 
 func (c *HostCollector) append(ctx context.Context, batch AppendBatch) bool {
+	name := "host"
+	if len(batch.CoverageEpochs) > 0 {
+		name = batch.CoverageEpochs[0].Family
+	} else if len(batch.UnavailableSpans) > 0 {
+		name = batch.UnavailableSpans[0].Family
+	}
+	if len(batch.Observations)+len(batch.CoverageEpochs)+len(batch.UnavailableSpans) == 0 {
+		return true
+	}
+	c.health.Attempt(name, c.clock.Now())
 	if c.writer == nil {
+		c.health.Record(name, c.clock.Now(), errors.New("writer unavailable"), 0, 0)
 		c.counters.errors.Add(1)
 		return false
 	}
 	result, err := c.writer.AppendBatch(ctx, batch)
+	c.health.Record(name, c.clock.Now(), err, 0, 0)
 	if err != nil {
 		c.counters.errors.Add(1)
 		return false
@@ -733,3 +742,5 @@ func sourceReason(ctx context.Context, err error) string {
 	}
 	return "source_error"
 }
+
+func (c *HostCollector) Health() map[string]CollectorHealth { return c.health.Snapshot() }

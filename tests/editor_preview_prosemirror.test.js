@@ -7,6 +7,7 @@ const manifest = JSON.parse(fs.readFileSync(path.join(root, 'tools/prosemirror-b
 const entry = fs.readFileSync(path.join(root, 'tools/prosemirror-bundle/prosemirror-entry.js'), 'utf8');
 const adapter = fs.readFileSync(path.join(root, 'static_src/js/yomux/93_prosemirror_editor.js'), 'utf8');
 const settingsRuntime = fs.readFileSync(path.join(root, 'static_src/js/yomux/50_editor_settings_runtime.js'), 'utf8');
+const changesEditor = fs.readFileSync(path.join(root, 'static_src/js/yomux/86_changes_editor.js'), 'utf8');
 
 assert.equal(manifest.dependencies['prosemirror-markdown'], '1.13.7');
 assert.equal(manifest.dependencies['prosemirror-model'], '1.25.11');
@@ -16,6 +17,12 @@ assert.equal(manifest.dependencies['prosemirror-view'], '1.42.3');
 assert.match(entry, /window\.YOmuxProseMirror/);
 assert.match(entry, /Decoration, DecorationSet, EditorView/);
 assert.match(adapter, /function createProseMirrorPanel/);
+assert.match(changesEditor, /pmAnchor: Number\(selection\?\.anchor \|\| 0\)/);
+assert.match(changesEditor, /pmHead: Number\(selection\?\.head \|\| selection\?\.anchor \|\| 0\)/);
+assert.match(changesEditor, /pmScrollTop: Number\(pmScrollDOM\?\.scrollTop \|\| 0\)/);
+assert.match(changesEditor, /pmFocused: Boolean\(pmView\.hasFocus\)/);
+assert.match(changesEditor, /function restoreProseMirrorPanelViewState/);
+assert.match(adapter, /restoreProseMirrorPanelViewState\(item, panel\)/);
 assert.match(adapter, /ProseMirror owns every descendant of EditorView\.dom/);
 assert.match(adapter, /function syncProseMirrorPanelSource/);
 assert.match(adapter, /handleFileEditorContentChanged/);

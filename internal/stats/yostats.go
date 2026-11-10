@@ -4,12 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/url"
 	"path/filepath"
 	"sort"
 	"sync/atomic"
 	"time"
 
+	"github.com/keivenchang/yomux/internal/atomicfile"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -164,9 +164,15 @@ type OpenFunc func(string) (ReadOnlyDB, error)
 
 // SQLiteReadOnlyURI returns the SQLite URI used for copied databases. The
 // caller's driver remains responsible for opening the URI in read-only mode.
+// mode=ro preserves committed WAL reads after a writer crash while preventing
+// preflight writes; immutable=1 would ignore that WAL and misread the schema.
 func SQLiteReadOnlyURI(path string) string {
+	return sqliteURI(path, "mode=ro&_busy_timeout=5000")
+}
+
+func sqliteURI(path, query string) string {
 	abs, _ := filepath.Abs(path)
-	return "file:" + url.PathEscape(abs) + "?mode=ro&_busy_timeout=5000"
+	return atomicfile.SQLiteURI(abs, query)
 }
 
 // OpenReadOnly opens and validates a copied database. The optional opener keeps
