@@ -71,8 +71,8 @@ PREFLIGHT_WEB_GROUP_KIND = "dead-web-owner-port-group"
 # require a claim, so an unnamed one produces zero signals.
 PREFLIGHT_CLAIM_STATE = "preflight_dead_owner_port_lease"
 # How often the reap re-checks its targets. Deliberately coarser than the
-# owner's 30ms default: preflight's liveness probe is a COMPLETE process-table
-# read (see `liveness_reader` below), and paying for one every 30ms across a
+# owner's 30ms default: preflight's identity probe is a COMPLETE process-table
+# read, and paying for one every 30ms across a
 # three-second grace would be a boot-time cost with no extra proof behind it.
 PREFLIGHT_VERIFY_POLL_SECONDS = 0.25
 
@@ -261,13 +261,6 @@ def preflight_port(
     # injectable for the same reason `kill` and `table_reader` are.
     generation_reader: Callable[[int], str | None] = process_spawn_generation,
     process_group_reader: Callable[[int], int | None] = live_process_group,
-    # The escalation's liveness poll. It defaults to the SAME complete-table
-    # requirement the launch decision uses, and that is a safety property rather
-    # than symmetry: `process_state` returns the empty string BOTH for a pid that
-    # is gone and for a /proc it could not read, so polling it directly would
-    # certify an unverifiable orphan as reaped and clear the launch. An
-    # unreadable process table must refuse.
-    liveness_reader: Callable[[int], bool] | None = None,
 ) -> dict:
     """Refuse a wedged live owner; reconcile a dead owner's verified orphans."""
     if table is None:
@@ -329,11 +322,8 @@ def preflight_port(
     if stale:
         # ONE batch through the ONE destructive owner: every stale orphan is
         # SIGTERMed before any of them is force-killed, which is what the private
-        # loop did with its own clock and its own fence. The liveness poll asks
-        # `pid_is_serving` directly rather than re-reading the whole process
-        # table on every 30ms pass -- the complete-table requirement belongs to
-        # the DECISION above, which has already been made.
-        probe = liveness_reader if liveness_reader is not None else (lambda pid: pid_is_serving(pid, table=table_reader()))
+        # loop did with its own clock and its own fence. Polling carries the
+        # complete typed identity result through the same owner too.
         try:
             outcomes = terminate_authorized_processes(
                 [
@@ -346,7 +336,7 @@ def preflight_port(
                     )
                     for pid in stale
                 ],
-                still_current=probe,
+                identity_diagnostic=lambda pid: process_record_diagnostic(stale_records[pid], table=table_reader()),
                 signal_process=kill,
                 grace_seconds=GROUP_TERMINATION_GRACE_SECONDS,
                 force_seconds=GROUP_TERMINATION_FORCE_SECONDS,

@@ -65,7 +65,7 @@ MIRRORS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
 def census(path: Path) -> dict:
     """Everything needed to state this fixture's provenance without reopening it."""
 
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     try:
         tables = [row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
         report: dict = {
@@ -93,14 +93,33 @@ def census(path: Path) -> dict:
     return report
 
 
+def copy_fixture_store(source: Path | None, target: Path, *, copy_function=shutil.copyfile, include_shm: bool = False) -> int:
+    """Preflight ownership and replace a fixture with its committed WAL snapshot."""
+    target_paths = [target.with_name(target.name + suffix) for suffix in ("", "-wal", "-shm")]
+    if source is not None:
+        source.stat()
+        if not source.is_file():
+            raise ValueError("source fixture must be a regular file")
+        source_paths = [source.with_name(source.name + suffix) for suffix in ("", "-wal", "-shm")]
+        if any(left.resolve() == right.resolve() or (left.exists() and right.exists() and left.samefile(right))
+               for left in source_paths for right in target_paths):
+            raise ValueError("source and target fixture paths overlap")
+    for path in target_paths:
+        path.unlink(missing_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    total = 0
+    if source is not None:
+        for suffix in (("", "-wal", "-shm") if include_shm else ("", "-wal")):
+            candidate = source.with_name(source.name + suffix)
+            if candidate.exists():
+                destination = target.with_name(target.name + suffix)
+                copy_function(candidate, destination)
+                total += destination.stat().st_size
+    return total
+
+
 def double(source: Path, target: Path) -> dict:
-    if target.exists():
-        target.unlink()
-    for suffix in ("-wal", "-shm"):
-        stale = target.with_name(target.name + suffix)
-        if stale.exists():
-            stale.unlink()
-    shutil.copy2(source, target)
+    copy_fixture_store(source, target, copy_function=shutil.copy2)
     before = census(target)
     started = time.clock_gettime(time.CLOCK_MONOTONIC)
     con = sqlite3.connect(target)
@@ -149,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     reporter.add_argument("--out", default="")
     args = parser.parse_args(argv)
     if args.command == "double":
-        report = double(Path(args.source).resolve(), Path(args.target).resolve())
+        report = double(Path(args.source).resolve(), Path(args.target).absolute())
     else:
         report = census(Path(args.database).resolve())
     text = json.dumps(report, indent=1, sort_keys=True)

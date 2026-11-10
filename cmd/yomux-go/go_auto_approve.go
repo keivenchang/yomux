@@ -243,18 +243,9 @@ func (store *goYoloStore) setIfIdentity(session, expectedIdentity string, enable
 	if expectedIdentity != "" && (!store.enabled[session] || store.identities[session] != expectedIdentity) {
 		return nil
 	}
-	newEnabled := make(map[string]bool, len(store.enabled)+1)
-	newIdentities := make(map[string]string, len(store.identities)+1)
-	newAgentIDs := make(map[string]map[string]string, len(store.agentIDs)+1)
-	for name, value := range store.enabled {
-		newEnabled[name] = value
-	}
-	for name, value := range store.identities {
-		newIdentities[name] = value
-	}
-	for name, values := range store.agentIDs {
-		newAgentIDs[name] = cloneGoYoloAgentIDs(values)
-	}
+	newEnabled := cloneGoYoloEnabled(store.enabled)
+	newIdentities := cloneGoYoloIdentities(store.identities)
+	newAgentIDs := cloneGoYoloAgentIDMap(store.agentIDs)
 	if enabled {
 		identity = strings.TrimSpace(identity)
 		if identity == "" {
@@ -406,6 +397,15 @@ func (s *server) publishGoYoloState(session string) {
 			"changes": map[string]any{session: s.goYoloSessionPayload(session)},
 			"fields":  map[string]any{"topology_generation": s.goYoloTopologyGeneration()},
 		})
+	}
+}
+
+func (s *server) publishAgentStatusRefresh() {
+	if s.events == nil {
+		return
+	}
+	if _, err := s.events.publish("auto_approve_changed", map[string]any{"refresh": true}); err != nil {
+		slog.Error("publish agent status refresh", "error", err)
 	}
 }
 

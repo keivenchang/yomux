@@ -899,15 +899,6 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   box-shadow: 0 10px 28px rgb(var(--shadow-rgb) / 0.40);
   opacity: 0.82 !important;
 }
-.pane-drag-image.drag-image {
-  color: var(--text);
-  background: color-mix(in srgb, var(--panel) 88%, transparent);
-  border: 2px dotted var(--pane-resizer-hover-bg);
-  border-radius: var(--radius-lg);
-  box-shadow: 0 14px 34px var(--paint-shadow-42);
-  overflow: hidden;
-  opacity: 0.86 !important;
-}
 .tabber-drag-image.drag-image {
   max-height: min(56vh, 520px);
   padding: var(--space-4);
@@ -924,42 +915,6 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 }
 .tabber-drag-image .session-popover {
   display: none !important;
-}
-.pane-drag-image-frame {
-  gap: var(--space-4);
-  width: 100%;
-  height: 100%;
-  padding: var(--space-9) var(--space-10);
-  background:
-    linear-gradient(to bottom, var(--pane-bar-bg, var(--panel2)) 0 30px, transparent 30px),
-    color-mix(in srgb, var(--panel) 94%, black 6%);
-}
-.pane-drag-image-title {
-  min-width: 0;
-  font-weight: 700;
-  font-size: var(--ui-font-size-sm);
-  line-height: 1.2;
-}
-.pane-drag-image-meta {
-  color: var(--muted);
-  font-size: var(--ui-font-size-xs);
-  line-height: 1.2;
-}
-.pane-drag-image-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  gap: var(--space-4);
-  min-height: 0;
-  overflow: hidden;
-  padding-top: var(--space-4);
-}
-.pane-drag-image-tabs span {
-  max-width: min(18ch, 42%);
-  padding: var(--space-2) var(--space-5);
-  background: var(--pane-bar-bg, var(--panel2));
-  font-size: var(--ui-font-size-xs);
-  line-height: 1.15;
 }
 .file-drag-main {
   display: flex;
@@ -998,9 +953,6 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 .file-drag-more {
   color: var(--muted);
   font: var(--ui-font-size-3xs)/1.15 var(--mono-font);
-}
-.file-drag-more {
-  color: var(--muted);
 }
 .state-legend {
   display: flex;

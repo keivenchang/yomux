@@ -3,14 +3,20 @@ load("//:tools/bazel_rules.bzl", "go_test_pair")
 
 go_library(
     name = "tailfile_lib",
-    srcs = ["tailfile.go"],
+    srcs = [
+        "ingestion.go",
+        "tailfile.go",
+    ],
     importpath = "github.com/keivenchang/yomux/internal/tailfile",
     visibility = ["//visibility:public"],
 )
 
 go_test_pair(
     name = "tailfile",
-    srcs = ["tailfile_test.go"],
+    srcs = [
+        "ingestion_test.go",
+        "tailfile_test.go",
+    ],
     embed = [":tailfile_lib"],
 )
 

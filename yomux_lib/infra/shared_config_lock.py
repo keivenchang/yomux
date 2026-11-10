@@ -97,6 +97,15 @@ def _revision(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def shared_config_file_signature(path: Path) -> tuple[int, ...] | None:
+    """Observe hand edits and replacements even when an editor preserves mtime."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_dev, stat.st_ino, stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size
+
+
 def _decode_mapping(raw: bytes, *, file_format: str) -> dict[str, Any]:
     if not raw:
         return {}

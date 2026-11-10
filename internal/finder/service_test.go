@@ -4227,7 +4227,7 @@ func TestRecursiveDeleteQuarantineDoesNotDeleteAReplacementEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer parent.Close()
-	_, quarantineErr := quarantineDeleteEntry(parent, "target.txt", identityFor(originalInfo))
+	_, quarantineErr := quarantineDeleteEntry(parent, "target.txt", identityFor(originalInfo), target)
 	if !errors.Is(quarantineErr, errChangedOnDisk) {
 		t.Fatalf("replacement quarantine error = %v", quarantineErr)
 	}
@@ -4502,11 +4502,15 @@ func TestFinderUsesPythonFilesystemLimits(t *testing.T) {
 
 func TestInfoReturnsDirectoryCapability(t *testing.T) {
 	service, root := newTestService(t, nil)
+	stat, err := os.Lstat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	info, finderErr := service.Info(context.Background(), root, false)
 	if finderErr != nil {
 		t.Fatalf("directory info error = %v", finderErr)
 	}
-	if info["kind"] != "dir" || info["size"] != nil || info["mtime"] != nil {
+	if info["kind"] != "dir" || info["size"] != stat.Size() || info["mtime"] != stat.ModTime().Unix() {
 		t.Fatalf("directory info = %#v", info)
 	}
 }

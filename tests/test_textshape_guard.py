@@ -43,6 +43,15 @@ def test_guarded_fetch_source_contract():
 def test_tmux_args_source_contract():
     source = inspect.getsource(test_tmux_args_source_contract)
     assert "tmux_args" in source and "argv" in source
+
+def test_direct_source_contract():
+    assert "source_contract" in inspect.getsource(test_direct_source_contract)
+
+def test_direct_file_contract():
+    assert Path(__file__).read_text() != ""
+
+def test_direct_serialized_contract():
+    assert "body" not in json.dumps({"status": 200})
 """,
     )
 
@@ -53,10 +62,13 @@ def test_tmux_args_source_contract():
         "test_finder_reload_source_contract",
         "test_guarded_fetch_source_contract",
         "test_tmux_args_source_contract",
+        "test_direct_source_contract",
+        "test_direct_file_contract",
+        "test_direct_serialized_contract",
     }
     assert textshape_assertion_guard.main(["--root", str(root)]) == 1
     output = capsys.readouterr().out
-    assert "4 candidates, 0 allowlisted, 4 unallowlisted" in output
+    assert "7 candidates, 0 allowlisted, 7 unallowlisted" in output
 
 
 def test_detector_ignores_behavioral_assertions_and_assertion_messages(tmp_path: Path):

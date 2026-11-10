@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
 from yomux_lib.agent_tui import agent_client_version_slug
+from yomux_lib.diagnostic_redaction import redact_diagnostic_text, redact_diagnostic_value
 
 
 DEFAULT_CAPTURE_COLS = 200
@@ -50,7 +51,8 @@ LiteralStringDumper.add_representer(str, _represent_string)
 
 
 def dump_fixture_yaml(data: dict) -> str:
-    return yaml.dump(data, Dumper=LiteralStringDumper, allow_unicode=True, sort_keys=True, width=120)
+    sanitized = redact_diagnostic_value(data, text_limit=None, text_transform=sanitize_string)
+    return yaml.dump(sanitized, Dumper=LiteralStringDumper, allow_unicode=True, sort_keys=True, width=120)
 
 
 def parse_size(value: str) -> tuple[int, int]:
@@ -64,12 +66,17 @@ def parse_size(value: str) -> tuple[int, int]:
     return cols, rows
 
 
-def sanitize_text(text: str) -> str:
+def sanitize_string(text: str) -> str:
     home = os.path.expanduser("~")
     sanitized = text.replace(home, "~") if home else text
+    sanitized = redact_diagnostic_text(sanitized)
     sanitized = TOKEN_RE.sub("<redacted-token>", sanitized)
     sanitized = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "<redacted-email>", sanitized)
-    return sanitized.rstrip() + "\n"
+    return sanitized
+
+
+def sanitize_text(text: str) -> str:
+    return sanitize_string(text).rstrip() + "\n"
 
 
 def command_version(command: str) -> str:

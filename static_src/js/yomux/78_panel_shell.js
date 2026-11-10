@@ -5,6 +5,7 @@
 function renderPanels(previousActive = [], options = {}) {
   const perf = clientPerfStart('renderPanels');
   try {
+    reconcileEditorNav();
     return renderPanelsMeasured(previousActive, options);
   } finally {
     clientPerfEnd(perf, {nodes: grid?.childElementCount || 0});
@@ -39,6 +40,7 @@ function renderPanelsMeasured(previousActive = [], options = {}) {
 }
 
 function finishPanelLayoutRender(previousActive = [], options = {}, {updateInactiveOverlays = false} = {}) {
+  finishEditorNavFocus();
   syncPanelVisibility(previousActive);
   renderAutoApproveButtons();
   scheduleAgentWindowActivityAnimationSync();
@@ -613,6 +615,24 @@ function syncPaneTabDismissControl(tab, item) {
   tab.insertAdjacentHTML('beforeend', nextHtml);
 }
 
+function bindPaneTabDismissInteraction(tab) {
+  for (const type of ['pointerdown', 'mousedown']) {
+    tab.addEventListener(type, event => {
+      if (!event.target.closest('[data-pane-tab-close]')) return;
+      // Dismissal must not transfer content focus to chrome that is about to disappear.
+      event.preventDefault();
+      event.stopPropagation();
+    });
+  }
+  tab.addEventListener('keydown', event => {
+    const close = event.target.closest('[data-pane-tab-close]');
+    if (!close || !['Enter', ' '].includes(event.key)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    close.click();
+  });
+}
+
 function syncPaneTabPinnedChrome(tab, item) {
   syncPaneTabPinnedIcon(tab, item);
   syncPaneTabDismissControl(tab, item);
@@ -783,6 +803,7 @@ function createPaneTab(side, item, displayContext = {}) {
     bindPaneTabPopover(tab, item);
   } else bindTabInteraction({anchor: tab, item, sourceSlot: () => side});
   tab.setAttribute('aria-label', paneTabAriaLabel(item));
+  bindPaneTabDismissInteraction(tab);
   tab.addEventListener('pointerdown', event => {
     dragTimingReset();           // S14: starts the opt-in drag-timing window (no-op unless the flag is on)
     dragTimingMark('pointerdown');
@@ -1077,13 +1098,6 @@ function fileEditorPaneTabHtml(item, options = {}) {
 }
 
 function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
-  // Callers such as tests and layout previews can pass a fresh metadata payload before it has
-  // entered transcriptMetadataState. Always use the same graph-backed input for badges and detail
-  // instead of silently reading an unrelated cached session record.
-  const summary = sessionWorkSummary(session, info);
-  const pr = options.showBadges === false
-    ? null
-    : (summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, summary.git)) : displayPullRequest(info));
   const desc = options.showDetail === false
     ? ''
     : (options.detail !== undefined ? String(options.detail || '') : sessionTabDescription(session, info));
@@ -1441,7 +1455,6 @@ function bindPanelPopover(panel) {
     const controller = createHoverPopover({
       anchor: zone,
       popover: () => zone.querySelector(':scope > .session-popover'),
-      showDelay: 0,
       hideDelay: () => popoverHideDelayMs,
     });
     return () => controller?.dispose?.();

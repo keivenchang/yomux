@@ -136,6 +136,13 @@ func resolvedDescriptorPath(file *os.File) (string, error) {
 	}
 	return filepath.Clean(path), nil
 }
+
+func descriptorPathMayAlias(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	// F_GETPATH follows the vnode path cache, which any hardlink opener can change.
+	return !ok || stat.Nlink != 1
+}
+
 func resolvedChildPath(dir *os.File, name string) (string, error) {
 	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
@@ -161,8 +168,8 @@ func platformLinkNoReplace(dir *os.File, oldName, newName string) error {
 	}
 	return platformUnlinkAt(dir, oldName, false)
 }
-func platformRenameNoReplace(dir *os.File, oldName, newName string) error {
-	return unix.RenameatxNp(int(dir.Fd()), oldName, int(dir.Fd()), newName, unix.RENAME_EXCL)
+func platformRenameBetweenNoReplace(dir *os.File, oldName string, target *os.File, newName string) error {
+	return unix.RenameatxNp(int(dir.Fd()), oldName, int(target.Fd()), newName, unix.RENAME_EXCL)
 }
 func platformOpenRoot() (int, error) {
 	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
@@ -188,3 +195,34 @@ func darwinPathForDescriptor(file *os.File) (string, error) {
 
 func platformChildFDPath(fd int) string           { return fmt.Sprintf("/dev/fd/%d", fd) }
 func platformGitPath(file *os.File, _ int) string { return platformDescriptorPath(file) }
+
+func platformMetadataTimes(stat *syscall.Stat_t) (any, any) {
+	return stat.Atimespec.Sec, stat.Birthtimespec.Sec
+}
+func platformMetadataRestriction(stat *syscall.Stat_t) string {
+	if stat.Flags&(unix.UF_IMMUTABLE|unix.SF_IMMUTABLE|unix.UF_APPEND|unix.SF_APPEND) != 0 {
+		return "The item is immutable or append-only"
+	}
+	return ""
+}
+func platformBirthAt(parent *os.File, name string) *int64 {
+	info, err := lstatAt(parent, name)
+	if err != nil {
+		return nil
+	}
+	value := info.Sys().(*syscall.Stat_t).Birthtimespec.Sec
+	return &value
+}
+func platformFilesystemRestriction(file *os.File) (string, error) {
+	var stat unix.Statfs_t
+	if err := unix.Fstatfs(int(file.Fd()), &stat); err != nil {
+		return "", err
+	}
+	if stat.Flags&unix.MNT_RDONLY != 0 {
+		return "The filesystem is read-only", nil
+	}
+	return "", nil
+}
+
+func platformMetadataOpenFlags() int                      { return unix.O_EVTONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC }
+func platformChmod(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }

@@ -1464,6 +1464,9 @@ async function startYoagentChatRequest(rawText, options = {}) {
   if (YOAGENT_CHAT_BACKENDS.includes(yoagentBackendKey())) {
     await refreshYoagentAgentAvailability({force: true, silent: true, render: false});
   }
+  if (yoagentChatState.busy || yoagentChatState.activeRequest || yoagentConversationState.pendingWaits.length) {
+    return sendYoagentChatMessage(text);
+  }
   if (!yoagentChatEnabled()) {
     renderYoagentPanel({preserveDraft: true, scrollBottom: false});
     return;

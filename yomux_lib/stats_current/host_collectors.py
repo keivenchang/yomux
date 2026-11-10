@@ -29,7 +29,9 @@ def _linux_system_times() -> tuple[float, float] | None:
         values = [float(item) for item in fields[1:]]
     except (IndexError, OSError, ValueError):
         return None
-    total = sum(values)
+    if len(values) < 4:
+        return None
+    total = sum(values[:8])
     idle = values[3] + (values[4] if len(values) > 4 else 0.0)
     return (total, total - idle) if total > 0 else None
 

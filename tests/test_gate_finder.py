@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import stat
-import time
 
 import pytest
 from selenium.webdriver.support.ui import WebDriverWait
@@ -24,7 +22,6 @@ FINDER_ENTRIES = {
     FINDER_ROOT: [{"name": "project", "kind": "dir"}],
     FINDER_DIRECTORY: [{"name": "nested.txt", "kind": "file"}],
 }
-QUIET_POLL_CYCLES = 25
 
 
 def _load_finder(browser, tmp_path) -> None:
@@ -1035,19 +1032,3 @@ def test_b4_indexed_label_appears_after_context_index_and_survives_finder_refres
     assert FINDER_DIRECTORY in metrics["afterRefresh"]["setting"], metrics
     assert metrics["afterRefresh"]["requestsAfterRefresh"] > metrics["afterRefresh"]["requestsBeforeRefresh"], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
-
-
-
-
-def _assert_quiet_fs_changed_volume(metrics: dict[str, object]) -> None:
-    assert metrics["registered"]["roots"], metrics
-    assert metrics["positive_events"] in ([], ["fs_changed"]), metrics
-    assert metrics["positive_delivery"] and metrics["positive_delivery"]["type"] == "fs_changed", metrics
-    assert metrics["positive_published_events"] == metrics["positive_delivered_events"] == 1, metrics
-    assert metrics["positive_published_bytes"] > 0 and metrics["positive_delivered_bytes"] > 0, metrics
-    assert metrics["quiet_queue_empty"] is True, metrics
-    assert len(metrics["rounds"]) == QUIET_POLL_CYCLES, metrics
-    assert all("fs_changed" not in events for events in metrics["rounds"]), metrics
-    assert metrics["signatures"][0] == metrics["signatures"][1], metrics
-    assert metrics["published_events"] == 0 and metrics["published_bytes"] == 0, metrics
-    assert metrics["delivered_events"] == 0 and metrics["delivered_bytes"] == 0, metrics

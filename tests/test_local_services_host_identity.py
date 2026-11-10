@@ -8,7 +8,9 @@ import json
 import os
 import time
 import signal
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +20,7 @@ from yomux_lib.host_identity import current_host_identity
 from yomux_lib.host_identity import is_current_local_process
 from yomux_lib.infra.process_claims import ProcessClaimLedger
 from yomux_lib.local_services import registry as registry_mod
+from yomux_lib.local_services import lifetime as lifetime_mod
 from yomux_lib.local_services.registry import ProcessTableEntry
 from yomux_lib.local_services.registry import process_record_diagnostic
 from yomux_lib.local_services.registry import shutdown_owned_local_services
@@ -37,6 +40,73 @@ def fixture_identity(*, stable_host_id: str = "host-a") -> HostIdentity:
         instance_nonce="instance-a",
         stable_host_id_source="fixture",
     )
+
+
+@pytest.mark.parametrize("transient", [False, True])
+def test_retirement_cannot_confirm_death_when_identity_becomes_unreadable(tmp_path, monkeypatch, transient):
+    identity = fixture_identity()
+    record = identity.process_record_fields()
+    current = is_current_local_process(record, host_identity=identity, start_identity_reader=lambda _: identity.process_start_identity, state_reader=lambda _: "S")
+    unavailable = replace(current, current=False, reason=registry_mod.LocalProcessReason.PROCESS_IDENTITY_UNAVAILABLE)
+    registry = object.__new__(registry_mod.LocalServiceRegistry)
+    registry.host_identity = identity
+    registry._service_dir = tmp_path
+    registry.spec = SimpleNamespace(name="fixture")
+    registry.clock = time.monotonic
+    registry.sleep = lambda _: None
+    monkeypatch.setattr(registry, "_record_process_diagnostic", lambda _: current)
+    monkeypatch.setattr(registry, "_authorization_record", lambda *_: record)
+    authorization = lifetime_mod.ServiceDestructionAuthorization(disposition=lifetime_mod.LIFETIME_DISPOSITION_AUTHORIZED, pid=identity.pid, reason="authorized", failed_dimension="", dimensions={})
+    monkeypatch.setattr(registry_mod, "authorize_service_destruction", lambda *_, **__: authorization)
+    signals = []
+
+    def signal_process(pid, signum):
+        signals.append((pid, signum))
+
+    monkeypatch.setattr(os, "kill", signal_process)
+    calls = []
+
+    def diagnostic(*_, **__):
+        calls.append(None)
+        unreadable = len(calls) == 4 if transient else bool(signals)
+        return unavailable if unreadable else current
+
+    monkeypatch.setattr(registry_mod, "process_record_diagnostic", diagnostic)
+    outcome = registry._terminate_recorded_generation(record, identity.pid, claim_state="fixture")
+    assert outcome.confirmed_dead is False
+    assert outcome.reason == "process_identity_unavailable"
+    assert signals == [(identity.pid, signal.SIGTERM)]
+
+
+@pytest.mark.parametrize("same_pid", [False, True])
+def test_record_supersession_retains_an_owner_whose_identity_cannot_be_read(monkeypatch, same_pid):
+    identity = fixture_identity()
+    existing = identity.process_record_fields()
+    incoming = existing.copy() if same_pid else identity.process_record_fields(pid=identity.pid + 1, start_identity="proc:other")
+    diagnostic = is_current_local_process(existing, host_identity=identity, start_identity_reader=lambda _: None, pid_probe=lambda _: True)
+    registry = object.__new__(registry_mod.LocalServiceRegistry)
+    registry.host_identity = identity
+    monkeypatch.setattr(registry_mod, "process_record_diagnostic", lambda *_, **__: diagnostic)
+    assert registry._record_supersession_refusal(existing, incoming) == "process_identity_unavailable"
+
+
+def test_termination_identity_refusal_reports_the_actual_last_signal():
+    identity = fixture_identity()
+    current = is_current_local_process(identity.process_record_fields(), host_identity=identity, start_identity_reader=lambda _: identity.process_start_identity, state_reader=lambda _: "S")
+    unavailable = replace(current, current=False, reason=registry_mod.LocalProcessReason.PROCESS_IDENTITY_UNAVAILABLE)
+    authorization = lifetime_mod.ServiceDestructionAuthorization(disposition=lifetime_mod.LIFETIME_DISPOSITION_AUTHORIZED, pid=identity.pid, reason="authorized", failed_dimension="", dimensions={})
+    signals = []
+    outcome = lifetime_mod.terminate_authorized_process(
+        authorization,
+        identity_diagnostic=lambda: unavailable if signals and signals[-1] == signal.SIGKILL else current,
+        signal_process=lambda _pid, signum: signals.append(signum),
+        grace_seconds=0,
+        force_seconds=0,
+    )
+    assert outcome.confirmed_dead is False
+    assert outcome.reason == "process_identity_unavailable"
+    assert outcome.attempted_action == lifetime_mod.LIFETIME_ACTION_FORCE_TERMINATE
+    assert outcome.signals == (signal.SIGTERM, signal.SIGKILL)
 
 
 def test_record_only_reclaim_covers_unidentifiable_records_and_nothing_else() -> None:
@@ -556,3 +626,57 @@ def test_a_service_can_never_mint_an_external_claim_naming_itself() -> None:
     )
     assert self_claim["diagnostic"]["reason"] == "self_connection"
     assert len(leases) == 1, "a refused self-claim was still stored in the lease table"
+
+
+@pytest.mark.parametrize("probe_error,expected", [(None, "process_identity_unavailable"), (PermissionError, "process_identity_unavailable"), (ProcessLookupError, "process_not_found")])
+def test_default_identity_fence_proves_process_absence_before_removing_record(monkeypatch, probe_error, expected):
+    identity = current_host_identity()
+    record = identity.process_record_fields()
+
+    def probe(pid, signum):
+        assert pid == identity.pid and signum == 0
+        if probe_error is not None:
+            raise probe_error()
+
+    monkeypatch.setattr(os, "kill", probe)
+    result = is_current_local_process(record, host_identity=identity, start_identity_reader=lambda _: None)
+    assert result.reason.value == expected
+    assert result.may_remove_stale_record is (probe_error is ProcessLookupError)
+
+
+def test_adoption_cleanup_error_cannot_leak_into_another_transaction(tmp_path, monkeypatch):
+    identity = current_host_identity()
+    ledger = ProcessClaimLedger(tmp_path, 'cleanup-fixture', host_identity=identity)
+    ledger.directory.mkdir(parents=True)
+    first_marker = ledger.adoption_marker_path('first')
+    original_unlink = Path.unlink
+
+    def unlink(path, *args, **kwargs):
+        if path == first_marker:
+            raise PermissionError('marker cleanup sentinel')
+        return original_unlink(path, *args, **kwargs)
+
+    def swap(_path, _record, _pid, claim_id, _successor, _target):
+        if claim_id == 'first':
+            raise ValueError('swap sentinel')
+        return {'result': 'adopted'}
+
+    monkeypatch.setattr(Path, 'unlink', unlink)
+    monkeypatch.setattr(ledger, '_swap_supervisor', swap)
+    target = is_current_local_process(identity.process_record_fields(), host_identity=identity)
+    with pytest.raises(ValueError, match='swap sentinel'):
+        ledger._adopt_under_marker(ledger.claim_path('first'), {}, identity.pid, 'first', target)
+    result = ledger._adopt_under_marker(ledger.claim_path('second'), {}, identity.pid, 'second', target)
+    assert result == {'result': 'adopted'}
+
+
+def test_unreadable_claim_encoding_returns_a_typed_row_and_keeps_siblings(tmp_path):
+    identity = current_host_identity()
+    ledger = ProcessClaimLedger(tmp_path, 'encoding-fixture', host_identity=identity)
+    ledger.directory.mkdir(parents=True)
+    ledger.claim_path('invalid-encoding').write_bytes(b'\xff')
+    ledger.claim_path('invalid-json').write_bytes(b'{')
+    rows = ledger.reap_unsupervised()
+    assert len(rows) == 2
+    assert {row['reason'] for row in rows} == {'unreadable_claim'}
+    assert {row['result'] for row in rows} == {'reported_only'}

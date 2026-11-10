@@ -1,6 +1,9 @@
 import os
+import json
 import threading
 from pathlib import Path
+import itertools
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -15,6 +18,50 @@ def ruleset(data):
     return yolo_rules.validate_rules(data, path=Path("/tmp/yolo-rules-test.yaml"), source="test")
 
 
+@pytest.mark.parametrize("consumer", ["yolo_settings", "evaluate", "rules_status"])
+def test_settings_read_failure_refuses_rule_actions_with_the_original_diagnostic(monkeypatch, consumer):
+    monkeypatch.setattr(yolo_rules, "settings_payload", lambda: {"settings": None, "error": "fixture invalid settings YAML"})
+    def unexpected_rules():
+        pytest.fail("rules must not be evaluated when settings cannot be read")
+    monkeypatch.setattr(yolo_rules, "cached_rules", unexpected_rules)
+    with pytest.raises(ValueError, match="fixture invalid settings YAML"):
+        if consumer == "evaluate":
+            yolo_rules.evaluate("echo allowed")
+        else:
+            getattr(yolo_rules, consumer)()
+
+
+@pytest.mark.parametrize('field', ['type', 'action'])
+@pytest.mark.parametrize('value', [[], {}], ids=['list', 'mapping'])
+def test_malformed_rule_fields_return_the_typed_manual_decision(monkeypatch, tmp_path, field, value):
+    path = tmp_path / 'rules.yaml'
+    rule = {'type': 'command', 'action': 'approve', 'match': 'echo'}
+    rule[field] = value
+    path.write_text(json.dumps({'default': 'approve', 'rules': [rule]}))
+    monkeypatch.setattr(yolo_rules, 'active_rule_path', lambda: path)
+    monkeypatch.setattr(yolo_rules, '_RULES_CACHE', {})
+    actual, error = yolo_rules.cached_rules()
+    assert actual is None
+    assert isinstance(error, yolo_rules.RuleLoadError)
+    assert error.reason_code == 'rules_file_malformed'
+
+
+@pytest.mark.parametrize('replace', [False, True], ids=['hand-edit', 'replacement'])
+def test_rule_cache_observes_same_size_revision_with_preserved_mtime(monkeypatch, tmp_path, replace):
+    path = tmp_path / 'rules.yaml'
+    path.write_text('default: approve\nrules: []\n')
+    monkeypatch.setattr(yolo_rules, 'active_rule_path', lambda: path)
+    monkeypatch.setattr(yolo_rules, '_RULES_CACHE', {})
+    assert yolo_rules.cached_rules()[0].default_action == 'approve'
+    original = path.stat()
+    target = path.with_name('replacement.yaml') if replace else path
+    target.write_text('default: decline\nrules: []\n')
+    os.utime(target, ns=(original.st_atime_ns, original.st_mtime_ns))
+    if replace:
+        os.replace(target, path)
+    assert yolo_rules.cached_rules()[0].default_action == 'decline'
+
+
 def test_concurrent_rule_bootstrap_keeps_one_complete_parseable_file(tmp_path):
     path = tmp_path / "yolo-rules.yaml"
     barrier = threading.Barrier(8)
@@ -23,14 +70,27 @@ def test_concurrent_rule_bootstrap_keeps_one_complete_parseable_file(tmp_path):
         barrier.wait()
         yolo_rules.ensure_rule_file(path)
 
-    workers = [threading.Thread(target=create) for _ in range(8)]
-    for worker in workers:
-        worker.start()
-    for worker in workers:
-        worker.join()
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        workers = [executor.submit(create) for _ in range(8)]
+        for worker in workers:
+            worker.result()
 
     rules = yolo_rules.parse_rule_text(path.read_text(encoding="utf-8"), path=path)
     assert rules.default_action == "ask"
+
+
+def test_rule_bootstrap_gate_rejects_a_failed_concurrent_creator(monkeypatch, tmp_path):
+    create = yolo_rules.ensure_rule_file
+    attempts = itertools.count()
+
+    def fail_later_creators(path):
+        if next(attempts):
+            raise RuntimeError("fixture concurrent creator failed")
+        return create(path)
+
+    monkeypatch.setattr(yolo_rules, "ensure_rule_file", fail_later_creators)
+    with pytest.raises(RuntimeError, match="fixture concurrent creator failed"):
+        test_concurrent_rule_bootstrap_keeps_one_complete_parseable_file(tmp_path)
 
 
 def test_yolo_rules_stale_document_write_is_refused(tmp_path):

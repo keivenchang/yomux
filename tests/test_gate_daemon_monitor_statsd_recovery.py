@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from tests.isolated_dev_server import build_paths
+from tests.gate_harness import run_fixture_cleanup_phases
 from tests.isolated_dev_server import start_isolated_dev_server
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
@@ -127,6 +128,7 @@ def test_go_stats_ignore_poisoned_legacy_statsd_record_end_to_end(monkeypatch, t
         assert record_path.read_bytes() == original_record
         assert hashlib.sha256(record_path.read_bytes()).hexdigest() == original_digest
     finally:
-        if server is not None:
-            server.stop()
-        stop_isolated_tmux_runtime(tmux_runtime)
+        run_fixture_cleanup_phases("legacy statsd record", [
+            ("server", lambda: server.stop() if server is not None else None),
+            ("tmux runtime", lambda: stop_isolated_tmux_runtime(tmux_runtime)),
+        ])

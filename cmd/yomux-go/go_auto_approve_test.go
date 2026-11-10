@@ -759,6 +759,7 @@ func TestGoYoloConfirmedRenameDisablesWorkerAndReleasesPaneLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &server{yolo: store, events: newEventBroker()}
+	defer s.releaseStaleGoYoloPaneLocks("old-session", map[string]bool{})
 	lock, _, err := s.acquireGoYoloTargetLock("%1")
 	if err != nil || lock == nil {
 		t.Fatalf("acquire pane lock = (%v, %v)", lock, err)
@@ -803,6 +804,7 @@ func TestGoYoloTransientTmuxFailureSuspendsWithoutReleasingPaneLock(t *testing.T
 		t.Fatal(err)
 	}
 	s := &server{yolo: store}
+	defer s.releaseStaleGoYoloPaneLocks("session", map[string]bool{})
 	lock, _, err := s.acquireGoYoloTargetLock("%1")
 	if err != nil || lock == nil {
 		t.Fatalf("acquire pane lock = (%v, %v)", lock, err)
@@ -1252,6 +1254,7 @@ func TestGoYoloCycleDisablesBeforeSendingToReplacementAgent(t *testing.T) {
 	}, agentProcessSnapshot: func(context.Context, int) (stats.AgentStatusProcess, error) {
 		return goYoloTestProcess(99, processStart, "codex", "/bin/codex"), nil
 	}}
+	defer s.releaseStaleGoYoloPaneLocks("codex-session", map[string]bool{})
 	setAgent := func() {
 		now := time.Now()
 		s.metadataMu.Lock()
@@ -1328,6 +1331,7 @@ func TestGoYoloRevalidatesProcessIdentityImmediatelyBeforeCapacitySend(t *testin
 	}, agentProcessSnapshot: func(context.Context, int) (stats.AgentStatusProcess, error) {
 		return goYoloTestProcess(99, "proc:replacement", "codex", "/bin/codex"), nil
 	}}
+	defer s.releaseStaleGoYoloPaneLocks("codex-session", map[string]bool{})
 	s.metadataMu.Lock()
 	s.metadataPayload = map[string]any{"sessions": map[string]any{"codex-session": map[string]any{
 		"agents": []map[string]any{{"kind": "codex", "pane_target": "%1", "pid": 99, "command": "codex", "executable": "/bin/codex", "process_instance_id": processIdentity, "status": "idle", "status_observed_at": float64(time.Now().UnixNano()) / 1e9}},

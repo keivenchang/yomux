@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/keivenchang/yomux/internal/stats"
-	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 type statsStreamRecorder struct {
@@ -924,7 +923,7 @@ func TestStatsDeltaReturnsSnapshotAfterAppendAnd304WhenUnchanged(t *testing.T) {
 		t.Fatalf("initial delta cache generation = %#v", initial["cache_generation"])
 	}
 	if _, err := writer.AppendBatch(context.Background(), stats.AppendBatch{Observations: []stats.Observation{{
-		EventID: "delta-1", Family: "cpu", SourceID: "host", ObservedAt: float64(time.Now().Unix()), EpochID: "epoch", OwnerGeneration: 1,
+		EventID: "delta-1", Family: "cpu", SourceID: "host", ObservedAt: float64(now.Unix()), EpochID: "epoch", OwnerGeneration: 1,
 		Payload: map[string]any{"process_percent": 10},
 	}}}); err != nil {
 		t.Fatal(err)
@@ -946,6 +945,16 @@ func TestStatsDeltaReturnsSnapshotAfterAppendAnd304WhenUnchanged(t *testing.T) {
 	}
 	if buckets, ok := delta["buckets"].([]any); !ok || len(buckets) > 2 {
 		t.Fatalf("delta was not incremental: buckets=%v", delta["buckets"])
+	}
+	foundCPU := false
+	for _, raw := range delta["buckets"].([]any) {
+		series := raw.(map[string]any)["series"].(map[string]any)
+		if cpu, ok := series["cpu_percent:host"].(map[string]any); ok && cpu["value"] == float64(10) {
+			foundCPU = true
+		}
+	}
+	if !foundCPU {
+		t.Fatalf("delta lost appended CPU observation: %s", changed.Body.String())
 	}
 	changedGeneration, ok := delta["cache_generation"].(float64)
 	if !ok || changedGeneration <= initialGeneration {
@@ -1326,38 +1335,6 @@ func TestStatsStreamSnapshotMatchesBrowserWireContract(t *testing.T) {
 			}
 		}
 	}
-}
-
-func normalizeSSECacheGeneration(value map[string]any) {
-	for _, key := range []string{"ack", "snapshot", "ready"} {
-		if payload, ok := value[key].(map[string]any); ok {
-			if _, exists := payload["cache_generation"]; exists {
-				payload["cache_generation"] = float64(0)
-			}
-		}
-	}
-}
-
-func matrixRequestedResolution(rangeSeconds int, requested any) int {
-	if value, ok := requested.(int); ok {
-		return value
-	}
-	return autoResolution(rangeSeconds)
-}
-
-func normalizeSSEIDs(body string) string {
-	lines := strings.Split(body, "\n")
-	for index, line := range lines {
-		if strings.HasPrefix(line, "id: ") {
-			lines[index] = "id: <process-relative>"
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-func matrixOracleJSON(value any) string {
-	data, _ := json.Marshal(value)
-	return string(data)
 }
 
 func TestStatsDeltaUsesPythonNoDataIdentityAndOrdering(t *testing.T) {
@@ -2085,19 +2062,6 @@ func parseSSEFrames(t *testing.T, body string) []sseFrame {
 		}
 	}
 	return frames
-}
-
-func runPythonWireOracle(t *testing.T, scriptPath, fixturePath string) []byte {
-	t.Helper()
-	root := testsupport.RepoRoot(t)
-	command := exec.Command("python3", scriptPath, fixturePath)
-	command.Dir = root
-	command.Env = testsupport.SyntheticEnvironment("PYTHONDONTWRITEBYTECODE=1", "PYTHONPATH="+root)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Python wire oracle failed: %v\n%s", err, output)
-	}
-	return output
 }
 
 func statsMapKeys(value map[string]any) []string {

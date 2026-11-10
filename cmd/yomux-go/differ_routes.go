@@ -432,7 +432,7 @@ func (s *server) sessionFiles(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusAccepted, sessionFilesPendingEnvelope(request.session))
 			return
 		}
-		finderHTTPJSON(w, finderRequestIDForHTTP(), sessionFilesPayloadWithCache(record, descriptor, request.cacheView, true, false, false, time.Now()), nil)
+		finderHTTPJSON(w, finderRequestIDForHTTP(), s.sessionFilesPayloadWithCache(record, descriptor, request.cacheView, true, false, false, time.Now()), nil)
 		return
 	}
 
@@ -440,7 +440,7 @@ func (s *server) sessionFiles(w http.ResponseWriter, r *http.Request) {
 		admission := s.admitLiveSessionFilesCache(request, viewID)
 		request = admission.request
 		if admission.hit {
-			finderHTTPJSON(w, finderRequestIDForHTTP(), sessionFilesPayloadWithCache(admission.record, descriptor, viewID, true, admission.stale, admission.refreshing, time.Now()), nil)
+			finderHTTPJSON(w, finderRequestIDForHTTP(), s.sessionFilesPayloadWithCache(admission.record, descriptor, viewID, true, admission.stale, admission.refreshing, time.Now()), nil)
 			return
 		}
 	}
@@ -483,7 +483,7 @@ func (s *server) sessionFiles(w http.ResponseWriter, r *http.Request) {
 			if stale {
 				refreshing = s.scheduleSessionFilesRefresh(request, viewID, task)
 			}
-			finderHTTPJSON(w, finderRequestIDForHTTP(), sessionFilesPayloadWithCache(record, descriptor, viewID, true, stale, refreshing, time.Now()), nil)
+			finderHTTPJSON(w, finderRequestIDForHTTP(), s.sessionFilesPayloadWithCache(record, descriptor, viewID, true, stale, refreshing, time.Now()), nil)
 			return
 		}
 	}
@@ -504,7 +504,7 @@ func (s *server) sessionFiles(w http.ResponseWriter, r *http.Request) {
 			return payload, finderErr
 		}
 		if record, ok := s.readSessionFilesCache(request, viewID); ok && sessionFilesCacheRecordMatchesRequestIdentity(request, record) {
-			return sessionFilesPayloadWithCache(record, descriptor, viewID, false, false, false, time.Now()), nil
+			return s.sessionFilesPayloadWithCache(record, descriptor, viewID, false, false, false, time.Now()), nil
 		}
 		payload["cache"] = sessionFilesCacheMetadata(sessionFilesCacheRecord{StoredAt: time.Now().UnixNano()}, descriptor, viewID, false, false, time.Now())
 		return payload, nil
@@ -548,6 +548,7 @@ func sessionFilesCachedChunks(payload map[string]any) []map[string]any {
 			"refs_by_repo": map[string]any{repoPath: refs},
 			"from_ref":     payload["from_ref"], "to_ref": payload["to_ref"],
 			"warnings": payload["warnings"], "errors": []any{}, "loaded": false,
+			"attribution_complete": true,
 		})
 	}
 	return chunks
@@ -587,11 +588,13 @@ func (s *server) sessionFilesStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer stream.close()
 	writeEvent := stream.write
-	if err := writeEvent("start", map[string]any{"session": request.session, "from_ref": request.fromRef, "to_ref": request.toRef}); err != nil {
+	if err := writeEvent("start", map[string]any{"session": request.session, "from_ref": request.fromRef, "to_ref": request.toRef, "preparation": s.finder.AttributionPreparation()}); err != nil {
 		return
 	}
 
+	cacheStarted := time.Now()
 	admission := s.admitLiveSessionFilesCache(request, viewID)
+	cacheLookupMs := time.Since(cacheStarted).Milliseconds()
 	request = admission.request
 	if admission.hit {
 		payload := sessionFilesCachePayload(admission.record)
@@ -607,7 +610,8 @@ func (s *server) sessionFilesStream(w http.ResponseWriter, r *http.Request) {
 		_ = writeEvent("done", map[string]any{
 			"session": request.session, "loaded": true, "errors": []any{}, "warnings": payload["warnings"],
 			"from_ref": payload["from_ref"], "to_ref": payload["to_ref"],
-			"cache": sessionFilesStreamCacheMetadata(admission.record, descriptor, viewID, admission.stale, admission.refreshing, time.Now()),
+			"preparation": s.finder.AttributionPreparation(),
+			"cache":       sessionFilesStreamCacheMetadata(admission.record, descriptor, viewID, admission.stale, admission.refreshing, time.Now()),
 		})
 		return
 	}
@@ -620,7 +624,9 @@ func (s *server) sessionFilesStream(w http.ResponseWriter, r *http.Request) {
 		request.sessionIdentity = identity
 	}
 	plan.request = request
+	paneStarted := time.Now()
 	roots, agents, rootErr := s.sessionFilesPlanInputs(plan)
+	paneDiscoveryMs := time.Since(paneStarted).Milliseconds()
 	if rootErr != nil {
 		_ = writeEvent("error", rootErr.Payload())
 		return
@@ -640,9 +646,21 @@ func (s *server) sessionFilesStream(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if phases, ok := payload["phases"].(map[string]any); ok {
+		copyPhases := make(map[string]any, len(phases)+2)
+		for key, value := range phases {
+			copyPhases[key] = value
+		}
+		copyPhases["cache_lookup_ms"] = cacheLookupMs
+		copyPhases["pane_discovery_ms"] = paneDiscoveryMs
+		payload = cloneSessionFilesPayloadEnvelope(payload)
+		payload["phases"] = copyPhases
+	}
 	_ = writeEvent("done", map[string]any{
 		"session": request.session, "loaded": true, "errors": payload["errors"], "warnings": payload["warnings"],
 		"from_ref": payload["from_ref"], "to_ref": payload["to_ref"],
+		"repo_paths":  sessionFilesPayloadRepositoryPaths(payload),
+		"preparation": payload["preparation"], "phases": payload["phases"],
 		"cache": sessionFilesCacheMetadata(sessionFilesCacheRecord{StoredAt: time.Now().UnixNano()}, descriptor, viewID, false, false, time.Now()),
 	})
 }
@@ -690,7 +708,7 @@ func (s *server) sessionFilesBatch(w http.ResponseWriter, r *http.Request) {
 				admission := s.admitLiveSessionFilesCache(itemRequest, viewID)
 				itemRequest = admission.request
 				if admission.hit {
-					return sessionFilesPayloadWithCache(admission.record, descriptor, viewID, true, admission.stale, admission.refreshing, time.Now()), http.StatusOK
+					return s.sessionFilesPayloadWithCache(admission.record, descriptor, viewID, true, admission.stale, admission.refreshing, time.Now()), http.StatusOK
 				}
 			}
 			if itemRequest.sessionIdentity == "" {
@@ -715,7 +733,7 @@ func (s *server) sessionFilesBatch(w http.ResponseWriter, r *http.Request) {
 				return sessionFilesBatchErrorPayload(name, finderErr), finderErr.Status
 			}
 			if record, ok := s.readSessionFilesCache(itemRequest, viewID); ok && sessionFilesCacheRecordMatchesRequestIdentity(itemRequest, record) {
-				payload = sessionFilesPayloadWithCache(record, descriptor, viewID, false, false, false, time.Now())
+				payload = s.sessionFilesPayloadWithCache(record, descriptor, viewID, false, false, false, time.Now())
 			}
 			return payload, http.StatusOK
 		})
@@ -724,4 +742,25 @@ func (s *server) sessionFilesBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		return map[string]any{"sessions": payloads, "statuses": statuses, "errors": []any{}, "loaded": true}, nil
 	})
+}
+
+func sessionFilesPayloadRepositoryPaths(payload map[string]any) []string {
+	paths := []string{}
+	if repos, ok := payload["repos"].([]map[string]any); ok {
+		for _, repo := range repos {
+			path, _ := repo["repo"].(string)
+			if path != "" {
+				paths = append(paths, path)
+			}
+		}
+	}
+	return paths
+}
+
+func cloneSessionFilesPayloadEnvelope(payload map[string]any) map[string]any {
+	copy := make(map[string]any, len(payload))
+	for key, value := range payload {
+		copy[key] = value
+	}
+	return copy
 }

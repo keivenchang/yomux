@@ -126,6 +126,7 @@ filegroup(
     testonly = True,
     srcs = [
         "tools/auto_approve_tmux.py",
+        "tools/generate_go_version.py",
         "tools/go_binary.py",
         "tools/instance_isolation.py",
         "tools/mockers/claude.py",
@@ -147,7 +148,11 @@ filegroup(
         "tests/fixtures/settings_native_contract.json",
         ":go_test_python_support",
         ":go_test_tool_inputs",
-    ] + glob(["static/locales/*.json"]),
+    ] + glob([
+        "static/locales/*.json",
+        "yomux_lib/yoagent/builtin_context/*.md",
+        "yomux_lib/yoagent/builtin_skills/*.yaml",
+    ]),
 )
 
 runtime_tree(
@@ -341,6 +346,7 @@ filegroup(
         "tests/conftest.py",
         "tests/helpers/__init__.py",
         "tests/helpers/agent_client_fixtures.py",
+        "tests/helpers/fixture_tools.py",
         "tests/test_agent_status_docker.py",
         "tools/auto_approve_tmux.py",
         "tools/docker_image.py",
@@ -376,6 +382,7 @@ filegroup(
         "MODULE.bazel",
         "go.mod",
         "tools/bazel_rules.bzl",
+        "tools/bazel_runtime_toolchain.bzl",
         "//cmd/fake-llm:BUILD.bazel",
         "//cmd/yomux-go:BUILD.bazel",
         "//internal/atomicfile:BUILD.bazel",
@@ -387,6 +394,8 @@ filegroup(
         "//internal/finder:BUILD.bazel",
         "//internal/locales:BUILD.bazel",
         "//internal/mutablefs:BUILD.bazel",
+        "//internal/productenv:BUILD.bazel",
+        "//internal/productversion:BUILD.bazel",
         "//internal/staticassets:BUILD.bazel",
         "//internal/stats:BUILD.bazel",
         "//internal/tailfile:BUILD.bazel",
@@ -394,7 +403,9 @@ filegroup(
         "//internal/tmuxcmd:BUILD.bazel",
         "//internal/work:BUILD.bazel",
         "//internal/yoagent:BUILD.bazel",
+        "//internal/yolo:BUILD.bazel",
         "//tools/staticgen:BUILD.bazel",
+        "//tools/versiongen:BUILD.bazel",
     ],
 )
 

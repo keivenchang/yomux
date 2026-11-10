@@ -14,7 +14,6 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from numbers import Real
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl
@@ -35,6 +34,7 @@ from .auth import read_auth_users
 from . import browser_diagnostic_receipts
 from .diagnostic_redaction import redact_diagnostic_value
 from .infra.listener_census import unique_listener_pid
+from .infra.numeric import is_finite_number
 from .tmux.sessions import process_cwd
 
 
@@ -251,7 +251,7 @@ def discover_served_bundle(driver: Any, url: str, navigate: bool = True) -> tupl
     """Hash the canonical bundle, optionally without replacing page-local diagnostics."""
     if navigate:
         driver.get(url)
-    bundle_url = driver.execute_script("return [...document.scripts].map(node => node.src).find(src => /\\/static\\/yolomux\\.js(?:$|\\?)/.test(src)) || ''")
+    bundle_url = driver.execute_script("return [...document.scripts].map(node => node.src).find(src => /\\/static\\/yomux\\.js(?:$|\\?)/.test(src)) || ''")
     if not isinstance(bundle_url, str) or not bundle_url:
         raise RuntimeError("served page did not name /static/yomux.js")
     response = driver.execute_async_script("""
@@ -691,6 +691,47 @@ BROWSER_EVENT_RING_INTACT = "intact"
 BROWSER_EVENT_RING_EVICTED = "ring_eviction"
 
 
+def event_ids_match_range(ids: Sequence[Any], *, first: int | None = None, last: int | None = None) -> bool:
+    """Check the entries supplied, never allocate the numeric span claimed by their IDs."""
+    if first is not None and last is not None and len(ids) != (max(0, last - first + 1) if last else 0):
+        return False
+    if not ids:
+        return True
+    start = ids[0] if first is None else first
+    return (
+        isinstance(start, int) and not isinstance(start, bool) and start > 0
+        and (last is None or ids[-1] == last)
+        and all(isinstance(value, int) and not isinstance(value, bool) and value == start + offset
+                for offset, value in enumerate(ids))
+    )
+
+
+def browser_event_ring_window(*, phase: str, first_id: int, last_id: int, prior_cursor: int, prior_first: int | None = None) -> dict[str, Any]:
+    """Derive ring counters from scalar bounds for live evidence and persisted artifacts."""
+    if (first_id == 0) != (last_id == 0) or first_id > last_id or (prior_first is not None and prior_first > prior_cursor):
+        raise AssertionError(f"browser {phase} event cursor is malformed")
+    if last_id < prior_cursor:
+        raise AssertionError(f"browser {phase} event cursor moved backwards")
+    if last_id > prior_cursor and first_id > prior_cursor + 1:
+        raise AssertionError(f"browser {phase} event cursor evicted unobserved events")
+    if prior_first is not None and first_id and first_id <= prior_cursor and (prior_first == 0 or first_id < prior_first):
+        raise AssertionError(f"browser {phase} event cursor lost its observed window")
+    if prior_first is None:
+        evicted = max(0, first_id - 1) if prior_cursor else 0
+    else:
+        evicted = max(0, min(first_id - 1, prior_cursor) - prior_first + 1) if prior_first else 0
+    return {
+        "phase": phase,
+        "reason": BROWSER_EVENT_RING_EVICTED if evicted else BROWSER_EVENT_RING_INTACT,
+        "evicted": evicted,
+        "appended": last_id - prior_cursor,
+        "priorCursor": prior_cursor,
+        "priorFirstId": prior_first or 0,
+        "retainedFirstId": first_id,
+        "retainedLastId": last_id,
+    }
+
+
 def browser_event_ring_extension(
     current_ids: Sequence[Any],
     *,
@@ -698,50 +739,17 @@ def browser_event_ring_extension(
     prior_cursor: int,
     prior_ids: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
-    """Verify a bounded browser diagnostic ring only evicted already-observed events.
-
-    ``jsDebugEvents`` is a ring capped at ``jsDebugEventLimit`` entries, so a later
-    snapshot is not a raw prefix-preserving extension of an earlier one: once the ring
-    is full, every appended event evicts the oldest retained event. Evicting an event
-    the caller already read loses nothing, so it is returned as a typed outcome instead
-    of being discarded or treated as loss. Evicting an event that was never observed by
-    the caller is real evidence loss and raises, as does any gap or reordering.
-
-    ``prior_ids`` is the caller's full observed window when it has one; when only a
-    cursor is available (the uploader fence records a cursor, not a list) the reported
-    ``evicted`` count is the number of events the ring dropped before this snapshot.
-    """
-    if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in current_ids):
+    """Accept eviction of observed events, rejecting gaps, reordering and unobserved loss."""
+    if not event_ids_match_range(current_ids):
         raise AssertionError(f"browser {phase} event cursor is malformed")
-    ids = [int(value) for value in current_ids]
-    if ids and ids != list(range(ids[0], ids[-1] + 1)):
-        raise AssertionError(f"browser {phase} event cursor is malformed")
-    first_id = ids[0] if ids else 0
-    last_id = ids[-1] if ids else 0
-    if last_id < prior_cursor:
-        raise AssertionError(f"browser {phase} event cursor moved backwards")
-    appended = [event_id for event_id in ids if event_id > prior_cursor]
-    if appended != list(range(prior_cursor + 1, last_id + 1)):
-        raise AssertionError(f"browser {phase} event cursor evicted unobserved events")
-    evicted = 0
-    if prior_ids is not None:
-        observed = [int(value) for value in prior_ids]
-        retained = [event_id for event_id in observed if event_id >= first_id]
-        if retained != [event_id for event_id in ids if event_id <= prior_cursor]:
-            raise AssertionError(f"browser {phase} event cursor lost its observed window")
-        evicted = len(observed) - len(retained)
-    elif prior_cursor > 0:
-        evicted = max(0, first_id - 1)
-    return {
-        "phase": phase,
-        "reason": BROWSER_EVENT_RING_EVICTED if evicted else BROWSER_EVENT_RING_INTACT,
-        "evicted": evicted,
-        "appended": len(appended),
-        "priorCursor": prior_cursor,
-        "priorFirstId": int(prior_ids[0]) if prior_ids else 0,
-        "retainedFirstId": first_id,
-        "retainedLastId": last_id,
-    }
+    first_id = current_ids[0] if current_ids else 0
+    last_id = current_ids[-1] if current_ids else 0
+    if prior_ids and not event_ids_match_range(prior_ids, last=prior_cursor):
+        raise AssertionError(f"browser {phase} event cursor lost its observed window")
+    return browser_event_ring_window(
+        phase=phase, first_id=first_id, last_id=last_id, prior_cursor=prior_cursor,
+        prior_first=(prior_ids[0] if prior_ids else 0) if prior_ids is not None else None,
+    )
 
 
 def validate_browser_event_ring_outcome(outcome: Any, *, phase: str) -> dict[str, Any]:
@@ -750,9 +758,9 @@ def validate_browser_event_ring_outcome(outcome: Any, *, phase: str) -> dict[str
     Field presence, non-negative counters and reason-versus-eviction leave the counters free of the
     windows they describe: an `intact` outcome could claim a retained range of `1..2` after a prior
     cursor of `50`, or `appended: 999` for a range ending at `51`. Neither is reachable — the ring is
-    append-only and its ids are contiguous — so the recorded window is replayed through
-    ``browser_event_ring_extension``, the producer itself, and the recorded counters must equal what
-    that owner derives. One owner means the two can never drift apart again.
+    append-only and its ids are contiguous — so the recorded bounds pass through
+    ``browser_event_ring_window``, shared with the live producer, and the recorded counters must
+    equal what that owner derives. One owner means the two can never drift apart again.
     """
     fields = {"phase", "reason", "evicted", "appended", "priorCursor", "priorFirstId", "retainedFirstId", "retainedLastId"}
     if not isinstance(outcome, Mapping) or set(outcome) != fields or outcome.get("phase") != phase:
@@ -769,21 +777,15 @@ def validate_browser_event_ring_outcome(outcome: Any, *, phase: str) -> dict[str
     retained_last = outcome["retainedLastId"]
     prior_first = outcome["priorFirstId"]
     prior_cursor = outcome["priorCursor"]
-    # Guard the window ordering before replaying it: an inverted range would rebuild as an empty one
-    # and be graded against the wrong producer branch instead of being rejected.
+    # Keep malformed ordering distinct from counters that disagree with valid window bounds.
     if (retained_first == 0) != (retained_last == 0) or retained_first > retained_last:
         raise AssertionError(f"browser {phase} event ring outcome is malformed: retained window {retained_first}..{retained_last} is not a range")
     if prior_first > prior_cursor:
         raise AssertionError(f"browser {phase} event ring outcome is malformed: prior window {prior_first}..{prior_cursor} is not a range")
     try:
-        rebuilt = browser_event_ring_extension(
-            list(range(retained_first, retained_last + 1)) if retained_first else [],
-            phase=phase,
-            prior_cursor=prior_cursor,
-            # `priorFirstId` is zero exactly when the producer had a cursor and no window
-            # (`finalize_live_browser_soak` records a cursor for the uploader fence), so the prior
-            # window is reconstructed only when the outcome states one.
-            prior_ids=list(range(prior_first, prior_cursor + 1)) if prior_first else None,
+        rebuilt = browser_event_ring_window(
+            phase=phase, first_id=retained_first, last_id=retained_last,
+            prior_cursor=prior_cursor, prior_first=prior_first or None,
         )
     except AssertionError as error:
         raise AssertionError(f"browser {phase} event ring outcome is malformed: {error}") from error
@@ -905,10 +907,8 @@ _JS_DEBUG_MAX_ASYNC_PHASE_MS = 86_400_000.0
 
 def _js_debug_async_phase_timing(value: Any) -> bool:
     return (
-        not isinstance(value, bool)
-        and isinstance(value, Real)
-        and math.isfinite(float(value))
-        and 0 <= float(value) <= _JS_DEBUG_MAX_ASYNC_PHASE_MS
+        is_finite_number(value)
+        and 0 <= value <= _JS_DEBUG_MAX_ASYNC_PHASE_MS
     )
 
 
@@ -1026,20 +1026,19 @@ def validate_browser_retirement_delta_evidence(
     """
 
     retained_first = retirement["retainedFirstId"]
-    expected_ids = list(range(retained_first, retirement["retainedLastId"] + 1)) if retained_first else []
     if not isinstance(retained_events, list):
         raise AssertionError("retained browser events are malformed")
     ids = [event.get("id") if isinstance(event, Mapping) else None for event in retained_events]
-    if ids != expected_ids:
+    if not event_ids_match_range(ids, first=retained_first, last=retirement["retainedLastId"]) or (retained_first == 0 and ids):
         raise AssertionError("retained browser event ids do not match the retirement ring window")
-    if isinstance(event_count, bool) or event_count != len(expected_ids):
+    if isinstance(event_count, bool) or event_count != len(ids):
         raise AssertionError("atomic snapshot event count does not match the retained event window")
-    if retained_cursor != (expected_ids[-1] if expected_ids else 0):
+    if retained_cursor != (ids[-1] if ids else 0):
         raise AssertionError("final browser cursor does not match the retained event window")
-    appended = [event_id for event_id in expected_ids if event_id > retirement["priorCursor"]]
+    appended = [event_id for event_id in ids if event_id > retirement["priorCursor"]]
     if delta["appendedEvents"] != len(appended):
         raise AssertionError("retirement delta appended count does not match the retained event ids")
-    if delta["mutatedEvents"] > len(expected_ids) - len(appended):
+    if delta["mutatedEvents"] > len(ids) - len(appended):
         raise AssertionError("retirement delta mutated more events than the retained window carried over")
     if delta["recordedFailures"] > len(appended):
         raise AssertionError("retirement delta recorded more failures than it appended events")
@@ -1544,10 +1543,10 @@ def sample_evidence(driver: Any) -> dict[str, Any]:
     server = [dict(entry) for entry in payload["logs"] if str(entry.get("level") or "").lower() in {"warning", "error"}]
     chrome = [entry for entry in console_entries if str(entry.get("level") or "").upper() in {"WARNING", "SEVERE"}]
     js_ids = [entry.get("id") for entry in result["events"]]
-    if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in js_ids) or (js_ids and js_ids != list(range(js_ids[0], js_ids[-1] + 1))):
+    if not event_ids_match_range(js_ids):
         raise AssertionError("browser JS cursor evidence is malformed")
     server_ids = [entry.get("id") for entry in payload["logs"]]
-    if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in server_ids) or (server_ids and server_ids != list(range(server_ids[0], server_ids[-1] + 1))):
+    if not event_ids_match_range(server_ids):
         raise AssertionError("server log cursor evidence is malformed")
     if len(server_ids) > capacity or sequence != dropped["count"] + len(server_ids) or (server_ids and server_ids[-1] != sequence):
         raise AssertionError("server log cursor accounting is malformed")
@@ -1570,7 +1569,7 @@ def server_ring_record(payload: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(count, bool) or not isinstance(count, int) or count < 0 or not isinstance(levels, Mapping) or any(not isinstance(key, str) or isinstance(value, bool) or not isinstance(value, int) or value < 0 for key, value in levels.items()) or sum(levels.values()) != count:
         raise AssertionError("server log ring drops are malformed")
     ids = [entry.get("id") for entry in logs]
-    if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in ids) or ids != list(range(ids[0], ids[-1] + 1)) if ids else False:
+    if not event_ids_match_range(ids):
         raise AssertionError("server log ring IDs are noncontiguous")
     if len(ids) > capacity or sequence != count + len(ids) or (ids and ids[-1] != sequence):
         raise AssertionError("server log ring accounting is malformed")
@@ -1612,8 +1611,7 @@ def validate_server_ring_transition(previous: Mapping[str, Any], current: Mappin
     if set(prior_by_id) != set(prior_ids) or any(current_by_id.get(event_id) != prior_by_id[event_id] for event_id in set(prior_ids) & set(current["ids"])):
         raise AssertionError("server log ring retained record content changed")
     new_logs = [entry for entry in current["logs"] if isinstance(entry.get("id"), int) and entry["id"] > prior_sequence]
-    expected = list(range(prior_sequence + 1, current["sequence"] + 1))
-    if [entry["id"] for entry in new_logs] != expected:
+    if not event_ids_match_range([entry["id"] for entry in new_logs], first=prior_sequence + 1, last=current["sequence"]):
         raise AssertionError("server log ring transition has an ID gap")
     return new_logs
 
@@ -1694,9 +1692,9 @@ def classify_incremental_evidence(evidence: Mapping[str, Any], previous: Mapping
     browser_ids = [entry.get("id") for entry in evidence.get("browserEvents", []) if isinstance(entry, Mapping)]
     if current["js"] < previous["js"]:
         integrity.append("browser JS cursor reset")
-    elif current["js"] > previous["js"] and (not browser_ids or browser_ids != list(range(browser_ids[0], browser_ids[-1] + 1))):
+    elif current["js"] > previous["js"] and (not browser_ids or not event_ids_match_range(browser_ids)):
         integrity.append("browser JS cursor gap")
-    elif current["js"] > previous["js"] and [event_id for event_id in browser_ids if event_id > previous["js"]] != list(range(previous["js"] + 1, current["js"] + 1)):
+    elif current["js"] > previous["js"] and not event_ids_match_range([event_id for event_id in browser_ids if event_id > previous["js"]], first=previous["js"] + 1, last=current["js"]):
         integrity.append("browser JS ring eviction or cursor gap")
     previous_server_ids = previous["server_log_ids"]
     current_server_ids = current["server_log_ids"]
@@ -1847,7 +1845,7 @@ def validate_sample_cadence(samples: Sequence[Any], *, key: str, label: str, spa
     marks: list[float] = []
     for index, sample in enumerate(samples):
         mark = sample.get(key) if isinstance(sample, Mapping) else None
-        if isinstance(mark, bool) or not isinstance(mark, (int, float)) or mark < 0:
+        if not is_finite_number(mark) or mark < 0:
             raise ArtifactIntegrityError(f"success artifact {label} sample {index} carries no measured {key}")
         marks.append(float(mark))
     if marks[0] > MAX_SAMPLE_GAP_SECONDS:
@@ -1866,9 +1864,9 @@ def validate_success_artifact(artifact: Mapping[str, Any]) -> None:
     """Fail closed: exit zero is reserved for a complete, internally coherent soak record."""
     required_identity = {"pid", "cwd", "process_started", "head", "bundle_url", "bundle_sha256"}
     requested_duration = artifact.get("requested_duration_seconds")
-    if not isinstance(artifact.get("url"), str) or not isinstance(artifact.get("started_pt"), str) or not isinstance(artifact.get("ended_pt"), str) or isinstance(artifact.get("elapsed_seconds"), bool) or not isinstance(artifact.get("elapsed_seconds"), (int, float)) or artifact["elapsed_seconds"] < 0:
+    if not isinstance(artifact.get("url"), str) or not isinstance(artifact.get("started_pt"), str) or not isinstance(artifact.get("ended_pt"), str) or not is_finite_number(artifact.get("elapsed_seconds")) or artifact["elapsed_seconds"] < 0:
         raise ArtifactIntegrityError("success artifact is missing run identity or timing")
-    if isinstance(requested_duration, bool) or not isinstance(requested_duration, int) or requested_duration < MIN_OBSERVATION_SECONDS:
+    if not is_finite_number(requested_duration) or not isinstance(requested_duration, int) or requested_duration < MIN_OBSERVATION_SECONDS:
         raise ArtifactIntegrityError("success artifact has malformed requested duration")
     if artifact["elapsed_seconds"] < requested_duration:
         raise ArtifactIntegrityError("success artifact ended before requested duration")
@@ -1878,8 +1876,7 @@ def validate_success_artifact(artifact: Mapping[str, Any]) -> None:
         not isinstance(settle, Mapping)
         or settle.get("status") != "clean"
         or settle.get("requested_seconds") != SETTLE_SECONDS
-        or isinstance(settle_elapsed, bool)
-        or not isinstance(settle_elapsed, (int, float))
+        or not is_finite_number(settle_elapsed)
         or settle_elapsed < SETTLE_SECONDS
         or settle.get("elapsed_seconds") != settle_elapsed
         or not isinstance(settle.get("samples"), list)

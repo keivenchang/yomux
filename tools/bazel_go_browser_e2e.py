@@ -2,7 +2,7 @@
 """Real Chromium smoke for the Go terminal page and PTY resize contract."""
 
 import argparse
-import atexit
+from contextlib import ExitStack
 import fcntl
 import hashlib
 import http.cookiejar
@@ -145,7 +145,7 @@ def tabber_reload_trace_source(session: str) -> str:
 
 
 def main(binary: str) -> None:
-    with tempfile.TemporaryDirectory(prefix="yolomux-go-e2e-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="yolomux-go-e2e-") as tmp, ExitStack() as cleanup_stack:
         root = Path(tmp)
         config = root / "config"
         config.mkdir()
@@ -174,7 +174,15 @@ def main(binary: str) -> None:
         (config / "auth-cookie-secret").write_text("11" * 32, encoding="ascii")
         port = 0
         tmux_socket_path = short_tmux_socket_path("yogo")
+        tmux_socket = str(tmux_socket_path)
+        tmux = ("tmux", "-S", tmux_socket)
         cleanup_errors = []
+
+        def report_cleanup_errors():
+            if cleanup_errors:
+                raise SystemExit("Go browser E2E cleanup failed: " + "; ".join(cleanup_errors))
+
+        cleanup_stack.callback(report_cleanup_errors)
         tmux_socket_cleaned = False
         server_log_paths = []
 
@@ -183,6 +191,10 @@ def main(binary: str) -> None:
             if tmux_socket_cleaned:
                 return
             try:
+                stopped = subprocess.run((*tmux, "kill-server"), check=False, capture_output=True, text=True)
+                if stopped.returncode not in (0, 1):
+                    cleanup_errors.append(f"fixture tmux server cleanup failed: {stopped.stderr.strip()}")
+                    return
                 shutil.rmtree(tmux_socket_path.parent)
             except FileNotFoundError:
                 pass
@@ -198,9 +210,7 @@ def main(binary: str) -> None:
                 return
             tmux_socket_cleaned = True
 
-        atexit.register(cleanup_tmux_socket_dir)
-        tmux_socket = str(tmux_socket_path)
-        tmux = ("tmux", "-S", tmux_socket)
+        cleanup_stack.callback(cleanup_tmux_socket_dir)
         sessions = [f"yo-go-e2e-{os.getpid()}-{index}" for index in range(3)]
         session = sessions[0]
         source_root = resolve_source_root()
@@ -346,7 +356,7 @@ exec /bin/sleep 300
             generation = len(list(root.glob("server-*.txt"))) + 1
             log_path = root / f"server-{generation}.txt"
             server_log_paths.append(log_path)
-            log_file = log_path.open("w", encoding="utf-8")
+            log_file = cleanup_stack.enter_context(log_path.open("w", encoding="utf-8"))
             environment = synthetic_server_environment({
                 "HOME": str(fixture_home),
                 **{key: str(value) for key, value in private_environment_roots.items()},
@@ -373,6 +383,7 @@ exec /bin/sleep 300
                 if dangerously_yolo:
                     command.append("--dangerously-yolo")
                 process = subprocess.Popen(command, env=environment, stdout=log_file, stderr=subprocess.STDOUT, pass_fds=(probe.fileno(),))
+                cleanup_stack.callback(stop_process, process, "Go server")
             log_file.close()
             for _ in range(80):
                 try:
@@ -2405,8 +2416,6 @@ exec /bin/sleep 300
             for session_name in sorted(all_sessions):
                 cleanup_tmux_session(session_name)
             cleanup_tmux_socket_dir()
-            if cleanup_errors:
-                raise SystemExit("Go browser E2E cleanup failed: " + "; ".join(cleanup_errors))
 
 
 if __name__ == "__main__":

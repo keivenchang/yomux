@@ -1447,3 +1447,40 @@ func TestDebugStatsServiceRefreshTiming(t *testing.T) {
 	err = service.Refresh(ctx)
 	t.Logf("keys=%d elapsed=%s err=%v state=%+v", len(keys), time.Since(started), err, service.State())
 }
+
+func TestStatsServiceDurablyInvalidatesInvalidTypedCosts(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			ctx := context.Background()
+			w, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Close()
+			bucket := MaterializedBucket{Start: 90, Duration: 10, Complete: true, Cost: MaterializedCostDetail{PricedAtoms: -1}}
+			payload, err := encodeRingBucketPayload(bucket, nil, 1, 99)
+			if legacy {
+				var encoded []byte
+				encoded, err = json.Marshal(bucket)
+				payload = string(encoded)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: 90, BucketJSON: payload, Complete: true}}, 1, 99, true); err != nil {
+				t.Fatal(err)
+			}
+			service := NewStatsService(w, StatsServiceConfig{Products: []ProductKey{{RangeSeconds: 10, ResolutionSeconds: 10}}, Now: func() time.Time { return time.Unix(99, 0) }})
+			if err := service.Refresh(ctx); err == nil {
+				t.Fatal("invalid typed cost admitted")
+			}
+			pending, err := w.PendingInvalidationCells(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(pending) != 1 || pending[0].BucketStart != 90 {
+				t.Fatalf("invalid typed cost has no durable repair: %+v", pending)
+			}
+		})
+	}
+}

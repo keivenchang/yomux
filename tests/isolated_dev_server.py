@@ -8,8 +8,7 @@ teardown signal so this fixture cannot stop a recycled or unrelated process.
 
 from __future__ import annotations
 
-import fcntl
-import hashlib
+import json
 import os
 import selectors
 import signal
@@ -38,7 +37,7 @@ from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
 from yomux_lib.host_identity import process_start_identity
 from tools.instance_isolation import synthetic_test_environment
-from tools.generate_go_version import generate_go_version_overlay
+from tools.go_binary import go_test_server_binary
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -48,65 +47,6 @@ SERVER_STOP_TIMEOUT_SECONDS = 10.0
 
 # The operator's live servers, by platform. Never automated, on any lane, for any reason.
 FORBIDDEN_LIVE_PORTS = frozenset(range(8880, 8884) if sys.platform == "darwin" else range(7110, 7114))
-
-
-def go_test_server_binary(source_root: Path) -> Path:
-    """Return the Go server for process-level tests, building it hermetically if needed."""
-
-    configured = os.environ.get("YOMUX_GO_BINARY", "").strip()
-    if configured:
-        binary = Path(configured)
-        if not binary.is_file() or not os.access(binary, os.X_OK):
-            raise FileNotFoundError(f"configured Go test server is not executable: {binary}")
-        return binary
-
-    go_sources = sorted(
-        path
-        for directory in (source_root / "cmd", source_root / "internal")
-        if directory.is_dir()
-        for path in directory.rglob("*.go")
-    )
-    digest = hashlib.sha256()
-    for path in [source_root / "go.mod", source_root / "go.sum", source_root / "version.yaml", *go_sources]:
-        if path.is_file():
-            digest.update(str(path.relative_to(source_root)).encode())
-            digest.update(path.read_bytes())
-    cache = Path(tempfile.gettempdir()) / "yomux-go-test-binaries" / digest.hexdigest()
-    binary = cache / "yomux-go"
-    cache.mkdir(parents=True, exist_ok=True)
-    with (cache / "build.lock").open("a+b") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        if binary.is_file() and os.access(binary, os.X_OK):
-            return binary
-        generated = cache / "product_version_generated.go"
-        overlay = cache / "go-overlay.json"
-        generate_go_version_overlay(
-            source_root / "version.yaml",
-            generated,
-            overlay,
-            source_root / "cmd/yomux-go/product_version_generated.go",
-        )
-        environment = dict(os.environ)
-        environment.update({
-            "GOMODCACHE": os.environ.get("GOMODCACHE", "/opt/yomux-go-mod-cache"),
-            "GOPROXY": "off",
-            "GOSUMDB": "off",
-            "GOWORK": "off",
-        })
-        temporary_binary = cache / "yomux-go.building"
-        completed = subprocess.run(
-            ["go", "build", "-buildvcs=false", "-overlay", str(overlay), "-o", str(temporary_binary), "./cmd/yomux-go"],
-            cwd=source_root,
-            env=environment,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(f"offline Go test-server build failed: {completed.stderr.strip() or completed.stdout.strip()}")
-        os.replace(temporary_binary, binary)
-        binary.chmod(0o700)
-    return binary
 
 
 def server_entrypoint(source_root: Path) -> Path:
@@ -389,6 +329,7 @@ class IsolatedDevServer:
     port_lease: HttpPortLease | None
     auth_bypass: bool = True
     tls: bool = False
+    dangerously_yolo: bool = False
     env_overrides: dict[str, str] | None = None
     output: list[str] = field(default_factory=list)
     stopped: bool = False
@@ -466,6 +407,7 @@ class IsolatedDevServer:
                 self.tmux,
                 auth_bypass=self.auth_bypass,
                 tls=self.tls,
+                dangerously_yolo=self.dangerously_yolo,
                 sessions=sessions,
                 port=self.port,
                 port_lease=self.port_lease,
@@ -503,6 +445,7 @@ def start_isolated_dev_server(
     *,
     auth_bypass: bool = True,
     tls: bool = False,
+    dangerously_yolo: bool = False,
     sessions: tuple[str, ...] = (),
     port: int | None = None,
     port_lease: HttpPortLease | None = None,
@@ -529,6 +472,7 @@ def start_isolated_dev_server(
         command = [
             *server_entrypoint_arguments(source_root),
             *([] if tls else ["--http"]),
+            *(["--dangerously-yolo"] if dangerously_yolo else []),
             "--host",
             "127.0.0.1",
             "--port",
@@ -584,6 +528,7 @@ def start_isolated_dev_server(
             port_lease=port_lease,
             auth_bypass=auth_bypass,
             tls=tls,
+            dangerously_yolo=dangerously_yolo,
             env_overrides=env_overrides,
         )
         if not server_start_identity:
@@ -606,6 +551,7 @@ def start_isolated_dev_server(
                         port_lease=port_lease,
                         auth_bypass=auth_bypass,
                         tls=tls,
+                        dangerously_yolo=dangerously_yolo,
                         env_overrides=env_overrides,
                     )
                 stop_and_reap_daemons(server)
@@ -725,8 +671,12 @@ def stop_and_reap_daemons(server: IsolatedDevServer) -> list[int]:
     """
 
     descendants = process_descendants(server.process.pid) if Path("/proc").is_dir() else []
-    server.stop()
-    return reap_descendants(descendants)
+    reaped: list[int] = []
+    run_fixture_cleanup_phases("server and daemons", [
+        ("server", server.stop),
+        ("descendants", lambda: reaped.extend(reap_descendants(descendants))),
+    ])
+    return reaped
 
 
 @pytest.fixture

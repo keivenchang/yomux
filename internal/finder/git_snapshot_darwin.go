@@ -553,7 +553,7 @@ func (s *Service) openDarwinNamespaceAt(ctx context.Context, workTree *os.File, 
 	namespace := &gitNamespace{
 		gitDir: gitDir, commonDir: commonDir, objects: objects,
 		gitDirPath: gitDirPath, commonPath: commonPath, objectsPath: objectPath,
-		alternates: filepath.Join(objectPath, "info", "alternates"), layoutCache: &s.gitObjectLayouts,
+		layoutCache:  &s.gitObjectLayouts,
 		workTreePath: workTreePath, snapshotCache: s.gitSnapshots,
 	}
 	if err := namespace.readDarwinAlternates(ctx); err != nil {

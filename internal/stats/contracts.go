@@ -96,6 +96,9 @@ type AppendValidationResult struct {
 	UsageAtomCount       int
 	TombstoneCount       int
 	IdempotencyKeys      []string
+	// Persistence must use the exact JSON that passed this call's validation.
+	observationPayloads []string
+	usagePayloads       []string
 }
 
 type ContractError struct {
@@ -139,35 +142,40 @@ func validateNumber(record, field string, value float64, positive bool) error {
 	return nil
 }
 
-func validatePayload(record, field string, payload map[string]any) error {
+func validatePayload(record, field string, payload map[string]any) (string, error) {
 	if payload == nil {
-		return invalid(record, field, "must be a JSON object")
+		return "", invalid(record, field, "must be a JSON object")
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return invalid(record, field, "must contain only JSON values")
+		return "", invalid(record, field, "must contain only JSON values")
 	}
 	if len(raw) > MaxPayloadBytes {
-		return invalid(record, field, fmt.Sprintf("exceeds %d bytes", MaxPayloadBytes))
+		return "", invalid(record, field, fmt.Sprintf("exceeds %d bytes", MaxPayloadBytes))
 	}
-	return nil
+	return string(raw), nil
 }
 
 func (o Observation) Validate() error {
+	_, err := o.validatedPayload()
+	return err
+}
+
+func (o Observation) validatedPayload() (string, error) {
 	if err := validateText("observation", "event_id", o.EventID, MaxEventIDBytes); err != nil {
-		return err
+		return "", err
 	}
 	if err := validateText("observation", "family", o.Family, MaxIdentityBytes); err != nil {
-		return err
+		return "", err
 	}
 	if err := validateText("observation", "source_id", o.SourceID, MaxSeriesComponentBytes); err != nil {
-		return err
+		return "", err
 	}
 	if err := validateNumber("observation", "observed_at", o.ObservedAt, false); err != nil {
-		return err
+		return "", err
 	}
 	if err := validateText("observation", "epoch_id", o.EpochID, MaxSeriesComponentBytes); err != nil {
-		return err
+		return "", err
 	}
 	return validatePayload("observation", "payload", o.Payload)
 }
@@ -222,16 +230,21 @@ func (s UnavailableSpan) Validate() error {
 }
 
 func (a UsageAtom) Validate() error {
+	_, err := a.validatedPayload()
+	return err
+}
+
+func (a UsageAtom) validatedPayload() (string, error) {
 	if err := validateText("usage_atom", "event_id", a.EventID, MaxEventIDBytes); err != nil {
-		return err
+		return "", err
 	}
 	for field, value := range map[string]string{"direction": a.Direction, "modality": a.Modality, "cache_role": a.CacheRole, "unit": a.Unit} {
 		if err := validateText("usage_atom", field, value, MaxIdentityBytes); err != nil {
-			return err
+			return "", err
 		}
 	}
 	if err := validateNumber("usage_atom", "observed_at", a.ObservedAt, false); err != nil {
-		return err
+		return "", err
 	}
 	return validatePayload("usage_atom", "payload", a.Payload)
 }
@@ -287,17 +300,21 @@ func (b AppendBatch) Validate() (AppendValidationResult, error) {
 		return nil
 	}
 	for i, item := range b.Observations {
-		if err := item.Validate(); err != nil {
+		payload, err := item.validatedPayload()
+		if err != nil {
 			return result, fmt.Errorf("observations[%d]: %w", i, err)
 		}
+		result.observationPayloads = append(result.observationPayloads, payload)
 		if err := addKey(item.IdempotencyKey(), item); err != nil {
 			return result, err
 		}
 	}
 	for i, item := range b.UsageAtoms {
-		if err := item.Validate(); err != nil {
+		payload, err := item.validatedPayload()
+		if err != nil {
 			return result, fmt.Errorf("usage_atoms[%d]: %w", i, err)
 		}
+		result.usagePayloads = append(result.usagePayloads, payload)
 		if err := addKey(item.IdempotencyKey(), item); err != nil {
 			return result, err
 		}

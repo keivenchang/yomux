@@ -7,12 +7,194 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestLegacyJobRetentionMatchesNativeOrder(t *testing.T) {
+	for _, shape := range []string{"list", "map"} {
+		for _, count := range []int{jobLimit - 1, jobLimit, jobLimit + 1} {
+			for _, tied := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%d/tied=%t", shape, count, tied), func(t *testing.T) {
+					directory := t.TempDir()
+					store, err := NewStore(directory)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer store.Close()
+					list := make([]any, count)
+					mapping := make(map[string]any, count)
+					for i := range list {
+						created := i + 1
+						if tied {
+							created = 1
+						}
+						id := fmt.Sprintf("job-%03d", i+1)
+						job := map[string]any{"id": id, "created_ts": created, "status": "queued"}
+						list[i], mapping[id] = job, job
+					}
+					var input any = list
+					if shape == "map" {
+						input = mapping
+					}
+					raw, err := json.Marshal(map[string]any{"yoagent_jobs": input})
+					if err != nil {
+						t.Fatal(err)
+					}
+					path := filepath.Join(directory, "legacy.json")
+					if err := os.WriteFile(path, raw, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if err := store.ImportLegacyJobs(context.Background(), path); err != nil {
+						t.Fatal(err)
+					}
+					jobs, issues, err := store.LoadJobs(context.Background())
+					if err != nil || len(issues) != 0 || len(jobs) != min(count, jobLimit) {
+						t.Fatalf("LoadJobs: count=%d issues=%v err=%v", len(jobs), issues, err)
+					}
+					for i, job := range jobs {
+						idNumber := count - i
+						if tied {
+							idNumber = i + 1
+						}
+						if want := fmt.Sprintf("job-%03d", idNumber); job["id"] != want {
+							t.Fatalf("job[%d] = %v, want %s", i, job["id"], want)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestLegacyJobImportReportsInvalidRecords(t *testing.T) {
+	directory := t.TempDir()
+	store, err := NewStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	path := filepath.Join(directory, "legacy.json")
+	if err := os.WriteFile(path, []byte(`{"yoagent_jobs":[null,{"created_ts":2},{"id":"retained","created_ts":1}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ImportLegacyJobs(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	jobs, issues, err := store.LoadJobs(context.Background())
+	if err != nil || len(jobs) != 1 || jobs[0]["id"] != "retained" || len(issues) != 2 {
+		t.Fatalf("import jobs=%v issues=%v err=%v", jobs, issues, err)
+	}
+	for _, issue := range issues {
+		if issue.Reason != "invalid_legacy_job" {
+			t.Fatalf("invalid record reason = %s", issue.Reason)
+		}
+	}
+}
+
+func TestLegacyJobRetentionCountsValidUniqueJobs(t *testing.T) {
+	for _, shape := range []string{"list", "map"} {
+		for _, failure := range []string{"invalid", "oversized", "duplicate"} {
+			t.Run(shape+"/"+failure, func(t *testing.T) {
+				directory := t.TempDir()
+				store, err := NewStore(directory)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer store.Close()
+				items := make([]any, 0, jobLimit+1)
+				for i := 1; i <= jobLimit; i++ {
+					items = append(items, map[string]any{"id": fmt.Sprintf("job-%03d", i), "created_ts": i})
+				}
+				newest := map[string]any{"created_ts": jobLimit + 1}
+				reason := "invalid_legacy_job"
+				if failure == "oversized" {
+					newest["id"], newest["text"] = "oversized", strings.Repeat("x", jobRecordLimit)
+					reason = "legacy_job_too_large"
+				} else if failure == "duplicate" {
+					newest["id"], newest["text"] = "job-200", "newest payload"
+					reason = "duplicate_legacy_job"
+				}
+				items = append(items, newest)
+				var input any = items
+				if shape == "map" {
+					mapping := make(map[string]any, len(items))
+					for i, item := range items {
+						mapping[fmt.Sprint(i)] = item
+					}
+					input = mapping
+				}
+				raw, err := json.Marshal(map[string]any{"yoagent_jobs": input})
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(directory, "legacy.json")
+				if err := os.WriteFile(path, raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.ImportLegacyJobs(context.Background(), path); err != nil {
+					t.Fatal(err)
+				}
+				jobs, issues, err := store.LoadJobs(context.Background())
+				if err != nil || len(jobs) != jobLimit || len(issues) != 1 || issues[0].Reason != reason {
+					t.Fatalf("jobs=%d issues=%v err=%v", len(jobs), issues, err)
+				}
+				if jobs[0]["id"] != "job-200" || jobs[jobLimit-1]["id"] != "job-001" {
+					t.Fatal("invalid or duplicate candidate displaced a valid job")
+				}
+				if failure == "duplicate" && jobs[0]["text"] != "newest payload" {
+					t.Fatal("older duplicate overwrote the newest job")
+				}
+			})
+		}
+	}
+}
+
+func TestLegacyJobImportSharesActiveIdempotencyAdmission(t *testing.T) {
+	for _, example := range []struct {
+		name, status, key string
+		want              int
+	}{
+		{"queued", "queued", "same-action", 1},
+		{"pending", "pending_confirmation", "same-action", 1},
+		{"history", "fired", "same-action", 2},
+		{"legacy-no-key", "queued", "", 2},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			directory := t.TempDir()
+			store, err := NewStore(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			raw, err := json.Marshal(map[string]any{"yoagent_jobs": []any{
+				map[string]any{"id": "old", "created_ts": 1, "status": example.status, "idempotency_key": example.key},
+				map[string]any{"id": "new", "created_ts": 2, "status": "queued", "idempotency_key": example.key},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(directory, "legacy.json")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.ImportLegacyJobs(context.Background(), path); err != nil {
+				t.Fatal(err)
+			}
+			jobs, issues, err := store.LoadJobs(context.Background())
+			if err != nil || len(jobs) != example.want || jobs[0]["id"] != "new" {
+				t.Fatalf("jobs=%v issues=%v err=%v", jobs, issues, err)
+			}
+			if len(issues) != 2-example.want || len(issues) > 0 && issues[0].Reason != "duplicate_legacy_idempotency" {
+				t.Fatalf("deduplication recovery issues=%v", issues)
+			}
+		})
+	}
+}
 
 func TestStoreImportsLegacyConversationAndUsesSQLite(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "yoagent")

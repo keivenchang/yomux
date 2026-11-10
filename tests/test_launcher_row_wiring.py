@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -14,6 +16,8 @@ from tools.tmux_paths import short_temp_base, short_temp_prefix
 import pytest
 
 from tests.gate_harness import HttpPortLease
+from tests.gate_harness import run_fixture_cleanup_phases
+from tests.browser_helpers.browser_layout import start_isolated_browser_app
 from tests.isolated_dev_server import REPO_ROOT
 from tests.isolated_dev_server import go_test_server_binary
 from tests.isolated_dev_server import assert_isolated_dev_server_port
@@ -40,6 +44,22 @@ def _launcher_path() -> Path:
 
 LAUNCHER = _launcher_path()
 STARTUP_COMMON = REPO_ROOT / "tools" / "startup_common.sh"
+
+@pytest.mark.parametrize("dangerously_yolo", [False, True])
+def test_browser_runtime_preserves_requested_launch_permission_after_restart(monkeypatch, tmp_path, dangerously_yolo):
+    runtime = start_isolated_browser_app(monkeypatch, tmp_path, dangerously_yolo=dangerously_yolo)
+    try:
+        for restart in (False, True):
+            if restart:
+                runtime.app.restart()
+            status, _headers, body = runtime.app.request("/")
+            assert status == 200
+            match = re.search(rb'<script id="yomux-bootstrap" type="application/json">(.*?)</script>', body, re.DOTALL)
+            assert match is not None
+            assert json.loads(match[1])["dangerouslyYolo"] is dangerously_yolo
+    finally:
+        runtime.close()
+
 
 _LAUNCHER_MISSING = pytest.mark.skipif(
     not LAUNCHER.is_file(), reason=f"live launcher not present at {LAUNCHER}"
@@ -166,7 +186,8 @@ def test_exec_launched_server_passes_the_real_session_probe_and_tears_down_by_pi
         assert server.process.poll() is not None, server.output[-20:]
         assert isinstance(reaped, list)
     finally:
-        if server is not None and server.process.poll() is None:
-            stop_and_reap_daemons(server)
-        stop_isolated_tmux_runtime(tmux_runtime)
-        shutil.rmtree(root)
+        run_fixture_cleanup_phases("managed row", [
+            ("server", lambda: stop_and_reap_daemons(server) if server is not None and server.process.poll() is None else None),
+            ("tmux runtime", lambda: stop_isolated_tmux_runtime(tmux_runtime)),
+            ("root", lambda: shutil.rmtree(root)),
+        ])

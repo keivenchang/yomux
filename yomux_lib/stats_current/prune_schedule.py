@@ -56,7 +56,7 @@ def parse_local_time(value: object) -> tuple[int, int] | None:
     if len(parts) != 2:
         return None
     hour_text, minute_text = parts
-    if not (hour_text.isdigit() and minute_text.isdigit()):
+    if not (hour_text.isdecimal() and minute_text.isdecimal()):
         return None
     if len(hour_text) > 2 or len(minute_text) != 2:
         return None

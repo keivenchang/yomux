@@ -156,7 +156,7 @@ function selectMarkdownPreviewSourceRange(path, sourceLine, selectedText = '') {
 
 function markdownPreviewSourceChange(container, sourcePanel, path, start, end, replacement, options = {}) {
   const state = fileEditorPanelState(sourcePanel);
-  if (!state || state.kind !== 'text' || state.historical === true) return false;
+  if (!state || state.kind !== 'text' || !fileEditorStateWritable(state)) return false;
   const before = state.content;
   const next = `${before.slice(0, start)}${replacement}${before.slice(end)}`;
   if (next === before) return false;
@@ -198,7 +198,7 @@ function handleMarkdownPreviewBackspace(container, event = null) {
   const panel = container.closest?.('.file-editor-panel');
   const state = panel ? fileEditorPanelState(panel) : null;
   const path = container.dataset.mdPath || panel?.dataset?.filePath || '';
-  if (!block || !panel || !state || state.kind !== 'text' || state.historical === true || !selection?.rangeCount) return false;
+  if (!block || !panel || !state || state.kind !== 'text' || !fileEditorStateWritable(state) || !selection?.rangeCount) return false;
   const range = selection.getRangeAt(0);
   if (!range.collapsed || !block.contains(range.startContainer)) return false;
   const line = Number(block.dataset.sourceLine || 0);
@@ -230,7 +230,7 @@ function handleMarkdownPreviewEnter(container, event = null) {
   const panel = container.closest?.('.file-editor-panel');
   const state = panel ? fileEditorPanelState(panel) : null;
   const path = container.dataset.mdPath || panel?.dataset?.filePath || '';
-  if (!block || !panel || !state || state.kind !== 'text' || state.historical === true) return false;
+  if (!block || !panel || !state || state.kind !== 'text' || !fileEditorStateWritable(state)) return false;
   if (/^H[1-6]$/.test(String(block.tagName || '').toUpperCase())) return false;
   const line = Number(block.dataset.sourceLine || 0);
   const offsets = markdownEditableRangeOffsets(state.content, line, block.dataset.sourceEndLine, block);
@@ -365,65 +365,6 @@ function markdownTextWithInlineFormat(text, sourceLine, selectedText, command) {
   }
   lines[index] = `${left}${formatted}${right}`;
   return lines.join('\n');
-  /* legacy implementation retained for reference:
-  if (command === 'clearInline') {
-    const start = lines[index].indexOf(selected);
-    if (start < 0) return null;
-    const before = lines[index].slice(0, start);
-    const after = lines[index].slice(start + selected.length);
-    const prefixes = ['**', '__', '*', '_', '~~', '<u>', '`'];
-    const suffixes = ['**', '__', '*', '_', '~~', '</u>', '`'];
-    let nextBefore = before;
-    let nextAfter = after;
-    let removed = true;
-    while (removed) {
-      removed = false;
-      for (let i = 0; i < prefixes.length; i += 1) {
-        if (nextBefore.endsWith(prefixes[i]) && nextAfter.startsWith(suffixes[i])) {
-          nextBefore = nextBefore.slice(0, -prefixes[i].length);
-          nextAfter = nextAfter.slice(suffixes[i].length);
-          removed = true;
-          break;
-        }
-      }
-    }
-    lines[index] = `${nextBefore}${selected}${nextAfter}`;
-    return lines.join('\n');
-  }
-  const plainLine = markdownInlinePlainText(lines[index]);
-  const plainStart = plainLine.indexOf(selected);
-  if (plainStart < 0 || plainLine.indexOf(selected, plainStart + selected.length) >= 0) return null;
-  const visibleSourceText = value => String(value || '')
-    .replace(/\\([\\`*_[\]{}()#+.!\-|>])/g, '$1')
-    .replace(/(`+)(.*?)\1/g, '$2')
-    .replace(/\*\*|__/g, '')
-    .replace(/~~/g, '')
-    .replace(/<[^>]+>/g, '')
-    .replace(/[*_]/g, '');
-  const sourceOffsetAtVisible = visibleOffset => {
-    for (let offset = 0; offset <= lines[index].length; offset += 1) {
-      if (visibleSourceText(lines[index].slice(0, offset)).length >= visibleOffset) return offset;
-    }
-    return lines[index].length;
-  };
-  const directStart = lines[index].indexOf(selected);
-  const start = directStart >= 0 ? directStart : sourceOffsetAtVisible(plainStart);
-  const end = directStart >= 0 ? directStart + selected.length : sourceOffsetAtVisible(plainStart + selected.length);
-  const marker = command === 'bold' ? ['**', '**']
-    : command === 'italic' ? ['*', '*']
-    : command === 'strike' ? ['~~', '~~']
-        : command === 'underline' ? ['<u>', '</u>']
-          : command === 'code' ? ['`', '`'] : null;
-  if (!marker) return null;
-  const before = lines[index].slice(0, start);
-  const after = lines[index].slice(end);
-  const active = before.endsWith(marker[0]) && after.startsWith(marker[1])
-    && !(marker[0] === '*' && (before.endsWith('**') || after.startsWith('**')));
-  lines[index] = active
-    ? `${before.slice(0, -marker[0].length)}${selected}${after.slice(marker[1].length)}`
-    : `${before}${marker[0]}${selected}${marker[1]}${after}`;
-  return lines.join('\n');
-  */
 }
 
 function markdownTextWithBlockFormat(text, sourceLine, command) {
@@ -577,13 +518,11 @@ function markdownPreviewCopySelectionWithStyle(context) {
       return new Blob([wrapper.innerHTML], {type: 'text/html'});
     });
     const firstImage = imageData[0]?.then(result => result.blob);
-    const item = new ClipboardItem({
+    void writeClipboardItemWithFeedback({
       'text/plain': new Blob([text], {type: 'text/plain'}),
       'text/html': html,
       ...(firstImage ? {'image/png': firstImage} : {}),
-    });
-    // Pass promises to ClipboardItem immediately so the user activation is retained while images fetch.
-    void clipboard.write([item]).then(() => showCopyFeedback({statusText: t('status.copiedStyledText')}));
+    }, {statusText: t('status.copiedStyledText')});
     return true;
   }
   return copyTextWithFeedback(text, {statusText: t('status.copiedStyledText')});
@@ -618,7 +557,7 @@ function markdownPreviewSelectionTransform(container, command, context = null) {
   const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)
     .find(panel => fileEditorPanelState(panel)?.historical !== true) || null;
   const state = sourcePanel ? fileEditorPanelState(sourcePanel) : fileState.get(path);
-  if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text' || state.historical === true) return false;
+  if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text' || !fileEditorStateWritable(state)) return false;
   const next = ['bold', 'italic', 'strike', 'underline', 'code', 'clearInline'].includes(command)
     ? markdownTextWithInlineFormat(state.content, sourceLine, selected.selectedText, command)
     : markdownTextWithBlockFormat(state.content, sourceLine, command);
@@ -810,7 +749,6 @@ function markdownPreviewUrlAllowed(value, tagName) {
   const raw = String(value || '').trim();
   if (!raw) return true;
   if (raw.startsWith('#') || raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../')) return true;
-  if (!raw.startsWith('//') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw)) return true;
   try {
     const base = globalThis.location?.href || 'http://localhost/';
     const url = new URL(raw, base);
@@ -1291,7 +1229,7 @@ function updateMarkdownInlineFromPreview(container, block) {
   const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)
     .find(panel => fileEditorPanelState(panel)?.historical !== true) || null;
   const state = sourcePanel ? fileEditorPanelState(sourcePanel) : fileState.get(path);
-  if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text' || state.historical === true) return false;
+  if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text' || !fileEditorStateWritable(state)) return false;
   if (!markdownPreviewInlineBlockIsEditable(block)) {
     renderFileEditorPreviewSurface(sourcePanel, container, path, state.content, {preserveSelection: false});
     return false;
@@ -1384,7 +1322,7 @@ function markdownEditorContextMenu(view, panel, path, event, context) {
 }
 
 function bindMarkdownPreviewEditing(container, text, markdownPath) {
-  if (!markdownPath || container._markdownReadOnly === true || !container.closest?.('.file-editor-panel')) return;
+  if (!markdownPath || container._markdownReadOnly === true || !fileEditorStateWritable(fileEditorPanelState(container.closest?.('.file-editor-panel')))) return;
   const editableBlocks = [];
   for (const block of Array.from(container.querySelectorAll('h1,h2,h3,h4,h5,h6,p'))) {
     const line = Number(block.dataset.sourceLine || 0);
@@ -1555,7 +1493,7 @@ function updateMarkdownTaskFromPreview(container, input) {
   const panels = fileEditorPanelsForPath(path);
   const sourcePanel = container.closest?.('.file-editor-panel') || panels.find(panel => fileEditorPanelState(panel)?.historical !== true) || null;
   const state = sourcePanel ? fileEditorPanelState(sourcePanel) : fileState.get(path);
-  if (state?.historical === true) return false;
+  if (container._markdownReadOnly === true || !fileEditorStateWritable(state)) return false;
   if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text') return false;
   const next = markdownTextWithTaskLineToggled(state.content, sourceLine, input.checked === true);
   if (next === null || next === state.content) return false;
@@ -1904,13 +1842,9 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   for (const img of Array.from(container.querySelectorAll?.('img')) || []) {
     const rawPath = String(img.dataset.markdownRawPath || '');
     if (!rawPath) continue;
-    if (options.snapshot === true) {
-      // A snapshot is copied into another document. Blob URLs belong to the source document's
-      // origin/URL store and become unusable there, so retain the authenticated same-origin URL
-      // for the destination document to request with its own cookie context.
-      img.src = rawFileUrl(rawPath);
-    } else if (img.isConnected) {
+    if (options.snapshot === true || img.isConnected) {
       localImagePromises.push(installRawFileMediaSource(img, rawPath, {
+        snapshot: options.snapshot === true,
         isCurrent: () => container._markdownPreviewGeneration === generation && img.isConnected,
         onFailure: error => {
           img.classList.add('markdown-preview-image-error');

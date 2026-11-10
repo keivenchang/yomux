@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -35,7 +36,23 @@ func (s *Service) SessionFiles(ctx context.Context, session string, roots []stri
 	return s.SessionFilesWithAgents(ctx, session, roots, nil, hours, fromRef, toRef, repoRefs)
 }
 
+type sessionFilesPhaseMetrics struct {
+	mu              sync.Mutex
+	resolution, git time.Duration
+}
+
+func (m *sessionFilesPhaseMetrics) add(resolution, git time.Duration) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.resolution += resolution
+	m.git += git
+	m.mu.Unlock()
+}
+
 type sessionFilesDiscovery struct {
+	metrics          *sessionFilesPhaseMetrics
 	session          string
 	hours            float64
 	fromRef          string
@@ -198,6 +215,7 @@ func (s *Service) sessionFilesRepositoryViewsBounded(ctx context.Context, discov
 				if workerContext.Err() != nil {
 					return
 				}
+				resolutionStarted := time.Now()
 				scopePath := sessionFilesRepositoryScopePath(path, false)
 				scope := discovery.repositoryScopes[filepath.Clean(scopePath)]
 				ownedScope := false
@@ -224,7 +242,10 @@ func (s *Service) sessionFilesRepositoryViewsBounded(ctx context.Context, discov
 					results <- result{duplicate: true}
 					continue
 				}
+				resolutionElapsed := time.Since(resolutionStarted)
+				gitStarted := time.Now()
 				view, repositoryErr := s.sessionFilesRepositoryWithScope(workerContext, discovery.session, repo, discovery.fromRef, discovery.toRef, discovery.repoRefs, discovery.touched, scope)
+				discovery.metrics.add(resolutionElapsed, time.Since(gitStarted))
 				if repositoryErr != nil {
 					if ownedScope {
 						scope.close()
@@ -526,6 +547,31 @@ func (s *Service) SessionFilesWithAgents(ctx context.Context, session string, ro
 // aggregate route, but publishes one complete repository view as soon as that repository finishes.
 // The returned aggregate payload is used by the HTTP owner to preserve the existing cache shape.
 func (s *Service) SessionFilesWithAgentsStream(ctx context.Context, session string, roots []string, agents []SessionFileAgent, hours float64, fromRef, toRef string, repoRefs map[string]map[string]string, emit func(map[string]any) error) (map[string]any, *Error) {
+	return s.SessionFilesWithAgentsStreamHints(ctx, session, roots, nil, agents, hours, fromRef, toRef, repoRefs, emit)
+}
+func (s *Service) SessionFilesWithAgentsStreamHints(ctx context.Context, session string, roots, hints []string, agents []SessionFileAgent, hours float64, fromRef, toRef string, repoRefs map[string]map[string]string, emit func(map[string]any) error) (map[string]any, *Error) {
+	started := time.Now()
+	phases := map[string]any{}
+	firstEmission := time.Duration(0)
+	attributionReady := false
+	completedRepos := make(map[string]bool)
+	originalEmit := emit
+	if emit != nil {
+		emit = func(chunk map[string]any) error {
+			chunk["attribution_complete"] = attributionReady
+			if attributionReady {
+				repos, _ := chunk["repos"].([]map[string]any)
+				for _, repo := range repos {
+					path, _ := repo["repo"].(string)
+					completedRepos[path] = true
+				}
+			}
+			if firstEmission == 0 {
+				firstEmission = time.Since(started)
+			}
+			return originalEmit(chunk)
+		}
+	}
 	boundedHours := boundedSessionFilesHours(hours)
 	candidateRoots := sessionFilesCandidateRoots(roots, agents)
 	// Do not scan current or historical transcripts before the first Git repository has painted.
@@ -534,9 +580,9 @@ func (s *Service) SessionFilesWithAgentsStream(ctx context.Context, session stri
 	touched := make(map[string]*sessionFileAttribution)
 	discovery := sessionFilesDiscovery{
 		session: session, hours: boundedHours, fromRef: fromRef, toRef: toRef, repoRefs: repoRefs,
-		candidateRoots: candidateRoots, touched: touched, repositoryScopes: make(map[string]*gitHistoryScope),
+		candidateRoots: candidateRoots, touched: touched, repositoryScopes: make(map[string]*gitHistoryScope), metrics: &sessionFilesPhaseMetrics{},
 	}
-	candidates := append([]string(nil), candidateRoots...)
+	candidates := append(append([]string(nil), candidateRoots...), hints...)
 	defer discovery.closeRepositoryScopes()
 	views, viewIndexByRepo, finderErr := s.sessionFilesRepositoryViewsBounded(ctx, discovery, candidates, func(_ int, view sessionFilesRepositoryView) error {
 		if emit == nil {
@@ -565,11 +611,16 @@ func (s *Service) SessionFilesWithAgentsStream(ctx context.Context, session stri
 	// Attribution is deliberately a second phase. It can discover a repository that is no longer
 	// represented by a live pane, or add agent/window metadata to files already emitted above. Those
 	// updates replace one repository at a time, so the browser stays interactive throughout the scan.
-	touched = collectSessionFileAttributions(ctx, agents, candidateRoots, boundedHours)
+	transcriptsStarted := time.Now()
+	touched = s.sessionFileAttributions(ctx, agents, candidateRoots, boundedHours)
+	phases["transcript_ms"] = time.Since(transcriptsStarted).Milliseconds()
 	if ctx.Err() != nil {
 		return nil, cancelled(session)
 	}
 	discovery.touched = touched
+	attributionReady = true
+	initialViewCount := len(views)
+	repositoryResolutionStarted := time.Now()
 	touchedRepos := make(map[string]bool)
 	repoByDirectory := make(map[string]string)
 	for path := range touched {
@@ -590,51 +641,51 @@ func (s *Service) SessionFilesWithAgentsStream(ctx context.Context, session stri
 			}
 			repoByDirectory[directory] = repo
 		}
+		if repo == "" || touchedRepos[repo] {
+			continue
+		}
 		touchedRepos[repo] = true
+		if _, visible := viewIndexByRepo[repo]; !visible {
+			discovered, indexes, discoveryErr := s.sessionFilesRepositoryViewsBounded(ctx, discovery, []string{repo}, func(_ int, view sessionFilesRepositoryView) error {
+				if emit == nil {
+					return nil
+				}
+				return emit(sessionFilesRepositoryChunk(discovery, view, false))
+			})
+			if discoveryErr != nil {
+				return nil, discoveryErr
+			}
+			for root, index := range indexes {
+				viewIndexByRepo[root] = len(views) + index
+			}
+			views = append(views, discovered...)
+		}
 	}
+	phases["repository_resolution_wall_ms"] = time.Since(repositoryResolutionStarted).Milliseconds()
 	reposWithAttributions := make([]string, 0, len(touchedRepos))
 	for repo := range touchedRepos {
 		reposWithAttributions = append(reposWithAttributions, repo)
 	}
 	sort.Strings(reposWithAttributions)
-	newRepos := make([]string, 0, len(reposWithAttributions))
 	for _, repo := range reposWithAttributions {
-		index, alreadyVisible := viewIndexByRepo[repo]
-		if alreadyVisible {
-			view, repositoryErr := s.sessionFilesRepositoryViewWithAttribution(ctx, session, cloneSessionFilesRepositoryView(views[index]), touched)
-			if repositoryErr != nil {
-				return nil, repositoryErr
-			}
-			views[index] = view
-			if emit != nil {
-				if err := emit(sessionFilesRepositoryChunk(discovery, view, true)); err != nil {
-					if ctx.Err() != nil {
-						return nil, cancelled(repo)
-					}
-					return nil, &Error{Status: http.StatusInternalServerError, Code: "session_files_stream_failed", MessageKey: "common.requestFailed", Path: repo, Retryable: true, Message: err.Error()}
-				}
-			}
+		index, visible := viewIndexByRepo[repo]
+		if !visible {
 			continue
 		}
-		newRepos = append(newRepos, repo)
-	}
-	newViewBase := len(views)
-	newViews, newViewIndexes, finderErr := s.sessionFilesRepositoryViewsBounded(ctx, discovery, newRepos, func(index int, view sessionFilesRepositoryView) error {
-		if emit == nil {
-			return nil
+		view, repositoryErr := s.sessionFilesRepositoryViewWithAttribution(ctx, session, cloneSessionFilesRepositoryView(views[index]), touched)
+		if repositoryErr != nil {
+			return nil, repositoryErr
 		}
-		return emit(sessionFilesRepositoryChunk(discovery, view, false))
-	})
-	if finderErr != nil {
-		return nil, finderErr
+		views[index] = view
+		if index < initialViewCount && emit != nil {
+			if err := emit(sessionFilesRepositoryChunk(discovery, view, true)); err != nil {
+				return nil, &Error{Status: 500, Code: "session_files_stream_failed", Message: err.Error()}
+			}
+		}
 	}
-	for repo, index := range newViewIndexes {
-		viewIndexByRepo[repo] = newViewBase + index
-	}
-	if enrichmentErr := s.enrichSessionFilesViewsStagedBounded(ctx, newViews, []sessionFilesViewEnricher{
-		s.enrichSessionFilesFileMetadata,
-		s.enrichSessionFilesRepository,
-	}, func(_ int, view sessionFilesRepositoryView) error {
+	// Every discovered repository uses the same enrichment parent after its early
+	// Git chunk. Discovery must not bypass metadata/ref completion for old panes.
+	if enrichmentErr := s.enrichSessionFilesViewsStagedBounded(ctx, views[initialViewCount:], []sessionFilesViewEnricher{s.enrichSessionFilesFileMetadata, s.enrichSessionFilesRepository}, func(_ int, view sessionFilesRepositoryView) error {
 		if emit == nil {
 			return nil
 		}
@@ -643,9 +694,27 @@ func (s *Service) SessionFilesWithAgentsStream(ctx context.Context, session stri
 		if ctx.Err() != nil {
 			return nil, cancelled(session)
 		}
-		return nil, &Error{Status: http.StatusInternalServerError, Code: "session_files_stream_failed", MessageKey: "common.requestFailed", Path: session, Retryable: true, Message: enrichmentErr.Error()}
+		return nil, &Error{Status: 500, Code: "session_files_stream_failed", Message: enrichmentErr.Error()}
 	}
-	views = append(views, newViews...)
+
+	if s.attributionIndex == nil || !s.AttributionPreparation().Partial {
+		allowed := make(map[string]bool)
+		for repo := range touchedRepos {
+			allowed[repo] = true
+		}
+		for _, root := range candidateRoots {
+			if repo, ok := sessionFilesKnownRepository(sessionFilesRepositoryScopePath(root, false), discovery.repositoryScopes); ok {
+				allowed[repo] = true
+			}
+		}
+		filtered := views[:0]
+		for _, view := range views {
+			if allowed[sessionFilesRepositoryPath(view)] {
+				filtered = append(filtered, view)
+			}
+		}
+		views = filtered
+	}
 	sort.SliceStable(views, func(i, j int) bool {
 		left, _ := views[i].repo["repo"].(string)
 		right, _ := views[j].repo["repo"].(string)
@@ -656,7 +725,27 @@ func (s *Service) SessionFilesWithAgentsStream(ctx context.Context, session stri
 		repo, _ := view.repo["repo"].(string)
 		discovery.repositories = append(discovery.repositories, repo)
 	}
-	return sessionFilesPayloadFromViews(discovery, views), nil
+	payload := sessionFilesPayloadFromViews(discovery, views)
+	if emit != nil {
+		for _, view := range views {
+			if !completedRepos[sessionFilesRepositoryPath(view)] {
+				if err := emit(sessionFilesRepositoryChunk(discovery, view, true)); err != nil {
+					return nil, &Error{Status: 500, Code: "session_files_stream_failed", Message: err.Error()}
+				}
+			}
+		}
+	}
+	phases["first_repository_ms"] = firstEmission.Milliseconds()
+	phases["completion_ms"] = time.Since(started).Milliseconds()
+	phases["repository_resolution_ms"] = discovery.metrics.resolution.Milliseconds()
+	phases["git_work_ms"] = discovery.metrics.git.Milliseconds()
+	phases["repositories"] = len(views)
+	phases["attributed_paths"] = len(touched)
+	payload["phases"] = phases
+	if s.attributionIndex != nil || s.attributionUnavailable != nil {
+		payload["preparation"] = s.AttributionPreparation()
+	}
+	return payload, nil
 }
 
 // AggregateSessionFiles combines the already-scoped session products into the same aggregate

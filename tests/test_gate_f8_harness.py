@@ -229,26 +229,30 @@ def _run_reaper_until_interrupted(command: list[str], cwd: Path) -> None:
     signal.signal(signal.SIGINT, raise_interrupt)
     signal.signal(signal.SIGTERM, raise_interrupt)
     try:
-        run_reaped_container_command(command, cwd=cwd, env=os.environ)
+        run_reaped_container_command(command, cwd=cwd, env=os.environ, terminate_grace_seconds=0.2)
     except KeyboardInterrupt:
         return
     raise RuntimeError("reaper command completed before the interrupt")
 
 
-def test_interrupted_container_run_reaps_the_wrapper_and_its_container(tmp_path):
+@pytest.mark.parametrize("resists_term", [False, True])
+def test_interrupted_container_run_reaps_the_wrapper_and_its_container(tmp_path, resists_term):
     grandchild_file = tmp_path / "container.pid"
-    # The outer python stands in for the docker wrapper; the `sleep` grandchild it spawns in the same
+    # The outer Python stands in for the Docker wrapper; its grandchild in the same
     # process group stands in for the --rm container. A name-pattern kill of the inner process left
     # exactly such a grandchild alive holding the lock; reaping the session must remove it.
+    child = (
+        "import os, signal, time; from pathlib import Path; "
+        f"signal.signal(signal.SIGTERM, signal.{'SIG_IGN' if resists_term else 'SIG_DFL'}); "
+        f"Path({str(grandchild_file)!r}).write_text(str(os.getpid())); time.sleep(300)"
+    )
     command = [
         sys.executable,
         "-c",
         textwrap.dedent(
             f"""
             import subprocess, sys, time
-            container = subprocess.Popen(['sleep', '300'])
-            with open({str(grandchild_file)!r}, 'w') as handle:
-                handle.write(str(container.pid))
+            container = subprocess.Popen([sys.executable, '-c', {child!r}])
             time.sleep(300)
             """
         ),
@@ -272,20 +276,26 @@ def test_interrupted_container_run_reaps_the_wrapper_and_its_container(tmp_path)
         os.kill(controller.pid, signal.SIGINT)
         controller.join(15)
         assert controller.exitcode == 0
+        assert signal.getsignal(signal.SIGINT) is worker_sigint
+
+        grandchild_pid = int(grandchild_file.read_text().strip())
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and _pid_alive(grandchild_pid):
+            time.sleep(0.02)
+        assert not _pid_alive(grandchild_pid), (
+            f"container wrapper grandchild {grandchild_pid} survived the interrupted run"
+        )
     finally:
         if controller.is_alive():
             controller.terminate()
             controller.join(10)
-
-    assert signal.getsignal(signal.SIGINT) is worker_sigint
-
-    grandchild_pid = int(grandchild_file.read_text().strip())
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and _pid_alive(grandchild_pid):
-        time.sleep(0.02)
-    assert not _pid_alive(grandchild_pid), (
-        f"container wrapper grandchild {grandchild_pid} survived the interrupted run"
-    )
+        if grandchild_file.exists() and grandchild_file.read_text().strip():
+            grandchild_pid = int(grandchild_file.read_text().strip())
+            if _pid_alive(grandchild_pid):
+                try:
+                    os.kill(grandchild_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 # ---------------------------------------------------------------------------

@@ -283,11 +283,16 @@ cpu_args=()
 if [ -n "$cpu_limit" ]; then
   if [ "$cpu_limit" != unlimited ]; then
     case "$cpu_limit" in ''|*[!0-9]*) echo "test container CPU limit must be a positive integer or unlimited" >&2; exit 2 ;; esac
-    if [ "$cpu_limit" -lt 1 ]; then
-      echo "test container CPU limit must be a positive integer or unlimited" >&2
+    cpu_limit="${cpu_limit#"${cpu_limit%%[!0]*}"}"
+    # Appending four zeros must remain within Docker's signed 64-bit CPUQuota.
+    if [ -z "$cpu_limit" ] || [ "${#cpu_limit}" -gt 15 ] || {
+      [ "${#cpu_limit}" -eq 15 ] && [[ "$cpu_limit" > 922337203685477 ]]
+    }; then
+      echo "test container CPU limit must be a positive integer or unlimited (CPU quota must fit signed 64-bit)" >&2
       exit 2
     fi
-    cpu_args+=(--cpus="$cpu_limit")
+    # Keep the same CPU allocation with shorter refill intervals than Docker's 100 ms default.
+    cpu_args+=(--cpu-period=10000 --cpu-quota="${cpu_limit}0000")
   fi
 fi
 memory_limit_mb="$(product_env_print TEST_MEMORY_MB "$(product_env_print BAZEL_MEMORY_MB "")")"

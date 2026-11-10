@@ -13,7 +13,7 @@
       "file_explorer_font_size": 12,
       "global_font_size": 14,
       "inactive_pane_opacity": 60,
-      "max_tabs_per_pane": 10,
+      "max_tabs_per_pane": 12,
       "pane_ring_opacity": 75,
       "pane_spacing": 3,
       "preview_font_size": 14,
@@ -44,7 +44,8 @@
       "autosave_delay_seconds": 6,
       "blame_all_lines": false,
       "ensure_final_newline_on_save": false,
-      "trim_trailing_whitespace_on_save": false
+      "trim_trailing_whitespace_on_save": false,
+      "cursor_blink_delay_ms": 600
     },
     "file_explorer": {
       "companion_dirs": [],
@@ -108,7 +109,8 @@
       "language": "system",
       "reload_on_update": true,
       "reload_on_update_auto": false,
-      "startup_tips": true
+      "startup_tips": true,
+      "enable_experimental_features": false
     },
     "github": {
       "watched_prs": []
@@ -349,14 +351,15 @@
         "yellow",
         "purple",
         "white",
-        "laser-lime",
         "neon-green",
         "neon-cyan",
         "neon-magenta",
         "neon-orange",
         "theme"
       ],
-      "aliases": {},
+      "aliases": {
+        "laser-lime": "neon-green"
+      },
       "choice_labels": {},
       "choice_metadata": {},
       "choices": [
@@ -366,7 +369,6 @@
         "yellow",
         "purple",
         "white",
-        "laser-lime",
         "neon-green",
         "neon-cyan",
         "neon-magenta",
@@ -375,7 +377,7 @@
       ],
       "current": "yellow",
       "default": "yellow",
-      "description": "green | blue | orange | yellow | purple | white | laser-lime | neon-green | neon-cyan | neon-magenta | neon-orange | theme. Default yellow. Applies to the active terminal cursor, editor cursor, and pane scrollbar thumb; theme uses each surface's scheme cursor.",
+      "description": "green | blue | orange | yellow | purple | white | neon-green | neon-cyan | neon-magenta | neon-orange | theme. Default yellow. Applies to the active terminal cursor, editor cursor, and pane scrollbar thumb; theme uses the inverse Global theme color. Laser lime is a legacy alias for Neon green.",
       "empty_allowed": false,
       "gui": {
         "section": "Colors",
@@ -415,11 +417,11 @@
       ],
       "current": "block",
       "default": "block",
-      "description": "line | block. CodeMirror cursor shape.",
+      "description": "line | block. Cursor shape for TextEditor and ViewEditor.",
       "empty_allowed": false,
       "gui": {
-        "section": "Colors",
-        "section_locale_key": "pref.section.colors",
+        "section": "Editor options",
+        "section_locale_key": "pref.section.editor_options",
         "visible": true
       },
       "hidden_choices": [],
@@ -551,7 +553,7 @@
       ],
       "current": "yomux-light",
       "default": "yomux-light",
-      "description": "Light editor scheme used by the editor dark/light toggle. Default is Popular IDE Light+.",
+      "description": "Light editor scheme used by the editor dark/light toggle. Default is YOmux Light.",
       "empty_allowed": false,
       "gui": {
         "section": "Colors",
@@ -585,7 +587,7 @@
       "choices": [],
       "current": 12,
       "default": 12,
-      "description": "Pixels, 6-24. Applied live to File Explorer/Finder.",
+      "description": "Pixels, 1-24. Applied live to File Explorer/Finder.",
       "empty_allowed": false,
       "gui": {
         "section": "Sizes",
@@ -694,8 +696,8 @@
       "choice_labels": {},
       "choice_metadata": {},
       "choices": [],
-      "current": 10,
-      "default": 10,
+      "current": 12,
+      "default": 12,
       "description": "Caps open tabs per pane (2-30); the oldest unused tabs auto-close (LRU) when the limit is exceeded (dirty editors are kept).",
       "empty_allowed": false,
       "gui": {
@@ -770,7 +772,7 @@
       "choices": [],
       "current": 3,
       "default": 3,
-      "description": "Pixels, 0-20. Gap between panes; at 0 they touch and the green active outline covers the divider. The active outline thickens as spacing grows.",
+      "description": "Pixels, 0-20. Gap between panes; at 0 they touch and the active outline covers the divider. The active outline thickens as spacing grows.",
       "empty_allowed": false,
       "gui": {
         "section": "UI sizes",
@@ -807,7 +809,7 @@
       "choices": [],
       "current": 14,
       "default": 14,
-      "description": "Pixels, 6-32. Applied live to rendered Preview panes and split-preview surfaces.",
+      "description": "Pixels, 6-28. Paired with appearance.editor_font_size for rendered Preview panes and split-preview surfaces.",
       "empty_allowed": false,
       "gui": {
         "section": "Sizes",
@@ -818,7 +820,7 @@
       "key": "preview_font_size",
       "label": "Preview font size",
       "limits": {
-        "max": 32,
+        "max": 28,
         "min": 6
       },
       "list_limit": null,
@@ -860,7 +862,7 @@
       ],
       "current": "theme",
       "default": "theme",
-      "description": "theme | green | blue | orange | yellow | purple | white. Color for pane separators and dashed tab/file/root drop previews. Theme preserves the dark/light defaults.",
+      "description": "theme | green | blue | orange | yellow | purple | white. Color for pane separators and dashed tab/file/root drop previews. Inverse global theme color is the default and pairs green to yellow, blue to yellow, yellow to blue, orange/red to blue, and violet/white-gray in both directions.",
       "empty_allowed": false,
       "gui": {
         "section": "Colors",
@@ -1097,7 +1099,7 @@
       "description": "off | top | bottom. Native tmux status bar position for new sessions. The YOmux Info Bar remains at the top of each pane.",
       "empty_allowed": false,
       "gui": {
-        "section": "Terminal",
+        "section": "Terminal options",
         "section_locale_key": "pref.section.terminal",
         "visible": true
       },
@@ -1377,6 +1379,43 @@
       "sensitivity": "normal",
       "type": "boolean",
       "units": "",
+      "write_role": "admin"
+    },
+    "editor.cursor_blink_delay_ms": {
+      "accepted_choices": [],
+      "aliases": {},
+      "choice_labels": {},
+      "choice_metadata": {},
+      "choices": [],
+      "current": 600,
+      "default": 600,
+      "description": "Milliseconds between cursor blink phases for TextEditor, ViewEditor, and cursor examples. 0 keeps the cursor static. Default 600.",
+      "empty_allowed": false,
+      "gui": {
+        "section": "Editor options",
+        "section_locale_key": "pref.section.editor_options",
+        "visible": true
+      },
+      "hidden_choices": [],
+      "key": "cursor_blink_delay_ms",
+      "label": "Cursor blink delay ms",
+      "limits": {
+        "max": 2000,
+        "min": 0
+      },
+      "list_limit": null,
+      "live_apply": "live",
+      "locale_keys": {
+        "description": "pref.editor.cursor_blink_delay_ms.help",
+        "label": "pref.editor.cursor_blink_delay_ms.label"
+      },
+      "path": "editor.cursor_blink_delay_ms",
+      "read_role": "readonly",
+      "requires_confirmation": false,
+      "section": "editor",
+      "sensitivity": "normal",
+      "type": "integer",
+      "units": "milliseconds",
       "write_role": "admin"
     },
     "editor.ensure_final_newline_on_save": {
@@ -3592,7 +3631,7 @@
       "description": "Lines, 1000-50000. xterm.js scrollback.",
       "empty_allowed": false,
       "gui": {
-        "section": "Terminal",
+        "section": "Terminal options",
         "section_locale_key": "pref.section.terminal",
         "visible": true
       },
@@ -4540,6 +4579,40 @@
       "type": "string",
       "units": "",
       "write_role": "admin"
+    },
+    "general.enable_experimental_features": {
+      "path": "general.enable_experimental_features",
+      "section": "general",
+      "key": "enable_experimental_features",
+      "label": "Enable experimental features",
+      "locale_keys": {
+        "description": "pref.general.enable_experimental_features.help",
+        "label": "pref.general.enable_experimental_features.label"
+      },
+      "current": false,
+      "default": false,
+      "type": "boolean",
+      "choices": [],
+      "accepted_choices": [],
+      "hidden_choices": [],
+      "choice_labels": {},
+      "choice_metadata": {},
+      "limits": null,
+      "units": "",
+      "empty_allowed": false,
+      "list_limit": null,
+      "aliases": {},
+      "description": "Show YO!chat, YO!agent, and YO!info in File and Tabs.",
+      "sensitivity": "normal",
+      "requires_confirmation": false,
+      "read_role": "readonly",
+      "write_role": "admin",
+      "live_apply": "live",
+      "gui": {
+        "section": "Experimental",
+        "section_locale_key": "pref.section.experimental",
+        "visible": true
+      }
     }
   },
   "cases": [
@@ -4558,7 +4631,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -4589,7 +4662,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -4653,7 +4727,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -4757,7 +4832,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -4788,7 +4863,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -4852,7 +4928,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -4959,7 +5036,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 20,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -4990,7 +5067,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -5054,7 +5132,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -5159,7 +5238,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -5190,7 +5269,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -5254,7 +5334,8 @@
           "language": "ja",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": false
+          "startup_tips": false,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -5359,7 +5440,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -5390,7 +5471,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -5454,7 +5536,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -5557,7 +5640,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -5588,7 +5671,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -5652,7 +5736,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -5755,7 +5840,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -5786,7 +5871,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -5850,7 +5936,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -5954,7 +6041,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -5985,7 +6072,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -6049,7 +6137,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -6158,7 +6247,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -6189,7 +6278,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -6253,7 +6343,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -6361,7 +6452,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -6392,7 +6483,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -6456,7 +6548,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -6563,7 +6656,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -6594,7 +6687,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -6658,7 +6752,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -6769,7 +6864,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -6801,7 +6896,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -6865,7 +6961,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -6971,7 +7068,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -7002,7 +7099,8 @@
           "autosave_delay_seconds": 10,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -7066,7 +7164,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -7178,7 +7277,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -7209,7 +7308,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -7276,7 +7376,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -7383,7 +7484,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 4,
           "preview_font_size": 14,
@@ -7414,7 +7515,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -7478,7 +7580,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -7587,7 +7690,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -7618,7 +7721,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -7682,7 +7786,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -7789,7 +7894,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -7820,7 +7925,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -7884,7 +7990,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -7987,7 +8094,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -8018,7 +8125,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -8082,7 +8190,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -8187,7 +8296,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 0,
           "preview_font_size": 14,
@@ -8218,7 +8327,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -8282,7 +8392,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -8385,7 +8496,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -8416,7 +8527,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -8480,7 +8592,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []
@@ -8585,7 +8698,7 @@
           "file_explorer_font_size": 12,
           "global_font_size": 14,
           "inactive_pane_opacity": 60,
-          "max_tabs_per_pane": 10,
+          "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
           "preview_font_size": 14,
@@ -8616,7 +8729,8 @@
           "autosave_delay_seconds": 6,
           "blame_all_lines": false,
           "ensure_final_newline_on_save": false,
-          "trim_trailing_whitespace_on_save": false
+          "trim_trailing_whitespace_on_save": false,
+          "cursor_blink_delay_ms": 600
         },
         "file_explorer": {
           "companion_dirs": [],
@@ -8680,7 +8794,8 @@
           "language": "system",
           "reload_on_update": true,
           "reload_on_update_auto": false,
-          "startup_tips": true
+          "startup_tips": true,
+          "enable_experimental_features": false
         },
         "github": {
           "watched_prs": []

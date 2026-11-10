@@ -76,7 +76,7 @@ func NewStore(directory string) (*Store, error) {
 	if err := mutablefs.RequireLocal(database); err != nil {
 		return nil, fmt.Errorf("YO!agent database must use local storage: %w", err)
 	}
-	if err := privateDatabaseFiles(database); err != nil {
+	if err := atomicfile.PrivateDatabaseFiles(database); err != nil {
 		return nil, fmt.Errorf("secure YO!agent database files: %w", err)
 	}
 	uri := url.URL{Scheme: "file", Path: filepath.ToSlash(database)}
@@ -98,33 +98,6 @@ func NewStore(directory string) (*Store, error) {
 		return nil, errors.Join(fmt.Errorf("initialize YO!agent database: %w", err), db.Close())
 	}
 	return store, nil
-}
-
-func privateDatabaseFiles(path string) error {
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		flags := os.O_RDWR | syscall.O_NOFOLLOW
-		if suffix == "" {
-			flags |= os.O_CREATE
-		}
-		file, err := os.OpenFile(path+suffix, flags, 0o600)
-		if errors.Is(err, os.ErrNotExist) && suffix != "" {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		info, err := file.Stat()
-		if err != nil {
-			return errors.Join(err, file.Close())
-		}
-		if !info.Mode().IsRegular() {
-			return errors.Join(errors.New("YO!agent database files must be regular"), file.Close())
-		}
-		if err := errors.Join(file.Chmod(0o600), file.Close()); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (store *Store) Close() error { return store.db.Close() }
@@ -565,23 +538,33 @@ func (store *Store) importLegacyJobValues(ctx context.Context, tx *sql.Tx, path 
 	sort.SliceStable(items, func(left, right int) bool {
 		leftJob, _ := items[left].(map[string]any)
 		rightJob, _ := items[right].(map[string]any)
-		return number(leftJob["created_ts"]) > number(rightJob["created_ts"])
+		leftTS, rightTS := number(leftJob["created_ts"]), number(rightJob["created_ts"])
+		if leftTS != rightTS {
+			return leftTS > rightTS
+		}
+		return firstNonEmpty(text(leftJob["id"]), text(leftJob["job_id"])) < firstNonEmpty(text(rightJob["id"]), text(rightJob["job_id"]))
 	})
-	start := 0
-	if len(items) > jobLimit {
-		start = len(items) - jobLimit
-	}
-	for index, item := range items[start:] {
+	admitted := make(map[string]bool, min(len(items), jobLimit))
+	for index, item := range items {
+		if len(admitted) == jobLimit {
+			break
+		}
 		job, ok := item.(map[string]any)
 		if !ok {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO yoagent_recovery_issues(path,line,reason) VALUES(?,?,?)`, path, start+index+1, "invalid_legacy_job"); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO yoagent_recovery_issues(path,line,reason) VALUES(?,?,?)`, path, index+1, "invalid_legacy_job"); err != nil {
 				return err
 			}
 			continue
 		}
 		clean, id, idempotencyKey, createdTS, err := normalizedJob(job)
 		if err != nil {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO yoagent_recovery_issues(path,line,reason) VALUES(?,?,?)`, path, start+index+1, "invalid_legacy_job"); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO yoagent_recovery_issues(path,line,reason) VALUES(?,?,?)`, path, index+1, "invalid_legacy_job"); err != nil {
+				return err
+			}
+			continue
+		}
+		if admitted[id] {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO yoagent_recovery_issues(path,line,reason) VALUES(?,?,?)`, path, index+1, "duplicate_legacy_job"); err != nil {
 				return err
 			}
 			continue
@@ -591,14 +574,27 @@ func (store *Store) importLegacyJobValues(ctx context.Context, tx *sql.Tx, path 
 			return fmt.Errorf("encode legacy YO!agent job %q: %w", id, err)
 		}
 		if len(encoded) > jobRecordLimit {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO yoagent_recovery_issues(path,line,reason) VALUES(?,?,?)`, path, start+index+1, "legacy_job_too_large"); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO yoagent_recovery_issues(path,line,reason) VALUES(?,?,?)`, path, index+1, "legacy_job_too_large"); err != nil {
 				return err
 			}
 			continue
 		}
+		if idempotencyKey != "" && (clean["status"] == "queued" || clean["status"] == "pending_confirmation") {
+			existing, err := findActiveJob(ctx, tx, idempotencyKey)
+			if err != nil {
+				return err
+			}
+			if existing != nil {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO yoagent_recovery_issues(path,line,reason) VALUES(?,?,?)`, path, index+1, "duplicate_legacy_idempotency"); err != nil {
+					return err
+				}
+				continue
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO yoagent_jobs(job_id,status,created_ts,idempotency_key,job_json) VALUES(?,?,?,?,?)`, id, clean["status"], createdTS, idempotencyKey, string(encoded)); err != nil {
 			return fmt.Errorf("import legacy YO!agent job %q: %w", id, err)
 		}
+		admitted[id] = true
 	}
 	return nil
 }
@@ -667,6 +663,22 @@ func (store *Store) SaveJob(ctx context.Context, value map[string]any) error {
 	return nil
 }
 
+func findActiveJob(ctx context.Context, tx *sql.Tx, idempotencyKey string) (map[string]any, error) {
+	var encoded string
+	err := tx.QueryRowContext(ctx, `SELECT job_json FROM yoagent_jobs WHERE idempotency_key=? AND status IN ('queued','pending_confirmation') ORDER BY created_ts DESC,job_id LIMIT 1`, idempotencyKey).Scan(&encoded)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("check duplicate YO!agent job: %w", err)
+	}
+	job, err := loadJSONMap(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("decode duplicate YO!agent job: %w", err)
+	}
+	return job, nil
+}
+
 // CreateJob persists a new job unless an active job with the same idempotency key already exists.
 // The duplicate check and insert share one transaction so parallel requests cannot enqueue twins.
 func (store *Store) CreateJob(ctx context.Context, value map[string]any) (map[string]any, bool, error) {
@@ -686,20 +698,15 @@ func (store *Store) CreateJob(ctx context.Context, value map[string]any) (map[st
 		return nil, false, fmt.Errorf("begin YO!agent job creation: %w", err)
 	}
 	defer tx.Rollback()
-	var existingJSON string
-	err = tx.QueryRowContext(ctx, `SELECT job_json FROM yoagent_jobs WHERE idempotency_key=? AND status IN ('queued','pending_confirmation') ORDER BY created_ts DESC,job_id LIMIT 1`, idempotencyKey).Scan(&existingJSON)
-	if err == nil {
-		existing, decodeErr := loadJSONMap(existingJSON)
-		if decodeErr != nil {
-			return nil, false, fmt.Errorf("decode duplicate YO!agent job: %w", decodeErr)
-		}
+	existing, err := findActiveJob(ctx, tx, idempotencyKey)
+	if err != nil {
+		return nil, false, err
+	}
+	if existing != nil {
 		if err := tx.Commit(); err != nil {
 			return nil, false, fmt.Errorf("finish duplicate YO!agent job lookup: %w", err)
 		}
 		return existing, false, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, false, fmt.Errorf("check duplicate YO!agent job: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO yoagent_jobs(job_id,status,created_ts,idempotency_key,job_json) VALUES(?,?,?,?,?)`, id, clean["status"], createdTS, idempotencyKey, string(encoded)); err != nil {
 		return nil, false, fmt.Errorf("persist YO!agent job %q: %w", id, err)

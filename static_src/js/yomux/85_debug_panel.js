@@ -4570,7 +4570,7 @@ async function refreshJsDebugSessionAliases() {
   if (state.sessionAliasPromise) return state.sessionAliasPromise;
   state.sessionAliasPromise = (async () => {
     try {
-      const payload = await apiFetch('/api/stats-session-aliases');
+      const payload = await apiFetchJson('/api/stats-session-aliases');
       if (key !== jsDebugSessionAliasTopologyKey()) return;
       debugGraphStatsCurrentModule()?.setSessionAliases?.(payload?.aliases || {});
       state.sessionAliasKey = key;
@@ -4578,6 +4578,7 @@ async function refreshJsDebugSessionAliases() {
       state.pendingGenerationKey = '';
       paintJsDebugCurrentStatsGeneration(state.client.controller?.()?.generation?.(), {forceGraphRefresh: true});
     } catch (error) {
+      if (key !== jsDebugSessionAliasTopologyKey()) return;
       recordJsDebugCurrentStatsFailure({
         message: `YO!stats session labels unavailable: ${jsDebugErrorText(error)}`,
         source: '/api/stats-session-aliases',
@@ -8434,7 +8435,7 @@ function debugGraphClearInteractionLines(panel, graph = null) {
   surfaces.forEach(surface => surface.classList.remove('js-debug-graph--hovering'));
   const owner = graph || panel;
   owner?.querySelectorAll?.('[data-js-debug-hover-tooltip]').forEach(tooltip => { tooltip.hidden = true; });
-  owner?.querySelectorAll?.('[data-js-debug-legend-item--hovered]').forEach(item => item.classList.remove('js-debug-legend-item--hovered'));
+  owner?.querySelectorAll?.('.js-debug-legend-item--hovered').forEach(item => item.classList.remove('js-debug-legend-item--hovered'));
 }
 
 function debugGraphClearInteractionLinesUnlessPinned(panel) {

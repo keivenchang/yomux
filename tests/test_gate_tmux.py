@@ -2,26 +2,17 @@
 from __future__ import annotations
 
 import math
-import os
 import shlex
-import shutil
 import statistics
-import subprocess
 import sys
-import threading
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from http import HTTPStatus
-from http.client import HTTPConnection
-from pathlib import Path
 from urllib.parse import urlencode
 
 import pytest
 
-from tests.helpers.fixture_tools import fixture_command
-from tests import gate_harness
+from tests.helpers.browser_contracts import send_native_key as _send_native_key
 from tests import latency_calibration
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
 from tests.browser_helpers.browser_layout import WebDriverWait  # noqa: F401
@@ -29,14 +20,10 @@ from tests.browser_helpers.browser_layout import TimeoutException
 from tests.browser_helpers.browser_layout import assert_live_runtime_boot_healthy
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.browser_helpers.browser_layout import click_visible_selector
-from tests.browser_helpers.browser_layout import start_browser_server
-from tests.browser_helpers.browser_layout import start_isolated_browser_app
-from tests.browser_helpers.browser_layout import stop_browser_fixture
 from tests.gate_harness import gate_http_port  # noqa: F401
 from tests.native_gate_fixtures import gate_live_server  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
-from tests.gate_harness import load_gate_terminal_only_browser
 from tests.tmux_runtime import clear_isolated_product_environment
 from tests.tmux_runtime import patch_isolated_product_environment
 from tests.tmux_runtime import run_isolated_tmux
@@ -45,7 +32,6 @@ from yomux_lib.tmux import tmux_utils
 
 pytestmark = pytest.mark.socket
 
-KEYSTROKE_LATENCY_SAMPLE_COUNT = 120
 # The user-visible keystroke ceiling. Fixed on every host: a host measurement may decide WHICH
 # statistic is certifiable, never how slow the product may be. Asserted only in the exclusive
 # certification phase (latency_calibration.LATENCY_CERTIFICATION_ENV), never in the parallel
@@ -53,9 +39,6 @@ KEYSTROKE_LATENCY_SAMPLE_COUNT = 120
 KEYSTROKE_LATENCY_CEILING_MS = 3.0
 KEYSTROKE_LATENCY_CERTIFIED_QUANTILE = 0.99
 KEYSTROKE_LATENCY_CERTIFIED_QUANTILE_KEY = f"p{round(KEYSTROKE_LATENCY_CERTIFIED_QUANTILE * 100)}_nearest_rank_ms"
-KEYSTROKE_SLOWDOWN_CONTROL_RATE = 4
-KEYSTROKE_SLOWDOWN_CONTROL_SAMPLE_COUNT = 12
-KEYSTROKE_SLOWDOWN_CONTROL_PRESSURE_SECONDS = 45.0
 TERMINAL_PRESSURE_DURATION_SECONDS = 12.0
 TERMINAL_PRESSURE_CHUNK_BYTES = 4096
 TERMINAL_PRESSURE_INTERVAL_SECONDS = 0.02
@@ -68,31 +51,6 @@ TERMINAL_PRESSURE_WAIT_TIMEOUT_MS = 8000
 class TerminalOutputPressure:
     session: str
     duration_seconds: float
-
-
-
-
-
-
-
-
-
-
-
-
-def _tmux(socket_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["tmux", "-S", str(socket_path), *args], capture_output=True, text=True, check=False, timeout=5)
-
-
-def _request(port: int, path: str) -> tuple[int, bytes]:
-    connection = HTTPConnection("127.0.0.1", port, timeout=5)
-    connection.request("POST", path)
-    response = connection.getresponse()
-    result = response.status, response.read()
-    connection.close()
-    return result
-
-
 
 
 @pytest.mark.no_browser
@@ -111,8 +69,6 @@ def test_gate_d6_destructive_default_server_policy_is_explicit(monkeypatch):
         tmux_utils.tmux_command(["kill-session", "-t", "yt-gate:"])
     with pytest.raises(tmux_utils.TmuxSocketTargetError):
         tmux_utils.tmux_command(["kill-server"])
-
-
 
 
 def _start_terminal_output_pressure(runtime, session: str, *, duration_seconds: float = TERMINAL_PRESSURE_DURATION_SECONDS) -> None:
@@ -202,18 +158,6 @@ def _client_perf_trace(driver) -> dict[str, object]:
     )
 
 
-def _send_native_key(driver, character: str) -> None:
-    key_code = ord(character.upper())
-    common = {
-        "key": character,
-        "code": f"Key{character.upper()}",
-        "windowsVirtualKeyCode": key_code,
-        "nativeVirtualKeyCode": key_code,
-    }
-    driver.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyDown", "text": character, "unmodifiedText": character, **common})
-    driver.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", **common})
-
-
 def _start_marker_echo_process(runtime, session: str, *, pressure: bool = False) -> None:
     """Replace an isolated shell with a raw-tty process that visibly acknowledges every `a`."""
 
@@ -294,124 +238,6 @@ def _install_visible_echo_probe(browser, session: str) -> None:
     )
 
 
-def _install_tab_transition_probe(browser) -> None:
-    browser.execute_script(
-        """
-        window.__tabTransitionSamples = [];
-        window.__tabTransitionLongTasks = [];
-        window.__tabActivationStaticReplacements = [];
-        window.__tabActivationOriginalReplaceChangesStaticHtml = replaceChangesStaticHtml;
-        replaceChangesStaticHtml = (...args) => {
-          const root = args[0];
-          const groups = root.querySelector('.changes-groups');
-          const rows = groups?.querySelectorAll('.file-tree-row').length || 0;
-          const startTime = performance.now();
-          const result = window.__tabActivationOriginalReplaceChangesStaticHtml(...args);
-          window.__tabActivationStaticReplacements.push({startTime, duration: performance.now() - startTime, rows,
-            retainedMountedGroups: Boolean(groups && groups === root.querySelector('.changes-groups') && groups.parentElement === root)});
-          return result;
-        };
-        const longTaskObserver = new PerformanceObserver(list => {
-          for (const entry of list.getEntries()) {
-            window.__tabTransitionLongTasks.push({startTime: entry.startTime, duration: entry.duration});
-          }
-        });
-        longTaskObserver.observe({entryTypes: ['longtask']});
-        window.__tabTransitionLongTaskObserver = longTaskObserver;
-        window.__tabPointerDownTargets = new Map();
-        const activationCounts = new Map();
-        const originalActivation = commitUserTerminalTabActivation;
-        commitUserTerminalTabActivation = (session, ...args) => {
-          activationCounts.set(session, (activationCounts.get(session) || 0) + 1);
-          return originalActivation(session, ...args);
-        };
-        const onPointerdown = event => {
-          const tab = event.target.closest?.('.dockview-pane-tab[data-pane-tab]');
-          if (!tab) return;
-          const session = tab.dataset.paneTab;
-          window.__tabPointerDownTargets.set(session, {
-            previous: activeItemForSide(slotForItem(session)), activationCount: activationCounts.get(session) || 0,
-          });
-        };
-        const onClick = event => {
-          const tab = event.target.closest?.('.dockview-pane-tab[data-pane-tab]');
-          if (!tab) return;
-          const session = tab.dataset.paneTab;
-          const side = slotForItem(session);
-          const pointerdown = window.__tabPointerDownTargets.get(session);
-          const previous = pointerdown?.previous || activeItemForSide(side);
-          window.__tabPointerDownTargets.delete(session);
-          const sample = {session, previous, eventAt: event.timeStamp, clickAt: performance.now()};
-          window.__tabTransitionSamples.push(sample);
-          requestAnimationFrame(() => {
-            const item = terminals.get(session);
-            const pane = document.getElementById(`terminal-pane-${session}`);
-            const previousTab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(previous)}"]`);
-            sample.frameAt = performance.now();
-            sample.activationCount = (activationCounts.get(session) || 0) - (pointerdown?.activationCount || 0);
-            sample.activeAtFrame = activeItemForSide(side);
-            sample.targetTabActive = tab.classList.contains(CLS.active);
-            sample.previousTabInactive = !previousTab?.classList.contains(CLS.active);
-            sample.terminalVisible = Boolean(item?.container && item.container.getBoundingClientRect().width > 0
-              && item.container.getBoundingClientRect().height > 0 && pane?.classList.contains(CLS.active));
-            sample.focused = document.activeElement === item?.term?.textarea;
-            sample.typingReady = item?.container?.classList.contains('typing-ready') === true;
-            sample.pending = tab.classList.contains('tab-activation-pending');
-            requestAnimationFrame(() => {
-              sample.firstPaintAt = performance.now();
-              sample.longTasks = window.__tabTransitionLongTasks
-                .filter(entry => entry.startTime + entry.duration > sample.eventAt && entry.startTime < sample.firstPaintAt)
-                .map(entry => ({startTime: entry.startTime, duration: entry.duration}));
-            });
-          });
-        };
-        document.addEventListener('pointerdown', onPointerdown, true);
-        document.addEventListener('click', onClick, true);
-        longTaskObserver.dispose = () => {
-          longTaskObserver.disconnect();
-          commitUserTerminalTabActivation = originalActivation;
-          document.removeEventListener('pointerdown', onPointerdown, true);
-          document.removeEventListener('click', onClick, true);
-        };
-        """
-    )
-
-
-def _wait_tab_transition_frame(browser, session: str) -> dict[str, object]:
-    sample = WebDriverWait(browser, 4, poll_frequency=0.01).until(
-        lambda driver: driver.execute_script(
-            """
-            const latest = [...(window.__tabTransitionSamples || [])].reverse().find(sample =>
-              sample.session === arguments[0]);
-            return latest?.firstPaintAt > 0 ? latest : false;
-            """,
-            session,
-        )
-    )
-    assert sample["activeAtFrame"] == session and sample["targetTabActive"] and sample["previousTabInactive"], sample
-    assert sample["terminalVisible"] and sample["focused"] and sample["typingReady"], sample
-    assert sample["activationCount"] == 1, sample
-    sample["clickToFrameMs"] = round(float(sample["frameAt"]) - float(sample["eventAt"]), 2)
-    sample["clickToPaintMs"] = round(float(sample["firstPaintAt"]) - float(sample["eventAt"]), 2)
-    sample["clickDispatchDelayMs"] = round(float(sample["clickAt"]) - float(sample["eventAt"]), 2)
-    return sample
-
-
-def _send_key_until_visible_echo(browser, *, sample_index: int, timeout: float = 3.0) -> float:
-    _send_native_key(browser, "a")
-    sample = WebDriverWait(browser, timeout, poll_frequency=0.01).until(
-        lambda driver: driver.execute_script(
-            """
-            const sample = window.__tabSwitchEchoProbe?.samples[arguments[0] - 1];
-            return sample?.paintedAt > 0 && sample.trusted ? sample : false;
-            """,
-            sample_index,
-        )
-    )
-    assert sample["index"] == sample_index and sample["marker"] == f"<E:{sample_index:04d}>", sample
-    return round(float(sample["paintedAt"]) - float(sample["eventAt"]), 2)
-
-
 def _echo_timing_summary(samples: list[float]) -> dict[str, float]:
     return {
         "p50_ms": round(statistics.median(samples), 2),
@@ -442,84 +268,6 @@ def test_s1_native_echo_timing_negative_control_rejects_a_held_paint_delay():
     assert verdicts[0]["ceiling_ms"] == 50.0 and verdicts[1]["ceiling_ms"] == 100.0, verdicts
 
 
-def _release_held_activation_write(browser, session: str, callback_index: int = -1, *, release_hold: bool = True) -> None:
-    browser.execute_script(
-        """
-        const barrier = window.__tabActivationWriteBarrier;
-        if (barrier?.session !== arguments[0]) throw new Error('activation write barrier owner changed');
-        if (arguments[2]) barrier.hold = false;
-        const callback = barrier.callbacks.splice(arguments[1], 1)[0];
-        if (callback) callback();
-        """,
-        session,
-        callback_index,
-        release_hold,
-    )
-
-
-def _assert_activation_pending_and_typing_ready(browser, session: str, *, timeout: float = 8.0) -> dict[str, object]:
-    state = WebDriverWait(browser, timeout, poll_frequency=0.01).until(
-        lambda driver: driver.execute_script(
-            """
-            const session = arguments[0];
-            const item = terminals.get(session);
-            const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(session)}"]`);
-            const transition = [...(window.__tabTransitionSamples || [])].reverse().find(sample => sample.session === session);
-            const inactiveTab = transition?.previous
-              ? document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(transition.previous)}"]`) : null;
-            const pane = document.getElementById(`terminal-pane-${session}`);
-            const terminal = item?.container;
-            if (!item || item.socket?.readyState !== WebSocket.OPEN || activeItemForSide(slotForItem(session)) !== session
-              || !tab?.classList.contains('tab-activation-pending') || !pane?.classList.contains(CLS.active)
-              || !inactiveTab || !terminal?.classList.contains('typing-ready')) return false;
-            const canvas = document.createElement('canvas');
-            canvas.width = canvas.height = 1;
-            const context = canvas.getContext('2d', {willReadFrequently: true});
-            const colorRgb = color => {
-              context.clearRect(0, 0, 1, 1);
-              context.fillStyle = color;
-              context.fillRect(0, 0, 1, 1);
-              return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3);
-            };
-            const originalLight = document.body.classList.contains('theme-light');
-            const originalTransition = tab.style.transition;
-            const themes = [];
-            tab.style.setProperty('--pane-bar-bg', 'rgb(19, 39, 59)');
-            tab.style.transition = 'none';
-            for (const light of [false, true]) {
-              document.body.classList.toggle('theme-light', light);
-              const pendingRgb = colorRgb(getComputedStyle(tab).backgroundColor);
-              const tabStyle = getComputedStyle(tab);
-              const inactiveRgb = colorRgb(tabStyle.getPropertyValue('--pane-inactive-tab-bg'));
-              tab.classList.remove('tab-activation-pending');
-              const activeStyle = getComputedStyle(tab);
-              const activeRgb = colorRgb(activeStyle.getPropertyValue('--pane-tab-active-bg'));
-              const activeTextRgb = colorRgb(activeStyle.color);
-              tab.classList.add('tab-activation-pending');
-              const expectedRgb = inactiveRgb.map((channel, index) => Math.round((channel + activeRgb[index]) / 2));
-              const pendingTextRgb = colorRgb(getComputedStyle(tab).color);
-              themes.push({light, pendingRgb, inactiveRgb, activeRgb, expectedRgb, pendingTextRgb, activeTextRgb,
-                midpoint: pendingRgb.every((channel, index) => Math.abs(channel - expectedRgb[index]) <= 1),
-                activeText: pendingTextRgb.every((channel, index) => Math.abs(channel - activeTextRgb[index]) <= 1)});
-            }
-            tab.style.removeProperty('--pane-bar-bg');
-            tab.style.transition = originalTransition;
-            document.body.classList.toggle('theme-light', originalLight);
-            return {
-              active: activeItemForSide(slotForItem(session)),
-              focused: document.activeElement === item.term.textarea,
-              typingReady: terminal.classList.contains('typing-ready'),
-              pendingThemes: themes,
-            };
-            """,
-            session,
-        )
-    )
-    assert state["active"] == session and state["focused"] and state["typingReady"], state
-    assert all(theme["midpoint"] and theme["activeText"] for theme in state["pendingThemes"]), state
-    return state
-
-
 def _counter_total(counter: dict[str, object] | None, field: str) -> int:
     return int(counter[field]) if counter else 0
 
@@ -527,12 +275,6 @@ def _counter_total(counter: dict[str, object] | None, field: str) -> int:
 def _nearest_rank_ms(samples: list[float], quantile: float) -> float:
     ordered = sorted(samples)
     return ordered[math.ceil(quantile * len(ordered)) - 1]
-
-
-def _focus_gate_terminal(browser, runtime) -> str:
-    """Load the fixture server and leave the keyboard focus on the first session's xterm textarea."""
-
-    return load_gate_terminal_only_browser(browser, runtime)
 
 
 def _keystroke_round(
@@ -641,485 +383,6 @@ def _keystroke_delivery_failures(observed: dict[str, object]) -> list[str]:
     return failures
 
 
-def _keystroke_summary(observed: dict[str, object]) -> dict[str, object]:
-    """Compact every observation except the raw per-key lists, for prints and assertion messages."""
-
-    samples = list(observed["samples"])
-    return {
-        "label": observed["label"],
-        "pressure": observed["pressure"],
-        "sample_count": observed["sample_count"],
-        "delivered_count": observed["counts"][-1] if observed["counts"] else 0,
-        "sampling_seconds": observed["sampling_seconds"],
-        "median_ms": statistics.median(samples),
-        "p95_nearest_rank_ms": _nearest_rank_ms(samples, 0.95),
-        KEYSTROKE_LATENCY_CERTIFIED_QUANTILE_KEY: _nearest_rank_ms(samples, KEYSTROKE_LATENCY_CERTIFIED_QUANTILE),
-        "max_ms": max(samples),
-        "focus_set": observed["focus_set"],
-        "ws_send_count": observed["ws_send_count"],
-        "ws_send_bytes": observed["ws_send_bytes"],
-        "term_on_data_count": observed["term_on_data_count"],
-        "term_on_data_bytes": observed["term_on_data_bytes"],
-        "echo_count": observed["echo_count"],
-        "pressure_bytes_observed": observed["pressure_bytes_observed"],
-        "long_task_count": observed["long_tasks"]["count"],
-        "long_task_max_ms": observed["long_tasks"]["maxMs"],
-    }
-
-
-def _assert_keystroke_delivery_complete(observed: dict[str, object]) -> None:
-    failures = _keystroke_delivery_failures(observed)
-    assert failures == [], {"failures": failures, "summary": _keystroke_summary(observed), "samples": observed["samples"]}
-
-
-def _run_tab_activation_native_echo_journey(browser, monkeypatch, tmp_path) -> dict[str, object]:
-    """Exercise pending activation and visible echo while the shared Differ renderer is busy."""
-    runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=2)
-    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
-    first, second = runtime.sessions
-    _start_marker_echo_process(runtime, first)
-    _start_marker_echo_process(runtime, second)
-    try:
-        query = urlencode({
-            "sessions": ",".join(runtime.sessions),
-            "layout": "left",
-            "tabs": f"left:{first},{second}",
-        })
-        browser.get(f"http://127.0.0.1:{server.server_address[1]}/?{query}")
-        WebDriverWait(browser, 12).until(
-            lambda driver: driver.execute_script(
-                "return typeof jsDebugFailureEvents === 'function' && typeof boot === 'function' && Boolean(document.getElementById('grid'));"
-            )
-        )
-        assert_live_runtime_boot_healthy(browser, "tab-activation-native-echo", timeout=12)
-        WebDriverWait(browser, 12).until(
-            lambda driver: driver.execute_script(
-                """
-                const item = terminals.get(arguments[0]);
-                return item?.socket?.readyState === WebSocket.OPEN && item.terminalOutputSeen === true
-                  && Boolean(item.term?.onRender) && Boolean(item.container?.querySelector('.xterm-screen'));
-                """,
-                first,
-            )
-        )
-        browser.execute_script(
-            """
-            const [first, second] = arguments;
-            const slots = emptyLayoutSlots();
-            slots[layoutTreeKey] = splitNode('row', leafNode('left'), leafNode('right'), 0.68);
-            slots.left = paneStateWithTabs([first, second], first);
-            slots.right = paneStateWithTabs([differItemId], differItemId);
-            applyLayoutSlots(slots, {prune: false});
-            """,
-            first,
-            second,
-        )
-        WebDriverWait(browser, 8).until(
-            lambda driver: driver.execute_script(
-                "return Boolean(panelNodes.get(differItemId)?.isConnected) && fileExplorerSessionFilesPaneIsVisible();"
-            )
-        )
-        # Let the real tab path lazily create and warm the second xterm before measuring cached-tab
-        # activation. This preserves the production mount behavior and avoids depending on a socket
-        # that cannot exist until the tab has been selected once.
-        click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{second}"]')
-        WebDriverWait(browser, 12).until(
-            lambda driver: driver.execute_script(
-                """
-                const item = terminals.get(arguments[0]);
-                return item?.socket?.readyState === WebSocket.OPEN && item.terminalOutputSeen === true
-                  && Boolean(item.term?.onRender) && Boolean(item.container?.querySelector('.xterm-screen'));
-                """,
-                second,
-            )
-        )
-        click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{first}"]')
-        legacy_pending = browser.execute_script(
-            """
-            const panel = document.createElement('div');
-            panel.className = 'panel active-pane';
-            const tab = document.createElement('button');
-            tab.className = 'pane-tab active tab-activation-pending';
-            panel.append(tab);
-            document.body.append(panel);
-            const pending = getComputedStyle(tab).backgroundColor;
-            tab.classList.remove('tab-activation-pending');
-            const active = getComputedStyle(tab).backgroundColor;
-            panel.remove();
-            return {pending, active, differs: pending !== active};
-            """
-        )
-        assert legacy_pending["differs"], legacy_pending
-        _install_visible_echo_probe(browser, second)
-        _install_tab_transition_probe(browser)
-        click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{second}"]')
-        quiet_transition = _wait_tab_transition_frame(browser, second)
-        _assert_activation_pending_and_typing_ready(browser, second)
-        click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{first}"]')
-        click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{second}"]')
-        quiet_ready = _assert_activation_pending_and_typing_ready(browser, second)
-        _release_held_activation_write(browser, second, 0, release_hold=False)
-        quiet_ready_after_stale = _assert_activation_pending_and_typing_ready(browser, second)
-        quiet_start_time = browser.execute_script("return performance.now();")
-        quiet_samples = [_send_key_until_visible_echo(browser, sample_index=index) for index in range(1, 21)]
-        quiet_timeline = browser.execute_script(
-            """
-            const startTime = arguments[0], endTime = performance.now();
-            return {startTime, endTime,
-              longTasks: window.__tabTransitionLongTasks.filter(task => task.startTime + task.duration > startTime && task.startTime < endTime),
-              samples: window.__tabSwitchEchoProbe.samples.map(sample => ({
-                index: sample.index, eventAt: sample.eventAt, renderAt: sample.renderAt, paintedAt: sample.paintedAt}))};
-            """, quiet_start_time,
-        )
-        replacement = browser.execute_script(
-            """
-            const original = terminals.get(arguments[0]);
-            const replacement = {...original};
-            window.__tabActivationOriginalItem = original;
-            window.__tabActivationReplacementItem = replacement;
-            terminals.set(arguments[0], replacement);
-            dockviewFinishTabActivationPerf(arguments[0]);
-            return {replaced: terminals.get(arguments[0]) === replacement,
-              callbackCount: window.__tabActivationWriteBarrier.callbacks.length};
-            """,
-            second,
-        )
-        assert replacement["replaced"] and replacement["callbackCount"] == 2, replacement
-        _release_held_activation_write(browser, second, 0, release_hold=False)
-        _assert_activation_pending_and_typing_ready(browser, second)
-        _release_held_activation_write(browser, second, 0)
-        WebDriverWait(browser, 8).until(
-            lambda driver: driver.execute_script(
-                "return !document.querySelector(`.dockview-pane-tab[data-pane-tab=\"${CSS.escape(arguments[0])}\"]`)?.classList.contains('tab-activation-pending');",
-                second,
-            )
-        )
-        browser.execute_script(
-            "terminals.set(arguments[0], window.__tabActivationOriginalItem); delete window.__tabActivationOriginalItem; delete window.__tabActivationReplacementItem;",
-            second,
-        )
-
-        differ_setup = browser.execute_async_script(
-            """
-            const done = arguments[arguments.length - 1];
-            (async () => {
-              const files = Array.from({length: 5000}, (_, index) => ({
-                session: arguments[1], repo: '/repo/app', path: `file-${index}.txt`,
-                abs_path: `/repo/app/file-${index}.txt`, status: 'M', mtime: index + 1,
-              }));
-              const payload = {session: arguments[1], loaded: true, refreshing: false, errors: [], warnings: [],
-                repos: [{repo: '/repo/app', count: files.length, added: 0, removed: 0}], files};
-              const slots = emptyLayoutSlots();
-              slots[layoutTreeKey] = splitNode('row', leafNode('left'), leafNode('right'), 0.68);
-              slots.left = paneStateWithTabs([arguments[2], arguments[3]], arguments[3]);
-              slots.right = paneStateWithTabs([differItemId], differItemId);
-              applyLayoutSlots(slots, {prune: false});
-              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-              window.__tabActivationLargePayload = payload;
-              // Keep the synthetic cache authoritative throughout both measured render phases.
-              window.__tabActivationOriginalFetch = window.fetch;
-              window.fetch = (input, options = {}) => {
-                const url = new URL(typeof input === 'string' ? input : input.url, location.href);
-                if (!url.pathname.startsWith('/api/session-files')) return window.__tabActivationOriginalFetch(input, options);
-                if (options.signal?.aborted) return Promise.reject(options.signal.reason);
-                const session = url.searchParams.get('session');
-                const payload = sessionFilesCacheForDestination('differ').get(sessionFilesCacheKey(session, 'differ'))?.payload;
-                if (!payload) return window.__tabActivationOriginalFetch(input, options);
-                if (url.pathname === '/api/session-files-stream') {
-                  const {files, ...summary} = payload;
-                  const frame = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-                  const body = frame('repo', {...summary, repo: '/repo/app', files}) + frame('done', summary);
-                  return Promise.resolve(new Response(body, {status: 200, headers: {'Content-Type': 'text/event-stream'}}));
-                }
-                return Promise.resolve(new Response(JSON.stringify(payload), {status: 200, headers: {'Content-Type': 'application/json'}}));
-              };
-              for (const session of [arguments[2], arguments[3]]) {
-                for (const destination of ['finder', 'differ']) {
-                  const request = sessionFilesRequestForDestination(destination, session);
-                  const payload = normalizedSessionFilesPayload({...window.__tabActivationLargePayload, session,
-                    files: window.__tabActivationLargePayload.files.map(file => ({...file, session}))}, request);
-                  const signature = sessionFilesPayloadSignatureForPayload(payload);
-                  sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload, signature});
-                }
-              }
-              setSessionFilesPayloadForDestination('differ', payload);
-              fileExplorerSessionFilesState.signature = sessionFilesPayloadSignatureForPayload(payload);
-              window.__tabActivationTreePromises = [];
-              window.__tabActivationTreeDone = false;
-              const original = renderChangesGroups;
-              window.__tabActivationOriginalRenderChangesGroups = original;
-              renderChangesGroups = (...args) => {
-                const result = original(...args);
-                if (result?.then) {
-                  window.__tabActivationTreePromises.push(result);
-                  window.__tabActivationTreeDone = false;
-                  result.finally(() => {
-                    if (window.__tabActivationTreePromises.at(-1) === result) window.__tabActivationTreeDone = true;
-                  });
-                }
-                return result;
-              };
-              window.__tabActivationBusyStartedAt = performance.now();
-              renderFileExplorerChangesPanel(panelNodes.get(differItemId), {force: true});
-              const pending = window.__tabActivationTreePromises.length === 1 && !window.__tabActivationTreeDone;
-              done({pending, visible: fileExplorerSessionFilesPaneIsVisible(), rows: files.length});
-            })().catch(error => done({error: String(error?.stack || error)}));
-            """,
-            runtime.sessions[0],
-            runtime.sessions[1],
-            runtime.sessions[0],
-            runtime.sessions[1],
-        )
-        assert "error" not in differ_setup, differ_setup
-        assert differ_setup["pending"] and differ_setup["visible"] and differ_setup["rows"] == 5000, differ_setup
-        WebDriverWait(browser, 12).until(
-            lambda driver: driver.execute_script(
-                "return !window.__tabActivationTreeDone && Boolean(document.querySelector('.file-explorer-panel[data-panel-item=\"__differ__\"] .changes-repo-group[data-changes-repo=\"/repo/app\"] .file-tree-row'));"
-            )
-        )
-        browser.execute_script(
-            "window.__yomuxTabSwitchPhaseTwoDelayMs = 10000; window.__tabActivationWriteBarrier.hold = true;"
-        )
-        click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{first}"]')
-        click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{second}"]')
-        busy_transition = _wait_tab_transition_frame(browser, second)
-        busy_ready = _assert_activation_pending_and_typing_ready(browser, second)
-        busy_samples = []
-        for offset, index in enumerate(range(21, 41)):
-            WebDriverWait(browser, 12, poll_frequency=0.01).until(
-                lambda driver: driver.execute_script(
-                    "return document.querySelectorAll('.file-explorer-panel[data-panel-item=\"__differ__\"] .changes-repo-group[data-changes-repo=\"/repo/app\"] .file-tree-row').length >= arguments[0];",
-                    max(1, offset * 250),
-                )
-            )
-            busy_samples.append(_send_key_until_visible_echo(browser, sample_index=index))
-        delivery = browser.execute_script(
-            """
-            return {samples: window.__tabSwitchEchoProbe.samples.length,
-              markers: window.__tabSwitchEchoProbe.samples.map(sample => sample.marker),
-              treeDone: window.__tabActivationTreeDone};
-            """
-        )
-        assert delivery["samples"] == 40 and delivery["markers"] == [f"<E:{index:04d}>" for index in range(1, 41)], delivery
-        busy_evidence = browser.execute_script(
-            "return window.__tabSwitchEchoProbe.samples.slice(20).map(sample => ({treePending: sample.treePending, treeRowsAtEvent: sample.treeRowsAtEvent}));"
-        )
-        assert busy_evidence[0]["treePending"] and busy_evidence[0]["treeRowsAtEvent"] > 0, busy_evidence
-        tree_state = browser.execute_async_script(
-            """
-            const done = arguments[0];
-            Promise.all(window.__tabActivationTreePromises).then(() => {
-              window.__tabActivationTreeDone = true;
-              const panel = panelNodes.get(differItemId);
-              done({rows: panel?.querySelectorAll('.file-tree-row').length || 0, done: window.__tabActivationTreeDone});
-            }, error => done({error: String(error?.stack || error)}));
-            """
-        )
-        assert "error" not in tree_state and tree_state["done"] and tree_state["rows"] >= 5000, tree_state
-        browser.execute_async_script("const done = arguments[0]; requestAnimationFrame(() => requestAnimationFrame(done));")
-        busy_render_timeline = browser.execute_script(
-            """
-            const startTime = window.__tabActivationBusyStartedAt;
-            const endTime = performance.now();
-            return {startTime, endTime,
-              longTasks: window.__tabTransitionLongTasks.filter(task => task.startTime + task.duration > startTime && task.startTime < endTime),
-              samples: window.__tabSwitchEchoProbe.samples.slice(20).map(sample => ({
-                index: sample.index, eventAt: sample.eventAt, renderAt: sample.renderAt, paintedAt: sample.paintedAt,
-                treePending: sample.treePending, treeRowsAtEvent: sample.treeRowsAtEvent,
-              }))};
-            """
-        )
-        assert busy_transition["eventAt"] > busy_render_timeline["startTime"], busy_transition
-        tail_row = browser.execute_async_script(
-            """
-            const done = arguments[0];
-            const panel = panelNodes.get(differItemId);
-            const scrollport = panel.querySelector('.file-explorer-changes-panel');
-            const row = panel.querySelector('.file-tree-row[data-path="/repo/app/file-4999.txt"]');
-            if (!row || !scrollport) { done({error: 'the final Differ row or scrollport is missing'}); return; }
-            const scrollTop = scrollport.scrollTop;
-            const estimatedHeight = row.getBoundingClientRect().height;
-            row.scrollIntoView({block: 'center'});
-            requestAnimationFrame(() => requestAnimationFrame(() => {
-              const box = row.getBoundingClientRect();
-              const viewport = scrollport.getBoundingClientRect();
-              const name = row.querySelector('.file-tree-name');
-              done({visible: row.checkVisibility({contentVisibilityAuto: true}),
-                insideViewport: box.top < viewport.bottom && box.bottom > viewport.top,
-                estimatedHeight, renderedHeight: box.height, nameWidth: name?.getBoundingClientRect().width || 0,
-                label: name?.textContent || ''});
-              scrollport.scrollTop = scrollTop;
-            }));
-            """
-        )
-        assert "error" not in tail_row and tail_row["visible"] and tail_row["insideViewport"], tail_row
-        assert abs(tail_row["estimatedHeight"] - tail_row["renderedHeight"]) < 1 and tail_row["nameWidth"] > 0, tail_row
-        assert tail_row["label"] == "file-4999.txt", tail_row
-        _release_held_activation_write(browser, second)
-        WebDriverWait(browser, 8).until(
-            lambda driver: driver.execute_script(
-                "return !document.querySelector(`.dockview-pane-tab[data-pane-tab=\"${CSS.escape(arguments[0])}\"]`)?.classList.contains('tab-activation-pending');",
-                second,
-            )
-        )
-        # Exercise the real cached activation scheduler after the held-work proof.
-        browser.execute_script(
-            """
-            delete window.__yomuxTabSwitchPhaseTwoDelayMs;
-            window.__tabActivationTreePromises = [];
-            window.__tabActivationPhaseTwoStartedAt = performance.now();
-            """,
-            first,
-            second,
-        )
-        click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{first}"]')
-        phase_one_wait = WebDriverWait(browser, 12, poll_frequency=0.01)
-        try:
-            phase_one_wait.until(
-                lambda driver: driver.execute_script(
-                    "return fileExplorerSessionFilesState.payload.session === arguments[0] && window.__tabActivationTreePromises.length > 0;", first
-                )
-            )
-        except TimeoutException:
-            phase_one_failure = browser.execute_script(
-                """
-                return {first: arguments[0], second: arguments[1], active: activeItemForSide('left'),
-                  focusedTerminal, focusedPanelItem, explicitTarget: fileExplorerExplicitSyncSessionTarget(),
-                  selectedSession: fileExplorerChangesSelectedSession,
-                  interactionCurrent: fileExplorerChangesSessionInteractionIsCurrent(arguments[0]),
-                  differPayload: fileExplorerSessionFilesState.payload?.session || '',
-                  differVisible: fileExplorerSessionFilesPaneIsVisible(),
-                  renderPromiseCount: window.__tabActivationTreePromises.length,
-                  tabActive: document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"]`)?.className,
-                  panelExists: Boolean(document.querySelector('.file-explorer-changes-panel'))};
-                """,
-                first,
-                second,
-            )
-            pytest.fail(f"cached tab phase-one sync did not start: {phase_one_failure}")
-        click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{second}"]')
-        phase_two_transition = _wait_tab_transition_frame(browser, second)
-        WebDriverWait(browser, 12, poll_frequency=0.01).until(
-            lambda driver: driver.execute_script(
-                "return fileExplorerSessionFilesState.payload.session === arguments[0] && fileExplorerExplicitSyncSessionTarget() === arguments[0] && window.__tabActivationTreePromises.length > 1;", second
-            )
-        )
-        phase_two_samples = [_send_key_until_visible_echo(browser, sample_index=index) for index in range(41, 61)]
-        phase_two = _echo_timing_summary(phase_two_samples)
-        phase_two_state = browser.execute_async_script(
-            """
-            const done = arguments[arguments.length - 1];
-            Promise.all(window.__tabActivationTreePromises).then(() => {
-              requestAnimationFrame(() => requestAnimationFrame(() => {
-                const startTime = window.__tabActivationPhaseTwoStartedAt;
-                const endTime = performance.now();
-                done({startTime, endTime, session: fileExplorerSessionFilesState.payload.session,
-                  syncTarget: fileExplorerExplicitSyncSessionTarget(),
-                  rows: document.querySelectorAll('.changes-repo-group[data-changes-repo="/repo/app"] .file-tree-row').length,
-                  samples: window.__tabSwitchEchoProbe.samples.slice(40).map(sample => ({
-                    index: sample.index, treePending: sample.treePending, treeRowsAtEvent: sample.treeRowsAtEvent})),
-                  longTasks: window.__tabTransitionLongTasks.filter(task => task.startTime + task.duration > startTime && task.startTime < endTime)});
-              }));
-            }, error => done({error: String(error)}));
-            """
-        )
-        assert phase_two_transition["eventAt"] > phase_two_state["startTime"], phase_two_transition
-        assert "error" not in phase_two_state and phase_two_state["session"] == second and phase_two_state["syncTarget"] == second, phase_two_state
-        assert phase_two_state["rows"] == 5000 and phase_two_state["samples"][0]["treePending"], phase_two_state
-        quiet = _echo_timing_summary(quiet_samples)
-        busy = _echo_timing_summary(busy_samples)
-        assert len(quiet_samples) == 20 and len(busy_samples) == 20, {"quiet": quiet, "busy": busy}
-
-        browser.execute_script(
-            """
-            const item = terminals.get(arguments[0]);
-            const originalWrite = item.term.write.bind(item.term);
-            window.__heldEchoDelayReleased = false;
-            item.term.write = function(data, callback) {
-              if (!window.__heldEchoDelayReleased && data !== '') {
-                window.__heldEchoDelayReleased = true;
-                setTimeout(() => originalWrite(data, callback), 150);
-                return;
-              }
-              return originalWrite(data, callback);
-            };
-            """,
-            second,
-        )
-        held_delay_ms = _send_key_until_visible_echo(browser, sample_index=61)
-        browser.execute_script(
-            "terminals.get(arguments[0]).term.write = window.__tabActivationOriginalWrite;",
-            second,
-        )
-        negative_control = _echo_timing_verdicts([held_delay_ms], label="held visible-echo negative control")
-        assert held_delay_ms >= 100.0 and [verdict["passed"] for verdict in negative_control] == [False, False], {
-            "held_delay_ms": held_delay_ms,
-            "negative_control": negative_control,
-        }
-        verdicts = [
-            *_echo_timing_verdicts(quiet_samples, label="quiet native key to visible echo"),
-            *_echo_timing_verdicts(busy_samples, label="Differ-busy native key to visible echo"),
-            *_echo_timing_verdicts(phase_two_samples, label="cached phase-two native key to visible echo"),
-        ]
-        return {
-            "quiet": quiet,
-            "busy": busy,
-            "phase_two": phase_two,
-            "phase_two_samples_ms": phase_two_samples,
-            "phase_two_transition": phase_two_transition,
-            "phase_two_state": phase_two_state,
-            "static_replacements": browser.execute_script("return window.__tabActivationStaticReplacements;"),
-            "quiet_timeline": quiet_timeline,
-            "quiet_samples_ms": quiet_samples,
-            "busy_samples_ms": busy_samples,
-            "pending_color": quiet_ready,
-            "stale_callback_pending_state": quiet_ready_after_stale,
-            "legacy_pending_color": legacy_pending,
-            "busy_pending_color": busy_ready,
-            "quiet_transition": quiet_transition,
-            "busy_transition": busy_transition,
-            "busy_render_timeline": busy_render_timeline,
-            "differ_rows": tree_state["rows"],
-            "differ_tail_row": tail_row,
-            "delivery": delivery,
-            "differ_pending_at_first_busy_key": busy_evidence[0],
-            "held_delay_ms": held_delay_ms,
-            "negative_control_verdicts": negative_control,
-            "verdicts": verdicts,
-        }
-    finally:
-        browser.execute_script(
-            """
-            window.__tabTransitionLongTaskObserver?.dispose();
-            window.__tabSwitchEchoProbe?.dispose();
-            if (window.__tabActivationOriginalRenderChangesGroups) renderChangesGroups = window.__tabActivationOriginalRenderChangesGroups;
-            if (window.__tabActivationOriginalReplaceChangesStaticHtml) replaceChangesStaticHtml = window.__tabActivationOriginalReplaceChangesStaticHtml;
-            if (window.__tabActivationOriginalFetch) window.fetch = window.__tabActivationOriginalFetch;
-            const barrier = window.__tabActivationWriteBarrier;
-            if (barrier) {
-              barrier.hold = false;
-              for (const callback of barrier.callbacks.splice(0)) callback();
-            }
-            const originalItem = window.__tabActivationOriginalItem;
-            if (originalItem) terminals.set(barrier.session, originalItem);
-            const item = originalItem || terminals.get(barrier?.session);
-            if (item?.term && window.__tabActivationOriginalWrite) item.term.write = window.__tabActivationOriginalWrite;
-            delete window.__yomuxTabSwitchPhaseTwoDelayMs;
-            """
-        )
-        stop_browser_fixture(server, thread, runtime, browser=browser)
-
-
-
-
-
-
-
-
-
-
-
-
 @pytest.mark.no_browser
 def test_s1_pressure_round_waits_for_the_existing_byte_floor_before_final_observation(monkeypatch):
     baseline_bytes = 41
@@ -1210,18 +473,6 @@ def _certification_verdict(summary: dict[str, object], certified_statistic: str)
 # env-var name with it, so a threshold or an admission rule could drift between this unit and the
 # phase that runs it.
 certification_phase_only = latency_calibration.certification_phase_fixture()
-
-
-
-
-def _negative_control_reasons(observed: dict[str, object]) -> list[str]:
-    return [failure.split(":", 1)[0] for failure in _keystroke_delivery_failures(observed)]
-
-
-
-
-
-
 
 
 def _complete_delivery_observation(sample_count: int = 4) -> dict[str, object]:

@@ -22,6 +22,9 @@ to the measured pre-test baseline.
 from __future__ import annotations
 
 import os
+import ctypes
+import sys
+from contextlib import ExitStack
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
@@ -46,6 +49,7 @@ REQUIRED_MAX_QUEUED_EVENTS = 65_536
 REQUIRED_FREE_INSTANCES = 256
 
 ADMITTED_CODE = "inotify_capacity_admitted"
+ADMITTED_BY_PROBE_CODE = "inotify_capacity_admitted_by_probe"
 CODE_UNMEASURABLE = "inotify_capacity_unmeasurable"
 CODE_INSTANCES_BELOW = "inotify_max_user_instances_below_requirement"
 CODE_WATCHES_BELOW = "inotify_max_user_watches_below_requirement"
@@ -84,19 +88,20 @@ def process_fd_owners(pid: int) -> dict[str, int]:
     """Resolve one process's descriptors to their targets, not just a count.
 
     A bare count cannot name a leaking owner; the resolved target is what
-    separates an inotify instance from a socket, a pipe or a held file.
+    separates an inotify instance from a socket, a pipe or a held file. Vanished
+    processes and descriptors are harmless; unreadable owners raise OSError.
     """
 
     owners: dict[str, int] = {}
     fd_dir = Path(f"/proc/{pid}/fd")
     try:
         names = os.listdir(fd_dir)
-    except OSError:
+    except (FileNotFoundError, ProcessLookupError):
         return owners
     for name in names:
         try:
             target = os.readlink(fd_dir / name)
-        except OSError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
         owners[target] = owners.get(target, 0) + 1
     return owners
@@ -121,12 +126,12 @@ def inotify_watch_descriptor_count(pid: int) -> int:
     fdinfo_dir = Path(f"/proc/{pid}/fdinfo")
     try:
         names = os.listdir(fdinfo_dir)
-    except OSError:
+    except (FileNotFoundError, ProcessLookupError):
         return 0
     for name in names:
         try:
             text = (fdinfo_dir / name).read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except (FileNotFoundError, ProcessLookupError):
             # A descriptor closed between listing and reading is not a measurement failure.
             continue
         total += sum(1 for line in text.splitlines() if line.startswith("inotify wd:"))
@@ -139,15 +144,15 @@ def inotify_instance_census() -> tuple[int, dict[int, int]]:
     The kernel accounts instances per uid across every namespace, but ``/proc``
     inside a container shows only that namespace's processes.  A census taken
     inside the test container therefore undercounts the ceiling's real consumers
-    and must not be read as the uid-wide total.
+    and must not be read as the uid-wide total. Unreadable census entries raise
+    OSError so admission cannot mistake partial evidence for a measured total.
     """
 
+    if not sys.platform.startswith("linux"):
+        return UNMEASURED_LIMIT, {}
     per_pid: dict[int, int] = {}
     total = 0
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return 0, per_pid
+    entries = os.listdir("/proc")
     uid = os.getuid()
     for entry in entries:
         if not entry.isdigit():
@@ -156,17 +161,44 @@ def inotify_instance_census() -> tuple[int, dict[int, int]]:
         try:
             if os.stat(f"/proc/{pid}").st_uid != uid:
                 continue
-        except OSError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
-        count = sum(
-            occurrences
-            for target, occurrences in process_fd_owners(pid).items()
-            if target == INOTIFY_FD_TARGET
-        )
+        try:
+            count = process_fd_owners(pid).get(INOTIFY_FD_TARGET, 0)
+        except PermissionError:
+            # The PID can exit and be reused after the ownership stat above.
+            # Ignore a replacement owned by another uid, but keep unreadable
+            # entries for this uid as a hard measurement failure.
+            try:
+                if os.stat(f"/proc/{pid}").st_uid != uid:
+                    continue
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            raise
         if count:
             per_pid[pid] = count
             total += count
     return total, per_pid
+
+
+def _open_inotify_instance() -> int:
+    initialize = ctypes.CDLL(None, use_errno=True).inotify_init1
+    initialize.argtypes = [ctypes.c_int]
+    initialize.restype = ctypes.c_int
+    descriptor = initialize(os.O_CLOEXEC | os.O_NONBLOCK)
+    if descriptor < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return descriptor
+
+
+def _probe_free_inotify_instances(required: int) -> int:
+    """Hold the complete gate allowance simultaneously, retiring every descriptor."""
+    with ExitStack() as cleanup:
+        for _ in range(required):
+            descriptor = _open_inotify_instance()
+            cleanup.callback(os.close, descriptor)
+    return required
 
 
 @dataclass(frozen=True)
@@ -180,6 +212,8 @@ class InotifyCapacityVerdict:
     in_use_instances: int
     free_instances: int
     top_holders: tuple[tuple[int, int], ...] = field(default=())
+    measurement_error: str = ""
+    probed_free_instances: int = 0
 
     def as_reason(self) -> dict[str, Any]:
         return {
@@ -190,6 +224,8 @@ class InotifyCapacityVerdict:
             "in_use_instances": self.in_use_instances,
             "free_instances": self.free_instances,
             "top_holders": [list(holder) for holder in self.top_holders],
+            "measurement_error": self.measurement_error,
+            "probed_free_instances": self.probed_free_instances,
             "remediation": REMEDIATION_COMMAND,
             "remediation_persist": REMEDIATION_PERSIST,
         }
@@ -225,6 +261,10 @@ class InotifyCapacityVerdict:
         if self.top_holders:
             holders = ", ".join(f"pid {pid}={count}" for pid, count in self.top_holders)
             lines.append(f"  largest current holders: {holders}")
+        if self.measurement_error:
+            lines.append(f"  census could not be measured: {self.measurement_error}")
+        if self.probed_free_instances:
+            lines.append(f"  simultaneously allocated probe instances: {self.probed_free_instances}")
         return "\n".join(lines)
 
 
@@ -251,9 +291,17 @@ def inotify_capacity_verdict(
         "max_queued_events": required_queued_events,
         "free_instances": required_free_instances,
     }
-    in_use, per_pid = inotify_instance_census()
+    measurement_error = ""
+    try:
+        in_use, per_pid = inotify_instance_census()
+    except OSError as error:
+        # Admission is the supervisor boundary: retain the failed measurement
+        # and refuse heavy lanes instead of presenting partial owners as zero.
+        in_use, per_pid = UNMEASURED_LIMIT, {}
+        measurement_error = f"{type(error).__name__}: {error}"
     top_holders = tuple(sorted(per_pid.items(), key=lambda item: -item[1])[:5])
-    free_instances = max_instances - in_use if max_instances != UNMEASURED_LIMIT else UNMEASURED_LIMIT
+    free_instances = max_instances - in_use if UNMEASURED_LIMIT not in (max_instances, in_use) else UNMEASURED_LIMIT
+    probed_free_instances = 0
 
     def refuse(code: str) -> InotifyCapacityVerdict:
         return InotifyCapacityVerdict(
@@ -264,6 +312,8 @@ def inotify_capacity_verdict(
             in_use_instances=in_use,
             free_instances=free_instances,
             top_holders=top_holders,
+            measurement_error=measurement_error,
+            probed_free_instances=probed_free_instances,
         )
 
     if UNMEASURED_LIMIT in (max_instances, max_watches, max_queued):
@@ -274,14 +324,22 @@ def inotify_capacity_verdict(
         return refuse(CODE_WATCHES_BELOW)
     if max_queued < required_queued_events:
         return refuse(CODE_QUEUED_BELOW)
-    if free_instances < required_free_instances:
+    if in_use == UNMEASURED_LIMIT:
+        try:
+            probed_free_instances = _probe_free_inotify_instances(required_free_instances)
+        except (OSError, AttributeError) as error:
+            measurement_error += f"; capacity probe failed: {type(error).__name__}: {error}"
+            return refuse(CODE_UNMEASURABLE)
+    elif free_instances < required_free_instances:
         return refuse(CODE_HEADROOM_BELOW)
     return InotifyCapacityVerdict(
         admitted=True,
-        reason_code=ADMITTED_CODE,
+        reason_code=ADMITTED_BY_PROBE_CODE if in_use == UNMEASURED_LIMIT else ADMITTED_CODE,
         measured=measured,
         required=required,
         in_use_instances=in_use,
         free_instances=free_instances,
         top_holders=top_holders,
+        measurement_error=measurement_error,
+        probed_free_instances=probed_free_instances,
     )

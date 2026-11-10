@@ -288,35 +288,7 @@ func TestOpenWriterQuarantinesPhysicallyCorruptDatabaseAndSidecars(t *testing.T)
 		t.Fatalf("corrupt recovery name = %q", name)
 	}
 
-	quarantined, err := filepath.Glob(path + ".corrupt-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(quarantined) != len(parts) {
-		t.Fatalf("quarantined files = %v, want %d files", quarantined, len(parts))
-	}
-	var quarantineBase string
-	for _, candidate := range quarantined {
-		if !strings.HasSuffix(candidate, "-wal") && !strings.HasSuffix(candidate, "-shm") && !strings.HasSuffix(candidate, "-journal") {
-			quarantineBase = candidate
-			break
-		}
-	}
-	if quarantineBase == "" {
-		t.Fatalf("quarantine base file missing: %v", quarantined)
-	}
-	for suffix, want := range parts {
-		got, err := os.ReadFile(quarantineBase + suffix)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(got) != string(want) {
-			t.Fatalf("quarantine %q = %q, want %q", suffix, got, want)
-		}
-	}
-	if info, err := os.Stat(path); err != nil || info.Size() == 0 {
-		t.Fatalf("recovered database was not recreated: info=%+v err=%v", info, err)
-	}
+	assertQuarantinedDatabaseParts(t, path, parts)
 }
 
 func TestOpenWriterQuarantinesZeroByteDatabaseAndSidecars(t *testing.T) {
@@ -343,35 +315,7 @@ func TestOpenWriterQuarantinesZeroByteDatabaseAndSidecars(t *testing.T) {
 		t.Fatalf("corrupt recovery name = %q", name)
 	}
 
-	quarantined, err := filepath.Glob(path + ".corrupt-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(quarantined) != len(parts) {
-		t.Fatalf("quarantined files = %v, want %d files", quarantined, len(parts))
-	}
-	var quarantineBase string
-	for _, candidate := range quarantined {
-		if !strings.HasSuffix(candidate, "-wal") && !strings.HasSuffix(candidate, "-shm") && !strings.HasSuffix(candidate, "-journal") {
-			quarantineBase = candidate
-			break
-		}
-	}
-	if quarantineBase == "" {
-		t.Fatalf("quarantine base file missing: %v", quarantined)
-	}
-	for suffix, want := range parts {
-		got, err := os.ReadFile(quarantineBase + suffix)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(got) != string(want) {
-			t.Fatalf("quarantine %q = %q, want %q", suffix, got, want)
-		}
-	}
-	if info, err := os.Stat(path); err != nil || info.Size() == 0 {
-		t.Fatalf("recovered database was not recreated: info=%+v err=%v", info, err)
-	}
+	assertQuarantinedDatabaseParts(t, path, parts)
 }
 
 func TestOpenWriterQuarantinesZeroByteDatabaseWithValidWAL(t *testing.T) {
@@ -639,5 +583,84 @@ func TestQuarantineRollsBackWhenDirectorySyncFails(t *testing.T) {
 		t.Fatal(globErr)
 	} else if len(quarantined) != 0 {
 		t.Fatalf("failed quarantine left artifacts: %v", quarantined)
+	}
+}
+
+func TestWriterAndReaderPreserveLiteralDatabasePath(t *testing.T) {
+	for _, name := range []string{"stats?mode=memory.sqlite3", "stats#other.sqlite3", "stats%25.sqlite3", "stats space.sqlite3"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "directory?#%", name)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				writer, err := OpenWriter(context.Background(), path)
+				if err != nil {
+					t.Fatalf("open literal path attempt %d: %v", attempt, err)
+				}
+				if err := writer.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Stat(path); err != nil {
+					t.Fatalf("requested database absent: %v", err)
+				}
+				reader, err := OpenReadOnly(context.Background(), path)
+				if err != nil {
+					t.Fatalf("read literal path attempt %d: %v", attempt, err)
+				}
+				if err := reader.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, uri := range []string{SQLiteReadOnlyURI(path), openCodeReadOnlyURI(path)} {
+				db, err := sql.Open("sqlite3", uri)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var id uint32
+				if err := db.QueryRow("PRAGMA application_id").Scan(&id); err != nil || id != ApplicationID {
+					db.Close()
+					t.Fatalf("reader selected wrong path: application_id=%d err=%v", id, err)
+				}
+				_, writeErr := db.Exec("CREATE TABLE unexpected_write (id INTEGER)")
+				db.Close()
+				if writeErr == nil {
+					t.Fatal("read-only URI admitted a write")
+				}
+			}
+		})
+	}
+}
+
+func assertQuarantinedDatabaseParts(t *testing.T, path string, parts map[string][]byte) {
+	t.Helper()
+	quarantined, err := filepath.Glob(path + ".corrupt-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quarantined) != len(parts) {
+		t.Fatalf("quarantined files = %v, want %d files", quarantined, len(parts))
+	}
+	var quarantineBase string
+	for _, candidate := range quarantined {
+		if !strings.HasSuffix(candidate, "-wal") && !strings.HasSuffix(candidate, "-shm") && !strings.HasSuffix(candidate, "-journal") {
+			quarantineBase = candidate
+			break
+		}
+	}
+	if quarantineBase == "" {
+		t.Fatalf("quarantine base file missing: %v", quarantined)
+	}
+	for suffix, want := range parts {
+		got, err := os.ReadFile(quarantineBase + suffix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("quarantine %q = %q, want %q", suffix, got, want)
+		}
+	}
+	if info, err := os.Stat(path); err != nil || info.Size() == 0 {
+		t.Fatalf("recovered database was not recreated: info=%+v err=%v", info, err)
 	}
 }

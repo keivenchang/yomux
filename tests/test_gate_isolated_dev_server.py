@@ -38,9 +38,96 @@ from tests.isolated_dev_server import isolated_dev_server  # noqa: F401  -- fixt
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401  -- fixture
 from tests.isolated_dev_server import finish_server_output, wait_until_serving
 from tests.isolated_dev_server import REPO_ROOT, go_test_server_binary
+from tests import isolated_dev_server as server_fixture
+from tools import verify_go_agent_status_live as verifier
+from tools import go_binary
+from tools.instance_isolation import synthetic_test_environment
 
 
 pytestmark = pytest.mark.socket
+
+
+@pytest.mark.parametrize("consumer", ["tests.test_agent_status_docker", "tools.verify_go_agent_status_live"])
+def test_curated_runtime_consumers_do_not_import_browser_fixtures(consumer):
+    script = """
+import importlib
+import importlib.abc
+import sys
+
+class ExcludeBrowserFixtures(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {"tests.gate_harness", "tests.isolated_dev_server"}:
+            raise ModuleNotFoundError("curated runtime excludes heavyweight fixture: " + fullname)
+
+sys.meta_path.insert(0, ExcludeBrowserFixtures())
+importlib.import_module(sys.argv[1])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, consumer], cwd=REPO_ROOT,
+        env=synthetic_test_environment(), capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+
+def test_isolated_server_build_includes_native_chat_storage(isolated_dev_server):
+    status, _headers, body = isolated_dev_server.request("/api/chat/bootstrap?browser_instance_id=fixture-capability")
+    assert status == HTTPStatus.OK, body.decode() + "\n" + "\n".join(isolated_dev_server.output)
+    assert "native chat storage unavailable" not in "\n".join(isolated_dev_server.output)
+
+
+def test_live_collector_verifier_uses_complete_native_fixture_builder(tmp_path, monkeypatch):
+
+    class BuilderReached(Exception):
+        pass
+
+    def complete_builder(source_root):
+        assert source_root == REPO_ROOT
+        raise BuilderReached()
+
+    def fixture_command(*command, **_kwargs):
+        if command[:2] == ("go", "build"):
+            raise AssertionError("verifier bypassed the complete native fixture builder")
+        return subprocess.CompletedProcess(command, 0, "private fixture pane", "")
+
+    monkeypatch.delenv("YOMUX_GO_BINARY", raising=False)
+    monkeypatch.delenv("YOLOMUX_GO_BINARY", raising=False)
+    monkeypatch.setattr(verifier, "go_test_server_binary", complete_builder, raising=False)
+    monkeypatch.setattr(verifier, "run", fixture_command)
+    with pytest.raises(BuilderReached):
+        verifier.main()
+
+
+@pytest.mark.parametrize("changed_input", ["embedded", "toolchain", "recipe"])
+def test_fixture_binary_cache_tracks_build_identity(tmp_path, monkeypatch, changed_input):
+    monkeypatch.delenv("YOMUX_GO_BINARY", raising=False)
+    monkeypatch.setattr(go_binary.tempfile, "gettempdir", lambda: str(tmp_path / "cache"))
+    (tmp_path / "version.yaml").write_text('version: "1.2.3"\n', encoding="utf-8")
+    embedded = tmp_path / "cmd/yomux-go/pages/main.gohtml"
+    embedded.parent.mkdir(parents=True)
+    embedded.write_text("original template", encoding="utf-8")
+    toolchain = ["original toolchain"]
+    monkeypatch.setattr(go_binary.subprocess, "check_output", lambda *_args, **_kwargs: toolchain[0])
+    builds = []
+
+    def build(command, **_kwargs):
+        builds.append(command)
+        Path(command[command.index("-o") + 1]).write_bytes(b"fixture binary")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(go_binary.subprocess, "run", build)
+    first = go_test_server_binary(tmp_path)
+    assert go_test_server_binary(tmp_path) == first
+    assert len(builds) == 1
+    if changed_input == "embedded":
+        embedded.write_text("changed template", encoding="utf-8")
+    elif changed_input == "toolchain":
+        toolchain[0] = "changed toolchain"
+    else:
+        monkeypatch.setattr(go_binary, "GO_TEST_SERVER_BUILD_FLAGS", ("-buildvcs=false", "-tags=sqlite_fts5", "-trimpath"), raising=False)
+    assert go_test_server_binary(tmp_path) != first
+    assert len(builds) == 2
+    assert all("-tags=sqlite_fts5" in command for command in builds)
 
 
 def test_server_output_drains_after_readiness_without_blocking_child():

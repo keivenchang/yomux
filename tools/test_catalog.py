@@ -188,7 +188,6 @@ NODE_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
 # collecting facades retain the historical pytest node IDs. These are explicit
 # because pytest collection alone cannot discover a non-test-named owner.
 PYTHON_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
-    "tests/helpers/fixture_http_server.py",
     "tests/helpers/login_throttle.py",
     "tests/subsystems/browser_harness_lifecycle.py",
 )

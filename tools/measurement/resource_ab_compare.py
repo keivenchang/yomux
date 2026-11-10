@@ -461,14 +461,12 @@ def _burst_bounds(samples: Sequence[dict], instant: float) -> tuple[int, int, fl
         rates.append(delta / span if span > 0 else 0.0)
     background = max(statistics.median(rates), VACUUM_BURST_MIN_BACKGROUND_BYTES)
     threshold = background * VACUUM_BURST_BACKGROUND_MULTIPLE
-    centre = min(range(len(rates)), key=lambda i: abs(float(inside[i]["epoch"]) - instant))
     # The detected instant can sit just after the burst, so find the nearest above-threshold
     # sample before committing to a centre.
-    peak = max(range(len(rates)), key=lambda i: rates[i] if abs(float(inside[i]["epoch"]) - instant)
-               <= VACUUM_BURST_SEARCH_SECONDS else -1.0)
-    if rates[peak] < threshold:
+    above_threshold = [index for index, rate in enumerate(rates) if rate >= threshold]
+    if not above_threshold:
         return None
-    centre = peak
+    centre = min(above_threshold, key=lambda i: abs(float(inside[i]["epoch"]) - instant))
     low = centre
     while low > 0 and rates[low - 1] >= threshold:
         low -= 1
@@ -789,9 +787,6 @@ def compare_lanes(
 
     base_samples = samples_in(baseline.fast, baseline_window)
     cand_samples = samples_in(candidate.fast, candidate_window)
-    base_vacuums_early = completed_vacuums(baseline.vacuum, Window("all", 0.0, 2e9))
-    cand_vacuums_early = completed_vacuums(candidate.vacuum, Window("all", 0.0, 2e9))
-    del base_vacuums_early, cand_vacuums_early
     base_spans = (baseline_window,)
     cand_spans = (candidate_window,)
     base_blocks = blocks(base_samples, baseline_window, block_seconds)
@@ -799,7 +794,11 @@ def compare_lanes(
 
     base_vacuums = completed_vacuums(baseline.vacuum, baseline_window)
     cand_vacuums = completed_vacuums(candidate.vacuum, candidate_window)
-    alignment = vacuum_alignment(base_vacuums, baseline_window, cand_vacuums, candidate_window)
+    recording = Window("recording", -math.inf, math.inf)
+    alignment = vacuum_alignment(
+        completed_vacuums(baseline.vacuum, recording), baseline_window,
+        completed_vacuums(candidate.vacuum, recording), candidate_window,
+    )
 
     underpowered = []
     for label, group in ((baseline.label, base_blocks), (candidate.label, cand_blocks)):
@@ -832,6 +831,11 @@ def compare_lanes(
         ).as_dict()
         for metric in FAST_LANE_METRICS
     ]
+    for comparison in comparisons:
+        comparison["statistical_significant"] = comparison["significant"]
+        if not alignment["aligned"]:
+            comparison["significant"] = False
+            comparison["note"] += "; REFUSED as a change: compaction phases are unknown or unmatched"
     return {
         "vacuum_alignment": alignment,
         "baseline": {
@@ -902,21 +906,24 @@ def self_test(lane: Lane, window: Window, block_seconds: float) -> dict:
                                "false_positives": []}
         return result
     trends = stationarity(samples_in(lane.fast, window), window)["verdict"]
+    statistical_significant = [
+        row["metric"] for row in result["comparisons"] if row["statistical_significant"]
+    ]
     false_positives = [
-        metric for metric in result["significant_metrics"]
+        metric for metric in statistical_significant
         if trends.get(metric, {}).get("verdict", "stationary") == "stationary"
     ]
     explained = [
         {"metric": metric, "verdict": trends[metric]["verdict"],
          "first_bin": trends[metric]["first_bin"], "last_bin": trends[metric]["last_bin"]}
-        for metric in result["significant_metrics"] if metric in trends
+        for metric in statistical_significant if metric in trends
         and trends[metric].get("verdict") != "stationary"
     ]
     result["self_test"] = {
         "expectation": (
             "two halves of one condition differ only where the window is genuinely non-stationary"
         ),
-        "significant": result["significant_metrics"],
+        "significant": statistical_significant,
         "explained_by_real_drift": explained,
         "false_positives": false_positives,
         "passed": not false_positives,
@@ -1009,7 +1016,7 @@ def main() -> int:
     if arguments.out is not None:
         arguments.out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(f"\nwrote {arguments.out}")
-    return 0
+    return 1 if result.get("self_test", {}).get("passed") is False else 0
 
 
 if __name__ == "__main__":

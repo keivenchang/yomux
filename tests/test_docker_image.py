@@ -126,10 +126,37 @@ def test_test_container_shared_memory_uses_daemon_ram_or_fails_explicitly(capaci
         assert result.stdout == capacity
 
 
-@pytest.mark.parametrize(("cpu_count", "accepted", "expected"), [("1", True, "--cpus=1"), ("12", True, "--cpus=12"), ("unlimited", True, ""), ("0", False, None), ("many", False, None)])
-def test_test_container_cpu_limit_is_applied_or_rejected(cpu_count, accepted, expected):
+def _container_cpu_sizing_source(source):
+    return source[source.index('cpu_limit="$(product_env_print'):source.index('memory_limit_mb=')]
+
+
+@pytest.mark.parametrize("prefix", ["YOMUX", "YOLOMUX"])
+@pytest.mark.parametrize(("cpu_count", "bazel_cpu_count", "accepted", "expected"), [
+    ("1", None, True, 1),
+    ("12", None, True, 12),
+    ("0010", None, True, 10),
+    ("0008", None, True, 8),
+    ("922337203685477", None, True, 922337203685477),
+    (None, "6", True, 6),
+    ("", "06", True, 6),
+    ("2", "6", True, 2),
+    ("unlimited", "6", True, None),
+    (None, "unlimited", True, None),
+    (None, None, True, None),
+    ("", None, True, None),
+    ("0", None, False, None),
+    ("0000", None, False, None),
+    ("many", None, False, None),
+    ("-1", None, False, None),
+    ("0.5", None, False, None),
+    ("922337203685478", None, False, None),
+    ("18446744073709551616", None, False, None),
+    ("9" * 100, None, False, None),
+    (None, "0000", False, None),
+])
+def test_test_container_cpu_limit_is_applied_or_rejected(cpu_count, bazel_cpu_count, accepted, expected, prefix):
     source = (Path(__file__).resolve().parents[1] / "docker/run-tests.sh").read_text()
-    sizing = source[source.index('cpu_limit="$(product_env_print'):source.index('memory_limit_mb=')]
+    sizing = _container_cpu_sizing_source(source)
     environment_owner = Path(__file__).resolve().parents[1] / "tools" / "product_environment.sh"
     script = f'source "{environment_owner}"\nyomux_normalize_environment\nset -e\n' + sizing + "printf '%s' \"${cpu_args[*]}\"\n"
     environment = {
@@ -137,11 +164,14 @@ def test_test_container_cpu_limit_is_applied_or_rejected(cpu_count, accepted, ex
         for key, value in os.environ.items()
         if not key.startswith(("YOMUX_", "YOLOMUX_"))
     }
-    environment["YOMUX_TEST_CPU_COUNT"] = cpu_count
+    for setting, value in (("TEST_CPU_COUNT", cpu_count), ("BAZEL_CPU_COUNT", bazel_cpu_count)):
+        if value is not None:
+            environment[f"{prefix}_{setting}"] = value
     result = subprocess.run([fixture_executable("bash"), "-c", script], capture_output=True, text=True, env=environment)
-    assert (result.returncode == 0) is accepted
+    assert result.returncode == (0 if accepted else 2), result.stderr
     if accepted:
-        assert result.stdout == expected
+        expected_args = [] if expected is None else ["--cpu-period=10000", f"--cpu-quota={expected * 10000}"]
+        assert result.stdout.split() == expected_args
     else:
         assert "CPU limit must be a positive integer or unlimited" in result.stderr
 
@@ -497,14 +527,15 @@ def test_contract_container_owner_label_has_no_literal_quotes(tmp_path):
 product_env_assign CHECK_RUN_TOKEN=fixture-token
 product_env_assign BAZEL_CACHE=off
 product_env_assign BAZEL_EXECUTION=docker
-cpu_args=(); cache_mount=()
+product_env_assign TEST_CPU_COUNT=10
+cache_mount=()
 REPO_ROOT=/fixture
 image_id=fixture; contract=fixture; IMAGE=fixture
 apparmor_profile=fixture; memory_limit_bytes=1024; shared_memory_bytes=1024; workdir=/w
 argv_output="$2"
 docker() { python3 -c 'import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))' "$argv_output" "$@"; printf fixture; }
 '''
-    script += source[label_start:label_end] + '\n' + source[create_start:create_end]
+    script += _container_cpu_sizing_source(source) + '\n' + source[label_start:label_end] + '\n' + source[create_start:create_end]
     result = subprocess.run([fixture_executable("bash"), '-c', script, 'label-test', str(root), str(capture)], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     argv = json.loads(capture.read_text())
@@ -512,6 +543,7 @@ docker() { python3 -c 'import json,sys; from pathlib import Path; Path(sys.argv[
     assert 'yolomux.check.run=fixture-token' in labels
     assert 'YOMUX_BAZEL_CACHE=off' in argv
     assert 'YOMUX_BAZEL_EXECUTION=docker' in argv
+    assert [argument for argument in argv if argument.startswith('--cpu')] == ['--cpu-period=10000', '--cpu-quota=100000']
     assert not any('"' in label for label in labels)
 
 

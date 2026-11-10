@@ -60,7 +60,16 @@ EXECUTION_MODES = ("auto", "docker", "native", "qualified-native")
 
 
 def repository_git_environment():
-    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    bundle = product_env("NATIVE_BUNDLE", "")
+    configured = os.environ.get("GIT_EXEC_PATH", "")
+    if bundle and configured:
+        expected = (Path(bundle) / "compiler/libexec/git-core").resolve(strict=False)
+        helper = expected / "git-upload-pack"
+        if (Path(configured).resolve(strict=False) == expected and expected.is_dir()
+                and helper.is_file() and os.access(helper, os.X_OK)):
+            environment["GIT_EXEC_PATH"] = str(expected)
+    return environment
 
 
 def repository_head_sha(root=ROOT, *, declared=False):
@@ -133,16 +142,19 @@ NATIVE_REQUIRED_TOOLS = frozenset({
     "grep", "timeout", "ps", "kill", "ln", "uname", "id", "getconf",
     "basename", "sleep", "printenv", "rmdir", "realpath", "stat", "touch",
     "date", "wc", "head", "tail", "tee", "xargs", "cut", "tr", "printf", "openssl", "curl",
-    "df", "sh", "true", "false", "seq", "whoami", "stty", "hostname", "nohup",
+    "df", "sh", "true", "false", "seq", "whoami", "stty", "hostname", "nohup", "dd",
     "mypy",
     "ar", "as", "ld", "nm", "ranlib", "strip", "flock",
 })
 NATIVE_LINUX_TOOLS = frozenset({"unshare", "mount", "setpriv", "setsid", "cpp", "gcov", "objcopy", "objdump", "paste", "sha256sum"})
 NATIVE_DARWIN_PLATFORM_TOOLS = {
     "ioreg": "/usr/sbin/ioreg",
+    "lsof": "/usr/sbin/lsof",
     "mount": "/sbin/mount",
+    "shasum": "/usr/bin/shasum",
     "sysctl": "/usr/sbin/sysctl",
     "system_profiler": "/usr/sbin/system_profiler",
+    "vm_stat": "/usr/bin/vm_stat",
 }
 NATIVE_DARWIN_TOOLS = frozenset({"otool", "install_name_tool", "codesign", "codesign_allocate", "lipo", *NATIVE_DARWIN_PLATFORM_TOOLS})
 NATIVE_SEED_DIRECTORIES = ("go-mod-cache", "bazel-repository-cache", "bazel-registry")

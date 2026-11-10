@@ -629,8 +629,7 @@ class TerminationRequest:
 def terminate_authorized_processes(
     requests: Sequence[TerminationRequest],
     *,
-    still_current: Callable[[int], bool],
-    identity_replaced: Callable[[int], bool] = lambda _pid: False,
+    identity_diagnostic: Callable[[int], LocalProcessDiagnostic],
     signal_process: Callable[[int, int], None] | None = None,
     grace_seconds: float,
     force_seconds: float,
@@ -651,7 +650,7 @@ def terminate_authorized_processes(
     on their own clocks and behind their own fences.  Expressing the batch here
     is what let both give up that authority without changing what they do.
 
-    ``still_current`` re-proves the SAME identity on every poll rather than
+    ``identity_diagnostic`` re-proves the SAME identity on every poll rather than
     asking whether the PID exists: a PID recycled between the SIGTERM and the
     SIGKILL is a different process, and force-killing it is the precise accident
     every dimension in :func:`authorize_service_destruction` exists to prevent.
@@ -692,26 +691,34 @@ def terminate_authorized_processes(
             surviving_supervisor=dict(surviving_supervisor or {}),
         )
 
-    def yield_to_replacement(index: int) -> None:
-        """A recycled PID is a DIFFERENT process, not a confirmed death.
+    def identity_status(index: int) -> LocalProcessReason:
+        """Unknown or replaced identities permit neither signals nor cleanup."""
 
-        Without this the escalation would read "the identity I was told to stop
-        is no longer there" as success and go on to remove the record and unlink
-        the socket -- on behalf of a live process it never had authority over.
-        """
-
+        diagnostic = identity_diagnostic(pids[index])
+        if diagnostic.current or diagnostic.reason is LocalProcessReason.PROCESS_NOT_FOUND:
+            return diagnostic.reason
+        action = LIFETIME_ACTION_NONE
+        if signals[index]:
+            action = LIFETIME_ACTION_FORCE_TERMINATE if signals[index][-1] == signal_module.SIGKILL else LIFETIME_ACTION_TERMINATE
         settle(
             index,
-            LIFETIME_ACTION_TERMINATE if signals[index] else LIFETIME_ACTION_NONE,
+            action,
             LIFETIME_RESULT_REFUSED,
-            LocalProcessReason.PROCESS_IDENTITY_REUSED.value,
+            diagnostic.reason.value,
             confirmed_dead=False,
             failed_dimension=DIMENSION_PROCESS_START_IDENTITY,
         )
+        return diagnostic.reason
 
     def fire(index: int, signal_number: int, action: str) -> bool:
         """Send one signal, returning False once the target has been settled."""
 
+        reason = identity_status(index)
+        if index in outcomes:
+            return False
+        if reason is LocalProcessReason.PROCESS_NOT_FOUND:
+            settle(index, action, LIFETIME_RESULT_ALREADY_EXITED, reason.value, confirmed_dead=True)
+            return False
         try:
             send_signal(pids[index], signal_number)
         except ProcessLookupError:
@@ -738,10 +745,13 @@ def terminate_authorized_processes(
         while True:
             remaining: list[int] = []
             for index in outstanding:
-                if still_current(pids[index]):
-                    remaining.append(index)
-                else:
+                reason = identity_status(index)
+                if index in outcomes:
+                    continue
+                if reason is LocalProcessReason.PROCESS_NOT_FOUND:
                     gone.add(index)
+                else:
+                    remaining.append(index)
             outstanding = remaining
             if not outstanding or clock() >= deadline:
                 return gone
@@ -774,8 +784,8 @@ def terminate_authorized_processes(
                 failed_dimension=authorization.failed_dimension,
             )
             continue
-        if identity_replaced(pids[index]):
-            yield_to_replacement(index)
+        identity_status(index)
+        if index in outcomes:
             continue
         pending.append(index)
 
@@ -792,8 +802,9 @@ def terminate_authorized_processes(
     if graceful:
         gone = wait_until_gone(list(pending), started + max(0.0, float(grace_seconds)))
         for index in list(pending):
-            if identity_replaced(pids[index]):
-                yield_to_replacement(index)
+            if index not in outcomes:
+                identity_status(index)
+            if index in outcomes:
                 pending.remove(index)
             elif index in gone and requests[index].graceful_first:
                 settle(index, LIFETIME_ACTION_TERMINATE, LIFETIME_RESULT_CONFIRMED_EXITED, LIFETIME_REASON_AUTHORIZED, confirmed_dead=True)
@@ -807,8 +818,9 @@ def terminate_authorized_processes(
                 pending.remove(index)
         gone = wait_until_gone(list(pending), forced_from + max(0.0, float(force_seconds)))
         for index in pending:
-            if identity_replaced(pids[index]):
-                yield_to_replacement(index)
+            if index not in outcomes:
+                identity_status(index)
+            if index in outcomes:
                 continue
             confirmed = index in gone
             settle(
@@ -828,8 +840,7 @@ def terminate_authorized_processes(
 def terminate_authorized_process(
     authorization: ServiceDestructionAuthorization,
     *,
-    still_current: Callable[[], bool],
-    identity_replaced: Callable[[], bool] = lambda: False,
+    identity_diagnostic: Callable[[], LocalProcessDiagnostic],
     signal_process: Callable[[int, int], None] | None = None,
     grace_seconds: float,
     force_seconds: float,
@@ -848,8 +859,7 @@ def terminate_authorized_process(
 
     return terminate_authorized_processes(
         [TerminationRequest(authorization=authorization, target=target, graceful_first=graceful_first)],
-        still_current=lambda _pid: still_current(),
-        identity_replaced=lambda _pid: identity_replaced(),
+        identity_diagnostic=lambda _pid: identity_diagnostic(),
         signal_process=signal_process,
         grace_seconds=grace_seconds,
         force_seconds=force_seconds,

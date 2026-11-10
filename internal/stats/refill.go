@@ -229,7 +229,7 @@ func (c *AgentTokenCollector) refillSource(ctx context.Context, kind, root strin
 			source := TranscriptSource{Path: path, Provider: kind, SourceID: kind + ":" + path, AgentID: kind + ":" + filepath.Base(path)}
 			state := TranscriptScannerState{}
 			for {
-				scan, err := ScanTranscript(source, &state, TranscriptScanOptions{Context: ctx, MaxBytes: DefaultTranscriptMaxBytes, MaxRecords: 4096})
+				scan, err := ScanTranscript(source, &state, TranscriptScanOptions{Ingestion: c.config.Ingestion, Context: ctx, MaxBytes: DefaultTranscriptMaxBytes, MaxRecords: 4096})
 				if err != nil {
 					return nil, err
 				}

@@ -186,29 +186,37 @@ func nativeYOAgentSessionState(metadata map[string]any) string {
 		return "unavailable"
 	}
 	state := "idle"
+	working, unavailable := false, false
 	for _, agent := range agents {
-		switch nativeYOAgentJobText(agent["status"]) {
-		case "working":
-			return "working"
-		case "needs-input":
+		status := nativeYOAgentJobText(agent["status"])
+		if status == "needs-input" {
 			switch nativeYOAgentJobText(agent["attention_kind"]) {
 			case "question":
-				state = "needs-input"
 			case "approval":
-				state = "blocked"
+				status = "blocked"
 			default:
-				state = "unavailable"
+				status = "unavailable"
 			}
+		}
+		switch status {
+		case "working":
+			working = true
+		case "needs-input":
+			state = "needs-input"
 		case "blocked":
 			if state != "needs-input" {
 				state = "blocked"
 			}
 		case "idle":
-		case "cooldown", "unavailable", "":
-			return "unavailable"
 		default:
-			return "unavailable"
+			unavailable = true
 		}
+	}
+	if working {
+		return "working"
+	}
+	if unavailable {
+		return "unavailable"
 	}
 	return state
 }

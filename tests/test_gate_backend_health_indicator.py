@@ -36,6 +36,7 @@ and no test can inherit a severity, an epoch or a debug sub-tab from the one bef
 """
 
 import pytest
+from types import SimpleNamespace
 from selenium.webdriver.common.by import By
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401  -- fixture
@@ -601,10 +602,27 @@ def test_a7_10_the_retained_noisy_sequences_change_paint_not_geometry(browser, t
         )
         resources = [] if reason == "" else [_resource(service, label_for, state, reason)]
         sample = _push_geometry(browser, _event(revision, overall, resources, epoch=epoch))
+        assert sample["severity"] == ("ready" if overall in {"starting", "ready"} else overall), sample
         _assert_same_vertical_geometry(baseline, sample, f"{service} step {revision} ({state})")
         _assert_stable_slot_and_neighbors(baseline, sample, f"{service} step {revision} ({state})")
-        if reason:
+        if sample["severity"] in {"degraded", "down"}:
             saw_warning = True
     # The sequence is not a no-op: the middle steps DID raise a warning, so a green result means the
     # geometry held through a real state change, not that nothing happened.
     assert saw_warning, states
+
+
+@pytest.mark.no_browser
+def test_a7_noisy_sequence_gate_rejects_a_dispatcher_that_never_paints(monkeypatch, tmp_path):
+    rectangle = {key: 1 for key in ("top", "bottom", "left", "right", "width", "height")}
+    healthy = {key: rectangle for key in ("topbar", "grid", "search", "language", "health", "xterm")}
+    healthy["severity"] = "ready"
+    monkeypatch.setitem(globals(), "load_live_runtime_boot_fixture", lambda *_args: None)
+    monkeypatch.setitem(globals(), "set_browser_visual_profile", lambda *_args, **_kwargs: None)
+    monkeypatch.setitem(globals(), "_geometry", lambda *_args: healthy)
+    monkeypatch.setitem(globals(), "_push_geometry", lambda *_args: healthy)
+    with pytest.raises(AssertionError):
+        test_a7_10_the_retained_noisy_sequences_change_paint_not_geometry(
+            SimpleNamespace(set_window_size=lambda *_args: None), tmp_path, "watchd",
+            [("starting", ""), ("degraded", "service_unhealthy"), ("ready", "")], "negative-control",
+        )

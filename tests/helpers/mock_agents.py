@@ -1,5 +1,6 @@
 """Mock-agent corpus and tmux helpers shared by status and mock-agent tests."""
 from pathlib import Path
+import os
 import re
 import subprocess
 import time
@@ -32,7 +33,7 @@ def case_command_name(case):
 
 def tmux_cmd(tmux_binary, socket_path, *args, timeout=8):
     return subprocess.run(
-        [tmux_binary, "-S", str(socket_path), *args],
+        [tmux_binary, "-f", os.devnull, "-S", str(socket_path), *args],
         capture_output=True,
         text=True,
         timeout=timeout,

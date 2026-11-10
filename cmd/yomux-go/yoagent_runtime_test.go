@@ -24,11 +24,22 @@ import (
 	"github.com/keivenchang/yomux/internal/yoagent"
 )
 
-func TestNativeYOAgentAnswerPersistsAndPublishesConversation(t *testing.T) {
-	store, err := yoagent.NewStore(t.TempDir())
+func newYOAgentTestStore(t *testing.T, directory string) *yoagent.Store {
+	t.Helper()
+	store, err := yoagent.NewStore(directory)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return store
+}
+
+func TestNativeYOAgentAnswerPersistsAndPublishesConversation(t *testing.T) {
+	store := newYOAgentTestStore(t, t.TempDir())
 	root, configDir := t.TempDir(), t.TempDir()
 	builtinDir := filepath.Join(root, "yomux_lib", "yoagent", "builtin_skills")
 	if err := os.MkdirAll(builtinDir, 0700); err != nil {
@@ -83,10 +94,7 @@ func TestNativeYOAgentAnswerPersistsAndPublishesConversation(t *testing.T) {
 }
 
 func TestNativeYOAgentModelIntentStoresValidatedJobWithoutStreamingPlan(t *testing.T) {
-	store, err := yoagent.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newYOAgentTestStore(t, t.TempDir())
 	root, configDir := t.TempDir(), t.TempDir()
 	builtinDir := filepath.Join(root, "yomux_lib", "yoagent", "builtin_skills")
 	if err := os.MkdirAll(builtinDir, 0700); err != nil {
@@ -172,10 +180,7 @@ model_intent:
 }
 
 func TestNativeYOAgentRejectsInvalidModelIntentPlanWithoutCreatingJob(t *testing.T) {
-	store, err := yoagent.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newYOAgentTestStore(t, t.TempDir())
 	root, configDir := t.TempDir(), t.TempDir()
 	builtinDir := filepath.Join(root, "yomux_lib", "yoagent", "builtin_skills")
 	if err := os.MkdirAll(builtinDir, 0700); err != nil {
@@ -219,11 +224,7 @@ model_intent:
 }
 
 func TestNativeYOAgentResumesAndPersistsProviderSessionInDatabase(t *testing.T) {
-	store, err := yoagent.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := newYOAgentTestStore(t, t.TempDir())
 	agent, err := newNativeYOAgent(store, t.TempDir(), t.TempDir(), func(context.Context) (map[string]any, error) {
 		return map[string]any{"backend": "codex"}, nil
 	}, func(string, map[string]any) error { return nil })
@@ -256,10 +257,7 @@ func TestNativeYOAgentResumesAndPersistsProviderSessionInDatabase(t *testing.T) 
 }
 
 func TestNativeYOAgentRejectsUnknownRoleBeforePersisting(t *testing.T) {
-	store, err := yoagent.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newYOAgentTestStore(t, t.TempDir())
 	agent, err := newNativeYOAgent(store, t.TempDir(), t.TempDir(), func(context.Context) (map[string]any, error) {
 		return map[string]any{"backend": "codex"}, nil
 	}, func(string, map[string]any) error { return nil })
@@ -276,10 +274,7 @@ func TestNativeYOAgentRejectsUnknownRoleBeforePersisting(t *testing.T) {
 }
 
 func TestNativeYOAgentPublishesTerminalError(t *testing.T) {
-	store, err := yoagent.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newYOAgentTestStore(t, t.TempDir())
 	var terminal map[string]any
 	agent, err := newNativeYOAgent(store, t.TempDir(), t.TempDir(), func(context.Context) (map[string]any, error) {
 		return map[string]any{"backend": "codex"}, nil
@@ -303,10 +298,7 @@ func TestNativeYOAgentPublishesTerminalError(t *testing.T) {
 }
 
 func TestNativeYOAgentCancelStopsActiveRequest(t *testing.T) {
-	store, err := yoagent.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newYOAgentTestStore(t, t.TempDir())
 	started := make(chan struct{})
 	terminal := make(chan map[string]any, 1)
 	agent, err := newNativeYOAgent(store, t.TempDir(), t.TempDir(), func(context.Context) (map[string]any, error) {
@@ -342,11 +334,80 @@ func TestNativeYOAgentCancelStopsActiveRequest(t *testing.T) {
 	}
 }
 
-func TestNativeYOAgentReadonlyUserCannotCancelRequest(t *testing.T) {
-	store, err := yoagent.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
+func TestNativeYOAgentQueuedRequestCancellationAndReuse(t *testing.T) {
+	for _, mode := range []string{"cancel", "deadline"} {
+		t.Run(mode, func(t *testing.T) {
+			store := newYOAgentTestStore(t, t.TempDir())
+			agent, err := newNativeYOAgent(store, t.TempDir(), t.TempDir(), func(context.Context) (map[string]any, error) {
+				return map[string]any{"backend": "codex"}, nil
+			}, func(string, map[string]any) error { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent.providerMu.Lock()
+			ctx, cancel := context.WithCancel(context.Background())
+			want := error(context.Canceled)
+			if mode == "deadline" {
+				cancel()
+				ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
+				want = context.DeadlineExceeded
+			}
+			defer cancel()
+			finished := make(chan error, 1)
+			go func() {
+				_, _, err := agent.Answer(ctx, "queued request", "en", "queued", "queued-stream", "admin")
+				finished <- err
+			}()
+			registeredBy := time.Now().Add(time.Second)
+			for {
+				agent.mu.Lock()
+				_, registered := agent.active["queued"]
+				agent.mu.Unlock()
+				if registered {
+					break
+				}
+				if time.Now().After(registeredBy) {
+					cancel()
+					agent.providerMu.Unlock()
+					<-finished
+					t.Fatal("request did not register")
+				}
+				runtime.Gosched()
+			}
+			if mode == "cancel" && !agent.Cancel("queued") {
+				cancel()
+				agent.providerMu.Unlock()
+				<-finished
+				t.Fatal("queued request was not cancellable")
+			}
+			select {
+			case err := <-finished:
+				agent.providerMu.Unlock()
+				if !errors.Is(err, want) {
+					t.Fatalf("queued request returned %v, want %v", err, want)
+				}
+			case <-time.After(time.Second):
+				cancel()
+				agent.providerMu.Unlock()
+				<-finished
+				t.Fatal("cancelled request waited for the independent provider owner")
+			}
+			messages, _, err := store.LoadMessages(context.Background(), yoagent.ConversationLimit)
+			if err != nil || len(messages) != 0 {
+				t.Fatalf("queued cancellation changed conversation: %v %v", messages, err)
+			}
+			agent.run = func(context.Context, string, map[string]any, string, string, bool, string, func(string) error) (map[string]any, string, error) {
+				return map[string]any{"backend": "codex"}, "reused", nil
+			}
+			if answer, _, err := agent.Answer(context.Background(), "new request", "en", "queued", "reused-stream", "admin"); err != nil || answer != "reused" {
+				t.Fatalf("provider/request ID reuse failed: %q %v", answer, err)
+			}
+		})
 	}
+}
+
+func TestNativeYOAgentReadonlyUserCannotCancelRequest(t *testing.T) {
+	store := newYOAgentTestStore(t, t.TempDir())
 	started := make(chan struct{})
 	finished := make(chan error, 1)
 	agent, err := newNativeYOAgent(store, t.TempDir(), t.TempDir(), func(context.Context) (map[string]any, error) {
@@ -411,11 +472,7 @@ func TestNativeAgentAuthEndpointReturnsCachedBrowserContract(t *testing.T) {
 }
 
 func TestNativeYOAgentJobsEndpointReturnsRedactedDatabaseRecords(t *testing.T) {
-	store, err := yoagent.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := newYOAgentTestStore(t, t.TempDir())
 	if err := store.SaveJob(context.Background(), map[string]any{
 		"id": "job-1", "status": "queued", "created_ts": time.Now().Unix(),
 		"prompt": "send token=private", "action": map[string]any{"text": "password=private"},
@@ -566,10 +623,7 @@ func nativeAgentTestProcessRunning(pid int) (bool, error) {
 }
 
 func TestNativeYOAgentResetCancelsAndWaitsForActiveRequest(t *testing.T) {
-	store, err := yoagent.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newYOAgentTestStore(t, t.TempDir())
 	started := make(chan struct{})
 	agent, err := newNativeYOAgent(store, t.TempDir(), t.TempDir(), func(context.Context) (map[string]any, error) {
 		return map[string]any{"backend": "codex"}, nil
@@ -738,10 +792,7 @@ func TestRunNativeAgentResumesCodexSession(t *testing.T) {
 
 func TestNativeChatHTTPYOAgentBridge(t *testing.T) {
 	s, mux := nativeChatFixture(t, nil)
-	store, err := yoagent.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newYOAgentTestStore(t, t.TempDir())
 	agent, err := newNativeYOAgent(store, t.TempDir(), t.TempDir(), func(context.Context) (map[string]any, error) {
 		return map[string]any{"backend": "codex"}, nil
 	}, func(string, map[string]any) error { return nil })

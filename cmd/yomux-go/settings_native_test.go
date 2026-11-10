@@ -85,6 +85,40 @@ func TestNativeSettingsMatchesRetainedContract(t *testing.T) {
 	}
 }
 
+func TestNativeSettingsEditorAndPreviewFontsStayPaired(t *testing.T) {
+	s := nativeSettingsFixtureServer(t)
+	schema, err := s.nativeSettingsSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaults := settingsObject(schema["DEFAULT_SETTINGS"])
+	legacy := cloneSettingsValue(defaults)
+	legacyAppearance := settingsObject(settingsObject(legacy)["appearance"])
+	legacyAppearance["editor_font_size"] = float64(18)
+	legacyAppearance["preview_font_size"] = float64(19)
+	loaded := schema.sanitize(settingsObject(legacy), nil)
+	if got := settingsObject(loaded["appearance"])["preview_font_size"]; got != float64(18) {
+		t.Fatalf("loaded preview font size = %v; want editor size 18", got)
+	}
+	for _, test := range []struct {
+		name  string
+		patch map[string]any
+		want  float64
+	}{
+		{name: "editor", patch: map[string]any{"appearance": map[string]any{"editor_font_size": float64(21)}}, want: 21},
+		{name: "preview", patch: map[string]any{"appearance": map[string]any{"preview_font_size": float64(22)}}, want: 22},
+		{name: "preview_clamped", patch: map[string]any{"appearance": map[string]any{"preview_font_size": float64(40)}}, want: 28},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			merged := schema.merge(settingsObject(defaults), test.patch, nil)
+			appearance := settingsObject(merged["appearance"])
+			if appearance["editor_font_size"] != test.want || appearance["preview_font_size"] != test.want {
+				t.Fatalf("paired font sizes = editor %v, preview %v; want %v", appearance["editor_font_size"], appearance["preview_font_size"], test.want)
+			}
+		})
+	}
+}
+
 func TestNativeSettingsUploadEnvironmentValidationAndPrecedence(t *testing.T) {
 	for _, value := range []string{"", "0", "-1", "invalid", "1.5"} {
 		t.Run("invalid_"+value, func(t *testing.T) {

@@ -15,6 +15,24 @@ from tests.tmux_runtime import patch_isolated_product_environment
 from yomux_lib import tmux_utils
 
 
+@pytest.mark.parametrize('action', ['enter', 'move'])
+def test_approval_key_failure_propagates_before_later_keys(monkeypatch, action):
+    calls = []
+
+    def refuse(args, timeout=5.0):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 1, '', 'fixture key refused')
+
+    monkeypatch.setattr(tmux_utils, 'run_cmd', refuse)
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        if action == 'enter':
+            tmux_utils.tmux_send_enter('%1')
+        else:
+            tmux_utils.tmux_move_to_option('%1', 3, 1)
+    assert raised.value.stderr == 'fixture key refused'
+    assert len(calls) == 1
+
+
 def test_tmux_run_converts_timeout_to_completed_process(monkeypatch):
     def fake_run(args, capture_output, text, encoding, errors, timeout, check):
         assert encoding == "utf-8"

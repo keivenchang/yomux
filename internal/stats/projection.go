@@ -174,7 +174,7 @@ func projectionBounds(request ProjectionRequest) ([][2]float64, error) {
 		return nil, fmt.Errorf("invalid projection resolution")
 	}
 	count := math.Ceil((request.End - request.Start) / request.Resolution)
-	if count > MaxProjectionInputs {
+	if count < 1 || count > MaxProjectionInputs {
 		return nil, fmt.Errorf("projection range exceeds %d buckets", MaxProjectionInputs)
 	}
 	bounds := make([][2]float64, int(count))

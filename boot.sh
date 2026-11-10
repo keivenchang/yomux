@@ -16,7 +16,6 @@ default_port="$primary_port"
 host="$(product_env_print HOST "0.0.0.0")"
 log_dir="$(product_env_print LOG_DIR "/tmp")"
 restart_lock_base="${TMPDIR:-/tmp}"
-dev_mode="auto"
 backend="go"
 cert_path=""
 key_path=""
@@ -131,7 +130,6 @@ while [[ "$#" -gt 0 ]]; do
       die "--dev is retired; rebuild and restart the Go server"
       ;;
     --no-dev)
-      dev_mode="never"
       shift
       ;;
     --)
@@ -199,16 +197,6 @@ extra_env=()
 while IFS= read -r -d '' assignment; do
   extra_env+=("$assignment")
 done < <(yomux_server_launch_environment "$backend" "$go_binary")
-
-use_dev_mode() {
-  local port="$1"
-  case "$dev_mode" in
-    always) return 0 ;;
-    never) return 1 ;;
-    auto) [[ "$port" != "$primary_port" ]] ;;
-    *) die "invalid dev mode: $dev_mode" ;;
-  esac
-}
 
 server_args=()
 build_server_args() {
@@ -290,19 +278,6 @@ port_listener_pids() {
   # typed classes it reports: this port's listening inode had no visible owner, several visible
   # owners, a fatal read, or the walk exceeded its time budget. Its stderr names which.
   yomux_port_listener_pids "$1" || die "listener census could not identify a unique owner for port $1"
-}
-
-wait_for_pid_exit() {
-  local pid="$1"
-  local max_attempts="${2:-8}"
-  local attempt
-  for ((attempt = 0; attempt < max_attempts; attempt++)); do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      return 0
-    fi
-    sleep 1
-  done
-  return 1
 }
 
 port_restart_lock_dir() {

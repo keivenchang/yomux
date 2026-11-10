@@ -26,6 +26,7 @@ if str(_SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(_SOURCE_ROOT))
 
 from tools.product_environment import product_env
+from tools.mockers.text_client_common import read_input_character
 from tools.instance_isolation import normalize_yomux_environment
 
 
@@ -2650,28 +2651,24 @@ def _has_more(timeout: float = 0.05) -> bool:
     return bool(ready)
 
 
-def _read_byte() -> str:
-    return os.read(sys.stdin.fileno(), 1).decode("utf-8", errors="replace")
-
-
 def read_key(timeout: float | None = None) -> str | None:
     if timeout is not None:
         ready, _, _ = select.select([sys.stdin.fileno()], [], [], timeout)
         if not ready:
             return None
-    char = _read_byte()
+    char = read_input_character(sys.stdin.fileno())
     if char != "\x1b":
         return char
     if not _has_more():
         return char
-    second = _read_byte()
+    second = read_input_character(sys.stdin.fileno())
     if second in {"[", "O"}:
         if not _has_more():
             return char + second
-        third = _read_byte()
+        third = read_input_character(sys.stdin.fileno())
         sequence = char + second + third
         while second == "[" and not "@" <= third <= "~" and len(sequence) < 32 and _has_more():
-            third = _read_byte()
+            third = read_input_character(sys.stdin.fileno())
             sequence += third
         return sequence
     return char + second

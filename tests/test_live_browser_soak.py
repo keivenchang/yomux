@@ -19,7 +19,6 @@ from tests.native_gate_fixtures import gate_live_server  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_http_port  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
-from tests.gate_harness import load_gate_browser
 
 
 TOOLS_MODULE = importlib.util.spec_from_file_location("live_browser_soak_tool", Path(__file__).parents[1] / "tools" / "live_browser_soak.py")
@@ -672,11 +671,12 @@ def test_main_serializes_os_and_subprocess_probe_failures(tmp_path, monkeypatch,
     assert output.stat().st_mode & 0o777 == 0o600
 
 
-def test_write_artifact_redacts_nested_key_context_and_basic_credentials(tmp_path):
+@pytest.mark.parametrize('records', [list, tuple], ids=['list', 'tuple'])
+def test_write_artifact_redacts_nested_key_context_and_basic_credentials(tmp_path, records):
     output = tmp_path / "artifact.json"
     canaries = ("nested-password", "nested-secret", "nested-token", "basic-credential", "quoted-password", "spaced-password", "bearer-credential")
     artifact = {
-        "browserEvents": [{"context": {"password": "nested-password", "client_secret": "nested-secret", "access_token": "nested-token", "headers": {"Authorization": "Basic basic-credential"}}}],
+        "browserEvents": records([{"context": {"password": "nested-password", "client_secret": "nested-secret", "access_token": "nested-token", "headers": {"Authorization": "Basic basic-credential"}}}]),
         "browserLocalFailures": [{"message": '{"password":"quoted-password"} password = spaced-password Authorization: Basic basic-credential Bearer bearer-credential'}],
     }
     soak.write_artifact(output, artifact)
@@ -1001,6 +1001,15 @@ def test_discover_served_bundle_navigates_to_exact_recorded_layout_url():
     assert bundle_url == "https://localhost:7443/static/yomux.js"
 
 
+@pytest.mark.browser
+def test_discover_served_bundle_reads_the_actual_native_page(browser, gate_live_server, request):
+    request.addfinalizer(lambda: browser.get("about:blank"))
+    browser.get(gate_live_server.base_url)
+    bundle_url, digest = soak.discover_served_bundle(browser, gate_live_server.base_url + "/", navigate=False)
+    assert urlsplit(bundle_url).path == "/static/yomux.js"
+    assert digest == hashlib.sha256((Path(__file__).parents[1] / "static" / "yomux.js").read_bytes()).hexdigest()
+
+
 def test_run_soak_authenticates_before_bundle_and_rejects_completion_identity_change(monkeypatch):
     calls = []
     first = soak.ListenerIdentity(1, "/repo", "one", "a" * 40)
@@ -1094,33 +1103,34 @@ def test_sample_evidence_fences_an_event_arriving_during_server_log_fetch():
     assert failures[0]["message"] == "arrived during logs"
 
 
-def test_success_artifact_requires_receipt_barrier_in_baseline_and_final_sample():
-    identity = {"pid": 1, "cwd": "/repo", "process_started": "now", "head": "a" * 40, "bundle_url": "https://localhost/static/yomux.js", "bundle_sha256": "b" * 64}
-    evidence = {"browserEvents": [], "browserLocalFailures": [], "serverLogErrors": [], "browserLogFailures": [], "serverLogDropped": {"count": 0}, "cursors": {"js": 0, "server_epoch": "a", "server_sequence": 0, "server_log_ids": []}}
-    artifact = {"url": "https://localhost/", "started_pt": "start", "ended_pt": "end", "requested_duration_seconds": 600, "elapsed_seconds": 600, "identity": identity, "completion_identity": identity, "baseline": evidence, "samples": [evidence, evidence], **clean_settle(evidence)}
-    with pytest.raises(soak.ArtifactIntegrityError, match="exact clean finalBoundary"):
+@pytest.fixture(params=("baseline", "finalBoundary"))
+def success_artifact_endpoint(monkeypatch, request):
+    artifact = complete_success_artifact(monkeypatch)
+    soak.validate_success_artifact(artifact)
+    evidence = artifact["baseline"] if request.param == "baseline" else artifact["finalBoundary"]["evidence"]
+    return artifact, evidence
+
+
+def test_success_artifact_requires_receipt_barrier_in_baseline_and_final_sample(success_artifact_endpoint):
+    artifact, evidence = success_artifact_endpoint
+    evidence.pop("browserReceiptBarrier")
+    with pytest.raises(soak.ArtifactIntegrityError, match="missing receipt projection evidence"):
         soak.validate_success_artifact(artifact)
 
 
-def test_success_artifact_rejects_well_formed_nonquiescent_receipt_barriers():
-    identity = {"pid": 1, "cwd": "/repo", "process_started": "now", "head": "a" * 40, "bundle_url": "https://localhost/static/yomux.js", "bundle_sha256": "b" * 64}
-    blocker = {"key": "page-1:1", "epoch": "page-1", "eventId": 1, "requestId": "r", "source": "/", "route": "/", "event": "api", "wallTime": "", "deliveryOutcome": "failed", "httpStatus": 500, "status": "pending"}
-    receipt = {"epoch": "page-1", "accepted": 0, "pending": 1, "retrying": 0, "rejected": 0, "dropped": 0, "quiescent": False, "blocking": [blocker]}
-    evidence = {"browserEvents": [], "browserLocalFailures": [], "browserReceiptBarrier": receipt, "serverLogErrors": [], "browserLogFailures": [], "serverLogDropped": {"count": 0}, "cursors": {"js": 0, "server_epoch": "a", "server_sequence": 0, "server_log_ids": []}}
-    artifact = {"url": "https://localhost/", "started_pt": "start", "ended_pt": "end", "requested_duration_seconds": 600, "elapsed_seconds": 600, "identity": identity, "completion_identity": identity, "baseline": evidence, "samples": [evidence, evidence], **clean_settle(evidence)}
-
-    with pytest.raises(soak.ArtifactIntegrityError, match="exact clean finalBoundary"):
+def test_success_artifact_rejects_well_formed_nonquiescent_receipt_barriers(success_artifact_endpoint):
+    artifact, evidence = success_artifact_endpoint
+    projection = receipt_projection([receipt_row(status="pending")])
+    evidence.update(browserReceiptBarrier=projection["barrier"], browserReceiptProjection=projection)
+    with pytest.raises(soak.ArtifactIntegrityError, match="non-quiescent receipt barrier evidence"):
         soak.validate_success_artifact(artifact)
 
 
 @pytest.mark.parametrize("failure_field", ("browserLocalFailures", "serverLogErrors", "browserLogFailures", "integrityFailures"))
-def test_success_artifact_rejects_nonempty_failure_evidence_without_run_soak(failure_field):
-    identity = {"pid": 1, "cwd": "/repo", "process_started": "now", "head": "a" * 40, "bundle_url": "https://localhost/static/yomux.js", "bundle_sha256": "b" * 64}
-    evidence = {"browserEvents": [], "browserLocalFailures": [], "browserReceiptBarrier": clean_receipt_barrier(), "serverLogErrors": [], "browserLogFailures": [], "integrityFailures": [], "serverLogDropped": {"count": 0}, "cursors": {"js": 0, "server_epoch": "a", "server_sequence": 0, "server_log_ids": []}}
+def test_success_artifact_rejects_nonempty_failure_evidence_without_run_soak(success_artifact_endpoint, failure_field):
+    artifact, evidence = success_artifact_endpoint
     evidence[failure_field] = [{"message": "must fail closed"}]
-    artifact = {"url": "https://localhost/", "started_pt": "start", "ended_pt": "end", "requested_duration_seconds": 600, "elapsed_seconds": 600, "identity": identity, "completion_identity": identity, "baseline": evidence, "samples": [evidence, evidence], **clean_settle(evidence)}
-
-    with pytest.raises(soak.ArtifactIntegrityError, match="exact clean finalBoundary"):
+    with pytest.raises(soak.ArtifactIntegrityError, match="contains " + failure_field):
         soak.validate_success_artifact(artifact)
 
 
@@ -1979,11 +1989,58 @@ def test_atomic_finalizer_rejects_ring_eviction_of_unobserved_events(monkeypatch
         ([1, 2], [1, 2, 3], 3, "browser retirement event cursor moved backwards"),
         ([5, 6, 7], [1, 2, 3], 3, "browser retirement event cursor evicted unobserved events"),
         ([3, 4, 5], [1, 2, 4], 4, "browser retirement event cursor lost its observed window"),
+        ([1, 2, 3], [], 2, "browser retirement event cursor lost its observed window"),
     ),
 )
 def test_browser_event_ring_extension_rejects_loss_reordering_and_gaps(current_ids, prior_ids, prior_cursor, message):
     with pytest.raises(AssertionError, match=re.escape(message)):
         soak.browser_event_ring_extension(current_ids, phase="retirement", prior_cursor=prior_cursor, prior_ids=prior_ids)
+
+
+
+@pytest.mark.parametrize("path", ("sparse_browser", "unobserved_browser", "retirement", "server_ring", "server_transition", "incremental_sparse", "incremental_gap"))
+def test_diagnostic_ring_validators_do_not_allocate_claimed_id_spans(monkeypatch, path):
+    """Two sparse entries must fail validation without allocating a billion phantom records."""
+    def bounded_range(*args):
+        result = range(*args)
+        assert len(result) < 10000, "numeric-span allocation in diagnostic validator"
+        return result
+
+    monkeypatch.setattr(soak, "range", bounded_range, raising=False)
+    huge = 10**9
+    if path in {"sparse_browser", "unobserved_browser"}:
+        with pytest.raises(AssertionError, match="event cursor is malformed|evicted unobserved"):
+            soak.browser_event_ring_extension([1, huge] if path == "sparse_browser" else [huge], phase="atomic", prior_cursor=0)
+    elif path == "retirement":
+        with pytest.raises(AssertionError, match="retained browser event ids"):
+            soak.validate_browser_retirement_delta_evidence(
+                {}, retirement={"retainedFirstId": 1, "retainedLastId": huge},
+                retained_events=[{"id": 1}, {"id": huge}], event_count=2,
+                retained_cursor=huge, fence_receipts=0, retained_receipts=0,
+            )
+    elif path == "server_ring":
+        with pytest.raises(AssertionError, match="IDs are noncontiguous"):
+            soak.server_ring_record({"ok": True, "logs": [{"id": 1}, {"id": huge}], "dropped": {"count": 0, "by_level": {}}, "epoch": "a", "sequence": huge, "capacity": 2})
+    elif path == "server_transition":
+        with pytest.raises(AssertionError, match="ID gap"):
+            soak.validate_server_ring_transition(
+                {"epoch": "a", "sequence": 0, "ids": [], "logs": [], "capacity": 2, "dropped": {"count": 0, "by_level": {}}},
+                {"epoch": "a", "sequence": huge, "ids": [huge], "logs": [{"id": huge}], "capacity": 2, "dropped": {"count": 0, "by_level": {}}},
+            )
+    else:
+        previous = {"browserLocalFailures": [], "serverLogErrors": [], "browserLogFailures": [], "serverLogDropped": {"count": 0}, "cursors": {"js": 0, "server_epoch": "a", "server_sequence": 0, "server_log_ids": []}}
+        evidence = {**previous, "browserEvents": [{"id": value} for value in ([1, huge] if path == "incremental_sparse" else [huge])], "cursors": {**previous["cursors"], "js": huge}}
+        classified, _ = soak.classify_incremental_evidence(evidence, soak.evidence_baseline(previous))
+        assert classified["integrityFailures"] == ["browser JS cursor gap" if path == "incremental_sparse" else "browser JS ring eviction or cursor gap"]
+
+
+def test_recorded_ring_window_uses_scalar_arithmetic_at_large_cursors(monkeypatch):
+    def forbidden_range(*_args):
+        raise AssertionError("numeric-span allocation in ring outcome validator")
+
+    monkeypatch.setattr(soak, "range", forbidden_range, raising=False)
+    outcome = {"phase": "atomic", "reason": "intact", "evicted": 0, "appended": 1, "priorCursor": 10**9 - 1, "priorFirstId": 1, "retainedFirstId": 1, "retainedLastId": 10**9}
+    assert soak.validate_browser_event_ring_outcome(outcome, phase="atomic") == outcome
 
 
 def test_browser_event_ring_extension_reports_observed_eviction_and_intact_windows():
@@ -3025,6 +3082,26 @@ def test_success_artifact_rejects_elapsed_time_its_own_samples_never_measured(mo
 
     with pytest.raises(soak.ArtifactIntegrityError, match="less elapsed time than its own samples measured"):
         soak.validate_success_artifact(artifact)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), 10 ** 1000], ids=["nan", "infinity", "oversized"])
+@pytest.mark.parametrize("field", ["elapsed", "sample", "settle"])
+def test_success_artifact_rejects_nonfinite_timing_evidence(monkeypatch, field, value):
+    artifact = complete_success_artifact(monkeypatch)
+    if field == "elapsed":
+        artifact["elapsed_seconds"] = value
+    elif field == "sample":
+        artifact["samples"][40]["elapsed_seconds"] = value
+    else:
+        artifact["settle"]["samples"][4]["settle_elapsed_seconds"] = value
+    with pytest.raises(soak.ArtifactIntegrityError):
+        soak.validate_success_artifact(artifact)
+
+
+def test_async_phase_measurements_reject_oversized_numbers():
+    original = {"type": "api"}
+    enriched = {**original, "phaseTimings": {"ttfbMs": 10 ** 1000}}
+    assert soak.js_debug_event_enrichment_matches(original, enriched) is False
 
 
 def test_persisted_validation_never_delegates_to_the_runtime_early_fail(monkeypatch):

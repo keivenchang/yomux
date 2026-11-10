@@ -1973,6 +1973,7 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
   target.sseAgeCount += (source.sseAgeCount || 0) * scale;
   target.latencyCount += (source.latencyCount || 0) * scale;
   target.bandwidthBytes += (source.bandwidthBytes || 0) * scale;
+  target.heartbeatCount += (source.heartbeatCount || 0) * scale;
   target.disconnectedMs += (source.disconnectedMs || 0) * scale;
   target.cpuTotalPercent += (source.cpuTotalPercent || 0) * scale;
   target.cpuCount += (source.cpuCount || 0) * scale;
@@ -2089,6 +2090,7 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
       targetClient.sseAgeCount += Number(sourceClient.sseAgeCount || 0) * scale;
       targetClient.latencyCount += Number(sourceClient.latencyCount || 0) * scale;
       targetClient.bandwidthBytes += Number(sourceClient.bandwidthBytes || 0) * scale;
+      targetClient.heartbeatCount += Number(sourceClient.heartbeatCount || 0) * scale;
       targetClient.disconnectedMs += Number(sourceClient.disconnectedMs || 0) * scale;
       target.clients.set(clientId, targetClient);
     }

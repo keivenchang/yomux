@@ -1,89 +1,21 @@
 from __future__ import annotations
 
-import json
-from urllib.parse import urlencode
 
 import pytest
-from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser
 from tests.browser_helpers.browser_console import BROWSER_JOURNEY_OBSERVATION_SECONDS
 from tests.browser_helpers.browser_console import acknowledge_and_consume_only_expected_js_debug_failures
-from tests.browser_helpers.browser_console import retire_only_nonfailure_js_debug_events
 from tests.browser_helpers.browser_console import begin_browser_journey_surface_tracking
-from tests.browser_helpers.browser_console import emit_js_debug_event
-from tests.browser_helpers.browser_console import retire_browser_after_strict_diagnostic_gate
 from tests.gate_harness import aged_state_root  # noqa: F401
 from tests.gate_harness import assert_browser_journey_error_free
-from tests.gate_harness import consume_only_expected_server_log_errors
 from tests.gate_harness import gate_http_port  # noqa: F401
-from tests.gate_harness import gate_http_request
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
-from tests.gate_harness import load_gate_browser
-from tests.gate_harness import open_gate_stats_surface
-from tests.gate_harness import run_finder_nested_reexpand_journey
 from tests.native_gate_fixtures import stateful_journey  # noqa: F401
-from yomux_lib.server_logs import SERVER_LOGS
-from yomux_lib.stats_current import storage as stats_storage
 
 
 pytestmark = [pytest.mark.browser, pytest.mark.socket]
-
-
-def _wait_for_js_debug_type(driver, event_type: str) -> dict[str, object]:
-    event = WebDriverWait(driver, 5).until(
-        lambda current: current.execute_script(
-            "return typeof jsDebugEvents === 'undefined' ? null : [...jsDebugEvents].reverse().find(event => event?.type === arguments[0]) || null;",
-            event_type,
-        )
-    )
-    assert isinstance(event, dict)
-    return event
-
-
-def _reset_stateful_server_log_ring(browser, journey) -> None:
-    """Reset only for ring-reset regressions and advance both fixture boundaries atomically."""
-
-    SERVER_LOGS.clear()
-    boundary = SERVER_LOGS.payload()
-    browser._yomux_server_log_boundary = boundary
-    journey.server_log_boundary = boundary
-
-
-def _load_browser_error_gate(browser, runtime) -> None:
-    session = runtime.tmux.sessions[0]
-    query = urlencode({"sessions": session, "layout": "left", "tabs": f"left:{session}*"})
-    load_gate_browser(browser, runtime, f"/?{query}")
-    lifecycle = browser.execute_script(
-        """
-        return {
-          activeItems: typeof activePaneItems === 'function' ? activePaneItems() : [],
-          finderVisible: typeof fileExplorerTreePaneIsVisible === 'function' && fileExplorerTreePaneIsVisible(),
-          channels: [...(clientEventTransportState.demand?.channels || [])],
-          watchDiffRequests: performance.getEntriesByType('resource')
-            .filter(entry => new URL(entry.name).pathname === '/api/fs/watch-diff').length,
-        };
-        """
-    )
-    assert lifecycle["activeItems"] == [session], lifecycle
-    assert lifecycle["finderVisible"] is False, lifecycle
-    assert "files" not in lifecycle["channels"], lifecycle
-    assert lifecycle["watchDiffRequests"] == 0, lifecycle
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_browser_journey_error_gate_observes_fifteen_second_late_error(browser):

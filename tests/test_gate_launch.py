@@ -4,28 +4,20 @@
 
 from __future__ import annotations
 
-from tests.helpers.fixture_tools import fixture_script
-import json
 import os
 from pathlib import Path
 import signal
-import statistics
 import subprocess
 import sys
 import time
 
 import pytest
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.gate_harness import gate_http_port  # noqa: F401
 from tests.native_gate_fixtures import gate_live_server  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
-from tests.gate_harness import load_gate_browser
-from tests.gate_harness import run_when_browser_ready
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
 from yomux_lib.local_services.registry import pid_is_serving
@@ -34,222 +26,13 @@ from yomux_lib.local_services.registry import process_state
 from yomux_lib.tmux.session_retirement import capture_tmux_session_retirement
 from yomux_lib.tmux.session_retirement import join_tmux_session_retirement
 from yomux_lib.tmux.session_retirement import retained_tmux_session_births
-from yomux_lib.tmux.sessions import discover_sessions
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 NEW_SESSION = "1"
-CREATE_SAMPLE_COUNT = 3
-CREATE_TRANSITION_MEASUREMENT_TIMEOUT_SECONDS = 8.0
-CREATE_TRANSITION_BUDGET_SECONDS = 2.0
-MOCK_READY_TEXT = {
-    "claude": "Claude Code v",
-    "codex": "OpenAI Codex (v",
-    "opencode": "Ask anything",
-}
 
 # Every browser test in this module is marked individually so the one non-browser negative
-# control can declare itself, matching tests/test_gate_editor.py.
+# control can declare itself.
 pytestmark = pytest.mark.socket
-
-
-def _write_mock_agent_wrapper(path: Path, agent: str) -> None:
-    mock_path = REPO_ROOT / "tools" / "mockers" / f"{agent}.py"
-    auth_args = ["auth", "status"] if agent in {"claude", "opencode"} else ["login", "status"]
-    auth_output = json.dumps({"loggedIn": True}) if agent == "claude" else "Logged in"
-    path.write_text(
-        fixture_script("\n".join(
-            (
-                "#!/usr/bin/env python3",
-                "from __future__ import annotations",
-                "import os",
-                "import sys",
-                f"if sys.argv[1:] == {auth_args!r}:",
-                f"    print({auth_output!r})",
-                "    raise SystemExit(0)",
-                f"os.execv(sys.executable, [sys.executable, {str(mock_path)!r}, '--mock', *sys.argv[1:]])",
-                "",
-            )
-        )),
-        encoding="utf-8",
-    )
-    path.chmod(0o700)
-
-
-def _prepare_launch_runtime(monkeypatch: pytest.MonkeyPatch, runtime) -> Path:
-    """Expose deterministic mock executables and fixture-owned numbered workdirs."""
-
-    bin_dir = runtime.paths.root / "mock-agent-bin"
-    bin_dir.mkdir()
-    for agent in MOCK_READY_TEXT:
-        _write_mock_agent_wrapper(bin_dir / agent, agent)
-    monkeypatch.setenv("YOLOMUX_EXTRA_PATH", str(bin_dir))
-    monkeypatch.setenv("PATH", os.pathsep.join((str(bin_dir), os.environ["PATH"])))
-    (runtime.paths.workspace_dir / f"project{NEW_SESSION}").mkdir()
-    return bin_dir
-
-
-def _create_session_in_browser(browser, agent: str, *, terminal: str = "") -> dict[str, object]:
-    result = browser.execute_async_script(
-        """
-        const agent = arguments[0];
-        const terminal = arguments[1];
-        const target = arguments[2];
-        const timeoutMs = arguments[3];
-        const done = arguments[arguments.length - 1];
-        const started = performance.now();
-        const tabSelector = `.dockview-pane-tab[data-pane-tab="${CSS.escape(target)}"]`;
-        const initial = {
-          roster: sessions.includes(target),
-          tab: Boolean(document.querySelector(tabSelector)),
-        };
-        const elapsedWhen = async (predicate, description) => {
-          await window.__yomuxTestWaitFor(predicate, {timeoutMs, description});
-          return performance.now() - started;
-        };
-        const roster = elapsedWhen(() => sessions.includes(target), `${target} in browser roster`);
-        const rendered = elapsedWhen(() => Boolean(document.querySelector(tabSelector)), `${target} rendered tab`);
-        const options = agent === 'term' ? {terminal} : {};
-        (async () => {
-          try {
-            await Promise.all([createNextSession(agent, options), roster, rendered]);
-            done({
-              initial,
-              rosterMs: await roster,
-              renderedMs: await rendered,
-              roster: sessions.includes(target),
-              tab: Boolean(document.querySelector(tabSelector)),
-              terminal: Boolean(document.querySelector(`#term-${CSS.escape(target)}`)),
-            });
-          } catch (error) {
-            done({error: String(error?.stack || error), initial, status: document.getElementById('status')?.textContent || ''});
-          }
-        })();
-        """,
-        agent,
-        terminal,
-        NEW_SESSION,
-        int(CREATE_TRANSITION_MEASUREMENT_TIMEOUT_SECONDS * 1000),
-    )
-    assert "error" not in result, result
-    assert result["initial"] == {"roster": False, "tab": False}, result
-    return result
-
-
-def _kill_session_in_browser(browser) -> dict[str, object]:
-    result = browser.execute_async_script(
-        """
-        const target = arguments[0];
-        const done = arguments[arguments.length - 1];
-        const originalConfirm = window.confirm;
-        window.confirm = () => true;
-        (async () => {
-          try {
-            const killed = await killTmuxSession(target);
-            await window.__yomuxTestWaitFor(() => (
-              !sessions.includes(target)
-              && !document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(target)}"]`)
-              && !document.getElementById(`panel-${target}`)
-            ), {timeoutMs: 5000, description: `${target} removed after kill`});
-            done({
-              killed,
-              roster: sessions.includes(target),
-              tab: Boolean(document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(target)}"]`)),
-              panel: Boolean(document.getElementById(`panel-${target}`)),
-            });
-          } catch (error) {
-            done({error: String(error?.stack || error)});
-          } finally {
-            window.confirm = originalConfirm;
-          }
-        })();
-        """,
-        NEW_SESSION,
-    )
-    assert "error" not in result, result
-    assert result == {"killed": True, "panel": False, "roster": False, "tab": False}, result
-    return result
-
-
-def _assert_agent_detected(browser, runtime, agent: str) -> None:
-    ready, panes = wait_for_isolated_tmux_panes(
-        runtime.tmux,
-        (NEW_SESSION,),
-        lambda captures: MOCK_READY_TEXT[agent] in captures.get(NEW_SESSION, ""),
-        timeout=15,
-    )
-    assert ready, panes
-
-    discovered, errors = discover_sessions([NEW_SESSION], enrich_paths=False)
-    agents = discovered[NEW_SESSION].agents
-    assert errors == [], errors
-    assert len(agents) == 1, agents
-    assert agents[0].kind == agent, agents[0]
-    assert f"{agent}.py" in agents[0].command and "--mock" in agents[0].command, agents[0]
-
-    # A forced metadata read is answered from the server's cache, so its bytes always predate the
-    # request. Await the generation the server says will observe this instant, and assert the
-    # rendered kind came from that generation -- the watchdog stays fail-closed but is no longer
-    # what decides the test, so a build that never ran cannot look like one that was merely slow.
-    rendered = browser.execute_async_script(
-        """
-        const target = arguments[0];
-        const agent = arguments[1];
-        const done = arguments[arguments.length - 1];
-        (async () => {
-          const baseline = Number(transcriptMetadataState.generation || 0);
-          try {
-            const forced = await refreshSessionMetadata({force: true, refreshAuto: true, refreshActivity: true});
-            const awaited = Number(transcriptMetadataState.pendingGeneration || 0);
-            await window.__yomuxTestWaitFor(() => (
-              Number(transcriptMetadataState.generation || 0) >= awaited
-              && sessionAgentKind(target) === agent
-            ), {
-              timeoutMs: 15000,
-              description: `${target} rendered as ${agent} from metadata generation >= ${awaited}`,
-            });
-            done({
-              kind: sessionAgentKind(target),
-              roster: sessions.includes(target),
-              baseline,
-              awaited,
-              generation: Number(transcriptMetadataState.generation || 0),
-              // The forced read's own typed outcome and the apply it produced. `awaited` is shared
-              // state, so when it is zero these name WHICH side dropped the promised identity: the
-              // server named none, or this client refused the payload that carried it.
-              forced,
-              lastApply: transcriptMetadataState.lastApply,
-            });
-          } catch (error) {
-            // Name which side stalled: the server never built the generation it promised, or it
-            // built it and the browser never applied it.
-            let served = null;
-            try {
-              const probe = await apiFetchJson('/api/session-metadata');
-              served = {generation: Number(probe?.metadata_generation || 0), cache: probe?.cache || null};
-            } catch (probeError) {
-              served = {error: String(probeError)};
-            }
-            done({
-              error: String(error?.stack || error),
-              kind: sessionAgentKind(target),
-              baseline,
-              awaited: Number(transcriptMetadataState.pendingGeneration || 0),
-              generation: Number(transcriptMetadataState.generation || 0),
-              lastApply: transcriptMetadataState.lastApply,
-              served,
-            });
-          }
-        })();
-        """,
-        NEW_SESSION,
-        agent,
-    )
-    evidence = json.dumps(rendered, sort_keys=True, default=str)
-    assert "error" not in rendered, evidence
-    assert rendered["kind"] == agent and rendered["roster"] is True, evidence
-    assert rendered["awaited"] > rendered["baseline"], evidence
-    assert rendered["generation"] >= rendered["awaited"], evidence
 
 
 def _pane_process_group(tmux_runtime) -> tuple[int, int]:
@@ -318,20 +101,6 @@ def _process_group_exists(process_group_id: int) -> bool:
     """
 
     return process_group_has_serving_member(process_group_id)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 @pytest.mark.no_browser

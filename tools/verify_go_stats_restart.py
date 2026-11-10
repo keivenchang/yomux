@@ -185,7 +185,7 @@ def record(number: int, observed: float, padding: int = 0, history: int | None =
 
 
 def facts(path: Path) -> dict:
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=3) as database:
+    with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=3) as database:
         row = database.execute("""SELECT count(*), coalesce(sum(json_extract(payload_json,'$.quantity')),0),
             coalesce(sum(CASE WHEN event_id LIKE '%:live-%' THEN json_extract(payload_json,'$.quantity') ELSE 0 END),0),
             coalesce(sum(CASE WHEN event_id LIKE '%:history-%' THEN json_extract(payload_json,'$.quantity') ELSE 0 END),0)

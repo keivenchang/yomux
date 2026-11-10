@@ -50,6 +50,9 @@ atomic_install_tree() {
 atomic_install_file "$binary" "$app/yomux-go"
 atomic_install_file "$repo_root/boot.sh" "$app/boot.sh"
 atomic_install_file "$repo_root/version.yaml" "$app/version.yaml"
+for notice in LICENSE NOTICE THIRD_PARTY_NOTICES.md; do
+  atomic_install_file "$repo_root/$notice" "$app/$notice"
+done
 for script in startup_common.sh product_environment.sh setup-tls.sh; do
   atomic_install_file "$repo_root/tools/$script" "$app/tools/$script"
 done

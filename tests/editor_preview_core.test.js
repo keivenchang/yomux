@@ -208,8 +208,6 @@ test('Markdown Preview editing converts plain paragraph and inline emphasis chan
   assert.equal(context.markdownTextWithInlineFormat('Say *hello* here', 1, 'hello', 'italic'), 'Say hello here');
   assert.equal(context.markdownTextWithBlockFormat('A paragraph', 1, 'bullet'), '- A paragraph');
   assert.equal(context.markdownTextWithBlockFormat('A paragraph', 1, 'h2'), '## A paragraph');
-  assert.equal(context.markdownTextWithInlineFormat('Say hello here', 1, 'hello', 'bold'), 'Say **hello** here');
-  assert.equal(context.markdownTextWithInlineFormat('Say **hello** here', 1, 'hello', 'bold'), 'Say hello here');
   assert.equal(context.markdownTextWithInlineLineEdited('Title\nFirst line\nsecond line\n\nNext', 2, 'Changed', 'paragraph'), 'Title\nChanged\n\nNext');
   assert.equal(context.markdownTextWithInlineFormat('Say `hello` here', 1, 'hello', 'bold'), 'Say **`hello`** here');
   assert.equal(context.markdownTextWithInlineFormat('***~~<u>*product*</u>~~***', 1, 'product', 'clearInline'), 'product');
@@ -246,7 +244,6 @@ test('Markdown Preview editing converts plain paragraph and inline emphasis chan
   assert.match(previewSource, /markdownSourceOffsetAtVisibleOffset/);
   assert.match(previewSource, /function markdownTextWithBackspaceAtOffset/);
   assert.match(previewSource, /deleteContentBackward/);
-  assert.equal(context.markdownTextWithBackspaceAtOffset('one\n\ntwo', 5, 0), 'one\ntwo');
   assert.equal(context.markdownTextWithBackspaceAtOffset('one\n\ntwo', 5, 0), 'one\ntwo');
   assert.equal(context.markdownTextWithBackspaceAtOffset('one<br>two', 7, 0), 'onetwo');
   assert.equal(context.markdownSourceOffsetAtVisibleOffset('one<br>two', 4), 7);

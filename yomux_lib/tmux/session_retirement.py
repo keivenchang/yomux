@@ -10,6 +10,10 @@ import threading
 import time
 
 from ..host_identity import process_identity_snapshot
+from ..host_identity import ProcessIdentitySnapshot
+from ..host_identity import LocalProcessReason
+from ..host_identity import current_host_identity
+from ..host_identity import is_current_local_process
 from ..local_services.registry import ProcessTableEntry
 from ..local_services.registry import ProcessTableUnavailable
 from ..local_services.registry import bounded_process_table
@@ -42,6 +46,21 @@ class SessionRetirementIdentity:
 
 class SessionRetirementError(RuntimeError):
     """A tmux session's exact retirement could not be established."""
+
+
+def _session_birth_is_current(member: ProcessBirthIdentity, snapshot: ProcessIdentitySnapshot | None) -> bool:
+    identity = current_host_identity()
+    diagnostic = is_current_local_process(
+        identity.process_record_fields(pid=member.pid, start_identity=member.start_identity),
+        host_identity=identity,
+        start_identity_reader=lambda _: snapshot.start_identity if snapshot else None,
+        state_reader=lambda _: snapshot.state if snapshot else "",
+    )
+    if diagnostic.current:
+        return True
+    if diagnostic.reason in {LocalProcessReason.PROCESS_NOT_FOUND, LocalProcessReason.PROCESS_IDENTITY_REUSED}:
+        return False
+    raise SessionRetirementError(f"cannot establish tmux process retirement: pid={member.pid}, reason={diagnostic.reason.value}")
 
 
 def capture_tmux_session_retirement(session: str) -> SessionRetirementIdentity:
@@ -90,19 +109,17 @@ def retained_tmux_session_births(
     for member in identity.members:
         if table is None:
             snapshot = process_identity_snapshot(member.pid)
-            if snapshot is None or snapshot.state == "Z" or snapshot.start_identity != member.start_identity:
+            if not _session_birth_is_current(member, snapshot):
                 continue
             try:
                 pgid = os.getpgid(member.pid)
-            except OSError:
+            except ProcessLookupError:
                 continue
+            except OSError as error:
+                raise SessionRetirementError(f"process group unavailable during tmux retirement: pid={member.pid}") from error
             # Fence the getpgid read against exit and PID reuse before publishing a survivor.
             current_snapshot = process_identity_snapshot(member.pid)
-            if (
-                current_snapshot is None
-                or current_snapshot.state == "Z"
-                or current_snapshot.start_identity != member.start_identity
-            ):
+            if not _session_birth_is_current(member, current_snapshot):
                 continue
             state = current_snapshot.state
             command = member.command
@@ -112,6 +129,8 @@ def retained_tmux_session_births(
                 continue
             pgid = current.pgid
             state = process_state(member.pid)
+            if state == "Z":
+                continue
             command = current.command
         retained.append(
             {

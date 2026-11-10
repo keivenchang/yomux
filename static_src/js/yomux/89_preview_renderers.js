@@ -957,8 +957,8 @@ function jsonLinesTablePreview(path, text, options = {}) {
   const overflowColumns = allColumns.slice(maxColumns);
   const rows = parsedRows.map(row => {
     if (!row.parsed) return {lineNumber: row.lineNumber, parsed: false, raw: row.raw};
-    const cells = columns.map(key => compactJsonLinesCell(row.record[key], maxCellChars));
-    const overflow = {};
+    const cells = columns.map(key => compactJsonLinesCell(Object.hasOwn(row.record, key) ? row.record[key] : undefined, maxCellChars));
+    const overflow = Object.create(null);
     for (const key of overflowColumns) {
       if (Object.hasOwn(row.record, key)) overflow[key] = row.record[key];
     }
@@ -1121,6 +1121,7 @@ function renderRawImagePreviewInto(container, path, state = null, options = {}) 
     context: options.context || '',
   })));
   container._previewAsync = installRawFileMediaSource(img, path, {
+    snapshot: options.snapshot === true,
     params: version ? {v: version} : {},
     isCurrent: () => container.contains(img),
     onFailure: error => scheduleRawMediaFallbackAfterUserScroll(container, img, 'raw-image-failure', () => (
@@ -1209,13 +1210,14 @@ function scheduleRawMediaFallbackAfterUserScroll(container, media, key, createFa
   return completion;
 }
 
-function renderNativeMediaPreviewInto(container, path, state = null, kind = 'audio') {
+function renderNativeMediaPreviewInto(container, path, state = null, kind = 'audio', options = {}) {
   const media = document.createElement(kind === 'video' ? 'video' : 'audio');
   media.className = `file-editor-native-media file-editor-native-${kind}`;
   media.controls = true;
   media.preload = 'metadata';
   container.replaceChildren(media, previewActionFallbackNode(t(kind === 'video' ? 'preview.video.title' : 'preview.audio.title'), `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
   container._previewAsync = installRawFileMediaSource(media, path, {
+    snapshot: options.snapshot === true,
     params: {v: rawFileMediaVersion(state)},
     isCurrent: () => container.contains(media),
     onFailure: error => scheduleRawMediaFallbackAfterUserScroll(container, media, 'raw-media-failure', () => (
@@ -1369,7 +1371,7 @@ function renderMarkdownPreviewStrategy({container, path, text, state, context, s
   container._previewText = text;
   container._previewDisplayMode = fileEditorPreviewDisplayMode;
   container._previewContext = context;
-  renderMarkdownPreviewInto(container, text, path, {context, readOnly: state?.historical === true, snapshot});
+  renderMarkdownPreviewInto(container, text, path, {context, readOnly: state ? !fileEditorStateWritable(state) : false, snapshot});
   return true;
 }
 
@@ -1385,9 +1387,9 @@ function renderHtmlPreviewStrategy({container, path, text, context, signature}) 
   renderHtmlPreviewInto(container, path, text);
   return true;
 }
-function renderImagePreviewStrategy({container, path, state, context, signature}) {
+function renderImagePreviewStrategy({container, path, state, context, signature, snapshot}) {
   if (!prepareRetainedPreviewStrategy(container, signature, '.file-editor-preview-image')) return false;
-  renderRawImagePreviewInto(container, path, state, {context});
+  renderRawImagePreviewInto(container, path, state, {context, snapshot});
   return true;
 }
 function renderPdfPreviewStrategy({container, path, signature}) {
@@ -1398,9 +1400,9 @@ function renderPdfPreviewStrategy({container, path, signature}) {
 function renderStructuredPreviewStrategy({container, path, text, renderer}) { renderStructuredPreviewInto(container, path, text, renderer); }
 function renderJsonLinesPreviewStrategy({container, path, text}) { renderJsonLinesTablePreviewInto(container, path, text); }
 function renderDelimitedPreviewStrategy({container, path, text, renderer}) { renderDelimitedPreviewInto(container, path, text, renderer); }
-function renderNativeMediaPreviewStrategy({container, path, state, renderer, signature}) {
+function renderNativeMediaPreviewStrategy({container, path, state, renderer, signature, snapshot}) {
   if (!prepareRetainedPreviewStrategy(container, signature, `.file-editor-native-${renderer.kind}`)) return false;
-  renderNativeMediaPreviewInto(container, path, state, renderer.kind);
+  renderNativeMediaPreviewInto(container, path, state, renderer.kind, {snapshot});
   return true;
 }
 function renderUnsupportedPreviewStrategy({container, path, state}) { renderUnsupportedPreviewInto(container, path, state); }

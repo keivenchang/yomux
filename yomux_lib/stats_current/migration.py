@@ -2232,7 +2232,7 @@ def migrate_current_v7_database(
             MigrationIssue("current_schema", source.name, str(V7_SCHEMA_VERSION)),
             MigrationIssue("ring_payload_rebuild", source.name, str(invalidated)),
         ),
-        1,
+        2,
         False,
     )
 

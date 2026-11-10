@@ -27,12 +27,7 @@ from tools.product_environment import product_env, product_env_name
 from tools.instance_isolation import normalize_yomux_environment
 
 MIGRATION_HOME = Path(".local/share/yomux-migrations")
-LEGACY_ROOT_KEYS = {
-    "config": product_env_name('CONFIG_DIR'),
-    "state": product_env_name('STATE_DIR'),
-    "cache": product_env_name('CACHE_DIR'),
-    "ca": product_env_name('CA_DIR'),
-}
+MIGRATION_CONFLICT_STATES = frozenset({"conflict_both_contain_data", "destination_only", "destination_exists", "source_symlink"})
 
 
 def utc_now() -> str:
@@ -59,6 +54,8 @@ def root_inventory(source: Path, target: Path, label: str) -> dict[str, Any]:
         state = "source_symlink"
     elif source_present and target_present:
         state = "conflict_both_contain_data"
+    elif source_present and path_present(target):
+        state = "destination_exists"
     elif source_present:
         state = "ready_to_move"
     elif target_present:
@@ -319,7 +316,7 @@ def prepare_mapping(roots: list[dict[str, str]], mapping_path: Path) -> dict[str
 
 
 def apply_mapping(mapping: dict[str, Any], mapping_path: Path) -> int:
-    conflicts = [entry for entry in mapping["entries"] if entry["state"] in {"conflict_both_contain_data", "destination_only", "source_symlink"}]
+    conflicts = [entry for entry in mapping["entries"] if entry["state"] in MIGRATION_CONFLICT_STATES]
     if conflicts:
         print("ERROR: data-root conflicts require manual resolution, including unsafe source roots; no roots were moved.", file=sys.stderr)
         print(json.dumps(conflicts, indent=2, sort_keys=True), file=sys.stderr)
@@ -360,14 +357,22 @@ def apply_mapping(mapping: dict[str, Any], mapping_path: Path) -> int:
 def rollback_mapping(mapping: dict[str, Any], mapping_path: Path) -> int:
     try:
         for entry in reversed(mapping["entries"]):
+            if entry["state"] in {"empty_or_missing", "ready_to_move", "rolled_back"}:
+                continue
+            if entry["state"] not in {"moved", "backed_up"}:
+                raise OSError(f"entry has no rollback ownership: {entry['state']}")
             source = Path(entry["source"])
             target = Path(entry["target"])
+            if source.is_symlink() or target.is_symlink():
+                raise OSError(f"rollback roots must be real directories: {source} and {target}")
             if path_present(source) and data_present(source) and path_present(target) and data_present(target):
                 raise FileExistsError(f"both rollback roots contain data: {source} and {target}")
             backup_value = entry.get("backup")
             backup = Path(backup_value) if backup_value else None
-            if path_present(target) and backup is not None:
-                if not backup.exists() or tree_signature(target) != tree_signature(backup):
+            if backup is None or backup.is_symlink() or not backup.is_dir():
+                raise OSError(f"recorded recovery backup is missing or unsafe: {backup}")
+            if path_present(target):
+                if tree_signature(target) != tree_signature(backup):
                     raise OSError(f"destination changed since migration; refusing rollback move: {target}")
             if path_present(target) and not path_present(source):
                 source.parent.mkdir(parents=True, exist_ok=True)
@@ -416,7 +421,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "dry-run":
         inventory = [root_inventory(Path(item["source"]), Path(item["target"]), item["label"]) for item in roots]
         print(json.dumps({"mode": "dry-run", "recovery_mapping": str(mapping_path), "roots": inventory}, indent=2, sort_keys=True))
-        return 2 if any(item["state"] in {"conflict_both_contain_data", "destination_only", "source_symlink"} for item in inventory) else 0
+        return 2 if any(item["state"] in MIGRATION_CONFLICT_STATES for item in inventory) else 0
     if args.mode == "rollback":
         if args.mapping is None:
             parser.error("rollback requires --mapping from a prior apply")

@@ -52,8 +52,8 @@ type AppendResult struct {
 }
 
 // PruneResult describes the retention changes committed by one maintenance
-// transaction. Coverage intervals that cross the cutoff are clipped so the
-// first retained sample still has an owning epoch, matching the Python store.
+// transaction. Retained coverage epochs keep their immutable start identity;
+// readers intersect those intervals with the requested display window.
 type PruneResult struct {
 	Observations, CoverageDeleted, CoverageClipped int
 	UsageAtoms                                     int
@@ -410,9 +410,8 @@ func (w *Writer) readDataVersionLockedAt(ctx context.Context, detect bool, now f
 		return err
 	}
 	changed := w.dataVersionReady && version != w.dataVersion
-	w.dataVersion = version
-	w.dataVersionReady = true
 	if detect && changed {
+		w.setPendingCacheUnavailable()
 		var generation, publishedGeneration int64
 		if err := w.db.QueryRowContext(ctx, "SELECT source_generation FROM schema_meta WHERE singleton=1").Scan(&generation); err != nil {
 			return err
@@ -438,6 +437,8 @@ func (w *Writer) readDataVersionLockedAt(ctx context.Context, detect bool, now f
 			return err
 		}
 	}
+	w.dataVersion = version
+	w.dataVersionReady = true
 	return nil
 }
 
@@ -466,7 +467,7 @@ func (w *Writer) ReconcileExternalMutationAt(ctx context.Context, now float64) e
 // immutable read-only URI prevents journal/WAL recovery from mutating the
 // source while this preflight runs.
 func validateWriterDatabaseReadOnly(ctx context.Context, path string) error {
-	db, err := sql.Open("sqlite3", writerReadOnlyURI(path))
+	db, err := sql.Open("sqlite3", SQLiteReadOnlyURI(path))
 	if err != nil {
 		return fmt.Errorf("open YO!stats database for read-only preflight: %w", err)
 	}
@@ -736,8 +737,7 @@ func (w *Writer) refreshPendingCache(ctx context.Context) error {
 }
 
 func writerURI(path string) string {
-	abs, _ := filepath.Abs(path)
-	return "file:" + filepath.ToSlash(abs) + "?_busy_timeout=5000"
+	return sqliteURI(path, "_busy_timeout=5000")
 }
 
 func (w *Writer) Close() error {
@@ -803,8 +803,7 @@ func (w *Writer) AppendWithCheckpointsAndRetire(ctx context.Context, batch Appen
 	return w.appendReplacingUsage(ctx, batch, checkpoints, retirement, nil)
 }
 
-func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, checkpoints []Checkpoint, retirement *CheckpointRetirement, replacement []UsageAtom) (AppendResult, error) {
-	var result AppendResult
+func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, checkpoints []Checkpoint, retirement *CheckpointRetirement, replacement []UsageAtom) (result AppendResult, appendErr error) {
 	if w == nil || w.db == nil || w.closed.Load() {
 		return result, errors.New("nil YO!stats writer")
 	}
@@ -820,6 +819,60 @@ func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, ch
 	}
 	phaseStarted = time.Now()
 	defer w.mutationMu.Unlock()
+	var failedCoverage *CoverageEpoch
+	if len(batch.CoverageEpochs) > 0 {
+		failedCoverage = &batch.CoverageEpochs[0]
+	} else if len(batch.UnavailableSpans) > 0 {
+		item := batch.UnavailableSpans[0]
+		failedCoverage = &CoverageEpoch{Family: item.Family, SourceID: item.SourceID, EpochID: item.EpochID, StartedAt: item.StartedAt, OwnerGeneration: item.OwnerGeneration}
+	}
+	defer func() {
+		if appendErr == nil {
+			return
+		}
+		var attributed *AppendError
+		if errors.As(appendErr, &attributed) {
+			detail := *attributed
+			if pruned := w.LastPrunedAt(); pruned > RetentionSeconds {
+				detail.PruneCutoff = pruned - RetentionSeconds
+			}
+			appendErr = &detail
+			return
+		}
+		detail := &AppendError{Collector: "writer", Reason: "append_failed", cause: appendErr}
+		// Only fixed validation reasons cross the health transport, never driver
+		// errors containing filesystem paths or transcript contents.
+		switch appendErr.Error() {
+		case "usage atom identity conflicts with stored data", "unavailable spans overlap", "unavailable span overlaps a coverage epoch", "unavailable span identity conflicts with stored data", "observation event identity conflicts with stored data", "usage tombstone does not match stored atom", "coverage epoch identity conflicts with stored data", "coverage epoch overlaps an unavailable span", "coverage epoch end cannot move backward", "coverage epoch start and cadence are immutable":
+			detail.Reason = appendErr.Error()
+		}
+		if failedCoverage != nil {
+			item := *failedCoverage
+			detail.Family = item.Family
+			detail.SourceID = opaqueIdentity(item.SourceID)
+			detail.Epoch = opaqueIdentity(item.EpochID)
+			detail.IncomingStart = item.StartedAt
+			detail.OwnerGeneration = item.OwnerGeneration
+			var stored float64
+			if err := w.db.QueryRowContext(ctx, "SELECT started_at FROM coverage_epochs WHERE family=? AND source_id=? AND epoch_id=?", item.Family, item.SourceID, item.EpochID).Scan(&stored); err == nil {
+				detail.StoredStart = &stored
+			}
+		} else if len(batch.Observations) > 0 {
+			item := batch.Observations[0]
+			detail.Family = item.Family
+			detail.SourceID = opaqueIdentity(item.SourceID)
+			detail.Epoch = opaqueIdentity(item.EpochID)
+			detail.OwnerGeneration = item.OwnerGeneration
+			detail.IncomingStart = item.ObservedAt
+		} else if len(batch.UsageAtoms) > 0 {
+			detail.Family = "agent_tokens"
+			detail.SourceID = opaqueIdentity(batch.UsageAtoms[0].EventID)
+		}
+		if pruned := w.LastPrunedAt(); pruned > RetentionSeconds {
+			detail.PruneCutoff = pruned - RetentionSeconds
+		}
+		appendErr = detail
+	}()
 	validationDone := false
 	defer func() {
 		if timings != nil && !validationDone {
@@ -943,9 +996,9 @@ func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, ch
 		}
 	}
 
-	for _, item := range batch.Observations {
-		payload, _ := json.Marshal(item.Payload)
-		payloadJSON := string(payload)
+	for index, item := range batch.Observations {
+		failedCoverage = &CoverageEpoch{Family: item.Family, SourceID: item.SourceID, EpochID: item.EpochID, StartedAt: item.ObservedAt, OwnerGeneration: item.OwnerGeneration}
+		payloadJSON := validated.observationPayloads[index]
 		var oldAt float64
 		var oldEpoch, oldPayload string
 		var oldGeneration uint64
@@ -966,6 +1019,7 @@ func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, ch
 		}
 	}
 	for _, item := range batch.CoverageEpochs {
+		failedCoverage = &item
 		var started, cadence float64
 		var ended sql.NullFloat64
 		var oldGen uint64
@@ -1001,6 +1055,7 @@ func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, ch
 		}
 	}
 	for _, item := range batch.UnavailableSpans {
+		failedCoverage = &CoverageEpoch{Family: item.Family, SourceID: item.SourceID, EpochID: item.EpochID, StartedAt: item.StartedAt, OwnerGeneration: item.OwnerGeneration}
 		var cadence float64
 		var oldReason string
 		var oldGen uint64
@@ -1031,12 +1086,19 @@ func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, ch
 			return rollback(errors.New("unavailable span identity conflicts with stored data"))
 		}
 	}
-	usageTimestamps, err := appendUsageAtoms(ctx, tx, batch.UsageAtoms, replacementConflicts, &result)
+	failedCoverage = nil
+	if len(batch.UsageAtoms) > 0 {
+		item := batch.UsageAtoms[0]
+		failedCoverage = &CoverageEpoch{Family: "agent_tokens", SourceID: item.EventID, StartedAt: item.ObservedAt}
+	}
+	usageTimestamps, err := appendUsageAtoms(ctx, tx, batch.UsageAtoms, validated.usagePayloads, replacementConflicts, &result)
 	if err != nil {
 		return rollback(err)
 	}
 	acceptedTimestamps = append(acceptedTimestamps, usageTimestamps...)
+	failedCoverage = nil
 	for _, item := range batch.UsageTombstones {
+		failedCoverage = &CoverageEpoch{Family: "agent_tokens", SourceID: item.EventID, StartedAt: item.ObservedAt}
 		var observed float64
 		var payloadJSON string
 		err = usageLookup.QueryRowContext(ctx, item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit).Scan(&observed, &payloadJSON)
@@ -1052,7 +1114,7 @@ func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, ch
 			return rollback(err)
 		}
 		if observed != item.ObservedAt || payload["quantity"] != item.Quantity || payload["provider"] != item.Provider || payload["model"] != item.Model || payload["thread_id"] != item.ThreadID || payload["execution_source"] != "codex" {
-			return rollback(errors.New("usage tombstone does not match stored atom"))
+			return rollback(&AppendError{Collector: "writer", Family: "agent_tokens", SourceID: opaqueIdentity(item.EventID), IncomingStart: item.ObservedAt, StoredStart: &observed, Reason: "usage tombstone does not match stored atom", cause: errors.New("usage tombstone does not match stored atom")})
 		}
 		if _, err = tx.ExecContext(ctx, "DELETE FROM usage_atoms WHERE event_id=? AND direction=? AND modality=? AND cache_role=? AND unit=?", item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit); err != nil {
 			return rollback(err)
@@ -1120,7 +1182,6 @@ func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, ch
 	// A failed refresh leaves the index fail-closed until the lifecycle owner
 	// reloads it from SQLite.
 	_ = w.refreshPendingCache(ctx)
-	_ = validated
 	if w.lifecycle != nil && changed > 0 {
 		w.lifecycle.NotifyAppend()
 	}
@@ -1129,7 +1190,7 @@ func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, ch
 
 // appendUsageAtoms batches identity reads and fresh inserts in the caller's
 // transaction. Duplicate and model-repair decisions keep their existing policy.
-func appendUsageAtoms(ctx context.Context, tx *sql.Tx, atoms []UsageAtom, skipped map[string]struct{}, result *AppendResult) ([]float64, error) {
+func appendUsageAtoms(ctx context.Context, tx *sql.Tx, atoms []UsageAtom, payloads []string, skipped map[string]struct{}, result *AppendResult) ([]float64, error) {
 	accepted := make([]float64, 0, len(atoms))
 	for start := 0; start < len(atoms); start += maxUsageStatementRows {
 		end := min(start+maxUsageStatementRows, len(atoms))
@@ -1168,11 +1229,7 @@ func appendUsageAtoms(ctx context.Context, tx *sql.Tx, atoms []UsageAtom, skippe
 			if _, changedSinceSnapshot := skipped[item.IdempotencyKey()]; changedSinceSnapshot {
 				continue
 			}
-			payload, err := json.Marshal(item.Payload)
-			if err != nil {
-				return nil, err
-			}
-			payloadJSON := string(payload)
+			payloadJSON := payloads[start+index]
 			old := existing[index]
 			if !old.found {
 				insertArgs = append(insertArgs, item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit, item.ObservedAt, payloadJSON)
@@ -1187,7 +1244,7 @@ func appendUsageAtoms(ctx context.Context, tx *sql.Tx, atoms []UsageAtom, skippe
 				updatedPayload, repaired, compatible = usageReplayPayloadChange(item.EventID, old.observed, old.payload, item.ObservedAt, payloadJSON)
 			}
 			if !compatible {
-				return nil, errors.New("usage atom identity conflicts with stored data")
+				return nil, &AppendError{Collector: "writer", Family: "agent_tokens", SourceID: opaqueIdentity(item.EventID), IncomingStart: item.ObservedAt, StoredStart: &old.observed, Reason: "usage atom identity conflicts with stored data", cause: errors.New("usage atom identity conflicts with stored data")}
 			}
 			if repaired {
 				if _, err := tx.ExecContext(ctx, "UPDATE usage_atoms SET payload_json=? WHERE event_id=? AND direction=? AND modality=? AND cache_role=? AND unit=?", updatedPayload, item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit); err != nil {
@@ -1251,9 +1308,8 @@ func (w *Writer) Prune(ctx context.Context, now float64) (PruneResult, error) {
 	if result.CoverageDeleted, err = execRowsAffected(ctx, tx, "DELETE FROM coverage_epochs WHERE ended_at IS NOT NULL AND ended_at <= ?", cutoff); err != nil {
 		return rollback(err)
 	}
-	if result.CoverageClipped, err = execRowsAffected(ctx, tx, "UPDATE coverage_epochs SET started_at = ? WHERE started_at < ? AND (ended_at IS NULL OR ended_at > ?)", cutoff, cutoff, cutoff); err != nil {
-		return rollback(err)
-	}
+	// Epoch starts are identities reused by live collectors. Readers intersect
+	// coverage with their requested window; retention must never rewrite identity.
 	if result.UnavailableDeleted, err = execRowsAffected(ctx, tx, "DELETE FROM unavailable_spans WHERE ended_at <= ?", cutoff); err != nil {
 		return rollback(err)
 	}

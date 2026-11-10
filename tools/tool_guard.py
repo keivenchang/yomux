@@ -100,27 +100,51 @@ def hold_host_tool_flock(
         handle.close()
 
 
-def _terminate_process_session(process: subprocess.Popen, grace_seconds: float) -> None:
-    """Signal the child's whole process session so the wrapper and its container are reaped."""
+def terminate_process_group(process: subprocess.Popen, grace_seconds: float = 10.0) -> None:
+    """Stop and reap one lane step's private session without waiting indefinitely."""
 
-    if process.poll() is not None:
-        return
+    # start_new_session=True makes the leader PID the process-group ID. Keep using that captured
+    # identity even when the leader has already exited but a descendant still owns the pipe.
+    process_group = process.pid
     try:
-        pgid = os.getpgid(process.pid)
+        os.killpg(process_group, signal.SIGTERM)
     except ProcessLookupError:
-        return
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    deadline = time.monotonic() + max(0.0, float(grace_seconds))
+        pass
+    except PermissionError:
+        # The process is ours, so still stop the leader if a platform refuses group signalling.
+        if process.poll() is None:
+            process.kill()
+    # The leader can exit while a descendant still owns stdout/stderr. Waiting only on the leader
+    # would return here and skip the forced group kill, leaving that descendant behind. Observe the
+    # private group itself for the grace window instead.
+    deadline = time.monotonic() + grace_seconds
     while time.monotonic() < deadline:
-        if process.poll() is not None:
-            return
-        time.sleep(0.05)
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(pgid, signal.SIGKILL)
-    process.wait()
+        process.poll()
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            break
+        except PermissionError:
+            break
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        if process.poll() is None:
+            process.kill()
+    try:
+        process.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        # SIGKILL cannot be ignored; this fallback keeps a broken platform implementation from
+        # turning the gate's timeout path back into an unbounded wait.
+        if process.poll() is None:
+            process.kill()
+        try:
+            process.wait(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def run_reaped_container_command(
@@ -143,5 +167,5 @@ def run_reaped_container_command(
     try:
         return process.wait()
     except BaseException:
-        _terminate_process_session(process, terminate_grace_seconds)
+        terminate_process_group(process, terminate_grace_seconds)
         raise

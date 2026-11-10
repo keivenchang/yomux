@@ -183,57 +183,12 @@ func parseSkill(data []byte, source, fallbackName string, builtin bool) (Skill, 
 	}
 	if value, exists := raw["model_intent"]; exists && value != nil {
 		intent, ok := value.(map[string]any)
-		if !ok || !builtin || !enabled || !validModelIntent(name, intent) {
+		skill.ModelIntent = intent
+		if _, valid := modelIntentFromSkill(skill); !ok || !valid {
 			return Skill{}, invalidSkill("model_intent must be a valid enabled built-in intent definition")
 		}
-		skill.ModelIntent = intent
 	}
 	return skill, nil
-}
-
-func validModelIntent(name string, intent map[string]any) bool {
-	handler, _ := intent["handler"].(string)
-	confirmation, _ := intent["confirmation"].(string)
-	candidate := object(intent["candidate"])
-	output := object(intent["output"])
-	defaults := object(intent["defaults"])
-	if candidate == nil || output == nil || defaults == nil || !slices.Contains([]string{"wait-roster-then-send", "wait-then-send", "loop-send"}, handler) || !skillNamePattern.MatchString(name) || !skillNamePattern.MatchString(handler) || confirmation != "required" && confirmation != "none" {
-		return false
-	}
-	if !modelIntentStringList(candidate["any_of"], true) || !modelIntentStringList(candidateValue(candidate, "require_any", []any{}), false) || !modelIntentStringList(candidateValue(candidate, "collective_terms", []any{}), false) {
-		return false
-	}
-	minimum, ok := modelIntentInteger(candidateValue(candidate, "min_known_sessions", 0))
-	if !ok || minimum < 0 {
-		return false
-	}
-	priority, ok := modelIntentInteger(candidateValue(candidate, "priority", 0))
-	if !ok || priority < 0 || priority > 100 {
-		return false
-	}
-	scope, _ := candidateValue(candidate, "session_scope", "condition").(string)
-	if scope != "condition" && scope != "request" {
-		return false
-	}
-	tag, _ := output["tag"].(string)
-	if !skillNamePattern.MatchString(tag) {
-		return false
-	}
-	schema := output["schema"]
-	if schemaName, ok := schema.(string); ok {
-		if schemaName != "delegated-prompt" && schemaName != "loop-send" {
-			return false
-		}
-	} else if object(schema) == nil {
-		return false
-	}
-	for _, value := range defaults {
-		switch value.(type) {
-		case nil, map[string]any, []any:
-			return false
-		}
-	}
-	return true
 }
 
 func candidateValue(candidate map[string]any, key string, fallback any) any {
@@ -415,14 +370,40 @@ func skillFilePath(configDir, kind, name string) (string, string, error) {
 	}
 	name = strings.TrimSpace(name)
 	suffix, directory := ".yaml", "skills.d"
+	suffixes := []string{".yaml", ".yml"}
 	if kind == "context" {
 		suffix, directory = ".md", "context.d"
+		suffixes = []string{".md"}
 	}
-	name = strings.TrimSuffix(name, suffix)
+	filename := name
+	extension := filepath.Ext(name)
+	if extension != "" {
+		if !slices.Contains(suffixes, strings.ToLower(extension)) {
+			return "", "", invalidSkill("file extension does not match its type")
+		}
+		name = strings.TrimSuffix(name, extension)
+	}
 	if name == "" || filepath.Base(name) != name || strings.ContainsAny(name, `/\\`) || !skillNamePattern.MatchString(name) {
 		return "", "", invalidSkill("file name must match [a-z][a-z0-9-]{1,63} and contain no path")
 	}
-	return kind, filepath.Join(configDir, directory, name+suffix), nil
+	if extension == "" {
+		filename = name + suffix
+		paths, err := regularFiles(filepath.Join(configDir, directory), suffixes...)
+		if err != nil {
+			return "", "", err
+		}
+		matched := false
+		for _, path := range paths {
+			if strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)) != name {
+				continue
+			}
+			if matched {
+				return "", "", invalidSkill("multiple files share this name; specify the file extension")
+			}
+			filename, matched = filepath.Base(path), true
+		}
+	}
+	return kind, filepath.Join(configDir, directory, filename), nil
 }
 
 func ReadUserSkillFile(configDir, kind, name string) (map[string]any, error) {
@@ -434,7 +415,7 @@ func ReadUserSkillFile(configDir, kind, name string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	payload := map[string]any{"kind": kind, "name": strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), "path": path, "text": string(data), "exists": true}
+	payload := map[string]any{"kind": kind, "name": strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), "filename": filepath.Base(path), "path": path, "text": string(data), "exists": true}
 	if kind == "skill" {
 		skill, parseErr := parseSkill(data, path, payload["name"].(string), false)
 		payload["valid"] = parseErr == nil
@@ -460,8 +441,7 @@ func ListUserSkillFiles(configDir string) map[string]any {
 			continue
 		}
 		for _, path := range paths {
-			name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-			payload, err := ReadUserSkillFile(configDir, group.kind, name)
+			payload, err := ReadUserSkillFile(configDir, group.kind, filepath.Base(path))
 			if err != nil {
 				issues = append(issues, map[string]any{"source": path, "diagnostic": err.Error()})
 				continue
@@ -520,7 +500,7 @@ func WriteUserSkillFile(ctx context.Context, configDir, kind, name, text string)
 	if err := os.Chmod(path, 0600); err != nil {
 		return nil, err
 	}
-	return ReadUserSkillFile(configDir, kind, name)
+	return ReadUserSkillFile(configDir, kind, filepath.Base(path))
 }
 
 func DeleteUserSkillFile(ctx context.Context, configDir, kind, name string) (result map[string]any, resultErr error) {
@@ -543,5 +523,5 @@ func DeleteUserSkillFile(ctx context.Context, configDir, kind, name string) (res
 	if err := os.Remove(path); err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "kind": kind, "name": strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), "path": path, "deleted": true}, nil
+	return map[string]any{"ok": true, "kind": kind, "name": strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), "filename": filepath.Base(path), "path": path, "deleted": true}, nil
 }

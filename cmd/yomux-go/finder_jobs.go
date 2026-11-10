@@ -83,7 +83,7 @@ func acceptedFinderJobParent(parent context.Context) context.Context {
 	return context.WithoutCancel(parent)
 }
 
-func finderReadyEnvelope(requestID string, payload map[string]any) map[string]any {
+func apiReadyEnvelope(requestID string, payload map[string]any) map[string]any {
 	envelope := map[string]any{
 		"state":    "ready",
 		"request":  map[string]any{"id": requestID},
@@ -148,7 +148,7 @@ func finderHTTPJSON(w http.ResponseWriter, requestID string, payload map[string]
 		jsonResponse(w, finderErr.Status, finderFailedEnvelope(requestID, finderErr))
 		return
 	}
-	jsonResponse(w, http.StatusOK, finderReadyEnvelope(requestID, payload))
+	jsonResponse(w, http.StatusOK, apiReadyEnvelope(requestID, payload))
 }
 
 func finderRequestIDForHTTP() string {
@@ -441,7 +441,7 @@ func finderJSONCompletion(requestID string, completed work.Result) (map[string]a
 	if !ok {
 		return finderJobFailure(errors.New("finder job returned an invalid result")), http.StatusInternalServerError
 	}
-	return finderReadyEnvelope(requestID, payload), http.StatusOK
+	return apiReadyEnvelope(requestID, payload), http.StatusOK
 }
 
 func finderJobFailure(err error) map[string]any {

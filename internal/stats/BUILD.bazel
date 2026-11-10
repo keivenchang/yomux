@@ -43,6 +43,7 @@ go_test_pair(
     shard_count = 8,
     deps = [
         SQLITE,
+        "//internal/tailfile:tailfile_lib",
         "//internal/testsupport:testsupport_lib",
         "@in_gopkg_yaml_v3//:go_default_library",
     ],

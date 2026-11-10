@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/keivenchang/yomux/internal/finder"
 )
@@ -117,13 +118,21 @@ func sessionFilesPlanRoots(plan sessionFilesPlan, roots []string) []string {
 
 func (s *server) sessionFilesPlanProduceWithInputs(ctx context.Context, plan sessionFilesPlan, roots []string, agents []finder.SessionFileAgent, emit func(map[string]any) error) (map[string]any, *finder.Error) {
 	request := plan.request
-	return s.finder.SessionFilesWithAgentsStream(ctx, request.session, roots, agents, request.hours, request.fromRef, request.toRef, request.repoRefs, emit)
+	started := time.Now()
+	hintedRoots := s.sessionFilesHintedRoots(plan, roots)
+	payload, err := s.finder.SessionFilesWithAgentsStreamHints(ctx, request.session, roots, hintedRoots, agents, request.hours, request.fromRef, request.toRef, request.repoRefs, emit)
+	if err == nil {
+		payload["discovery_roots"] = append([]string(nil), roots...)
+		payload["producer_ms"] = time.Since(started).Milliseconds()
+	}
+	return payload, err
 }
 
 func (s *server) sessionFilesPlanProduceAndCacheWithInputs(ctx context.Context, plan sessionFilesPlan, roots []string, agents []finder.SessionFileAgent, emit func(map[string]any) error) (map[string]any, *finder.Error) {
+
 	request := plan.request
 	generation := s.beginSessionFilesCacheWrite(plan.viewID)
-	payload, finderErr := s.sessionFilesPlanProduceWithInputs(ctx, plan, roots, agents, emit)
+	payload, finderErr := s.sharedSessionFilesProduce(ctx, plan, roots, agents, emit)
 	if finderErr != nil {
 		return payload, finderErr
 	}
@@ -136,6 +145,6 @@ func (s *server) sessionFilesPlanProduceAndCacheWithInputs(ctx context.Context, 
 
 func (s *server) sessionFilesPlanTaskWithInputs(plan sessionFilesPlan, roots []string, agents []finder.SessionFileAgent) func(context.Context) (map[string]any, *finder.Error) {
 	return func(ctx context.Context) (map[string]any, *finder.Error) {
-		return s.sessionFilesPlanProduceWithInputs(ctx, plan, roots, agents, nil)
+		return s.sharedSessionFilesProduce(ctx, plan, roots, agents, nil)
 	}
 }

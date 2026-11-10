@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/keivenchang/yomux/internal/atomicfile"
 	"github.com/mattn/go-sqlite3"
 	"golang.org/x/sys/unix"
 )
@@ -23,7 +24,7 @@ import (
 const indexTransientCeiling = int64(2 * 1024 * 1024 * 1024)
 
 func readOnlyIndex(path string) (*sql.DB, error) {
-	return sql.Open("sqlite3", "file:"+filepath.ToSlash(path)+"?mode=ro&_busy_timeout=5000")
+	return sql.Open("sqlite3", atomicfile.SQLiteURI(path, "mode=ro&_busy_timeout=5000"))
 }
 
 // Probe SQLite headers without opening SQLite: even mode=ro can create WAL
@@ -201,7 +202,7 @@ func (store *searchIndexStore) loadNormalizedPaths(ctx context.Context, root str
 }
 
 func validateIndex(path string) error {
-	db, err := sql.Open("sqlite3", "file:"+filepath.ToSlash(path)+"?mode=ro&immutable=1")
+	db, err := sql.Open("sqlite3", atomicfile.SQLiteURI(path, "mode=ro&immutable=1"))
 	if err != nil {
 		return err
 	}
@@ -392,7 +393,7 @@ func migrateSearchIndex(path string, initialPolicy ...*indexRequest) error {
 	if info.Size() > indexTransientCeiling {
 		return errors.New("Finder migration source exceeds transient ceiling")
 	}
-	original, err := sql.Open("sqlite3", "file:"+filepath.ToSlash(path)+"?_busy_timeout=5000")
+	original, err := sql.Open("sqlite3", atomicfile.SQLiteURI(path, "_busy_timeout=5000"))
 	if err != nil {
 		return err
 	}
@@ -423,7 +424,7 @@ func migrateSearchIndex(path string, initialPolicy ...*indexRequest) error {
 	}
 	defer candidate.db.Close()
 	candidate.db.SetMaxOpenConns(1)
-	sourceURI := "file:" + filepath.ToSlash(path) + "?mode=ro"
+	sourceURI := atomicfile.SQLiteURI(path, "mode=ro")
 	if _, err := candidate.db.Exec(`ATTACH DATABASE ? AS source`, sourceURI); err != nil {
 		return err
 	}

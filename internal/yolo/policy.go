@@ -559,22 +559,12 @@ func nestedPayloads(call invocation) []string {
 			}
 		}
 	}
+	if (command == "docker" || command == "podman") && len(args) > 1 && args[0] == "container" {
+		args = args[1:]
+	}
 	if (command == "docker" || command == "podman") && len(args) > 0 && (args[0] == "exec" || args[0] == "run") {
-		index := 1
-		entrypoint := ""
-		for index < len(args) && strings.HasPrefix(args[index], "-") {
-			option := args[index]
-			if strings.HasPrefix(option, "--entrypoint=") {
-				entrypoint = strings.TrimPrefix(option, "--entrypoint=")
-			}
-			index++
-			if !strings.Contains(option, "=") && dockerOptionTakesValue(option) && index < len(args) {
-				if option == "--entrypoint" {
-					entrypoint = args[index]
-				}
-				index++
-			}
-		}
+		parsed := parseDockerOptions(args[1:])
+		index, entrypoint := 1+parsed.next, parsed.entrypoint
 		if index < len(args) {
 			index++
 		}
@@ -713,20 +703,17 @@ func ambiguousWrapperTokens(tokens []string) bool {
 			}
 			continue
 		case "docker", "podman":
-			if index+1 >= len(tokens) || tokens[index+1] != "run" {
+			if index+1 < len(tokens) && strings.HasPrefix(tokens[index+1], "-") {
+				return true
+			}
+			if index+1 < len(tokens) && tokens[index+1] == "container" {
+				index++
+			}
+			if index+1 >= len(tokens) || (tokens[index+1] != "run" && tokens[index+1] != "exec") {
 				return false
 			}
-			entrypoint := ""
-			for optionIndex := index + 2; optionIndex < len(tokens) && strings.HasPrefix(tokens[optionIndex], "-"); optionIndex++ {
-				option := tokens[optionIndex]
-				if strings.HasPrefix(option, "--entrypoint=") {
-					entrypoint = strings.TrimPrefix(option, "--entrypoint=")
-				} else if option == "--entrypoint" && optionIndex+1 < len(tokens) {
-					entrypoint = tokens[optionIndex+1]
-					optionIndex++
-				}
-			}
-			return entrypoint != "" && !shells[filepath.Base(entrypoint)] || dockerRunMountsRoot(tokens[index+2:])
+			parsed := parseDockerOptions(tokens[index+2:])
+			return parsed.ambiguous || tokens[index+1] == "run" && (parsed.mountsRoot || parsed.entrypoint != "" && !shells[filepath.Base(parsed.entrypoint)])
 		default:
 			return false
 		}
@@ -734,38 +721,71 @@ func ambiguousWrapperTokens(tokens []string) bool {
 	return false
 }
 
-func dockerRunMountsRoot(options []string) bool {
-	for index := 0; index < len(options) && strings.HasPrefix(options[index], "-"); {
-		option := options[index]
-		value := ""
-		if strings.HasPrefix(option, "--mount=") {
-			value = strings.TrimPrefix(option, "--mount=")
-		} else if strings.HasPrefix(option, "--volume=") {
-			value = strings.TrimPrefix(option, "--volume=")
-		} else if strings.HasPrefix(option, "-v=") {
-			value = strings.TrimPrefix(option, "-v=")
-		} else {
-			index++
-			if dockerOptionTakesValue(option) && index < len(options) {
-				value = options[index]
-				index++
+type dockerOptions struct {
+	next       int
+	entrypoint string
+	mountsRoot bool
+	ambiguous  bool
+}
+
+// Parse only option forms whose argument boundary is known. Unknown separate
+// options fail closed: guessing their arity could hide a bind or shell payload.
+func parseDockerOptions(options []string) dockerOptions {
+	parsed := dockerOptions{}
+	for parsed.next < len(options) && strings.HasPrefix(options[parsed.next], "-") {
+		option := options[parsed.next]
+		parsed.next++
+		if option == "--" {
+			break
+		}
+		name, value, inline := strings.Cut(option, "=")
+		if !strings.HasPrefix(option, "--") {
+			// Docker permits clustered boolean flags followed by a value flag,
+			// for example -itv/:/host or -itv /:/host.
+			for len(name) > 2 && strings.ContainsRune("itd", rune(name[1])) {
+				name = "-" + name[2:]
+			}
+			if len(name) > 2 && strings.ContainsRune("uewvp", rune(name[1])) {
+				value, name, inline = name[2:], name[:2], true
 			}
 		}
-		if option == "-v" || option == "--volume" || strings.HasPrefix(option, "--volume=") || strings.HasPrefix(option, "-v=") {
-			if filepath.Clean(strings.SplitN(value, ":", 2)[0]) == "/" {
-				return true
+		if dockerOptionTakesValue(name) {
+			if !inline {
+				if parsed.next == len(options) {
+					parsed.ambiguous = true
+					return parsed
+				}
+				value = options[parsed.next]
+				parsed.next++
+			}
+			if value == "" {
+				parsed.ambiguous = true
+				return parsed
+			}
+		} else if !inline || !strings.HasPrefix(name, "--") {
+			switch name {
+			case "-i", "-t", "-d", "--interactive", "--tty", "--detach", "--rm", "--init", "--privileged", "--read-only":
+			default:
+				parsed.ambiguous = true
+				return parsed
 			}
 		}
-		if option == "--mount" || strings.HasPrefix(option, "--mount=") {
+		if name == "--entrypoint" {
+			parsed.entrypoint = value
+		}
+		if name == "-v" || name == "--volume" {
+			parsed.mountsRoot = parsed.mountsRoot || filepath.Clean(strings.SplitN(value, ":", 2)[0]) == "/"
+		}
+		if name == "--mount" {
 			for _, field := range strings.Split(value, ",") {
 				key, source, found := strings.Cut(field, "=")
 				if found && (key == "source" || key == "src") && filepath.Clean(source) == "/" {
-					return true
+					parsed.mountsRoot = true
 				}
 			}
 		}
 	}
-	return false
+	return parsed
 }
 
 func dockerOptionTakesValue(option string) bool {

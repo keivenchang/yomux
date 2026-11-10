@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import subprocess
@@ -28,6 +29,32 @@ def active_auth_yaml() -> str:
     password: "guest"
     role: "readonly"
 """
+
+
+@pytest.mark.parametrize("stored", [
+    "pbkdf2_sha256$0$salt$" + "00" * 32,
+    "pbkdf2_sha256$-1$salt$" + "00" * 32,
+    "pbkdf2_sha256$invalid$salt$" + "00" * 32,
+    "pbkdf2_sha256$18446744073709551616$salt$" + "00" * 32,
+    "pbkdf2_sha256$1$salt$\xe9",
+])
+def test_malformed_password_hash_denies_without_raising(stored):
+    assert auth.auth_password_matches("incorrect", stored) is False
+
+
+@pytest.mark.parametrize("hashed", [False, True])
+def test_unicode_credentials_use_the_native_utf8_contract(monkeypatch, hashed):
+    password = "p\xe4ssword"
+    stored = password
+    if hashed:
+        salt = "s\xe4lt"
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 1).hex()
+        stored = f"pbkdf2_sha256$1${salt}${digest}"
+    monkeypatch.setattr(auth, "current_auth_users", lambda: (auth.AuthUser("\u7528\u6237", stored, "admin"),))
+    identity = auth.auth_identity_for_credentials("\u7528\u6237", password)
+    assert identity is not None and identity.username == "\u7528\u6237"
+    assert auth.auth_identity_for_credentials("\u7528\u6237", "incorrect") is None
+    assert auth.auth_identity_for_credentials("other", password) is None
 
 
 def test_missing_auth_yaml_creates_commented_starter(monkeypatch, tmp_path):
@@ -174,6 +201,20 @@ def test_auth_cookie_secret_persists(tmp_path):
     assert secret_path.parent.stat().st_mode & 0o777 == 0o700
 
 
+def test_auth_cookie_secret_reuses_a_native_peer_published_during_generation(monkeypatch, tmp_path):
+    secret_path = tmp_path / "auth-cookie-secret"
+    peer_secret = b"p" * 32
+
+    def publish_peer_secret(size):
+        assert size == 32
+        secret_path.write_text(peer_secret.hex() + "\n", encoding="utf-8")
+        return b"l" * size
+
+    monkeypatch.setattr(auth.os, "urandom", publish_peer_secret)
+    assert auth.load_auth_cookie_secret(secret_path) == peer_secret
+    assert bytes.fromhex(secret_path.read_text().strip()) == peer_secret
+
+
 def test_auth_cookie_value_survives_secret_reload(monkeypatch, tmp_path):
     secret_path = tmp_path / "auth-cookie-secret"
 
@@ -184,9 +225,10 @@ def test_auth_cookie_value_survives_secret_reload(monkeypatch, tmp_path):
     assert common.auth_cookie_value("keivenc", "random-password") == first
 
 
-def test_invalid_auth_cookie_secret_is_rewritten(tmp_path):
+@pytest.mark.parametrize("invalid", [b"not-hex\n", b"\xff"])
+def test_invalid_auth_cookie_secret_is_rewritten(tmp_path, invalid):
     secret_path = tmp_path / "auth-cookie-secret"
-    secret_path.write_text("not-hex\n", encoding="utf-8")
+    secret_path.write_bytes(invalid)
 
     secret = common.load_auth_cookie_secret(secret_path)
 

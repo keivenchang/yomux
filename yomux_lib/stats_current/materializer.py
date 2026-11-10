@@ -17,6 +17,7 @@ from typing import Iterable
 from typing import Iterator
 from typing import Mapping
 
+from ..infra.numeric import is_finite_number
 from . import identity
 from .families import CURRENT_FAMILIES
 from .families import FAMILY_BY_NAME
@@ -53,7 +54,6 @@ MODEL_TOKEN_DIMENSIONS = ("output", "all", "input", "cache_read", "cache_write")
 TOKEN_DETAIL_DIMENSIONS = (
     "input", "cache_read", "cache_write_5m", "cache_write_1h", "output", "reasoning", "other",
 )
-MAX_PRIVATE_BROWSER_CLIENTS = 4
 MAX_CACHED_OBSERVATION_PROJECTIONS = 32_768
 PUBLIC_EXECUTION_SOURCES = frozenset({
     "claude", "codex", "opencode", "yoagent", "summary", "images", "responses",
@@ -665,138 +665,6 @@ def _updated_layer_buckets(
     return tuple(bucket for bucket in buckets if bucket is not None)
 
 
-# The open-cell ceiling a streaming full rebuild runs under. One cell per resolution, and no more,
-# because the read is ordered by `observed_at` so each resolution's cells arrive contiguously.
-#
-# It is `len(RESOLUTIONS)` and NOT `len(RESOLUTIONS) * (1 + MAX_PRIVATE_BROWSER_CLIENTS)`: private
-# browser overlays would multiply it, but `PrivateOverlay` is constructed nowhere in the product,
-# `Generation.private_overlays` is always the empty default, and `_updated_layer_buckets` is never
-# called with `private_source_id` -- the parameter exists for a path that only the serving side
-# uses, through `slice_generation`. Measured on a real full rebuild: four calls, one per
-# resolution, `private_source_id` None in every one. If overlays are ever built, this ceiling and
-# the assertion below must both change, which is why it is a formula over the live constants.
-MAX_OPEN_FOLD_CELLS = len(RESOLUTIONS)
-
-
-def _stream_full_layers(
-    observations: Iterable[Observation],
-    *,
-    bounds: Mapping[int, tuple[int, int]],
-    usage_cells: Mapping[object, list[_ProjectedUsageAtom]],
-    observed_until: float,
-    shared_gaps: tuple[NoData, ...],
-) -> tuple[Layer, ...]:
-    """Build every layer of a FULL rebuild from an ordered observation stream, closing as it goes.
-
-    Only valid when there is no previous generation and no dirty set, which is exactly the full
-    rebuild: `build_generation` calls `_build` with `previous=None, dirty=None`, and there
-    `_layer_fold_starts` returns every bucket start in the window, both splice guards in
-    `_updated_layer_buckets` are skipped, and its loop is already `sorted(touched)` ascending.
-    Measured on a real rebuild rather than assumed: four calls, `previous` and `dirty` None in all
-    four, `fold_starts` equal to every bucket start in all four. So the incremental path's
-    splice-and-patch is not something this has to reproduce -- it is the dirty path's shape.
-
-    **What is bounded.** At most `MAX_OPEN_FOLD_CELLS` folds are open at once, asserted below,
-    because the stream is ascending in `observed_at` so a resolution's cell is finished the moment
-    the cursor crosses its boundary. Measured by instrumenting this function over a 60,000-real-
-    observation fixture: 4 open cells holding **307** accumulators, against the 240,000
-    `_ProjectedObservation` objects the current path retains for that same fixture -- 782x fewer.
-
-    Two earlier figures for this exist and both are right about what they counted, so the fixture
-    has to travel with the number. **358 / 670x** is a hand-walk model built before this function
-    existed; it counted distinct `(series, source_id)` pairs, charging per source only for the
-    `*_average_sources` operations, which is not the shape `_SeriesFold` actually holds. Run side by
-    side on the identical fixture the two give 358 and 307. **The spec's ~330 accumulators against
-    617,243 objects is a different fixture** -- the production store rather than this 60,000-row
-    slice -- so its ~1,870x is not comparable to 782x and neither is wrong.
-
-    **What is deliberately NOT bounded here.** `usage_cells` is passed in whole, as the design
-    says: 74,011 usage atoms against 1.19 M observations is three orders of magnitude smaller and
-    is not the problem. A bucket takes its usage atoms at close, after its observations, which is
-    the order `_fold_bucket` uses and therefore the order the compensated sums see.
-    """
-
-    open_folds: dict[int, tuple[int, _BucketFold]] = {}
-    closed: dict[int, dict[int, Bucket]] = {resolution: {} for resolution in bounds}
-
-    def close(resolution: int) -> None:
-        start, fold = open_folds.pop(resolution)
-        for atom in usage_cells.get((resolution, start), ()):
-            fold.add_usage_atom(atom)
-        closed[resolution][start] = fold.close(start, resolution, observed_until)
-
-    for observation in observations:
-        projected = _ProjectedObservation(
-            observation.observed_at, _observation_samples(observation),
-        )
-        for resolution, (end, span) in bounds.items():
-            start = math.floor(observation.observed_at / resolution) * resolution
-            if not end - span <= start < end:
-                continue
-            current = open_folds.get(resolution)
-            if current is not None and current[0] != start:
-                if start < current[0]:
-                    raise MaterializationError(
-                        "streaming rebuild received observations out of order; the open-cell "
-                        "bound depends on an ascending observed_at read"
-                    )
-                close(resolution)
-            if resolution not in open_folds:
-                open_folds[resolution] = (start, _BucketFold())
-            open_folds[resolution][1].add_observation(projected)
-            if len(open_folds) > MAX_OPEN_FOLD_CELLS:
-                raise MaterializationError(
-                    f"streaming rebuild held {len(open_folds)} open cells against a ceiling of "
-                    f"{MAX_OPEN_FOLD_CELLS}; the read is no longer ordered"
-                )
-    for resolution in tuple(open_folds):
-        close(resolution)
-
-    layers = []
-    for resolution, (end, span) in bounds.items():
-        start = end - span
-        buckets = []
-        for bucket_start in range(start, end, resolution):
-            bucket = closed[resolution].get(bucket_start)
-            if bucket is None:
-                # A bucket with no observations still exists, and may still carry usage atoms.
-                empty = _BucketFold()
-                for atom in usage_cells.get((resolution, bucket_start), ()):
-                    empty.add_usage_atom(atom)
-                bucket = empty.close(bucket_start, resolution, observed_until)
-            buckets.append(bucket)
-        layers.append(Layer(
-            resolution, start, end, tuple(buckets), _clip_gaps(shared_gaps, start, end),
-        ))
-    return tuple(layers)
-
-
-def _private_browser_sources(snapshot: StoreSnapshot) -> tuple[str, ...]:
-    latest: dict[str, float] = {}
-    for observation in snapshot.observations:
-        if observation.family == "browser":
-            latest[observation.source_id] = max(
-                latest.get(observation.source_id, float("-inf")), observation.observed_at,
-            )
-    for epoch in snapshot.coverage_epochs:
-        if epoch.family == "browser":
-            observed_at = epoch.started_at if epoch.ended_at is None else epoch.ended_at
-            latest[epoch.source_id] = max(
-                latest.get(epoch.source_id, float("-inf")), observed_at,
-            )
-    for span in snapshot.unavailable_spans:
-        if span.family == "browser":
-            latest[span.source_id] = max(
-                latest.get(span.source_id, float("-inf")), span.ended_at,
-            )
-    return tuple(
-        source_id
-        for source_id, _observed_at in sorted(
-            latest.items(), key=lambda item: (-item[1], item[0]),
-        )[:MAX_PRIVATE_BROWSER_CLIENTS]
-    )
-
-
 def _fold_or_reuse_bucket(
     identity: DirtyCell,
     reusable: Bucket | None,
@@ -941,19 +809,7 @@ class _SeriesFold:
 
 
 class _BucketFold:
-    """Accumulate one bucket from its observations and usage atoms, and close it once.
-
-    This is the observation-side counterpart of `_CostDetailFold`, and the piece the streaming
-    rebuild needs: with the read ordered by `observed_at`, exactly one cell per resolution is open
-    at a time, so a caller that closes cells as the cursor passes them holds O(open cells x series)
-    instead of O(rows).
-
-    Measured by instrumenting `_stream_full_layers` over a 60,000-real-observation fixture: **4
-    cells open at peak holding 307 accumulators, against the 240,000 `_ProjectedObservation`
-    objects the current path retains for that fixture -- 782x fewer.** An earlier hand-walk model
-    of the same fixture said 358 and 670x; it counted a shape this class does not hold, and
-    `_stream_full_layers` carries the reconciliation.
-    """
+    """Accumulate one bucket from its observations and usage atoms."""
 
     __slots__ = ("_series", "_timestamps", "_first_at", "_last_at", "_cost")
 
@@ -1020,9 +876,8 @@ def _fold_bucket(
 ) -> Bucket:
     """The whole-input form, expressed as the fold so there is only one implementation.
 
-    Same reasoning as `_build_bucket_cost_detail`: a second reducing version beside the fold would
-    be two things to drift apart, and the equivalence that matters would be between two copies
-    rather than a property of one.
+    Feeding observations and usage through the same fold keeps their ordering and reductions
+    identical for all callers.
     """
 
     fold = _BucketFold()
@@ -1031,13 +886,6 @@ def _fold_bucket(
     for atom in usage_atoms:
         fold.add_usage_atom(atom)
     return fold.close(start, duration, observed_until)
-
-
-def _sample_values_by_source(values: Iterable[_Sample]) -> dict[str, list[int | float]]:
-    grouped: dict[str, list[int | float]] = {}
-    for value in values:
-        grouped.setdefault(value.source_id, []).append(value.value)
-    return grouped
 
 
 def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
@@ -1571,15 +1419,7 @@ class _CostDetailFold:
         source_identity = (atom.agent_key, atom.agent_source)
         source_row = self._sources.setdefault(
             source_identity,
-            {
-                "source": atom.agent_source,
-                "total_tokens": 0,
-                "total_micro_usd": 0,
-                "total_api_list_micro_usd": 0,
-                "dimensions": _empty_cost_dimensions(),
-                "priced": {"atoms": 0, "tokens": 0},
-                "unpriced": {"atoms": 0, "tokens": 0},
-            },
+            _empty_source(atom.agent_source),
         )
         _add_cost_atom_to_attribution(source_row, atom, "cost source attribution")
         if atom.evidence is not None:
@@ -1632,20 +1472,6 @@ class _CostDetailFold:
             max(0, len(self._agent_scores) - len(selected_agents)),
             max(0, len(self._evidence_scores) - len(selected_evidence)),
         )
-
-
-def _build_bucket_cost_detail(atoms: tuple[_CostDetailAtom, ...]) -> BucketCostDetail:
-    """The whole-input form, expressed as the fold so there is only one implementation.
-
-    Keeping a separate two-pass version would leave two things to drift apart, and the equivalence
-    that matters would be between two copies rather than a property of one. Feeding a whole tuple
-    in is now the degenerate case of feeding it in chunks.
-    """
-
-    fold = _CostDetailFold()
-    for atom in atoms:
-        fold.add(atom)
-    return fold.close()
 
 
 def _stable_detail_key(*values: str) -> str:
@@ -2497,12 +2323,12 @@ def _append_gap(gaps: list[NoData], gap: NoData) -> None:
         return
     if gaps and (
         gaps[-1].family, gaps[-1].source_id, gaps[-1].epoch_id,
-        gaps[-1].native_cadence_seconds, gaps[-1].end,
-    ) == (gap.family, gap.source_id, gap.epoch_id, gap.native_cadence_seconds, gap.start):
+        gaps[-1].native_cadence_seconds, gaps[-1].reason, gaps[-1].end,
+    ) == (gap.family, gap.source_id, gap.epoch_id, gap.native_cadence_seconds, gap.reason, gap.start):
         previous = gaps.pop()
         gaps.append(NoData(
             previous.family, previous.source_id, previous.epoch_id,
-            previous.start, gap.end, previous.native_cadence_seconds,
+            previous.start, gap.end, previous.native_cadence_seconds, previous.reason,
         ))
     else:
         gaps.append(gap)
@@ -2528,7 +2354,7 @@ def _clip_gaps(gaps: Iterable[NoData], start: float, end: float) -> tuple[NoData
 
 def _number(values: Mapping[str, object], name: str) -> float:
     value = values[name]
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+    if not is_finite_number(value):
         raise MaterializationError(f"{name} must be a finite number")
     return float(value)
 
@@ -2540,5 +2366,5 @@ def _optional_number(values: Mapping[str, object], name: str) -> float | None:
 def _validate_generation_inputs(source: int, cache: int, generated: float, observed: float) -> None:
     if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in (source, cache)):
         raise MaterializationError("generation numbers must be non-negative integers")
-    if any(not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 for value in (generated, observed)):
+    if any(not is_finite_number(value) or value < 0 for value in (generated, observed)):
         raise MaterializationError("generation timestamps must be finite and non-negative")

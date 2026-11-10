@@ -11,6 +11,84 @@ import (
 	"testing"
 )
 
+func TestUserSkillFilesPreserveAdmittedExtensions(t *testing.T) {
+	for _, extension := range []string{".yaml", ".yml", ".YAML", ".YML", ".md", ".MD"} {
+		t.Run(extension, func(t *testing.T) {
+			config := t.TempDir()
+			kind, directory, content := "skill", "skills.d", "name: local-status\ndescription: Initial\n"
+			if strings.EqualFold(extension, ".md") {
+				kind, directory, content = "context", "context.d", "Initial context\n"
+			}
+			path := filepath.Join(config, directory, "local-status"+extension)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			listing := ListUserSkillFiles(config)
+			files := listing["files"].([]map[string]any)
+			if listing["ok"] != true || len(files) != 1 || files[0]["path"] != path || files[0]["filename"] != filepath.Base(path) {
+				t.Fatalf("listing=%v", listing)
+			}
+			for _, name := range []string{"local-status", filepath.Base(path)} {
+				file, err := ReadUserSkillFile(config, kind, name)
+				if err != nil || file["path"] != path || file["text"] != content {
+					t.Fatalf("read %s=%v %v", name, file, err)
+				}
+				updated := strings.ReplaceAll(content, "Initial", "Updated")
+				file, err = WriteUserSkillFile(context.Background(), config, kind, name, updated)
+				if err != nil || file["path"] != path || file["text"] != updated {
+					t.Fatalf("write %s=%v %v", name, file, err)
+				}
+				content = updated
+			}
+			deleted, err := DeleteUserSkillFile(context.Background(), config, kind, "local-status")
+			if err != nil || deleted["path"] != path {
+				t.Fatalf("delete=%v %v", deleted, err)
+			}
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Fatalf("original file remains: %v", err)
+			}
+		})
+	}
+}
+
+func TestUserSkillFilesRejectAmbiguousBareNames(t *testing.T) {
+	config := t.TempDir()
+	for _, extension := range []string{".yaml", ".yml", ".YAML"} {
+		if _, err := WriteUserSkillFile(context.Background(), config, "skill", "local-status"+extension, "name: local-status\ndescription: "+extension); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listing := ListUserSkillFiles(config)
+	files := listing["files"].([]map[string]any)
+	if listing["ok"] != true || len(files) != 3 {
+		t.Fatalf("listing=%v", listing)
+	}
+	for _, file := range files {
+		filename := file["filename"].(string)
+		read, err := ReadUserSkillFile(config, "skill", filename)
+		if err != nil || read["path"] != file["path"] || !strings.Contains(read["text"].(string), filepath.Ext(filename)) {
+			t.Fatalf("explicit read=%v %v", read, err)
+		}
+	}
+	if _, err := ReadUserSkillFile(config, "skill", "local-status"); err == nil {
+		t.Fatal("ambiguous bare read selected a file")
+	}
+	if _, err := WriteUserSkillFile(context.Background(), config, "skill", "local-status", "name: local-status\ndescription: overwritten"); err == nil {
+		t.Fatal("ambiguous bare write selected a file")
+	}
+	if _, err := DeleteUserSkillFile(context.Background(), config, "skill", "local-status"); err == nil {
+		t.Fatal("ambiguous bare delete selected a file")
+	}
+	for _, file := range files {
+		if _, err := DeleteUserSkillFile(context.Background(), config, "skill", file["filename"].(string)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestLoadSkillSnapshotOverlaysUserSkillAndContext(t *testing.T) {
 	root, config := t.TempDir(), t.TempDir()
 	builtin := filepath.Join(root, "yomux_lib", "yoagent")

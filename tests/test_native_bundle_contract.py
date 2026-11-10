@@ -98,6 +98,13 @@ def test_locked_bundle_is_checked_without_running_tools(bundle, monkeypatch):
     assert admitted.executables["python3"] == bundle[0] / "bin/python3"
 
 
+def test_platform_tool_inventory_covers_darwin_normalization_and_fixture_commands():
+    darwin = contract.required_native_tools("Darwin")
+    assert {"shasum", "lsof", "vm_stat", "dd"}.issubset(darwin)
+    assert "sha256sum" not in darwin
+    assert {"shasum", "lsof", "vm_stat"}.issubset(contract.NATIVE_DARWIN_PLATFORM_TOOLS)
+
+
 @pytest.mark.parametrize("asset", tuple(contract.NATIVE_XTERM_ASSETS))
 def test_missing_xterm_fixture_refuses_even_a_newly_locked_bundle(bundle, asset):
     root, lock, manifest, _digest = bundle
@@ -408,6 +415,44 @@ def test_release_context_collects_pinned_git_facts_with_clean_environment(monkey
     assert context == {"revision": revision, "head_version_source": 'version: "1.2.3"\n',
                        "commit_subject": "Release YOmux 1.2.3",
                        "tags": {"v1.2.3": {"type": "tag", "subject": "YOmux 1.2.3"}}}
+
+
+def test_fixture_git_environment_preserves_only_its_locked_helper_directory(monkeypatch, tmp_path):
+    bundle = tmp_path / "bundle"
+    git_core = bundle / "compiler/libexec/git-core"
+    git_core.mkdir(parents=True)
+    helper = git_core / "git-upload-pack"
+    helper.write_text("fixture", encoding="utf-8")
+    helper.chmod(0o700)
+    monkeypatch.setenv("YOMUX_NATIVE_BUNDLE", str(bundle))
+    monkeypatch.setenv("GIT_EXEC_PATH", str(git_core))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/operator/credentials")
+    monkeypatch.setenv("GIT_DIR", "/foreign/repository")
+
+    environment = contract.repository_git_environment()
+
+    assert environment["GIT_EXEC_PATH"] == str(git_core.resolve())
+    assert "GIT_CONFIG_GLOBAL" not in environment
+    assert "GIT_DIR" not in environment
+
+
+def test_fixture_git_environment_rejects_locked_helper_directory_without_upload_pack(monkeypatch, tmp_path):
+    bundle = tmp_path / "bundle"
+    git_core = bundle / "compiler/libexec/git-core"
+    git_core.mkdir(parents=True)
+    monkeypatch.setenv("YOMUX_NATIVE_BUNDLE", str(bundle))
+    monkeypatch.setenv("GIT_EXEC_PATH", str(git_core))
+
+    assert "GIT_EXEC_PATH" not in contract.repository_git_environment()
+
+
+def test_fixture_git_environment_discards_unrelated_helper_directories(monkeypatch, tmp_path):
+    bundle = tmp_path / "bundle"
+    (bundle / "compiler/libexec/git-core").mkdir(parents=True)
+    monkeypatch.setenv("YOMUX_NATIVE_BUNDLE", str(bundle))
+    monkeypatch.setenv("GIT_EXEC_PATH", "/operator/git-core")
+
+    assert "GIT_EXEC_PATH" not in contract.repository_git_environment()
 
 
 @pytest.mark.parametrize("case", ["valid", "missing", "revision", "tag"])

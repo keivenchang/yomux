@@ -5,10 +5,12 @@
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 
 import pytest
@@ -27,10 +29,20 @@ def native_launch_environment(tmp_path):
     binary = go_test_server_binary(REPO)
     executable_path = tmp_path / "bin"
     executable_path.mkdir()
-    for command in ("bash", "env", "dirname", "uname", "sha256sum", "mkdir", "cp", "mv", "rm", "chmod", "tmux", "git", "ps", "sh"):
+    commands = ("bash", "env", "dirname", "uname", "sha256sum", "mkdir", "cp", "mv", "rm", "chmod", "tmux", "git", "ps", "sh")
+    if sys.platform == "darwin":
+        commands += ("lsof",)
+    for command in commands:
         source = shutil.which(command)
         assert source, command
-        shutil.copy2(source, executable_path / command)
+        destination = executable_path / command
+        if sys.platform == "darwin":
+            # macOS kills relocated platform-signed tools such as lsof. Keep
+            # their executable identity while exposing no Python on PATH.
+            destination.write_text(f'#!/bin/sh\nexec {shlex.quote(source)} "$@"\n')
+            destination.chmod(0o755)
+        else:
+            shutil.copy2(source, destination)
     runtime = tempfile.TemporaryDirectory(prefix="yn-", dir=short_temp_base())
     runtime_root = Path(runtime.name)
     environment = synthetic_test_environment({

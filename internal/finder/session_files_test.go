@@ -761,6 +761,11 @@ func TestSessionFilesStreamReplacesEachAttributedRepositoryOnce(t *testing.T) {
 	if len(chunks) != 4 {
 		t.Fatalf("stream chunks = %d, want initial plus metadata, Git-ref, and attribution replacements: %#v", len(chunks), chunks)
 	}
+	for index, chunk := range chunks {
+		if got, want := chunk["attribution_complete"], index == len(chunks)-1; got != want {
+			t.Fatalf("chunk %d attribution_complete = %v, want %v", index, got, want)
+		}
+	}
 	for index := 1; index < len(chunks); index++ {
 		if chunks[index]["replace_repo"] != true {
 			t.Fatalf("replacement chunk %d = %#v, want replace_repo=true", index, chunks[index])

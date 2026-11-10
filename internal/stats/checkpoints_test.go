@@ -250,7 +250,7 @@ func TestCheckpointMigrationPairsBackupAndFencesOldWriter(t *testing.T) {
 	if err := w.db.QueryRow("SELECT source_digest FROM migration_reconciliation WHERE migration_id='go-checkpoints-v1'").Scan(&backup); err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite3", writerReadOnlyURI(filepath.Join(backup, filepath.Base(path))))
+	db, err := sql.Open("sqlite3", SQLiteReadOnlyURI(filepath.Join(backup, filepath.Base(path))))
 	if err != nil {
 		t.Fatal(err)
 	}

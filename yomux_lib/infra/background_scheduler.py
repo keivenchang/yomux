@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import queue
 import threading
 import time
@@ -16,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .host_identity import current_host_identity
+from .host_identity import pid_is_alive
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,20 +59,6 @@ class BackgroundRoleState:
     refresh_requests: int = 0
     fallback_count: int = 0
     last_error: str = ""
-
-
-def pid_is_alive(pid: int) -> bool:
-    """Return basic liveness for local-service record readers."""
-
-    if int(pid) <= 0:
-        return False
-    try:
-        os.kill(int(pid), 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 class BackgroundScheduler:

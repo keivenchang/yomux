@@ -5,12 +5,56 @@ package finder
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type watchDiffProbeContext struct {
+	context.Context
+	checks atomic.Int64
+}
+
+func (c *watchDiffProbeContext) Done() <-chan struct{} {
+	c.checks.Add(1)
+	return c.Context.Done()
+}
+
+func TestWatchDiffDoesNotTraverseUnsubscribedDescendants(t *testing.T) {
+	s, root := newTestService(t, nil)
+	nested := filepath.Join(root, "src", "nested")
+	if err := os.Mkdir(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.WatchRoots(context.Background(), map[string]any{
+		"client_id": "finder", "roots": []any{root}, "root_surfaces_version": 1,
+		"root_surfaces": []any{map[string]any{"path": root, "surfaces": []any{"finder"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	probe := func() int64 {
+		ctx := &watchDiffProbeContext{Context: context.Background()}
+		if _, err := s.WatchDiff(ctx, "", true); err != nil {
+			t.Fatal(err)
+		}
+		return ctx.checks.Load()
+	}
+	before := probe()
+	for i := 0; i < 64; i++ {
+		if err := os.WriteFile(filepath.Join(nested, fmt.Sprintf("%d.data", i)), []byte("nested"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if after := probe(); after != before {
+		t.Fatalf("full baseline work grew with unsubscribed descendants: %d -> %d context checks", before, after)
+	}
+}
 
 type shutdownNativeWatcher struct {
 	events  chan nativeWatchEvent
@@ -152,4 +196,33 @@ func TestWatchCloseCancelsActiveRegistration(t *testing.T) {
 		t.Fatal("Close did not cancel registration")
 	}
 	<-registrationDone
+}
+
+func TestWatchDiffReportsRegisteredFileMissingAfterParentRename(t *testing.T) {
+	s, root := newTestService(t, nil)
+	parent := filepath.Join(root, "src")
+	path := filepath.Join(parent, "watched.txt")
+	if err := os.WriteFile(path, []byte("base"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	registration, failure := s.WatchRoots(context.Background(), map[string]any{
+		"client_id": "parent-rename", "roots": []any{root}, "files": []any{path},
+	})
+	if failure != nil {
+		t.Fatal(failure)
+	}
+	if err := os.Rename(parent, filepath.Join(root, "renamed-parent")); err != nil {
+		t.Fatal(err)
+	}
+	s.noteChange([]string{path}, "rename")
+	for _, full := range []bool{false, true} {
+		result, failure := s.WatchDiff(context.Background(), registration["watch_token"].(string), full)
+		if failure != nil {
+			t.Fatalf("full=%v: vanished parent rejected watch diff: %v", full, failure)
+		}
+		files := result["files"].([]any)
+		if len(files) != 1 || !reflect.DeepEqual(files[0].(map[string]any)["signature"], []any{path, "missing"}) {
+			t.Fatalf("full=%v: missing signature = %v", full, files)
+		}
+	}
 }

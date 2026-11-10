@@ -30,6 +30,7 @@ from yomux_lib.infra import common
 from yomux_lib.infra.filesystem_preflight import preflight_mutable_roots
 from yomux_lib.infra.host_partition import host_partitioned_state_dir
 
+from ..infra.numeric import is_finite_number
 from . import identity
 from . import resolution as stats_resolution
 from tools.product_environment import product_env
@@ -792,12 +793,9 @@ def _validate_text(
 
 
 def _validate_timestamp(value: object, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_finite_number(value) or value < 0:
         raise StorageValidationError(f"{name} must be a finite timestamp")
-    timestamp = float(value)
-    if not math.isfinite(timestamp) or timestamp < 0:
-        raise StorageValidationError(f"{name} must be a finite timestamp")
-    return timestamp
+    return float(value)
 
 
 def retention_covers_display_window() -> bool:
@@ -895,7 +893,11 @@ def _ring_bucket_values(bucket: RingBucketWrite) -> tuple[int, int, int, str | b
         raise StorageValidationError("bucket_start must align to resolution_seconds")
     if not isinstance(bucket.bucket_json, str):
         raise StorageValidationError("bucket_json must be a JSON object")
-    if len(bucket.bucket_json.encode("utf-8")) > MAX_RING_BUCKET_BYTES:
+    try:
+        encoded_size = len(bucket.bucket_json.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise StorageValidationError("bucket_json must contain valid UTF-8 text") from error
+    if encoded_size > MAX_RING_BUCKET_BYTES:
         raise StorageValidationError(
             f"bucket_json exceeds {MAX_RING_BUCKET_BYTES} bytes"
         )
@@ -3187,9 +3189,7 @@ class Store:
         recorded_marker = value.get("last_vacuumed_at")
         recorded_ratio = value.get("reclaimable_ratio")
         for candidate in (recorded_marker, recorded_ratio):
-            if isinstance(candidate, bool) or not isinstance(candidate, (int, float)):
-                return 0.0
-            if not math.isfinite(float(candidate)) or float(candidate) < 0:
+            if not is_finite_number(candidate) or candidate < 0:
                 return 0.0
         # A ratio is a fraction of the file, so above 1.0 is impossible. `_record_vacuum_baseline`
         # is bounded by construction and cannot write one, which makes this corruption -- and an
@@ -4101,9 +4101,7 @@ class Store:
         if not isinstance(value, dict):
             return 0.0
         recorded = value.get("last_pruned_at")
-        if isinstance(recorded, bool) or not isinstance(recorded, (int, float)):
-            return 0.0
-        if not math.isfinite(float(recorded)) or float(recorded) < 0:
+        if not is_finite_number(recorded) or recorded < 0:
             return 0.0
         return float(recorded)
 
@@ -4228,11 +4226,8 @@ def _prune_retained_facts(connection: sqlite3.Connection, cutoff: float) -> Prun
         "DELETE FROM coverage_epochs WHERE ended_at IS NOT NULL AND ended_at <= ?",
         (cutoff,),
     ).rowcount
-    coverage_clipped = connection.execute(
-        "UPDATE coverage_epochs SET started_at = ? "
-        "WHERE started_at < ? AND (ended_at IS NULL OR ended_at > ?)",
-        (cutoff, cutoff, cutoff),
-    ).rowcount
+    # Retained epoch starts are immutable collector identities. Moving one to the cutoff
+    # makes the next sample conflict with its own still-active epoch.
     unavailable_deleted = connection.execute(
         "DELETE FROM unavailable_spans WHERE ended_at <= ?", (cutoff,)
     ).rowcount
@@ -4248,7 +4243,7 @@ def _prune_retained_facts(connection: sqlite3.Connection, cutoff: float) -> Prun
     return PruneResult(
         observations,
         coverage_deleted,
-        coverage_clipped,
+        0,
         usage_atoms,
         0,
         unavailable_deleted,

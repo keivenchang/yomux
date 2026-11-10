@@ -112,12 +112,13 @@ def _git_with_pinned_repo_process(
     use_fchdir_cwd = sys.platform == "darwin"
     repo_cwd_args = [] if use_fchdir_cwd else ["-C", str(repo.descriptor_path())]
     popen_extra_kwargs: dict[str, Any] = {"preexec_fn": lambda: os.fchdir(repo.descriptor)} if use_fchdir_cwd else {}
-    args_with_repo = ["git", *repo_cwd_args, *args]
+    repo_options = [*repo_cwd_args, "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}"]
+    args_with_repo = ["git", *repo_options, *args]
     process_env = None
     if git_dir_handle is not None:
         args_with_repo = [
             "git",
-            *repo_cwd_args,
+            *repo_options,
             "-c",
             "advice.graftFileDeprecated=false",
             *args,
@@ -308,7 +309,7 @@ def _git_with_pinned_repo(
 
 
 def _read_small_git_control_file(directory_fd: int, relative_path: str) -> str | None:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = paths.descriptor_open_flags(os.O_RDONLY)
     try:
         descriptor = os.open(relative_path, flags, dir_fd=directory_fd)
     except OSError:
@@ -471,20 +472,21 @@ def authorized_repo_root(raw_path: str | Path, *, operation: str) -> Path | None
 def pinned_repo_path(handle: paths.SafePathHandle, *, operation: str = ""):
     """Keep one authorized Git control/index generation live through a namespace move."""
 
-    try:
-        with pinned_git_scope_from_handle(
-            handle,
-            target_path=handle.resolved,
-            operation=operation,
-            deadline=time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS,
-            include_index=True,
-            index_mutation=True,
-        ) as scope:
-            yield scope
-    except paths.FilesystemError as error:
-        if error.message_key != "fs.error.notGitRepo":
-            raise
-        yield None
+    with contextlib.ExitStack() as stack:
+        try:
+            scope = stack.enter_context(pinned_git_scope_from_handle(
+                handle,
+                target_path=handle.resolved,
+                operation=operation,
+                deadline=time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS,
+                include_index=True,
+                index_mutation=True,
+            ))
+        except paths.FilesystemError as error:
+            if error.message_key != "fs.error.notGitRepo":
+                raise
+            scope = None
+        yield scope
 
 
 def git_branch_state(
@@ -1589,7 +1591,7 @@ def _git_read_namespace(
                 entries.append(ref_entry)
                 ref_descriptor = os.open(
                     parts[-1],
-                    os.O_RDONLY | paths.nofollow_flag(),
+                    paths.descriptor_open_flags(os.O_RDONLY),
                     dir_fd=current_fd,
                 )
                 try:
@@ -2162,7 +2164,7 @@ def _materialize_pinned_loose_object(
             return None
         source_descriptor = os.open(
             suffix,
-            os.O_RDONLY | paths.nofollow_flag() | getattr(os, "O_CLOEXEC", 0),
+            paths.descriptor_open_flags(os.O_RDONLY),
             dir_fd=parent_handle.descriptor,
         )
         try:
@@ -2990,7 +2992,7 @@ def _git_shallow_snapshot(
     deadline: float,
 ) -> tuple[str, bytes]:
     _ensure_git_view_deadline(deadline)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = paths.descriptor_open_flags(os.O_RDONLY)
     try:
         descriptor = os.open("shallow", flags, dir_fd=git_common_dir_handle.descriptor)
     except FileNotFoundError:
@@ -3965,7 +3967,7 @@ def publish_pinned_index_rename(scope: PinnedGitHistoryScope) -> None:
     try:
         source_descriptor = os.open(
             private_index,
-            os.O_RDONLY | paths.nofollow_flag() | getattr(os, "O_CLOEXEC", 0),
+            paths.descriptor_open_flags(os.O_RDONLY),
         )
     except OSError as error:
         raise _history_error(
@@ -4964,7 +4966,7 @@ def _git_read_namespace_key(scope: BoundedGitReadScope) -> str:
     try:
         descriptor = os.open(
             "config",
-            os.O_RDONLY | paths.nofollow_flag(),
+            paths.descriptor_open_flags(os.O_RDONLY),
             dir_fd=scope.git_common_dir_handle.descriptor,
         )
     except FileNotFoundError:
@@ -4983,7 +4985,7 @@ def _git_read_namespace_key(scope: BoundedGitReadScope) -> str:
     return hashlib.sha256(repr((scope.read_namespace, config_digest)).encode("utf-8")).hexdigest()
 
 
-def _git_repository_identity_key(scope: BoundedGitReadScope) -> str:
+def _git_repository_identity_key(scope: BoundedGitReadScope | PinnedGitHistoryScope) -> str:
     identity = tuple(
         (handle.stat_result.st_dev, handle.stat_result.st_ino)
         for handle in (
@@ -5801,7 +5803,7 @@ def _diff_file_from_safe_path(
             untracked = False
             result = _run_direct_bounded_git(
                 scope,
-                ["diff", diff_from, diff_to, "--", rel_path],
+                ["diff", "--no-ext-diff", "--no-textconv", diff_from, diff_to, "--", rel_path],
                 operation="gitDiff",
                 timeout=5.0,
                 max_output_bytes=paths.MAX_READ_BYTES + 1,
@@ -5865,11 +5867,10 @@ def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = N
 
 
 # Inline git blame for the editor. PR number is extracted from the commit summary the same
-# way the metadata code does (`(#1234)`). Cached per (path, HEAD sha, file mtime, ref) because blame is
-# expensive and only changes when the file or HEAD moves.
+# way the metadata code does (`(#1234)`). Cache identity includes repository and file generations
+# because an atomic replacement can preserve the previous file's modification time.
 _BLAME_PR_RE = re.compile(r"\(#(\d+)\)")
-_BLAME_SHA_RE = re.compile(r"[0-9a-f]{40}")
-_blame_cache: dict[tuple[str, str, int, str], dict[str, Any]] = {}
+_blame_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
 
 
 def _parse_blame_porcelain(text: str) -> dict[str, dict[str, Any]]:
@@ -5884,7 +5885,7 @@ def _parse_blame_porcelain(text: str) -> dict[str, dict[str, Any]]:
         if raw[0] == "\t":
             if final_line is not None:
                 info = meta.get(cur_sha, {})
-                uncommitted = cur_sha == "0" * 40
+                uncommitted = cur_sha == "0" * len(cur_sha)
                 summary = info.get("summary", "")
                 pr = _BLAME_PR_RE.search(summary)
                 lines[str(final_line)] = {
@@ -5896,7 +5897,7 @@ def _parse_blame_porcelain(text: str) -> dict[str, dict[str, Any]]:
                 }
             continue
         parts = raw.split(" ", 3)
-        if parts and _BLAME_SHA_RE.fullmatch(parts[0]) and len(parts) >= 3:
+        if parts and _GIT_OBJECT_ID_RE.fullmatch(parts[0]) and len(parts) >= 3:
             cur_sha = parts[0]
             final_line = int(parts[2])
             meta.setdefault(cur_sha, {})
@@ -5942,9 +5943,13 @@ def _blame_file_from_safe_path(
                 allow_failure=True,
             )
             head_sha = (head.stdout or "").strip() if head.returncode == 0 else ""
-            mtime_ns = file_handle.stat_result.st_mtime_ns
+            metadata = file_handle.stat_result
             use_ref = ref if (ref and ref not in {"current", "working", "HEAD", ""}) else ""
-            cache_key = (str(path), head_sha, mtime_ns, use_ref)
+            cache_key = (
+                str(path), _git_repository_identity_key(scope), head_sha,
+                metadata.st_dev, metadata.st_ino, metadata.st_size,
+                metadata.st_mtime_ns, metadata.st_ctime_ns, use_ref,
+            )
             cached = _blame_cache.get(cache_key)
             if cached is not None:
                 return cached

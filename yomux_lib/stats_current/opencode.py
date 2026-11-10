@@ -22,6 +22,8 @@ import shlex
 from typing import Literal, cast
 from urllib.parse import quote
 
+from ..infra.numeric import is_finite_number
+
 from ..infra.atomic_file import atomic_write_text
 from ..infra.common import STATE_DIR
 from ..infra.common import canonical_yomux_working_directory
@@ -798,6 +800,26 @@ def read_usage(
             connection.close()
 
 
+def _sqlite_milliseconds(value: object) -> int:
+    if not is_finite_number(value):
+        raise ValueError("invalid-time")
+    milliseconds = float(value) * 1000
+    if not is_finite_number(milliseconds) or not -(1 << 63) <= milliseconds < 1 << 63:
+        raise ValueError("invalid-time")
+    return int(milliseconds)
+
+
+def _tool_start_milliseconds(value: object) -> int | None | OpenCodeUnavailable:
+    if value is None:
+        return None
+    if not is_finite_number(value) or value < 0:
+        return OpenCodeUnavailable("invalid-tool-start-time")
+    try:
+        return _sqlite_milliseconds(value)
+    except ValueError:
+        return OpenCodeUnavailable("invalid-tool-start-time")
+
+
 def _read_tool_inputs_uncached(
     database: Path = DEFAULT_DATABASE_PATH,
     *,
@@ -811,8 +833,9 @@ def _read_tool_inputs_uncached(
         raise ValueError("OpenCode SQLite bounds must be positive")
     if not _bounded_text(session_id):
         return OpenCodeUnavailable("invalid-session-id")
-    if after is not None and (not isinstance(after, (int, float)) or not math.isfinite(float(after)) or after < 0):
-        return OpenCodeUnavailable("invalid-tool-start-time")
+    after_milliseconds = _tool_start_milliseconds(after)
+    if isinstance(after_milliseconds, OpenCodeUnavailable):
+        return after_milliseconds
     connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(
@@ -843,9 +866,9 @@ def _read_tool_inputs_uncached(
             "AND json_extract(data, '$.tool') IN (?, ?, ?, ?) "
         )
         parameters: list[object] = [MAX_TOOL_INPUT_BYTES, MAX_TOOL_INPUT_BYTES, MAX_TOOL_INPUT_BYTES, session_id, *_EDIT_TOOL_NAMES]
-        if after is not None:
+        if after_milliseconds is not None:
             query += "AND time_updated >= ? "
-            parameters.append(int(float(after) * 1000))
+            parameters.append(after_milliseconds)
         query += "ORDER BY time_updated DESC, id DESC LIMIT ?"
         parameters.append(max_parts)
         rows = connection.execute(query, parameters).fetchall()
@@ -936,7 +959,9 @@ def read_tool_inputs(
     """Read cached bounded OpenCode edit inputs, invalidated by the database/WAL identity."""
 
     database_path = database.expanduser().resolve(strict=False)
-    after_milliseconds = None if after is None else int(float(after) * 1000)
+    after_milliseconds = _tool_start_milliseconds(after)
+    if isinstance(after_milliseconds, OpenCodeUnavailable):
+        return after_milliseconds
     cached = _cached_tool_inputs(
         str(database_path), session_id, max_parts, after_milliseconds, tool_database_revision(database_path),
     )
@@ -957,9 +982,13 @@ def _database_session_candidates(
 ) -> tuple[str, ...]:
     """Return bounded session candidates for one process cwd/start boundary."""
 
+    if now is not None and not is_finite_number(now):
+        return ()
     current = float(now if now is not None else time.time())
     lower = current - DEFAULT_SESSION_MAX_AGE_SECONDS
-    if started_at is not None and math.isfinite(float(started_at)):
+    if started_at is not None:
+        if not is_finite_number(started_at):
+            return ()
         lower = max(lower, float(started_at) - DEFAULT_SESSION_START_SKEW_SECONDS)
     upper = current + DEFAULT_FUTURE_SKEW_SECONDS
     canonical_directory = _canonical_directory(directory)
@@ -978,7 +1007,7 @@ def _database_session_candidates(
         rows = connection.execute(
             'SELECT id, directory FROM "session" '
             "WHERE time_updated >= ? AND time_updated <= ? ORDER BY time_updated DESC, id DESC LIMIT ?",
-            (int(lower * 1000), int(upper * 1000), max_sessions + 1),
+            (_sqlite_milliseconds(lower), _sqlite_milliseconds(upper), max_sessions + 1),
         ).fetchall()
         return tuple(
             candidate
@@ -1017,6 +1046,8 @@ def session_id_for_terminal_title(
         return None
     canonical_directory = _canonical_directory(directory)
     directory_aliases = yomux_working_directory_aliases(directory)
+    if now is not None and not is_finite_number(now):
+        return None
     current = float(now if now is not None else time.time())
     if not math.isfinite(current) or max_sessions <= 0 or max_session_age_seconds <= 0 or future_skew_seconds < 0:
         return None
@@ -1052,8 +1083,8 @@ def session_id_for_terminal_title(
             "ORDER BY time_updated DESC, id DESC LIMIT ?",
             (
                 *directory_aliases,
-                int((current - max_session_age_seconds) * 1000),
-                int((current + future_skew_seconds) * 1000),
+                _sqlite_milliseconds(current - max_session_age_seconds),
+                _sqlite_milliseconds(current + future_skew_seconds),
                 max_sessions + 1,
             ),
         ).fetchall()
@@ -1179,6 +1210,8 @@ def _read_session_state(
     max_parts: int,
     max_inputs: int,
 ) -> OpenCodeStateSuccess:
+    if now is not None and not is_finite_number(now):
+        raise ValueError("invalid-clock")
     current = float(now if now is not None else time.time())
     if not math.isfinite(current):
         raise ValueError("invalid-clock")
@@ -1191,8 +1224,8 @@ def _read_session_state(
         "ORDER BY time_created DESC, admitted_seq DESC, id DESC LIMIT ?",
         (
             session.session_id,
-            int((current - _STATE_RECENT_SECONDS) * 1000),
-            int((current + DEFAULT_FUTURE_SKEW_SECONDS) * 1000),
+            _sqlite_milliseconds(current - _STATE_RECENT_SECONDS),
+            _sqlite_milliseconds(current + DEFAULT_FUTURE_SKEW_SECONDS),
             max_inputs + 1,
         ),
     ).fetchall()
@@ -1239,8 +1272,8 @@ def _read_session_state(
         "ORDER BY time_updated DESC, id DESC LIMIT ?",
         (
             session.session_id,
-            int((current - _STATE_RECENT_SECONDS) * 1000),
-            int((current + DEFAULT_FUTURE_SKEW_SECONDS) * 1000),
+            _sqlite_milliseconds(current - _STATE_RECENT_SECONDS),
+            _sqlite_milliseconds(current + DEFAULT_FUTURE_SKEW_SECONDS),
             max_parts + 1,
         ),
     ).fetchall()
@@ -1264,8 +1297,8 @@ def _read_session_state(
         "ORDER BY m.time_updated DESC, m.id DESC LIMIT ?",
         (
             session.session_id,
-            int((current - _STATE_RECENT_SECONDS) * 1000),
-            int((current + DEFAULT_FUTURE_SKEW_SECONDS) * 1000),
+            _sqlite_milliseconds(current - _STATE_RECENT_SECONDS),
+            _sqlite_milliseconds(current + DEFAULT_FUTURE_SKEW_SECONDS),
             max_messages + 1,
         ),
     ).fetchall()
@@ -1353,7 +1386,7 @@ def _select_session(
         # worktree move or may differ from OpenCode's canonical project path. Do not turn an exact
         # session selector into an unavailable read because of that auxiliary hint.
         if started_at is not None:
-            if not math.isfinite(float(started_at)):
+            if not is_finite_number(started_at):
                 return OpenCodeUnavailable("invalid-start-time")
             # A resumed TUI can reopen a session whose last persisted update predates this
             # process. The explicit ID remains authoritative; do not replace it with a newer
@@ -1364,12 +1397,14 @@ def _select_session(
         return OpenCodeAmbiguousSession("session-selector-requires-id-or-directory", ())
     canonical_directory = _canonical_directory(directory)
     directory_aliases = yomux_working_directory_aliases(directory)
+    if now is not None and not is_finite_number(now):
+        return OpenCodeUnavailable("invalid-clock")
     current = float(now if now is not None else time.time())
     if not math.isfinite(current):
         return OpenCodeUnavailable("invalid-clock")
     lower = current - max_session_age_seconds
     if started_at is not None:
-        if not math.isfinite(float(started_at)):
+        if not is_finite_number(started_at):
             return OpenCodeUnavailable("invalid-start-time")
         lower = max(lower, float(started_at) - start_skew_seconds)
     upper = current + future_skew_seconds
@@ -1379,8 +1414,8 @@ def _select_session(
         "ORDER BY time_updated DESC, id DESC LIMIT ?",
         (
             *directory_aliases,
-            int(lower * 1000),
-            int(upper * 1000),
+            _sqlite_milliseconds(lower),
+            _sqlite_milliseconds(upper),
             max_sessions + 1,
         ),
     ).fetchall()
@@ -1680,17 +1715,13 @@ def _token_number(value: object) -> int | None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError("token-count-is-not-numeric")
-    number = float(value)
-    if not math.isfinite(number) or number < 0 or not number.is_integer():
+    if not is_finite_number(value) or value < 0 or isinstance(value, float) and not value.is_integer():
         raise ValueError("token-count-is-not-a-nonnegative-integer")
-    return int(number)
+    return int(value)
 
 
 def _cost_number(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) and number >= 0 else None
+    return float(value) if is_finite_number(value) and value >= 0 else None
 
 
 def _json_object(value: object) -> dict[str, object]:
@@ -1748,10 +1779,7 @@ def _bounded_text(value: object) -> str:
 
 
 def _milliseconds(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value) / 1000
-    return number if math.isfinite(number) and number > 0 else None
+    return float(value) / 1000 if is_finite_number(value) and value > 0 else None
 
 
 def source_id_for_agent(agent_key: str) -> str:

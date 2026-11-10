@@ -296,7 +296,7 @@ def parse_args() -> argparse.Namespace:
 
 def _self_test() -> bool:
     """Run the pytest coverage that replaced the old inline self-test."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
     with tempfile.TemporaryDirectory(prefix=short_temp_prefix(f"yomux-test-{os.getpid()}-{os.getuid()}-"), dir=short_temp_base()) as raw_root:
         test_root = Path(raw_root)
@@ -308,12 +308,10 @@ def _self_test() -> bool:
             sys.executable,
             "-m",
             "pytest",
-            "-p",
-            "no:cacheprovider",
-            os.path.join(script_dir, "tests/test_auto_approve_detector.py"),
-            os.path.join(script_dir, "tests/test_yolo_rules.py"),
+            str(repo_root / "tests/test_auto_approve_detector.py"),
+            str(repo_root / "tests/test_yolo_rules.py"),
         ]
-        return subprocess.run(cmd, env=env, check=False).returncode == 0
+        return subprocess.run(cmd, cwd=repo_root, env=env, check=False).returncode == 0
 
 
 # ---------------------------------------------------------------------------

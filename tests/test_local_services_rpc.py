@@ -1,6 +1,7 @@
 import errno
 import json
 import select
+import signal
 import socket
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import fcntl
 import os
 import time
 import traceback
+from pathlib import Path
 
 import pytest
 
@@ -1782,3 +1784,98 @@ def test_rpc_owner_separates_every_transport_case_the_duplicate_collapses():
         rpc.LOCAL_SERVICE_REASON_IDENTITY_MISMATCH,
         rpc.LOCAL_SERVICE_REASON_PROTOCOL,
     ]
+
+
+@pytest.mark.parametrize("field,value", [("version", True), ("accept_to_read_ms", float("nan")), ("read_complete_ms", float("nan")), ("service_duration_ms", float("nan")), ("queue_wait_ms", float("nan"))])
+def test_current_rpc_rejects_invalid_envelope_numeric_values(field, value):
+    metadata = rpc.new_envelope("testd", "echo", {}).to_dict()
+    metadata["capacity_limit"] = 1
+    metadata[field] = value
+    encoded = json.dumps(metadata).encode("utf-8")
+    frame = len(encoded).to_bytes(rpc.LOCAL_RPC_HEADER_BYTES, "big") + encoded
+    with pytest.raises(rpc.LocalRpcError):
+        rpc.read_message(FragmentedConnection([frame]))
+
+
+def test_local_service_shutdown_failure_still_releases_owned_resources(tmp_path):
+    stop = threading.Event()
+    socket_path = rpc.safe_socket_path(tmp_path / 'shutdown.sock')
+    lock_path = tmp_path / 'shutdown.lock'
+    prior = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
+
+    def fail_shutdown():
+        raise RuntimeError('shutdown sentinel')
+
+    try:
+        with pytest.raises(RuntimeError, match='shutdown sentinel'):
+            runtime.run_local_rpc_service(
+                socket_path=socket_path, lock_path=lock_path, service_name='shutdown-test',
+                stop_event=stop, handle=lambda _payload, _binary: ({'ok': True}, b''),
+                on_idle=lambda: False, on_client=lambda: None, on_start=stop.set,
+                on_shutdown=fail_shutdown, parent_pid_reader=lambda: 0,
+            )
+        assert not socket_path.exists()
+        assert not socket_path.with_suffix('.lifetime.json').exists()
+        assert {signum: signal.getsignal(signum) for signum in prior} == prior
+        if sys.platform.startswith('linux'):
+            targets = []
+            for descriptor in Path('/proc/self/fd').iterdir():
+                try:
+                    targets.append(os.readlink(descriptor))
+                except FileNotFoundError:
+                    pass
+            assert str(lock_path) not in targets
+    finally:
+        for signum, handler in prior.items():
+            signal.signal(signum, handler)
+
+
+def test_local_service_startup_failure_restores_signal_handlers(tmp_path, monkeypatch):
+    prior = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
+
+    def fail_preflight(**_kwargs):
+        raise RuntimeError('preflight sentinel')
+
+    monkeypatch.setattr(runtime, 'preflight_mutable_roots', fail_preflight)
+    try:
+        with pytest.raises(RuntimeError, match='preflight sentinel'):
+            runtime.run_local_rpc_service(
+                socket_path=tmp_path / 'start.sock', lock_path=tmp_path / 'start.lock',
+                service_name='start-test', stop_event=threading.Event(),
+                handle=lambda _payload, _binary: ({'ok': True}, b''),
+                on_idle=lambda: False, on_client=lambda: None, parent_pid_reader=lambda: 0,
+            )
+        assert {signum: signal.getsignal(signum) for signum in prior} == prior
+    finally:
+        for signum, handler in prior.items():
+            signal.signal(signum, handler)
+
+
+@pytest.mark.parametrize("failure", ["constructor", "start"])
+def test_local_service_worker_start_failure_closes_admitted_connection(tmp_path, monkeypatch, failure):
+    socket_path = rpc.safe_socket_path(tmp_path / 'thread.sock')
+
+    def refuse_thread_start(_thread):
+        raise RuntimeError('thread start sentinel')
+
+    if failure == "start":
+        monkeypatch.setattr(threading.Thread, 'start', refuse_thread_start)
+    else:
+        def refuse_thread_construction(**_kwargs):
+            raise RuntimeError('thread start sentinel')
+        monkeypatch.setattr(threading, 'Thread', refuse_thread_construction)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(0.5)
+
+        def connect_client():
+            client.connect(str(socket_path))
+
+        with pytest.raises(RuntimeError, match='thread start sentinel'):
+            runtime.run_local_rpc_service(
+                socket_path=socket_path, lock_path=tmp_path / 'thread.lock',
+                service_name='thread-test', stop_event=threading.Event(),
+                handle=lambda _payload, _binary: ({'ok': True}, b''),
+                on_idle=lambda: False, on_client=lambda: None, on_start=connect_client,
+                concurrent_handlers=1, parent_pid_reader=lambda: 0,
+            )
+        assert client.recv(1) == b''

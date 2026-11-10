@@ -21,8 +21,6 @@ type ModelIntent struct {
 	Defaults                         map[string]any
 }
 
-var modelIntentNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,63}$`)
-
 var modelIntentSchemas = map[string]map[string]any{
 	"delegated-prompt": {
 		"type": "object", "additionalProperties": false, "required": []any{"session", "prompt", "return_result"},
@@ -75,14 +73,20 @@ func SelectModelIntent(skills []Skill, question string, sessions []string) *Mode
 
 func modelIntentFromSkill(skill Skill) (ModelIntent, bool) {
 	raw := skill.ModelIntent
-	if !skill.Builtin || !skill.Enabled || raw == nil || !modelIntentNamePattern.MatchString(skill.Name) {
+	if !skill.Builtin || !skill.Enabled || raw == nil || !skillNamePattern.MatchString(skill.Name) {
 		return ModelIntent{}, false
 	}
 	handler, _ := raw["handler"].(string)
 	confirmation, _ := raw["confirmation"].(string)
 	candidate, output, defaults := object(raw["candidate"]), object(raw["output"]), object(raw["defaults"])
-	if candidate == nil || output == nil || defaults == nil || !slices.Contains([]string{"wait-roster-then-send", "wait-then-send", "loop-send"}, handler) || !modelIntentNamePattern.MatchString(handler) || confirmation != "required" && confirmation != "none" {
+	if candidate == nil || output == nil || defaults == nil || !slices.Contains([]string{"wait-roster-then-send", "wait-then-send", "loop-send"}, handler) || !skillNamePattern.MatchString(handler) || confirmation != "required" && confirmation != "none" {
 		return ModelIntent{}, false
+	}
+	for _, value := range defaults {
+		switch value.(type) {
+		case nil, map[string]any, []any:
+			return ModelIntent{}, false
+		}
 	}
 	anyOfValue := candidate["any_of"]
 	requireAnyValue := candidateValue(candidate, "require_any", []any{})
@@ -97,7 +101,7 @@ func modelIntentFromSkill(skill Skill) (ModelIntent, bool) {
 	priority, okPriority := modelIntentInteger(candidateValue(candidate, "priority", 0))
 	scope, _ := candidateValue(candidate, "session_scope", "condition").(string)
 	tag, _ := output["tag"].(string)
-	if !okMinimum || minimum < 0 || !okPriority || priority < 0 || priority > 100 || scope != "condition" && scope != "request" || !modelIntentNamePattern.MatchString(tag) {
+	if !okMinimum || minimum < 0 || !okPriority || priority < 0 || priority > 100 || scope != "condition" && scope != "request" || !skillNamePattern.MatchString(tag) {
 		return ModelIntent{}, false
 	}
 	schema := object(output["schema"])

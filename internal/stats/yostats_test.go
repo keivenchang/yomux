@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -264,14 +265,12 @@ func TestFactReadersHonorCanceledContext(t *testing.T) {
 }
 
 func TestOpenReadOnlyRejectsActualSQLiteVariants(t *testing.T) {
-	tests := map[string]func(*sql.DB){
-		"missing table": func(db *sql.DB) { _, _ = db.Exec("DROP TABLE observations") },
-		"missing column": func(db *sql.DB) {
-			_, _ = db.Exec("ALTER TABLE usage_atoms RENAME TO usage_atoms_old; CREATE TABLE usage_atoms (event_id TEXT, direction TEXT, modality TEXT, cache_role TEXT, unit TEXT, observed_at REAL); DROP TABLE usage_atoms_old")
-		},
-		"newer schema": func(db *sql.DB) { _, _ = db.Exec("PRAGMA user_version = 10") },
+	tests := map[string]string{
+		"missing table":  "DROP TABLE observations",
+		"missing column": "ALTER TABLE usage_atoms RENAME TO usage_atoms_old; CREATE TABLE usage_atoms (event_id TEXT, direction TEXT, modality TEXT, cache_role TEXT, unit TEXT, observed_at REAL); DROP TABLE usage_atoms_old",
+		"newer schema":   fmt.Sprintf("PRAGMA user_version = %d", checkpointSchemaVersion+1),
 	}
-	for name, mutate := range tests {
+	for name, statement := range tests {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "stats.sqlite3")
 			createSQLiteFixture(t, path)
@@ -279,13 +278,22 @@ func TestOpenReadOnlyRejectsActualSQLiteVariants(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			mutate(mutable)
+			if _, err := mutable.Exec(statement); err != nil {
+				_ = mutable.Close()
+				t.Fatal(err)
+			}
 			if err := mutable.Close(); err != nil {
 				t.Fatal(err)
 			}
 			_, err = OpenReadOnly(context.Background(), path)
 			if err == nil {
 				t.Fatal("incompatible SQLite file was accepted")
+			}
+			if name == "newer schema" {
+				var tooNew *SchemaTooNewError
+				if !errors.As(err, &tooNew) || tooNew.Found <= tooNew.Supported {
+					t.Fatalf("newer schema rejection was not exercised: %v", err)
+				}
 			}
 		})
 	}

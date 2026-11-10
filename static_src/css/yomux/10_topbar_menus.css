@@ -1057,17 +1057,19 @@ body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-ro
   color: var(--menu-detail-text);
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
-/* File destinations are navigation, not cards: icon, name, explanation, and shortcut/state share
-   one row. The detail is still titled and in the accessible name when it has to ellipsize. */
+/* Navigation details and keyboard shortcuts share the label row. */
+.app-menu-has-keybinding .app-menu-content,
 .app-menu-file-destination .app-menu-content {
   display: grid;
   grid-template-columns: minmax(0, auto) minmax(0, 1fr);
   align-items: center;
   column-gap: var(--space-6);
 }
+.app-menu-has-keybinding .app-menu-line,
 .app-menu-file-destination .app-menu-line {
   min-width: 0;
 }
+.app-menu-has-keybinding .app-menu-detail,
 .app-menu-file-destination .app-menu-detail {
   min-width: 0;
   max-width: none;

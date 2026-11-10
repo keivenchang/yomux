@@ -28,6 +28,7 @@ from enum import Enum
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
+from typing import BinaryIO
 from typing import Callable
 
 from ..infra import common
@@ -43,6 +44,7 @@ from ..infra.common import canonical_yomux_working_directory
 from ..infra.filesystem_preflight import FilesystemClassification
 from ..infra.filesystem_preflight import classify_filesystem
 from ..infra.host_partition import host_partitioned_state_dir
+from ..infra.numeric import is_finite_number
 from ..filesystem import FilesystemError
 from ..filesystem import git_ops as filesystem_git_ops
 from ..filesystem import git_root_for_path
@@ -117,202 +119,6 @@ _AUTHORIZED_REPOSITORY_SNAPSHOT_HANDLE: contextvars.ContextVar[Any | None] = con
     "authorized_repository_snapshot_handle",
     default=None,
 )
-
-
-def disk_cache_index_path(cache_dir: Path) -> Path:
-    return Path(cache_dir) / "cache-index.json"
-
-
-def disk_cache_manifest_path(cache_dir: Path, signature: str) -> Path:
-    return Path(cache_dir) / f"{signature}.manifest.json"
-
-
-def _read_disk_cache_index_unlocked(index_path: Path) -> dict[str, Any]:
-    payload = read_json_file(index_path, None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
-    source_entries = payload.get("entries") if isinstance(payload, dict) else None
-    entries = {
-        str(signature): value
-        for signature, value in source_entries.items()
-        if isinstance(value, dict)
-    } if isinstance(source_entries, dict) else {}
-    journal_path = index_path.with_name(index_path.name + ".journal")
-    try:
-        journal_lines = journal_path.read_text(encoding="utf-8").splitlines()
-    except (FileNotFoundError, OSError):
-        journal_lines = []
-    for line in journal_lines:
-        try:
-            record = json.loads(line)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(record, dict) and isinstance(record.get("signature"), str):
-            entries[record["signature"]] = {
-                "size": max(0, int(record.get("size") or 0)),
-                "mtime": max(0.0, float(record.get("mtime") or 0.0)),
-            }
-    return {"version": 1, "entries": entries, "recovery_cursor": ""}
-
-
-def _write_disk_cache_index_unlocked(index_path: Path, index: dict[str, Any]) -> None:
-    atomic_write_text(index_path, json.dumps(index, sort_keys=True, separators=(",", ":")), mode=0o600)
-    try:
-        index_path.with_name(index_path.name + ".journal").unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def update_disk_cache_index(cache_dir: Path, signature: str, *, size: int, mtime: float) -> None:
-    """Append one cache entry and periodically fold its journal into the shared index."""
-    index_path = disk_cache_index_path(cache_dir)
-    try:
-        with file_lock(index_path, dir_mode=0o700):
-            journal_path = index_path.with_name(index_path.name + ".journal")
-            line = json.dumps(
-                {"signature": str(signature), "size": max(0, int(size)), "mtime": max(0.0, float(mtime))},
-                sort_keys=True,
-                separators=(",", ":"),
-            ) + "\n"
-            with open(journal_path, "a", encoding="utf-8") as journal:
-                journal.write(line)
-            try:
-                journal_bytes = journal_path.stat().st_size
-            except OSError:
-                journal_bytes = 0
-            if journal_bytes > 512 * 1024:
-                _write_disk_cache_index_unlocked(index_path, _read_disk_cache_index_unlocked(index_path))
-    except OSError as exc:
-        logger.debug("failed to update session-files cache index: %s", exc)
-
-
-def prune_disk_cache(
-    cache_dir: Path,
-    *,
-    max_age_seconds: float,
-    max_bytes: int,
-    batch_size: int,
-    now: float | None = None,
-) -> dict[str, Any]:
-    """Prune the durable session-files cache in batchd, never in the web process."""
-
-    cache_dir = Path(cache_dir)
-    index_path = disk_cache_index_path(cache_dir)
-    max_age = max(0.0, float(max_age_seconds))
-    byte_cap = max(0, int(max_bytes))
-    limit = max(1, int(batch_size))
-    current_time = time.time() if now is None else float(now)
-
-    try:
-        with file_lock(index_path, dir_mode=0o700):
-            index = _read_disk_cache_index_unlocked(index_path)
-            recovered_entries = 0
-            try:
-                paths = cache_dir.iterdir()
-            except OSError:
-                paths = ()
-            for path in paths:
-                if not path.name.endswith(".json") or path.name.endswith(".manifest.json") or path.name == index_path.name:
-                    continue
-                signature = path.stem
-                if signature in index["entries"]:
-                    continue
-                try:
-                    payload_stat = path.stat()
-                except OSError:
-                    continue
-                manifest_path = disk_cache_manifest_path(cache_dir, signature)
-                size = int(payload_stat.st_size)
-                mtime = float(payload_stat.st_mtime)
-                try:
-                    manifest_stat = manifest_path.stat()
-                    size += int(manifest_stat.st_size)
-                    mtime = max(mtime, float(manifest_stat.st_mtime))
-                except OSError:
-                    pass
-                index["entries"][signature] = {"size": size, "mtime": mtime}
-                recovered_entries += 1
-                if recovered_entries >= limit:
-                    break
-            entries = [
-                {
-                    "path": cache_dir / f"{signature}.json",
-                    "manifest_path": cache_dir / f"{signature}.manifest.json",
-                    "signature": signature,
-                    "size": max(0, int(metadata.get("size") or 0)),
-                    "mtime": max(0.0, float(metadata.get("mtime") or 0.0)),
-                }
-                for signature, metadata in index["entries"].items()
-            ]
-            _write_disk_cache_index_unlocked(index_path, index)
-    except OSError:
-        entries = []
-        recovered_entries = 0
-        try:
-            paths = cache_dir.glob("*.json")
-        except OSError:
-            paths = ()
-        for path in paths:
-            if path.name.endswith(".manifest.json") or path.name == index_path.name:
-                continue
-            try:
-                payload_stat = path.stat()
-            except OSError:
-                continue
-            manifest_path = disk_cache_manifest_path(cache_dir, path.stem)
-            size = int(payload_stat.st_size)
-            mtime = float(payload_stat.st_mtime)
-            try:
-                manifest_stat = manifest_path.stat()
-                size += int(manifest_stat.st_size)
-                mtime = max(mtime, float(manifest_stat.st_mtime))
-            except OSError:
-                pass
-            entries.append({"path": path, "manifest_path": manifest_path, "signature": path.stem, "size": size, "mtime": mtime})
-
-    total_indexed_bytes = sum(entry["size"] for entry in entries)
-    kept = [entry for entry in entries if not max_age or max(0.0, current_time - entry["mtime"]) <= max_age]
-    to_remove = [entry for entry in entries if entry not in kept]
-    total_bytes = sum(entry["size"] for entry in kept)
-    for entry in sorted(kept, key=lambda item: (item["mtime"], str(item["path"]))):
-        if total_bytes <= byte_cap:
-            break
-        to_remove.append(entry)
-        total_bytes -= entry["size"]
-    removed_files = 0
-    removed_bytes = 0
-    removed_signatures: set[str] = set()
-    for entry in to_remove[:limit]:
-        signature = entry["signature"]
-        if signature in removed_signatures:
-            continue
-        removed_signatures.add(signature)
-        removed_bytes += entry["size"]
-        for path in (entry["path"], entry["manifest_path"]):
-            try:
-                path.unlink()
-                removed_files += 1
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
-    if removed_signatures:
-        try:
-            with file_lock(index_path, dir_mode=0o700):
-                index = _read_disk_cache_index_unlocked(index_path)
-                for signature in removed_signatures:
-                    index["entries"].pop(signature, None)
-                _write_disk_cache_index_unlocked(index_path, index)
-        except OSError:
-            pass
-    return {
-        "entries": len(entries),
-        "recovered_entries": recovered_entries,
-        "removed_entries": len(removed_signatures),
-        "removed_files": removed_files,
-        "removed_bytes": removed_bytes,
-        "kept_bytes": max(0, total_indexed_bytes - removed_bytes),
-        "max_age_seconds": max_age,
-        "max_bytes": byte_cap,
-    }
 
 
 @dataclass
@@ -451,7 +257,7 @@ class SharedTranscriptReader:
         consumed = 0
         with path.open("rb") as handle:
             handle.seek(offset)
-            while raw_line := handle.readline():
+            while raw_line := read_transcript_line(handle):
                 if not (raw_line.endswith(b"\n") or raw_line.endswith(b"\r")):
                     break
                 record = transcript_json_record(raw_line.rstrip(b"\r\n"))
@@ -1002,7 +808,7 @@ def transcript_scan_state_from_payload(cache_key: tuple[Any, ...], payload: Any,
         state["size"] = max(0, int(payload.get("size") or 0))
         state["prefix_digest"] = str(payload.get("prefix_digest") or "")
         state["parsed_tail"] = base64.b64decode(str(payload.get("parsed_tail_b64") or ""), validate=True)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     provider = str(cache_key[0])
     if provider == "claude":
@@ -1025,7 +831,10 @@ def transcript_scan_state_from_payload(cache_key: tuple[Any, ...], payload: Any,
         state["model"] = transcript_model_name(payload.get("model"))
     elif provider in {"stats-current-claude", "stats-current-codex"}:
         kind = provider.removeprefix("stats-current-")
-        state["usage_parser_state"] = usage_atom_parser_state_from_payload(kind, payload.get("usage_parser_state"))
+        try:
+            state["usage_parser_state"] = usage_atom_parser_state_from_payload(kind, payload.get("usage_parser_state"))
+        except (TypeError, ValueError, OverflowError):
+            return None
     return state
 
 
@@ -1055,7 +864,7 @@ def _is_incomplete_stats_current_cursor(path: Path) -> bool:
 
     try:
         record = read_json_file(path, {}, exceptions=())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return False
     if not isinstance(record, dict):
         return False
@@ -1072,7 +881,7 @@ def _is_incomplete_stats_current_cursor(path: Path) -> bool:
         return False
     try:
         return max(0, int(state.get("offset") or 0)) < max(0, int(state.get("size") or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
 
 
@@ -1368,7 +1177,7 @@ def scan_transcript_append(path: Path, offset: int, update: Callable[[str], None
     consumed = 0
     with path.open("rb") as handle:
         handle.seek(offset)
-        while raw_line := handle.readline():
+        while raw_line := read_transcript_line(handle):
             if not (raw_line.endswith(b"\n") or raw_line.endswith(b"\r")):
                 break
             update(raw_line.decode("utf-8", errors="replace"))
@@ -1393,11 +1202,8 @@ def update_claude_transcript_scan_state(state: dict[str, Any], line: str) -> Non
     is_assistant = '"type":"assistant"' in line or '"type": "assistant"' in line
     if not is_assistant or ('"usage"' not in line and not any(tool in line for tool in CLAUDE_EDIT_TOOLS)):
         return
-    try:
-        record = json.loads(line)
-    except json.JSONDecodeError:
-        return
-    if record.get("type") != "assistant":
+    record = transcript_json_record(line)
+    if record is None or record.get("type") != "assistant":
         return
     message = record.get("message")
     if not isinstance(message, dict):
@@ -1427,11 +1233,14 @@ def update_claude_transcript_scan_state(state: dict[str, Any], line: str) -> Non
     if not isinstance(raw_changes, dict):
         raw_changes = {}
         state["raw_changes"] = raw_changes
-    for item in message.get("content", []) or []:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return
+    for item in content:
         if not isinstance(item, dict) or item.get("type") != "tool_use":
             continue
         tool = item.get("name")
-        if tool not in CLAUDE_EDIT_TOOLS:
+        if not isinstance(tool, str) or tool not in CLAUDE_EDIT_TOOLS:
             continue
         payload = item.get("input")
         file_path = payload.get("file_path") if isinstance(payload, dict) else None
@@ -1686,13 +1495,13 @@ def usage_number(usage: Any, *names: str) -> float | None:
     if not isinstance(usage, dict):
         return None
     for name in names:
-        if name not in usage:
+        if name not in usage or isinstance(usage[name], bool):
             continue
         try:
             value = float(usage[name])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
-        if value >= 0 and value == value and value != float("inf"):
+        if is_finite_number(value) and value >= 0:
             return value
     return None
 
@@ -1892,8 +1701,7 @@ def transcript_generated_tokens(path: Path, kind: str, cwd: str | None = None) -
 def transcript_record_timestamp(record: dict[str, Any]) -> float | None:
     value = record.get("timestamp")
     if isinstance(value, (int, float)):
-        timestamp = float(value)
-        return timestamp if timestamp > 0 else None
+        return float(value) if is_finite_number(value) and value > 0 else None
     text = str(value or "").strip()
     if not text:
         return None
@@ -1904,6 +1712,19 @@ def transcript_record_timestamp(record: dict[str, Any]) -> float | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.timestamp()
+
+
+MAX_TRANSCRIPT_RECORD_BYTES = 8 * 1024 * 1024
+
+
+def read_transcript_line(handle: BinaryIO, *, maximum_bytes: int | None = None) -> bytes:
+    limit = MAX_TRANSCRIPT_RECORD_BYTES + 1
+    if maximum_bytes is not None:
+        limit = min(limit, maximum_bytes)
+    raw_line = handle.readline(limit)
+    if len(raw_line) > MAX_TRANSCRIPT_RECORD_BYTES:
+        raise ValueError(f"transcript record exceeds {MAX_TRANSCRIPT_RECORD_BYTES}-byte parser limit")
+    return raw_line
 
 
 def transcript_json_record(raw_line: bytes | str) -> dict[str, Any] | None:
@@ -1927,8 +1748,8 @@ def transcript_json_records(path: Path, *, max_bytes: int | None = None) -> Iter
         with path.open("rb") as handle:
             remaining = max(0, int(max_bytes)) if max_bytes is not None else None
             while remaining is None or remaining > 0:
-                raw_line = handle.readline() if remaining is None else handle.readline(remaining)
-                if not raw_line:
+                raw_line = read_transcript_line(handle, maximum_bytes=remaining)
+                if not raw_line or not raw_line.endswith((b"\n", b"\r")):
                     break
                 if remaining is not None:
                     remaining -= len(raw_line)

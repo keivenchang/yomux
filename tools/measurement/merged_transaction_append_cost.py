@@ -56,10 +56,10 @@ host, and these arms write real bytes.
 import argparse
 import json
 import os
-import shutil
 import sqlite3
 import sys
 import time
+from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -67,6 +67,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from yomux_lib.stats_current import storage
 from yomux_lib.stats_current import resolution as res
+from tools.statsd_fixture_double import copy_fixture_store
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
 
@@ -109,7 +110,7 @@ def now_stamps():
 
 def table_counts(database_path):
     """Count every table this experiment can touch, from an independent read-only handle."""
-    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    connection = sqlite3.connect(Path(database_path).resolve().as_uri() + "?mode=ro", uri=True)
     try:
         counts = {}
         for table in COUNTED_TABLES:
@@ -130,7 +131,7 @@ def table_counts(database_path):
 
 def newest_observed_at(database_path):
     """Anchor synthetic ingest just after a copied store's newest fact, or None when empty."""
-    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    connection = sqlite3.connect(Path(database_path).resolve().as_uri() + "?mode=ro", uri=True)
     try:
         row = connection.execute("SELECT max(observed_at) FROM observations").fetchone()
         return None if row is None or row[0] is None else float(row[0])
@@ -140,23 +141,15 @@ def newest_observed_at(database_path):
 
 def prepare_store(database_path, *, topology, source):
     """Materialize the arm's starting database and return its anchor timestamp."""
-    for suffix in ("", "-wal", "-shm"):
-        try:
-            os.unlink(database_path + suffix)
-        except FileNotFoundError:
-            pass
+    if topology not in {"fresh", "copy"}:
+        raise ValueError(f"unknown topology {topology!r}")
+    if topology == "copy":
+        if not source:
+            raise ValueError("--topology copy requires --source")
+    # Copy committed WAL frames, retaining this harness's policy of rebuilding SHM.
+    copy_fixture_store(Path(source) if topology == "copy" else None, Path(database_path))
     if topology == "fresh":
         return 1_750_000_000.0
-    if topology != "copy":
-        raise ValueError(f"unknown topology {topology!r}")
-    if not source:
-        raise ValueError("--topology copy requires --source")
-    shutil.copyfile(source, database_path)
-    # Carry a non-empty WAL because it holds committed frames the main file does not yet have.
-    # Never carry `-shm`: it is shared-memory coordination state for the ORIGINAL set of
-    # connections, SQLite rebuilds it on open, and a stale copy makes recovery ambiguous.
-    if os.path.exists(source + "-wal") and os.path.getsize(source + "-wal") > 0:
-        shutil.copyfile(source + "-wal", database_path + "-wal")
     newest = newest_observed_at(database_path)
     # Anchor one second past the copied store's newest fact so appends look like continuing
     # ingest and the ring-invalidation path resolves to real published slots.
@@ -165,7 +158,7 @@ def prepare_store(database_path, *, topology, source):
 
 def published_generation(database_path):
     """Read the generation the ring was last published from, or 0 when never published."""
-    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    connection = sqlite3.connect(Path(database_path).resolve().as_uri() + "?mode=ro", uri=True)
     try:
         row = connection.execute(
             "SELECT source_generation FROM aggregate_publication WHERE singleton = 1"

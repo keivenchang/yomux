@@ -291,6 +291,29 @@ def test_apply_refuses_conflicting_data_roots_without_moving_either(tmp_path: Pa
     assert not mapping_path.exists()
 
 
+
+def test_existing_empty_destination_is_a_preflight_conflict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    source = tmp_path / '.config' / 'yolomux'
+    target = tmp_path / '.config' / 'yomux'
+    source.mkdir(parents=True)
+    target.mkdir()
+    (source / 'data').write_bytes(b'preserved')
+    for name in ('YOMUX_ROOT', 'YOLOMUX_ROOT', 'YOMUX_CONFIG_DIR', 'YOLOMUX_CONFIG_DIR'):
+        monkeypatch.delenv(name, raising=False)
+    mapping_path = tmp_path / 'recovery' / 'migration.json'
+    roots = [{'label': 'config', 'source': str(source), 'target': str(target)}]
+    target_identity = target.stat().st_ino
+
+    assert migration.main(['dry-run', '--home', str(tmp_path), '--mapping', str(mapping_path)]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert next(item for item in report['roots'] if item['label'] == 'config')['state'] == 'destination_exists'
+    mapping = migration.prepare_mapping(roots, mapping_path)
+    assert migration.apply_mapping(mapping, mapping_path) == 2
+    assert not mapping_path.exists()
+    assert (source / 'data').read_bytes() == b'preserved'
+    assert target.stat().st_ino == target_identity and list(target.iterdir()) == []
+
+
 def test_dangling_destination_symlink_is_a_conflict(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     source = tmp_path / "old"
     target = tmp_path / "new"
@@ -353,6 +376,55 @@ def test_repeat_apply_is_idempotent_after_completed_mapping(tmp_path: Path, caps
     assert result == 0
     assert "already applied" in capsys.readouterr().out
     assert (Path(roots[0]["target"]) / "settings.yaml").read_text(encoding="utf-8") == "kept\n"
+
+
+def test_rollback_leaves_roots_never_moved_by_migration(tmp_path: Path) -> None:
+    roots = _roots(tmp_path, count=1)
+    mapping_path = tmp_path / "recovery/migration.json"
+    mapping = migration.prepare_mapping(roots, mapping_path)
+    assert migration.apply_mapping(mapping, mapping_path) == 0
+    target = Path(roots[0]["target"])
+    target.mkdir()
+    (target / "new-user-data").write_bytes(b"created after migration")
+    assert migration.rollback_mapping(mapping, mapping_path) == 0
+    assert (target / "new-user-data").read_bytes() == b"created after migration"
+    assert not Path(roots[0]["source"]).exists()
+
+
+@pytest.mark.parametrize("state", ["moved", "backed_up"])
+def test_rollback_requires_recorded_backup_before_moving_target(tmp_path: Path, state: str) -> None:
+    roots = _roots(tmp_path, count=1)
+    mapping_path = tmp_path / "recovery/migration.json"
+    mapping = migration.prepare_mapping(roots, mapping_path)
+    mapping["entries"][0]["state"] = state
+    target = Path(roots[0]["target"])
+    target.mkdir()
+    (target / "data").write_bytes(b"unowned target")
+    assert migration.rollback_mapping(mapping, mapping_path) == 1
+    assert (target / "data").read_bytes() == b"unowned target"
+    assert not Path(roots[0]["source"]).exists()
+
+
+@pytest.mark.parametrize("target_symlink", [False, True])
+def test_rollback_recovers_rename_crash_window_but_refuses_symlink_target(tmp_path: Path, target_symlink: bool) -> None:
+    roots = _roots(tmp_path, count=1)
+    source, target = (Path(roots[0][key]) for key in ("source", "target"))
+    source.mkdir()
+    (source / "data").write_bytes(b"original")
+    mapping_path = tmp_path / "recovery/migration.json"
+    mapping = migration.prepare_mapping(roots, mapping_path)
+    assert migration.apply_mapping(mapping, mapping_path) == 0
+    mapping["entries"][0]["state"] = "backed_up"
+    if target_symlink:
+        target.rename(tmp_path / "other-owner")
+        target.symlink_to(tmp_path / "other-owner", target_is_directory=True)
+    assert migration.rollback_mapping(mapping, mapping_path) == (1 if target_symlink else 0)
+    if target_symlink:
+        assert target.is_symlink()
+        assert not source.exists()
+    else:
+        assert (source / "data").read_bytes() == b"original"
+        assert not target.exists()
 
 
 def test_rollback_refuses_destination_modified_after_apply(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

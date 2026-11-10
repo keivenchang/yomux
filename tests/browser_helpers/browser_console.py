@@ -6,6 +6,7 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 import json
+import uuid
 from numbers import Real
 from typing import Any
 from urllib.parse import parse_qs
@@ -16,6 +17,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from yomux_lib import browser_diagnostic_receipts
 from yomux_lib.live_browser_soak import js_debug_event_enrichment_matches
+from tests.helpers.fixture_tools import run_fixture_cleanup_phases
 
 
 # Live activity-summary and session-files errors arrived 8 and 15 seconds after the first
@@ -903,11 +905,20 @@ def retire_browser_after_strict_diagnostic_gate(
     *,
     claimed_clean_surfaces: Sequence[str] = (),
     require_js_debug_store: bool = True,
+    destination_url: str | None = None,
+    close_window: Callable[[], None] | None = None,
+    reload_page: bool = False,
 ) -> dict[str, Any]:
     """Atomically snapshot browser diagnostics and retire the page in one JS task."""
 
-    snapshot = driver.execute_script(
-        """
+    if close_window is not None and destination_url is not None:
+        raise ValueError("browser retirement cannot navigate and close together")
+    if reload_page and (close_window is not None or destination_url is None):
+        raise ValueError("browser reload requires a navigation destination")
+    if close_window is not None and not callable(close_window):
+        raise TypeError("browser close requires the delegated close action")
+    script = """
+        function captureBrowserRetirementDiagnostics() {
         const eventsDefined = typeof jsDebugEvents !== 'undefined';
         const failureReaderDefined = typeof jsDebugFailureEvents === 'function';
         const receiptBarrierDefined = typeof jsDebugCurrentObservationReceiptBarrier === 'function';
@@ -932,17 +943,92 @@ def retire_browser_after_strict_diagnostic_gate(
         const journey = journeyState && Array.isArray(journeyState.visitedSurfaces)
           ? {reachable: true, visitedSurfaces: [...journeyState.visitedSurfaces]}
           : {reachable: false, visitedSurfaces: []};
-        const result = {jsDebug, journey};
-        window.location.replace('about:blank');
-        return result;
+          return {jsDebug, journey};
+        }
+        const result = captureBrowserRetirementDiagnostics();
         """
+    if close_window is not None:
+        prefix = f"YOMUX_CLOSE_DIAGNOSTIC_{uuid.uuid4().hex}:"
+        snapshots = []
+        evidence = []
+
+        def install_close_capture():
+            snapshots.append(driver.execute_script(script + """
+              const receiptPrefix = arguments[0];
+              window.addEventListener('pagehide', () => {
+                console.info(receiptPrefix + JSON.stringify(captureBrowserRetirementDiagnostics()));
+              }, {once:true});
+              return result;
+            """, prefix))
+
+        def validate_close_receipt():
+            entries = []
+
+            def collect_console():
+                entries.extend(read_browser_console_log(driver))
+
+            def validate_snapshot(current):
+                evidence.append(_strict_browser_retirement_evidence(
+                    current, entries, claimed_clean_surfaces, require_js_debug_store,
+                ))
+
+            def validate_terminal_snapshot():
+                receipts = []
+                for entry in entries:
+                    message = str(entry.get("message") or "")
+                    if prefix not in message:
+                        continue
+                    try:
+                        decoded = json.loads(message[message.index('"'):])
+                        if not isinstance(decoded, str) or not decoded.startswith(prefix):
+                            raise ValueError("unexpected close receipt prefix")
+                        receipts.append(json.loads(decoded[len(prefix):]))
+                    except (ValueError, TypeError) as error:
+                        raise AssertionError("browser close diagnostic receipt is malformed") from error
+                if len(receipts) != 1:
+                    raise AssertionError(f"expected one browser close diagnostic receipt, received {len(receipts)}")
+                validate_snapshot(receipts[0])
+
+            run_fixture_cleanup_phases("browser close diagnostics", [("console", collect_console)] + [
+                ("initial snapshot", lambda current=current: validate_snapshot(current)) for current in snapshots
+            ] + [("terminal snapshot", validate_terminal_snapshot)])
+
+        run_fixture_cleanup_phases("browser close", (
+            ("capture setup", install_close_capture),
+            ("actual close", close_window),
+            ("close diagnostics", validate_close_receipt),
+        ))
+        return evidence[-1]
+    elif destination_url is not None:
+        console_entries = read_browser_console_log(driver)
+        snapshot = driver.execute_script(script + """
+          window.__yomuxDiagnosticRetirement = true;
+          if (arguments[1]) window.location.reload();
+          else window.location.assign(arguments[0]);
+          return result;
+        """, destination_url, reload_page)
+        WebDriverWait(driver, driver.timeouts.page_load, poll_frequency=0.05).until(
+            lambda current: current.execute_script(
+                "return window.__yomuxDiagnosticRetirement !== true && document.readyState === 'complete';"
+            )
+        )
+    else:
+        console_entries = None
+        snapshot = driver.execute_script(script + """
+          window.location.replace('about:blank');
+          return result;
+        """)
+        # Observe the commit before listener cleanup; WebDriver can return while it is starting.
+        WebDriverWait(driver, 3, poll_frequency=0.05).until(
+            lambda current: str(current.current_url) == "about:blank"
+        )
+    return _strict_browser_retirement_evidence(
+        snapshot, read_browser_console_log(driver) if console_entries is None else console_entries,
+        claimed_clean_surfaces, require_js_debug_store,
     )
-    # ``location.replace`` starts retirement in the same task as the diagnostic snapshot, but
-    # WebDriver may return before the navigation commits.  Observe that commit before fixture
-    # cleanup so persistent HTTP transports cannot remain attached to a server that is stopping.
-    WebDriverWait(driver, 3, poll_frequency=0.05).until(
-        lambda current: str(current.current_url) == "about:blank"
-    )
+
+
+def _strict_browser_retirement_evidence(snapshot, console_entries, claimed_clean_surfaces, require_js_debug_store):
     if not isinstance(snapshot, Mapping):
         raise AssertionError("browser diagnostic retirement snapshot is malformed")
     js_debug = _validate_js_debug_store(snapshot.get("jsDebug"), required=require_js_debug_store)
@@ -950,7 +1036,7 @@ def retire_browser_after_strict_diagnostic_gate(
     evidence = _browser_local_error_evidence_from_snapshots(
         js_debug,
         surface_evidence,
-        read_browser_console_log(driver),
+        console_entries,
     )
     if _browser_local_evidence_has_failure(evidence):
         raise AssertionError(f"browser journey emitted errors at retirement: {json.dumps(evidence, sort_keys=True)}")

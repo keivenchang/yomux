@@ -11,6 +11,7 @@
 }
 
 :root {
+  --editor-cursor-blink-cycle: 1200ms;
   --light-readable-text: #111827;
   --light-readable-bg: var(--paint-white);
   --light-readable-line: #c7ced8;
@@ -217,7 +218,6 @@
   --inactive-pane-overlay-alpha: 0.18;
   --inactive-pane-overlay: rgb(var(--inactive-pane-overlay-rgb) / calc(var(--inactive-pane-overlay-alpha) * var(--inactive-pane-opacity-scale)));
   --inactive-tab-bg: #293240;
-  --inactive-tab-bg-hover: #354052;
   --inactive-tab-border: #667286;
   --pane-inactive-tab-bg: var(--active-tab-muted-bg);
   --pane-inactive-tab-bg-hover: var(--active-tab-muted-hover-bg);
@@ -907,7 +907,6 @@
   --50-terminal-file-tree-file-tree-row-fg-111: var(--accent-lime);
   --50-terminal-file-tree-file-tree-row-text-shadow-112: 0 0 8px rgba(196, 249, 112, 0.35);
   --50-terminal-file-tree-file-tree-row-shadow-113: 0 0 0 1px rgba(12, 15, 20, 0.9), 0 0 7px rgba(245, 197, 66, 0.75);
-  --50-terminal-file-tree-file-tree-children-border-left-114: var(--line);
 }
 
 .app-modal-overlay {
@@ -1161,7 +1160,6 @@ body.theme-light {
   --inactive-pane-overlay-rgb: 90 96 105;
   --inactive-pane-overlay-alpha: 0.09;
   --inactive-tab-bg: #e3e8f0;
-  --inactive-tab-bg-hover: #d7deea;
   --inactive-tab-border: var(--pane-tab-control-border);
   --shadow-popover: 0 18px 50px rgba(15, 23, 42, 0.24);
   --shadow-elevated: 0 16px 42px rgba(15, 23, 42, 0.24);
@@ -1432,7 +1430,6 @@ body.theme-light {
   --50-terminal-file-tree-file-tree-row-fg-111: var(--good);
   --50-terminal-file-tree-file-tree-row-text-shadow-112: none;
   --50-terminal-file-tree-file-tree-row-shadow-113: 0 0 0 1px rgba(255, 255, 255, 0.95), 0 0 6px rgba(122, 160, 0, 0.55);
-  --50-terminal-file-tree-file-tree-children-border-left-114: rgba(100, 116, 139, 0.28);
 }
 
 body.editor-theme-light {
@@ -1469,7 +1466,11 @@ body.editor-theme-light {
 .drop-action-result pre,
 .file-editor-conflict-compare pre,
 .git-diff-commit-message,
-.js-debug-log-message {
+.js-debug-log-message,
+.finder-move-source,
+.finder-move-target,
+.finder-move-dialog .file-editor-dialog-body,
+.file-get-info dd {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1517,7 +1518,6 @@ body.editor-theme-light {
 .badge-base {
   justify-content: center;
 }
-.pane-drag-image-tabs span,
 .info-refresh,
 .changes-control select,
 .changes-refresh,

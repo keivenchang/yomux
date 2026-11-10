@@ -33,6 +33,47 @@ func openTestStore(t *testing.T, path string, clock func() float64) *Store {
 	return store
 }
 
+func TestSearchPaginationCoversLiteralAndTokenMatches(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "chat.sqlite3"), func() float64 { return 100000 })
+	ctx := context.Background()
+	for index, body := range []string{"red blue", "red and blue", "red plus blue", "unrelated"} {
+		_, _, err := store.Insert(ctx, NewMessage{Message: Message{Room: DefaultRoom, MessagePayload: MessagePayload{
+			Username: "search-user", SenderInstance: "fixture", ClientUUID: fmt.Sprint(index), Body: body,
+		}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, limit := range []int{1, 2, 3, 4} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			var cursor *int64
+			var ids []int64
+			for pageIndex := 0; pageIndex < 4; pageIndex++ {
+				page, err := store.Search(ctx, DefaultRoom, "red blue", cursor, &limit, nil, nil, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, hit := range page.Hits {
+					ids = append(ids, hit.Message.ID)
+				}
+				if !page.HasMore {
+					if page.NextCursor != nil {
+						t.Fatal("last page has a continuation cursor")
+					}
+					break
+				}
+				if page.NextCursor == nil {
+					t.Fatal("search has more results without a cursor")
+				}
+				cursor = page.NextCursor
+			}
+			if want := []int64{3, 2, 1}; !reflect.DeepEqual(ids, want) {
+				t.Fatalf("paginated IDs = %v, want %v", ids, want)
+			}
+		})
+	}
+}
+
 func TestStoreOriginalPythonContract(t *testing.T) {
 	path, err := runfiles.Rlocation("yomux/tests/fixtures/chat_store_contract.json")
 	if err != nil {

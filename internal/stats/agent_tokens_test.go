@@ -232,9 +232,6 @@ func TestAgentTokenCollectorCyclesRealShapedSourcesAndProjectsRate(t *testing.T)
 		t.Fatal(err)
 	}
 	if got := projection.Buckets[0].Input + projection.Buckets[0].Output + projection.Buckets[0].Cache; got != 180 {
-		t.Fatalf("token total = %g", got)
-	}
-	if got := projection.Buckets[0].Input + projection.Buckets[0].Output + projection.Buckets[0].Cache; got != 180 {
 		t.Fatalf("tokens/minute projection = %g", got)
 	}
 }
@@ -2561,10 +2558,13 @@ func TestAgentTokenCollectorDenseOpenCodeUsageAppendAndReplayMeetBudget(t *testi
 	usage := AppendBatch{UsageAtoms: batch.UsageAtoms}
 	for _, replay := range []bool{false, true} {
 		ctx, cancel := context.WithTimeout(context.Background(), defaultOpenCodeAppendTimeout)
-		result, appendErr := writer.AppendBatch(ctx, usage)
+		timings := &AppendTimings{}
+		result, appendErr := writer.AppendBatch(WithAppendTimings(ctx, timings), usage)
+		contextErr := ctx.Err()
 		cancel()
+		t.Logf("dense usage replay=%v timings=%+v context=%v", replay, timings, contextErr)
 		if appendErr != nil {
-			t.Fatalf("dense usage append replay=%v: %v", replay, appendErr)
+			t.Fatalf("dense usage append replay=%v: %v; cause=%v context=%v timings=%+v", replay, appendErr, errors.Unwrap(appendErr), contextErr, timings)
 		}
 		accepted, duplicates := wantAtoms, 0
 		if replay {

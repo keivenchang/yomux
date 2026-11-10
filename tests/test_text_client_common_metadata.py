@@ -4,11 +4,16 @@
 import pytest
 import ast
 import json
+import os
 import re
+import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from tools.mockers import opencode
 
@@ -18,7 +23,7 @@ TOOLS_DIR = ROOT / "tools" / "mockers"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
-from text_client_common import (  # noqa: E402
+from tools.mockers.text_client_common import (  # noqa: E402
     ANSI_BOLD,
     ANSI_ITALIC,
     ANSI_RESET,
@@ -39,14 +44,19 @@ from text_client_common import (  # noqa: E402
     client_intent_markdown_rows,
     client_slash_help_rows,
     prefixed_output_labels,
+    read_input_character,
     render_terminal_markdown_line,
 )
 import claude  # noqa: E402
 import codex  # noqa: E402
+from yomux_lib.agent_comms.claude_stream_json import claude_stream_json_run
+from yomux_lib.agent_comms.exceptions import TransportInterrupted
+from yomux_lib.agent_comms import claude_stream_json as transport
+from yomux_lib.agent_comms.codex_app_server import CodexAppServerProtocol
+from yomux_lib.agent_comms import process_stream
 from yomux_lib.agent_comms.json_rpc import json_rpc_request  # noqa: E402
 from yomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer  # noqa: E402
 from yomux_lib.agent_comms.stream_events import normalize_codex_app_server_message  # noqa: E402
-from yomux_lib.yoagent.backends import yoagent_response_detail_rows  # noqa: E402
 from claude import ClaudeTextClient  # noqa: E402
 from codex import APP_SERVER_TIMEOUT_SECONDS, CodexTextClient  # noqa: E402
 
@@ -212,14 +222,12 @@ def test_codex_show_thinking_restores_summary_from_config_none(monkeypatch):
 def test_codex_tui_configuration_uses_parser_model_and_effort(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["codex.py"])
     args = codex.parse_args()
-    try:
+    with patch.dict(vars(codex.mock_agent_common)):
         codex.configure_codex_tui(args)
 
         assert codex.mock_agent_common.MODEL == "gpt-5.4-mini"
         assert codex.mock_agent_common.EFFORT == "medium"
         assert codex.mock_agent_common.live_composer_status_line().startswith("  gpt-5.4-mini medium · ")
-    finally:
-        codex.mock_agent_common.configure_codex_mock()
 
 
 def test_text_clients_accept_mock_mode(monkeypatch):
@@ -482,19 +490,15 @@ def test_prefixed_output_labels_share_common_tool_and_metrics_labels():
 def test_text_clients_use_shared_agent_comms_primitives():
     codex_source = (TOOLS_DIR / "codex.py").read_text()
     claude_source = (TOOLS_DIR / "claude.py").read_text()
-    transport_source = (ROOT / "yomux_lib" / "yoagent" / "transports.py").read_text()
     assert "from yomux_lib.agent_comms.codex_app_server import CodexAppServerProtocol" in codex_source
     assert "from yomux_lib.agent_comms.json_rpc import json_rpc_request" in codex_source
     assert "from yomux_lib.agent_comms.stream_events import normalize_codex_app_server_message" in codex_source
     assert "def json_rpc_request(" not in codex_source
     assert "def json_rpc_notification(" not in codex_source
     assert "from yomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer" in claude_source
-    assert "def _readline(" not in transport_source
-    assert "def _read_message(" not in transport_source
-    assert "def _read_response(" not in transport_source
-    assert "def _wait_turn_complete(" not in transport_source
+    assert not (ROOT / "yomux_lib" / "yoagent" / "transports.py").exists()
     assert isinstance(codex.CodexTextClient(codex_args()).last_normalized_events, list)
-    assert isinstance(claude.ClaudeTextClient(claude_args()).stream_normalizer, object)
+    assert isinstance(claude.ClaudeTextClient(claude_args()).stream_normalizer, ClaudeStreamJsonNormalizer)
 
 
 def test_text_client_normalized_events_match_shared_agent_comms(capsys):
@@ -600,6 +604,30 @@ def codex_args(**overrides):
     return SimpleNamespace(**values)
 
 
+@pytest.mark.parametrize("values", ["danger-full-access invalid", "never invalid", "yolo invalid"])
+def test_codex_invalid_permissions_preserve_the_next_turn_policy(values, capsys):
+    client = CodexTextClient(codex_args(sandbox="read-only", approval_policy="on-request"))
+    updates = []
+    client.update_thread_settings = lambda **settings: updates.append(settings)
+    client.handle_permissions_command(values)
+    assert "unknown permissions value: invalid" in capsys.readouterr().out
+    assert updates == []
+    params = client.turn_params("fixture")
+    assert params["approvalPolicy"] == "on-request"
+    assert params["sandboxPolicy"]["type"] == "readOnly"
+
+
+def test_codex_valid_permissions_publish_the_complete_policy_once():
+    client = CodexTextClient(codex_args(sandbox="read-only", approval_policy="on-request"))
+    updates = []
+    client.update_thread_settings = lambda **settings: updates.append(settings)
+    client.handle_permissions_command("workspace-write never")
+    params = client.turn_params("fixture")
+    assert updates == [{"approvalPolicy": "never", "sandboxPolicy": params["sandboxPolicy"]}]
+    assert params["approvalPolicy"] == "never"
+    assert params["sandboxPolicy"]["type"] == "workspaceWrite"
+
+
 def claude_args(**overrides):
     values = {
         "cwd": str(ROOT),
@@ -625,6 +653,336 @@ def claude_args(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+@pytest.mark.parametrize("owner,output", [
+    (owner, output) for owner in ("client", "shared") for output in ("quiet", "partial", "stderr")
+] + [("shared", "input")])
+def test_claude_pipe_reader_bounds_silent_partial_and_stderr_backpressure(owner, output):
+
+    code = {
+        "quiet": "import time; time.sleep(60)",
+        "partial": "import os,time; os.write(1,b'{'); time.sleep(60)",
+        "stderr": "import os; os.write(2,b'e'*200000); os.write(1,b'{}\\n')",
+        "input": "import os,sys; os.write(2,b'e'*200000); assert len(sys.stdin.read())==200000; os.write(1,b'{}\\n')",
+    }[output]
+    command = [sys.executable, "-c", code]
+    processes = []
+
+    def launch(*args, **kwargs):
+        process = subprocess.Popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def watchdog(_signal, _frame):
+        raise AssertionError("pipe reader exceeded its deadline")
+
+    previous = signal.signal(signal.SIGALRM, watchdog)
+    signal.setitimer(signal.ITIMER_REAL, 2)
+    try:
+        if owner == "shared":
+            text = "x" * 200000 if output == "input" else ""
+            operation = lambda: claude_stream_json_run(command, text, cwd=str(ROOT), env={}, timeout=0.05, popen=launch)
+            expected_error = subprocess.TimeoutExpired
+        else:
+            process = launch(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            client = ClaudeTextClient(claude_args(timeout=1.0 if output == "stderr" else 0.05))
+            operation = lambda: client.read_stream(process)
+            expected_error = TimeoutError
+        if output in {"stderr", "input"}:
+            result = operation()
+            if owner == "shared":
+                assert result == (0, "{}\n", "e" * 200000)
+            else:
+                assert "".join(client.stream_stderr_parts) == "e" * 200000
+        else:
+            with pytest.raises(expected_error):
+                operation()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+
+
+def test_claude_turn_retires_child_when_message_handler_raises(monkeypatch):
+    client = ClaudeTextClient(claude_args())
+    command = [sys.executable, "-c", "import os,time; os.write(1,b'{}\\n'); time.sleep(60)"]
+    processes = []
+    original_popen = subprocess.Popen
+
+    def launch(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def fail_message(_message):
+        raise ValueError("invalid message")
+
+    monkeypatch.setattr(client, "command_for_turn", lambda _text: command)
+    monkeypatch.setattr(client, "handle_message", fail_message)
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    try:
+        with pytest.raises(ValueError, match="invalid message"):
+            client.send_turn("fixture")
+        assert processes and all(process.poll() is not None for process in processes)
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
+
+
+def test_claude_interrupt_accepts_process_exit_between_poll_and_signal(monkeypatch):
+    client = ClaudeTextClient(claude_args())
+    client.current_process = SimpleNamespace(pid=123, poll=lambda: None, wait=lambda **_kwargs: 0)
+
+    def exited(_pid, _signal):
+        raise ProcessLookupError("process exited after poll")
+
+    monkeypatch.setattr(claude.os, "killpg", exited)
+    client.interrupt_turn()
+
+
+def test_shared_claude_cancellation_remains_active_after_every_pipe_closes():
+
+    cancelled = threading.Event()
+    timer = threading.Timer(0.1, cancelled.set)
+    timer.start()
+    try:
+        with pytest.raises(TransportInterrupted):
+            claude_stream_json_run(
+                [sys.executable, "-c", "import os,time; [os.close(fd) for fd in (0,1,2)]; time.sleep(60)"],
+                "", cwd=str(ROOT), env={}, timeout=1, cancel_event=cancelled,
+            )
+    finally:
+        timer.cancel()
+        timer.join()
+
+
+def test_shared_claude_pipe_reader_preserves_split_unicode_and_normalizes_newlines(monkeypatch):
+
+    payload = json.dumps({"type": "result", "result": "é😀"}, ensure_ascii=False) + "\r\n"
+    stdout_fds = []
+    original_read = transport.os.read
+
+    def read_fragment(fd, size):
+        return original_read(fd, 1 if fd in stdout_fds else size)
+
+    monkeypatch.setattr(transport.os, "read", read_fragment)
+    result = transport.claude_stream_json_run(
+        [sys.executable, "-c", f"import os; os.write(1, {payload.encode()!r})"],
+        "", cwd=str(ROOT), env={}, timeout=1,
+        process_callback=lambda process: stdout_fds.append(process.stdout.fileno()),
+    )
+    assert result == (0, payload.replace("\r\n", "\n"), "")
+
+
+@pytest.mark.parametrize("owner", ["protocol", "help"])
+@pytest.mark.parametrize("output", ["partial", "stderr", "buffered"])
+def test_codex_pipe_reader_bounds_partial_and_stderr_and_retains_buffered_messages(owner, output):
+
+    code = {
+        "partial": "import os,time; os.write(1,b'{'); time.sleep(60)",
+        "stderr": "import os,time; os.write(2,b'e'*200000); os.write(1,b'{}\\n'); time.sleep(60)",
+        "buffered": "import os,time; os.write(1,b'{}\\n{}\\n'); time.sleep(60)",
+    }[output]
+    process = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    protocol = CodexAppServerProtocol()
+    read_message = protocol.read_message if owner == "protocol" else codex.read_help_model_message
+
+    def watchdog(_signal, _frame):
+        raise AssertionError("Codex pipe reader exceeded its deadline")
+
+    previous = signal.signal(signal.SIGALRM, watchdog)
+    signal.setitimer(signal.ITIMER_REAL, 2)
+    try:
+        if output == "partial":
+            with pytest.raises((TimeoutError, subprocess.TimeoutExpired)):
+                read_message(process, time.monotonic() + 0.1)
+        else:
+            assert read_message(process, time.monotonic() + 1) == {}
+            if output == "buffered":
+                assert read_message(process, time.monotonic() + 0.1) == {}
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        protocol.terminate_process(process)
+        assert not hasattr(process, "_yomux_rpc_pipe_state")
+        assert process.stdout.closed and process.stderr.closed
+
+
+@pytest.mark.parametrize("owner", ["protocol", "help", "client"])
+def test_codex_large_request_preserves_full_duplex_progress(owner):
+
+    code = ("import os,sys,json; os.write(2,b'e'*200000); request=json.loads(sys.stdin.readline()); "
+            "print(json.dumps({'id':request['id'],'result':{'received':len(request['params']['blob'])}}),flush=True)")
+    process = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    protocol = CodexAppServerProtocol()
+
+    def watchdog(_signal, _frame):
+        raise AssertionError("Codex request blocked behind stderr backpressure")
+
+    previous = signal.signal(signal.SIGALRM, watchdog)
+    signal.setitimer(signal.ITIMER_REAL, 2)
+    try:
+        if owner == "help":
+            assert codex.help_model_request(process, "fixture", "fixture", {"blob": "x" * 200000}) == {"received": 200000}
+        else:
+            message = json_rpc_request("fixture", "fixture", {"blob": "x" * 200000})
+            if owner == "client":
+                client = CodexTextClient(codex_args())
+                client.process = process
+                client.write(message)
+            else:
+                protocol.write_message(process, message)
+            assert protocol.read_message(process, time.monotonic() + 1)["result"] == {"received": 200000}
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        protocol.terminate_process(process)
+
+
+def test_codex_interrupt_defers_pipe_cleanup_to_an_executing_reader(monkeypatch):
+
+    entered, release = threading.Event(), threading.Event()
+    original_selector = process_stream.selectors.DefaultSelector
+
+    class PausedSelector:
+        def __init__(self):
+            self.selector = original_selector()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.selector.close()
+
+        def __getattr__(self, name):
+            return getattr(self.selector, name)
+
+        def select(self, **kwargs):
+            entered.set()
+            assert release.wait(3), "reader was not released"
+            return self.selector.select(**kwargs)
+
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    protocol = CodexAppServerProtocol()
+    errors = []
+
+    def read():
+        try:
+            protocol.read_message(process, time.monotonic() + 5)
+        except OSError as error:
+            errors.append(error)
+
+    monkeypatch.setattr(process_stream.selectors, "DefaultSelector", PausedSelector)
+    reader = threading.Thread(target=read)
+    reader.start()
+    try:
+        assert entered.wait(1)
+        protocol.terminate_process(process)
+    finally:
+        release.set()
+        reader.join(timeout=3)
+        protocol.terminate_process(process)
+    assert not reader.is_alive()
+    assert errors and process.stdout.closed and process.stderr.closed
+
+
+@pytest.mark.parametrize("operation", ["select", "read", "write"])
+def test_codex_keyboard_interrupt_preserves_reader_for_turn_interrupt_request(monkeypatch, operation):
+
+    original_selector = process_stream.selectors.DefaultSelector
+
+    class InterruptedSelector(original_selector):
+        interrupted = False
+
+        def select(self, timeout=None):
+            if operation == "select" and not self.interrupted:
+                self.interrupted = True
+                raise KeyboardInterrupt()
+            return super().select(timeout)
+
+    code = ("import sys,json; print('{}',flush=True); "
+            "[(print(json.dumps({'id':request['id'],'result':{}}),flush=True)) "
+            "for request in (json.loads(line) for line in sys.stdin)]")
+    process = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    protocol = CodexAppServerProtocol()
+    monkeypatch.setattr(process_stream.selectors, "DefaultSelector", InterruptedSelector)
+    if operation in {"read", "write"}:
+        original_io = getattr(process_stream.os, operation)
+        interrupted = False
+
+        def interrupt_once(*args):
+            nonlocal interrupted
+            if not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt()
+            return original_io(*args)
+
+        monkeypatch.setattr(process_stream.os, operation, interrupt_once)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            if operation == "write":
+                protocol.write_message(process, json_rpc_request("prior", "fixture", {}))
+            else:
+                protocol.read_message(process, time.monotonic() + 1)
+        protocol.write_message(process, json_rpc_request("interrupt", "turn/interrupt", {}))
+        responses = [protocol.read_message(process, time.monotonic() + 1) for _ in range(3 if operation == "write" else 2)]
+        assert responses[-1] == {"id": "interrupt", "result": {}}
+    finally:
+        protocol.terminate_process(process)
+
+
+@pytest.mark.parametrize("reader,payload", [("utf8", b""), ("escape", b"["), ("paste", b"partial"), ("mock", b"")])
+def test_prompt_input_stops_on_eof_inside_partial_sequences(monkeypatch, reader, payload):
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, payload)
+    os.close(write_fd)
+    editor = PromptLineEditor(PromptInputSession([]), "")
+    operations = {
+        "utf8": lambda: read_input_character(read_fd, b"\xc3"),
+        "escape": lambda: editor.read_escape_tail(read_fd),
+        "paste": lambda: editor.read_bracketed_paste(read_fd),
+        "mock": lambda: claude.mock_agent_common.read_key(timeout=0.1),
+    }
+
+    def watchdog(_signal, _frame):
+        raise AssertionError("prompt reader spun after EOF")
+
+    previous = signal.signal(signal.SIGALRM, watchdog)
+    signal.setitimer(signal.ITIMER_REAL, 0.5)
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(fileno=lambda: read_fd))
+    try:
+        with pytest.raises(EOFError):
+            operations[reader]()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        os.close(read_fd)
+
+
+@pytest.mark.parametrize("text", ["é", "中", "😀"])
+def test_mock_key_reader_preserves_complete_utf8_characters(monkeypatch, text):
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, text.encode("utf-8") + b"\x1b[D\r")
+    os.close(write_fd)
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(fileno=lambda: read_fd))
+    try:
+        assert claude.mock_agent_common.read_key(timeout=0.1) == text
+        assert claude.mock_agent_common.read_key(timeout=0.1) == "\x1b[D"
+        assert claude.mock_agent_common.read_key(timeout=0.1) == "\r"
+    finally:
+        os.close(read_fd)
 
 
 def test_shared_slash_command_registry_drives_completion_and_help():

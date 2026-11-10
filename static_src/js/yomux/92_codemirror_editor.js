@@ -13,10 +13,6 @@ function destroyCodeMirrorPanel(panel, {invalidateEnsure = true} = {}) {
   // Clear the diff scrollbar overview so its red/green rail doesn't linger after switching to
   // edit/normal mode (only the diff build re-adds it via updateCodeMirrorDiffOverview).
   panel?.querySelector?.('.cm-diff-overview')?.remove();
-  if (panel?._cmMergeView) {
-    panel._cmMergeView.destroy();
-    panel._cmMergeView = null;
-  }
   if (panel?._cmView) {
     panel._cmView.destroy();
     panel._cmView = null;
@@ -116,8 +112,7 @@ function codeMirrorReadOnlyExtensions(api, path, panel = null, options = {}) {
     codeMirrorContextMenuSelectionExtension(api),
     api.highlightActiveLine(),
     codeMirrorEditorOptionCompartmentExtensions(api, panel, options),
-    api.EditorState.readOnly.of(true),
-    api.EditorView.editable.of(false),
+    codeMirrorFileAccessExtensions(api, panel, path, {readOnly: true}),
     ...(options.plain ? [codeMirrorThemeOnlyExtensions(api, panel)] : [codeMirrorLanguageExtension(api, path), codeMirrorThemedExtensions(api, panel, path)]),
   ];
 }
@@ -332,12 +327,38 @@ function codeMirrorPlainEditableExtensions(api, panel, path, options = {}) {
     saveKeymap,
     findKeymap,
     defaultKeymap,
-    safeCodeMirrorExtension('read only', () => api.EditorState.readOnly.of(readOnlyMode)),
-    safeCodeMirrorExtension('editable', () => api.EditorView.editable.of(!readOnlyMode)),
+    codeMirrorFileAccessExtensions(api, panel, path),
     codeMirrorThemedExtensions(api, panel, path),
     codeMirrorWorkingUpdateExtension(api, panel, path),
     codeMirrorSplitSyncExtension(api, panel, path),
   ];
+}
+
+function codeMirrorFileAccessExtensions(api, panel, path, options = {}) {
+  const writable = options.readOnly !== true && fileEditorStateWritable(fileEditorPanelState(panel) || fileState.get(path));
+  const extensions = [api.EditorState.readOnly.of(!writable), api.EditorView.editable.of(writable)];
+  if (!panel || !api.Compartment) return extensions;
+  panel._cmAccessCompartment = panel._cmAccessCompartment || new api.Compartment();
+  panel._cmAccessReadOnly = options.readOnly === true;
+  panel._cmAccessWritable = writable;
+  return panel._cmAccessCompartment.of(extensions);
+}
+
+function refreshFileEditorWriteAccess(panel, state) {
+  const writable = fileEditorStateWritable(state);
+  panel.classList.toggle('file-editor-readonly', !writable);
+  const cmWritable = writable && panel._cmAccessReadOnly !== true;
+  if (panel._cmView && panel._cmAccessCompartment && panel._cmAccessWritable !== cmWritable) {
+    const api = panel._cmApi;
+    panel._cmAccessWritable = cmWritable;
+    panel._cmView.dispatch({effects: panel._cmAccessCompartment.reconfigure([
+      api.EditorState.readOnly.of(!cmWritable), api.EditorView.editable.of(cmWritable),
+    ])});
+  }
+  if (panel._pmView && panel._pmAccessWritable !== writable) {
+    panel._pmAccessWritable = writable;
+    panel._pmView.setProps({editable: () => prosemirrorPanelEditable(panel)});
+  }
 }
 
 function codeMirrorEditorOptionExtensions(api, options = {}) {
@@ -522,11 +543,7 @@ function diffOverviewIsCodeMirrorChunk(chunk) {
     && Number.isFinite(Number(chunk.toB));
 }
 
-function diffOverviewCodeMirrorChunks(view, panel = null) {
-  const mergeChunks = panel?._cmMergeView?.chunks;
-  if (Array.isArray(mergeChunks) && mergeChunks.length && mergeChunks.every(diffOverviewIsCodeMirrorChunk)) {
-    return mergeChunks;
-  }
+function diffOverviewCodeMirrorChunks(view) {
   const values = view?.state?.values;
   if (!Array.isArray(values)) return null;
   for (const value of values) {
@@ -828,7 +845,7 @@ function updateCodeMirrorDiffOverview(panel, container, state, currentText, orig
   const view = panel?._cmView;
   const scrollTarget = codeMirrorDiffOverviewScrollTarget(view, container);
   const currentLineCount = Math.max(String(currentText || '').split('\n').length, 1);
-  const chunks = diffOverviewCodeMirrorChunks(view, panel);
+  const chunks = diffOverviewCodeMirrorChunks(view);
   let chunkRows = diffOverviewRowsFromCodeMirrorRenderedWeights(view, chunks, currentText, original, container)
     || diffOverviewRowsFromCodeMirrorChunks(chunks, currentText, original);
   if (!chunkRows && view) {
@@ -965,7 +982,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   try {
     const api = await loadCodeMirrorApi();
     if (panel._cmGeneration !== generation) return null;
-    if (!api.MergeView || !api.unifiedMergeView) {
+    if (!api.unifiedMergeView) {
       setFileEditorPanelStatus(panel, t('editor.codemirrorMergeUnavailable'), 'error');
       return false;
     }
@@ -978,12 +995,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     installCodeMirrorDiffCollapsedScrollGuard(panel, container);
     if (panel._cmView && panel._cmMode === 'diff' && panel._cmSignature === signature) {
       installCodeMirrorDiffResizeObserver(panel, item, path, container);
-      if (layout === 'side') {
-        syncCodeMirrorDocument(panel._cmMergeView?.a, original);
-        syncCodeMirrorDocument(panel._cmMergeView?.b, currentText, {cleanOnly: true, path, state});
-      } else {
-        syncCodeMirrorDocument(panel._cmView, currentText, {cleanOnly: true, path, state});
-      }
+      syncCodeMirrorDocument(panel._cmView, currentText, {cleanOnly: true, path, state});
       updateCodeMirrorDiffOverview(panel, container, state, currentText, original);
       scheduleDiffOverviewSettledRebuild(panel);
       restoreFileEditorPanelViewState(item, panel);
@@ -997,110 +1009,65 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     panel._cmDiffLayout = layout;
     installCodeMirrorDiffResizeObserver(panel, item, path, container);
     installCodeMirrorDiffCollapsedScrollGuard(panel, container);
-    if (layout === 'side') {
-      panel._cmMergeView = new api.MergeView({
-        a: {
-          doc: original,
-          extensions: [
-            api.drawSelection(),
-            codeMirrorContextMenuSelectionExtension(api),
-            api.highlightActiveLine(),
-            ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
-            api.EditorState.readOnly.of(true),
-            api.EditorView.editable.of(false),
-            codeMirrorLanguageExtension(api, path),
-            codeMirrorThemedExtensions(api, panel, path),
-          ],
-        },
-        b: {
-          doc: currentText,
-          extensions: [
-            ...(diffEditsAllowed
-              ? [
-                  ...codeMirrorExtensions(api, panel, path),
-                  codeMirrorWorkingUpdateExtension(api, panel, path),
-                ]
-              : codeMirrorReadOnlyExtensions(api, path, panel)),
-            // B3: panel._cmView is this `b` editor (side-by-side), so the overview rebuild listener lives here.
-            codeMirrorDiffOverviewListener(api, panel),
-          ],
-        },
-        parent: container,
-        revertControls: 'a-to-b',
-        // show each change as TWO uniform full lines (old solid red + new solid green) with
-        // NO intra-line word/token highlight — even a 1-char edit shows whole-line red + whole-line green.
-        highlightChanges: false,
-        gutter: true,
-        // B4: expand-all omits collapseUnchanged so every unchanged line shows; else collapse the runs.
-        ...(expandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
+    const unifiedMergeOptions = {
+      original,
+      // Full-line red/green only, without intra-line token highlighting.
+      highlightChanges: false,
+      gutter: true,
+      mergeControls: !readOnlyMode && diffEditsAllowed,
+      // B4: expand-all omits collapseUnchanged so every unchanged line shows; else collapse the runs.
+      ...(expandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
+    };
+    const unifiedDiffExtensions = (plain = false) => [
+      api.unifiedMergeView(unifiedMergeOptions),
+      ...(diffEditsAllowed ? codeMirrorExtensions(api, panel, path, {plain}) : codeMirrorReadOnlyExtensions(api, path, panel, {plain})),
+      codeMirrorDiffOverviewListener(api, panel),  // B3: rebuild overview on fold/geometry change
+    ];
+    let cmState;
+    try {
+      cmState = api.EditorState.create({
+        doc: currentText,
+        extensions: unifiedDiffExtensions(false),
       });
-      panel._cmView = panel._cmMergeView.b;
-      trackCodeMirrorViews(panel, api, [panel._cmMergeView.a, panel._cmMergeView.b]);
-      panel._cmMergeView.b.scrollDOM?.addEventListener('scroll', () => {
-        scheduleFileEditorSplitScrollSync(panel, 'editor');
-        scheduleFileEditorPanelViewStateCapture(item, panel);
+      panel._cmPlainFallback = false;
+    } catch (error) {
+      console.warn('CodeMirror diff language parser failed; retrying plain diff editor', error);
+      panel._cmThemeCompartment = null;
+      panel._cmEditorOptionCompartment = null;
+      panel._cmLocaleCompartment = null;
+      cmState = api.EditorState.create({
+        doc: currentText,
+        extensions: unifiedDiffExtensions(true),
       });
-    } else {
-      const unifiedMergeOptions = {
-        original,
-        // full-line red/green only, no intra-line token highlight (see MergeView above).
-        highlightChanges: false,
-        gutter: true,
-        mergeControls: !readOnlyMode && diffEditsAllowed,
-        // B4: expand-all omits collapseUnchanged so every unchanged line shows; else collapse the runs.
-        ...(expandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
-      };
-      const unifiedDiffExtensions = (plain = false) => [
-        api.unifiedMergeView(unifiedMergeOptions),
-        ...(diffEditsAllowed ? codeMirrorExtensions(api, panel, path, {plain}) : codeMirrorReadOnlyExtensions(api, path, panel, {plain})),
-        codeMirrorDiffOverviewListener(api, panel),  // B3: rebuild overview on fold/geometry change
-      ];
-      let cmState;
-      try {
-        cmState = api.EditorState.create({
-          doc: currentText,
-          extensions: unifiedDiffExtensions(false),
-        });
-        panel._cmPlainFallback = false;
-      } catch (error) {
-        console.warn('CodeMirror diff language parser failed; retrying plain diff editor', error);
-        panel._cmThemeCompartment = null;
-        panel._cmEditorOptionCompartment = null;
-        panel._cmLocaleCompartment = null;
-        cmState = api.EditorState.create({
-          doc: currentText,
-          extensions: unifiedDiffExtensions(true),
-        });
-        panel._cmPlainFallback = true;
-      }
-      panel._cmView = new api.EditorView({
-        state: cmState,
-        parent: container,
-        dispatch(transaction) {
-          mapMarkdownTypingPair(panel, transaction);
-          panel._cmView.update([transaction]);
-          refreshMarkdownFormattingToolbar(panel);
-          if (transaction.docChanged || transaction.selectionSet) {
-            updateCodeMirrorCursorStatus(panel);
-            captureCodeMirrorPanelViewState(panel, path);
-            if (transaction.selectionSet && !transaction.docChanged && typeof selectMarkdownPreviewSourceRange === 'function') {
-              const selection = transaction.newSelection.main;
-              const line = transaction.newDoc.lineAt(selection.from);
-              const text = transaction.newDoc.sliceString(selection.from, selection.to);
-              selectMarkdownPreviewSourceRange(path, line.number, text);
-            }
-          }
-          if (transaction.docChanged) {
-            if (!panel._cmSyncing) scheduleCodeMirrorSource(panel, path);
-          }
-        },
-      });
-      panel._cmView.scrollDOM?.addEventListener('scroll', () => {
-        scheduleFileEditorSplitScrollSync(panel, 'editor');
-        scheduleFileEditorPanelViewStateCapture(item, panel);
-      });
-      trackCodeMirrorViews(panel, api, [panel._cmView]);
+      panel._cmPlainFallback = true;
     }
+    panel._cmView = new api.EditorView({
+      state: cmState,
+      parent: container,
+      dispatch(transaction) {
+        mapMarkdownTypingPair(panel, transaction);
+        panel._cmView.update([transaction]);
+        refreshMarkdownFormattingToolbar(panel);
+        if (transaction.docChanged || transaction.selectionSet) {
+          updateCodeMirrorCursorStatus(panel);
+          captureCodeMirrorPanelViewState(panel, path);
+          if (transaction.selectionSet && !transaction.docChanged && typeof selectMarkdownPreviewSourceRange === 'function') {
+            const selection = transaction.newSelection.main;
+            const line = transaction.newDoc.lineAt(selection.from);
+            const text = transaction.newDoc.sliceString(selection.from, selection.to);
+            selectMarkdownPreviewSourceRange(path, line.number, text);
+          }
+        }
+        if (transaction.docChanged) {
+          if (!panel._cmSyncing) scheduleCodeMirrorSource(panel, path);
+        }
+      },
+    });
+    panel._cmView.scrollDOM?.addEventListener('scroll', () => {
+      scheduleFileEditorSplitScrollSync(panel, 'editor');
+      scheduleFileEditorPanelViewStateCapture(item, panel);
+    });
+    trackCodeMirrorViews(panel, api, [panel._cmView]);
     panel._cmPath = path;
     panel._cmSignature = signature;
     panel._cmMode = 'diff';
@@ -1603,6 +1570,8 @@ function updateFileEditorPanelChrome(panel, path) {
   const item = panel?.dataset?.layoutItem || '';
   const state = fileEditorStateForItem(path, item);
   const previewOnly = state?.historical === true;
+  const writable = fileEditorStateWritable(state);
+  refreshFileEditorWriteAccess(panel, state);
   panel.classList.toggle('dirty', !!state?.dirty);
   const dirtyDot = panel.querySelector('.file-editor-title .file-tab-dirty');
   if (dirtyDot) dirtyDot.hidden = !state?.dirty;
@@ -1615,7 +1584,7 @@ function updateFileEditorPanelChrome(panel, path) {
   }
   const saveButton = panel.querySelector('.file-editor-save-panel');
   if (saveButton) {
-    saveButton.hidden = previewOnly || readOnlyMode || state?.kind !== 'text';
+    saveButton.hidden = previewOnly || !writable || state?.kind !== 'text';
     saveButton.disabled = !state?.dirty;
   }
   const reloadButton = panel.querySelector('.file-editor-reload-panel');
@@ -1625,7 +1594,7 @@ function updateFileEditorPanelChrome(panel, path) {
   const uploadButton = panel.querySelector('.file-editor-upload-panel');
   if (uploadButton) {
     const viewMode = editorViewModeFor(path, item);
-    uploadButton.hidden = readOnlyMode || state?.kind !== 'text' || previewRendererForPath(path)?.id !== 'markdown' || !['edit', 'split'].includes(viewMode);
+    uploadButton.hidden = !writable || state?.kind !== 'text' || previewRendererForPath(path)?.id !== 'markdown' || !['edit', 'split'].includes(viewMode);
   }
   updateFileEditorToolbarSeparators(panel);
   ensureMarkdownFormattingToolbar(panel);
@@ -2501,7 +2470,7 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
   const statePath = options.statePath || path;
   const item = fileEditorPanelItem(panel) || options.item || fileEditorItemFor(path);
   const state = fileEditorStateForItem(statePath, item);
-  if (!state || state.kind !== 'text' || state.historical === true || (expectedState && state !== expectedState)) return false;
+  if (!fileEditorStateWritable(state) || state.kind !== 'text' || (expectedState && state !== expectedState)) return false;
   const contentPanel = panel || state.contentOwnerPanel || null;
   flushProseMirrorSource(contentPanel, statePath, {preserveTerminalNewline: true});
   syncOpenFileContentFromPanels(statePath, contentPanel);
@@ -2513,6 +2482,7 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
   applyFileEditorSaveHygiene(path);
   if (!state.dirty && options.force !== true) return true;
   const savedContent = state.content;
+  const relocationRevision = Number(state.relocationRevision || 0);
   setFileEditorPanelStatus(contentPanel, t(options.autosave ? 'editor.autoSaving' : 'editor.saving'), '');
   let selfWrite = null;
   const clearSelfWrite = () => {
@@ -2525,6 +2495,7 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
       path,
       content: savedContent,
     };
+    if (state.fileId) body.expected_file_id = state.fileId;
     if (options.force !== true) body.expected_mtime = state.mtime;
     // write_file truncates in place before writing the replacement bytes. Register the expected
     // self-write before admission so watchd's zero-byte observation cannot be mistaken for an
@@ -2545,9 +2516,13 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
     const currentStatePath = options.statePath || statePath;
     if (!fileStateIsCurrent(currentStatePath, state)) {
       clearSelfWrite();
+      // A completed local save may outlive its tab. Refresh a clean reopened owner even
+      // while focused; ordinary watcher reloads defer there to protect active editing.
+      const reopened = fileState.get(currentStatePath);
+      if (reopened && !reopened.dirty) await replaceOpenFileStateFromDisk(currentStatePath, payload);
       return true;
     }
-    applyFileIdentityMetadata(state, payload);
+    if (Number(state.relocationRevision || 0) === relocationRevision) applyFileIdentityMetadata(state, payload);
     state.mtime = filePayloadMtime(payload);
     state.size = payload.size;
     clearSelfWrite();
@@ -2580,6 +2555,8 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
   } catch (err) {
     clearSelfWrite();
     if (!fileStateIsCurrent(options.statePath || statePath, state)) return false;
+    // A failed write admitted for the old pathname cannot decide conflicts for the relocated document.
+    if (Number(state.relocationRevision || 0) !== relocationRevision) return false;
     if (err?.status === 409) {
       setFileEditorPanelStatus(panel, t('dialog.conflictTitle'), 'warn');
       return {conflict: true, message: userMessageText(err, err.message)};
@@ -2662,10 +2639,11 @@ async function runFileEditorSaveOwner(path, owner) {
 }
 
 function saveFileEditor(path, panel, options = {}) {
+  if (fileTreeMovePendingForPath(path)) return Promise.resolve(false);
   if (readOnlyMode) return Promise.resolve(false);
   const item = fileEditorPanelItem(panel) || options.item || fileEditorItemFor(path);
   const state = fileEditorStateForItem(path, item);
-  if (!state || state.kind !== 'text' || state.historical === true) return Promise.resolve(false);
+  if (!fileEditorStateWritable(state) || state.kind !== 'text') return Promise.resolve(false);
   let owner = fileEditorSaveOwners.get(path);
   if (!owner) {
     owner = {active: null, pending: null, path};

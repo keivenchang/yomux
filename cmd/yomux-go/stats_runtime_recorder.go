@@ -41,6 +41,7 @@ type statsRuntimeRecorder struct {
 	pendingMu          sync.Mutex
 	pendingBatches     []stats.AppendBatch
 	pendingUnavailable []stats.UnavailableSpan
+	health             stats.CollectorHealthTracker
 	metricsMu          sync.Mutex
 	lastAppendErr      string
 	runs               atomic.Uint64
@@ -90,6 +91,7 @@ func (r *statsRuntimeRecorder) diagnostics() map[string]any {
 
 func (r *statsRuntimeRecorder) recordAppendError(err error) {
 	r.appendErrors.Add(1)
+	r.health.Record("service_load", r.now(), err, len(r.pendingBatches), r.droppedBatches.Load())
 	message := "append failed"
 	if err != nil {
 		message = err.Error()
@@ -200,6 +202,7 @@ func (r *statsRuntimeRecorder) flushPending(ctx context.Context) error {
 	r.pendingUnavailable = nil
 	r.overflowEpochID = ""
 	r.appendSuccess.Add(1)
+	r.health.Record("service_load", r.now(), nil, 0, r.droppedBatches.Load())
 	return nil
 }
 
@@ -209,6 +212,15 @@ func (r *statsRuntimeRecorder) RunOnce(ctx context.Context) {
 	}
 	r.runs.Add(1)
 	at := r.now()
+	r.health.Attempt("service_load", at)
+	// The last dropped cadence can extend beyond an early timer tick. Retry
+	// its queue without admitting a sample inside the recorded gap.
+	if float64(at.UnixNano())/1e9 < r.epochStarted {
+		if err := r.flushPending(ctx); err != nil {
+			return
+		}
+		return
+	}
 	samples := r.sample(at)
 	// Source order is intentionally normalized so synthetic fixtures and
 	// duplicate/replayed appends have stable request shapes.
@@ -235,7 +247,6 @@ func (r *statsRuntimeRecorder) RunOnce(ctx context.Context) {
 			// Keep the oldest window and persist an explicit unavailable span before
 			// a later observation can extend coverage past this dropped cadence.
 			r.recordDroppedBatchLocked(current, factContext.ObservedAt, factContext.CadenceSeconds)
-			slog.Warn("stats runtime recorder pending queue full", "dropped_newest_batch", true)
 			r.droppedBatches.Add(1)
 		}
 	}
@@ -245,13 +256,13 @@ func (r *statsRuntimeRecorder) RunOnce(ctx context.Context) {
 	batch := r.pendingBatchLocked()
 	if _, err := r.writer.AppendBatch(ctx, batch); err != nil {
 		r.recordAppendError(err)
-		slog.Warn("stats runtime recorder append failed", "error", err)
 		return
 	}
 	r.pendingBatches = nil
 	r.pendingUnavailable = nil
 	r.overflowEpochID = ""
 	r.appendSuccess.Add(1)
+	r.health.Record("service_load", r.now(), nil, 0, r.droppedBatches.Load())
 }
 
 func (r *statsRuntimeRecorder) pendingBatchLocked() stats.AppendBatch {
@@ -266,6 +277,17 @@ func (r *statsRuntimeRecorder) pendingBatchLocked() stats.AppendBatch {
 func (r *statsRuntimeRecorder) recordDroppedBatchLocked(batch stats.AppendBatch, observedAt, cadence float64) {
 	if r.overflowEpochID == "" {
 		r.overflowEpochID = r.epochID
+		// Adjacent timer ticks can be closer than the nominal cadence. The
+		// queued coverage must stop where the first dropped sample begins.
+		for i := range r.pendingBatches {
+			for j := range r.pendingBatches[i].CoverageEpochs {
+				epoch := &r.pendingBatches[i].CoverageEpochs[j]
+				if epoch.EndedAt != nil && *epoch.EndedAt > observedAt {
+					end := observedAt
+					epoch.EndedAt = &end
+				}
+			}
+		}
 		r.epochSequence++
 		suffix := ":gap-" + strconv.FormatUint(r.epochSequence, 10)
 		baseLimit := stats.MaxSeriesComponentBytes - len(suffix)

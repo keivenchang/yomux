@@ -40,7 +40,7 @@ function markdownFormattingPanelWritable(panel) {
   const path = panel.dataset.filePath;
   const item = panel.dataset.layoutItem || fileEditorItemFor(path);
   const state = fileEditorPanelState(panel);
-  return panelNodes.get(item) === panel && state?.kind === 'text' && state.historical !== true
+  return panelNodes.get(item) === panel && state?.kind === 'text' && fileEditorStateWritable(state)
     && previewRendererForPath(path)?.id === 'markdown';
 }
 

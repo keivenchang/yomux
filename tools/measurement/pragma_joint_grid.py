@@ -46,6 +46,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools.statsd_fixture_double import copy_fixture_store
+
 # Negative form is KiB of memory, so the grid stays meaningful if `page_size` ever changes.
 CACHE_SIZE_POINTS = (-2000, -16000, -65536, -262144, -582740)
 CACHE_SIZE_CONTROL = -2000
@@ -311,20 +316,11 @@ def spawn_point(
 def copy_store(source: Path, destination: Path) -> int:
     """Byte copy of the store and its sidecars. SQLite is never asked to open the original."""
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    total = 0
-    for suffix in ("", "-wal", "-shm"):
-        candidate = Path(str(source) + suffix)
-        if not candidate.exists():
-            continue
-        target = Path(str(destination) + suffix)
-        shutil.copyfile(candidate, target)
-        total += target.stat().st_size
-    return total
+    return copy_fixture_store(source, destination, include_shm=True)
 
 
 def quick_check(store: Path) -> str:
-    connection = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
+    connection = sqlite3.connect(store.resolve().as_uri() + "?mode=ro", uri=True)
     try:
         return str(connection.execute("PRAGMA quick_check").fetchone()[0])
     finally:
@@ -461,7 +457,9 @@ def decide(read_points: Sequence[dict], write_points: Sequence[dict]) -> dict:
                 "spent"
             ),
         }
-    elif smallest_cache is not None and within_budget:
+    elif smallest_cache is not None and within_budget and not any(
+        rejected["cache_size"] == smallest_cache["requested_cache_size"] for rejected in rejected_on_write
+    ):
         gap = min(p["io_delta"]["syscr"] for p in mmap_only) - best_syscr
         choice = {
             "cache_size": smallest_cache["requested_cache_size"],
@@ -476,7 +474,7 @@ def decide(read_points: Sequence[dict], write_points: Sequence[dict]) -> dict:
         choice = {
             "cache_size": CACHE_SIZE_CONTROL, "mmap_size": MMAP_SIZE_CONTROL,
             "reason": (
-                "no point flattens the read curve within the anonymous budget; the defaults stand "
+                "no accepted point flattens the read curve within the anonymous budget without a write regression; the defaults stand "
                 "and the grid's own numbers are the evidence for leaving them alone"
             ),
         }

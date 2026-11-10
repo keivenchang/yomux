@@ -149,7 +149,7 @@ test('missing duration samples do not become zero-valued client measurements', (
 });
 
 test('observation uploads capture request diagnostics without recursively uploading themselves', () => {
-  const uploader = sourceFunction('flushJsDebugCurrentObservations', 'jsDebugApplyCurrentObservationReceipt');
+  const uploader = sourceFunction('flushJsDebugCurrentObservations', 'finalizeJsDebugCurrentObservationBytes');
   assert.match(uploader, /await apiFetchJson\('\/api\/stats-observations'/);
   const recorder = coreSource.slice(coreSource.indexOf('function recordApiDebugEvent('), coreSource.indexOf('function recordApiDebugResponseBytes('));
   const events = [];
@@ -290,7 +290,7 @@ function sourceFunction(name, nextName) {
       .filter(index => index >= 0),
   );
   assert.notEqual(start, -1, `${name} exists`);
-  assert.notEqual(end, -1, `${nextName} follows ${name}`);
+  assert.ok(Number.isFinite(end) && end > start, `${nextName} follows ${name}`);
   const body = source.slice(start, end);
   if (!body.includes('debugDisplayProductLabel(')) return body;
   const helperStart = source.indexOf('function debugDisplayProductLabel(');
@@ -299,6 +299,10 @@ function sourceFunction(name, nextName) {
   assert.notEqual(helperEnd, -1, 'debugDisplayProductLabel ends before stats push handling');
   return `${source.slice(helperStart, helperEnd)}\n${body}`;
 }
+
+test('source extraction rejects a missing end owner', () => {
+  assert.throws(() => sourceFunction('debugGraphSeriesAxis', 'missingBoundaryOwner'), /missingBoundaryOwner follows/);
+});
 
 test('client work counter columns stay aligned across optional timing and detail values', () => {
   const context = {result: null};
@@ -4586,7 +4590,6 @@ test('focused Reset Zoom immediately repaints the shared full-range domain and s
     function jsDebugHistoryCoverageResolutionSeconds() { return 60; }
     function jsDebugHistoryCoverageNeedsRefresh() { return false; }
     function renderYoCostPanels() { return false; }
-    function debugGraphInteractionBelongsToPanel() { return false; }
     function debugGraphClassName() { return 'js-debug-graph'; }
     function debugGraphBodyHtml() { return ''; }
     function preserveDebugGraphBodyControls() {}
@@ -4607,7 +4610,6 @@ test('focused Reset Zoom immediately repaints the shared full-range domain and s
     function jsDebugHistoryReadinessBusy() { return false; }
     const jsDebugCurrentStatsClientState = {paintedGenerationKey: ''};
     const jsDebugHistoryReadiness = {phase: 'ready'};
-    var jsDebugGraphSelectionState = null;
     var jsDebugGraphTouchCandidateState = null;
     var jsDebugGraphPendingResolutionChange = null;
     function debugGraphInteractionBelongsToPanel() { return false; }
@@ -5499,7 +5501,7 @@ test('stats and cost renders defer while a chart gesture owns their live DOM', (
   assert.deepEqual({...costContext.result}, {rendered: false, pending: 'true'});
   assert.match(sourceFunction('handleDebugGraphPointerUp', 'handleDebugGraphPointerCancel'), /flushDeferredDebugGraphInteractionRefresh/);
   assert.match(sourceFunction('handleDebugGraphPointerCancel', 'cancelDebugGraphSelection'), /cancelDebugGraphSelection\(panel\)/);
-  const panelBinding = sourceFunction('bindDebugPanel', 'registerDebugRuntimeFacade');
+  const panelBinding = slice(source, 'function bindDebugPanel(', "\nregisterDebugRuntimeFacade('panel',");
   assert.equal((panelBinding.match(/scope\.ownEvent\('pointerdown'/g) || []).length, 1);
   assert.match(panelBinding, /bindDebugGraphTouchSelection\(panel\)/);
   assert.match(panelBinding, /lostpointercapture/);
@@ -5636,12 +5638,8 @@ test('CPU projection keeps the average at coarse resolutions instead of promotin
     jsDebugCurrentSeriesValue: (series, name) => series[name] === undefined ? null : Number(series[name]),
   };
   vm.runInNewContext(`${projectionSource}
-    result = [
-      jsDebugCurrentCpuProjectionValue({average: 42, maximum: 100}, 'average'),
-      jsDebugCurrentCpuProjectionValue({average: 42, maximum: 100}, 'average'),
-      jsDebugCurrentCpuProjectionValue({average: 42, maximum: 100}, 'average'),
-    ];`, context);
-  assert.deepEqual([...context.result], [42, 42, 42]);
+    result = jsDebugCurrentCpuProjectionValue({average: 42, maximum: 100}, 'average');`, context);
+  assert.equal(context.result, 42);
   assert.match(projectionSource, /return average/);
 });
 
@@ -6357,29 +6355,51 @@ testAsync('stats alias snapshots refresh after view creation and reject stale to
   const functionText = sourceFunction('jsDebugSessionAliasTopologyKey', 'ensureJsDebugCurrentStatsClient');
   const requests = [];
   const applied = [];
+  const failures = [];
   const context = {
     transcriptMetadataState: {epoch: 'test'}, tmuxTopologyGeneration: 1, sessions: ['source'], tabberViewSessions: new Map(),
     jsDebugCurrentStatsClientState: {client: {controller: () => ({generation: () => null})}, sessionAliasKey: '', sessionAliasPromise: null},
     jsDebugStatsPanelVisible: () => true,
     apiFetch: () => new Promise(resolve => requests.push(resolve)),
+    apiPendingResponseFromPayload: () => null,
+    isApiPendingResponse: () => false,
+    userMessageText: (_payload, fallback) => fallback,
     debugGraphStatsCurrentModule: () => ({setSessionAliases: aliases => applied.push(aliases)}),
-    paintJsDebugCurrentStatsGeneration() {}, recordJsDebugCurrentStatsFailure() {}, jsDebugErrorText: String,
+    paintJsDebugCurrentStatsGeneration() {}, recordJsDebugCurrentStatsFailure: failure => failures.push(failure), jsDebugErrorText: String,
   };
-  vm.runInNewContext(functionText, context);
+  vm.createContext(context);
+  vm.runInContext(coreSource.slice(coreSource.indexOf('async function apiJsonResponse('), coreSource.indexOf('async function apiFetchJsonQuiet(')), context);
+  vm.runInContext(functionText, context);
+  const response = aliases => new Response(JSON.stringify({aliases}), {status: 200, headers: {'Content-Type': 'application/json'}});
   const first = context.refreshJsDebugSessionAliases();
-  requests.shift()({aliases: {old: 'source'}});
+  requests.shift()(response({old: 'source'}));
   await first;
   assert.equal(applied.length, 1);
+  assert.deepEqual(applied[0], {old: 'source'});
   context.tabberViewSessions.set('new', {sourceSession: 'source', windowId: '@12'});
   const second = context.refreshJsDebugSessionAliases();
   context.tmuxTopologyGeneration = 2;
-  requests.shift()({aliases: {stale: 'source'}});
+  requests.shift()(response({stale: 'source'}));
   await second;
   assert.equal(applied.length, 1, 'obsolete response cannot replace last good aliases');
   assert.equal(requests.length, 1, 'changed topology schedules one successor');
-  requests.shift()({aliases: {new: 'renamed'}});
+  requests.shift()(response({new: 'renamed'}));
   await context.jsDebugCurrentStatsClientState.sessionAliasPromise;
   assert.deepEqual(applied[1], {new: 'renamed'});
+  context.tmuxTopologyGeneration = 3;
+  const obsoleteFailure = context.refreshJsDebugSessionAliases();
+  context.tmuxTopologyGeneration = 4;
+  requests.shift()(new Response('{}', {status: 503}));
+  await obsoleteFailure;
+  assert.equal(failures.length, 0, 'obsolete errors cannot mark the new topology failed');
+  requests.shift()(response({newest: 'current'}));
+  await context.jsDebugCurrentStatsClientState.sessionAliasPromise;
+  assert.deepEqual(applied[2], {newest: 'current'});
+  context.tmuxTopologyGeneration = 5;
+  const currentFailure = context.refreshJsDebugSessionAliases();
+  requests.shift()(new Response('{}', {status: 503}));
+  await currentFailure;
+  assert.equal(failures.length, 1, 'current errors retain their diagnostic evidence');
 });
 
 Promise.all(pending).then(() => {

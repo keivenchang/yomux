@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+
+	"github.com/keivenchang/yomux/internal/tailfile"
 )
 
 const (
@@ -93,6 +95,10 @@ type TranscriptScannerState struct {
 	ClaudeMessageOrderRebuildPresent   map[string]struct{}
 	ClaudeSequence                     int64
 	CodexUsage                         UsageCounters
+	CodexUsageDomains                  map[string]UsageCounters
+	CodexTurnID                        string
+	CodexResponseIDs                   map[string]struct{}
+	CodexResponseOrder                 []string
 	CodexModel                         string
 	CodexModelEvidence                 string
 	CodexEffort                        string
@@ -107,6 +113,7 @@ type TranscriptScannerState struct {
 }
 
 type TranscriptScanOptions struct {
+	Ingestion           *tailfile.Ingestion
 	Context             context.Context
 	MaxBytes            int64
 	MaxRecords          int
@@ -521,6 +528,16 @@ func ScanTranscript(source TranscriptSource, state *TranscriptScannerState, opti
 		return TranscriptScanResult{}, err
 	}
 	defer file.Close()
+	var physical io.ReaderAt = file
+	var ingestionSnapshot *tailfile.Snapshot
+	if options.Ingestion != nil {
+		snapshot, snapshotErr := options.Ingestion.Snapshot(file)
+		if snapshotErr != nil {
+			return TranscriptScanResult{}, snapshotErr
+		}
+		physical = snapshot
+		ingestionSnapshot = snapshot
+	}
 
 	before := cloneTranscriptState(*state)
 	after := cloneTranscriptState(*state)
@@ -553,7 +570,7 @@ func ScanTranscript(source TranscriptSource, state *TranscriptScannerState, opti
 			return nil, false, nil
 		}
 		data := make([]byte, size)
-		n, readErr := file.ReadAt(data, offset)
+		n, readErr := physical.ReadAt(data, offset)
 		result.BytesRead += int64(n)
 		remaining -= int64(n)
 		if readErr != nil && readErr != io.EOF {
@@ -660,7 +677,7 @@ func ScanTranscript(source TranscriptSource, state *TranscriptScannerState, opti
 		}
 	}
 	if source.Provider == "claude" && claudeMessageOrderNeedsRebuild(&after) {
-		complete, rebuildErr := rebuildLegacyClaudeMessageOrder(file, &after, options, &remaining, &result)
+		complete, rebuildErr := rebuildLegacyClaudeMessageOrder(physical, &after, options, &remaining, &result)
 		if rebuildErr != nil {
 			return TranscriptScanResult{}, rebuildErr
 		}
@@ -701,7 +718,7 @@ func ScanTranscript(source TranscriptSource, state *TranscriptScannerState, opti
 		snapshotContentLimit = 0
 	}
 	contentLimit := min(remaining, snapshotContentLimit)
-	contentSource := &transcriptCountingReader{reader: io.NewSectionReader(file, contentStart, contentLimit)}
+	contentSource := &transcriptCountingReader{reader: io.NewSectionReader(physical, contentStart, contentLimit)}
 	reader := bufio.NewReader(io.LimitReader(contentSource, contentLimit))
 	contentConsumed := int64(0)
 	for result.RecordsParsed < options.MaxRecords {
@@ -716,7 +733,16 @@ func ScanTranscript(source TranscriptSource, state *TranscriptScannerState, opti
 				break
 			}
 		}
-		line, lineBytes, complete, budgetCut, readErr := readTranscriptLine(options.Context, reader, contentRemaining)
+		var line []byte
+		var lineBytes int64
+		var complete, budgetCut bool
+		var readErr error
+		if ingestionSnapshot != nil {
+			line, lineBytes, complete, budgetCut, readErr = options.Ingestion.ReadFrame(options.Context, ingestionSnapshot, contentStart+contentConsumed, contentRemaining)
+			contentSource.read += lineBytes
+		} else {
+			line, lineBytes, complete, budgetCut, readErr = readTranscriptLine(options.Context, reader, contentRemaining)
+		}
 		if readErr != nil {
 			return TranscriptScanResult{}, readErr
 		}
@@ -854,7 +880,7 @@ func resetTranscriptContent(state *TranscriptScannerState) {
 	state.ClaudeMessageOrderRebuildOrderHead = 0
 	state.ClaudeMessageOrderRebuildPresent = nil
 	state.ClaudeSequence = 0
-	state.CodexUsage = nil
+	resetCodexUsageState(state)
 	state.CodexModel = ""
 	state.CodexModelEvidence = ""
 	state.CodexEffort = ""
@@ -885,34 +911,7 @@ func (r *transcriptCountingReader) Read(buffer []byte) (int, error) {
 // its end on the next cycle; read-ahead beyond the returned prefix is still
 // charged through the wrapped reader and may be reread later.
 func readTranscriptLine(ctx context.Context, reader *bufio.Reader, maxBytes int64) ([]byte, int64, bool, bool, error) {
-	var line []byte
-	var total int64
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, total, false, false, err
-		}
-		fragment, err := reader.ReadSlice('\n')
-		available := maxBytes - total
-		if int64(len(fragment)) > available {
-			if available > 0 {
-				line = append(line, fragment[:available]...)
-				total += available
-			}
-			return line, total, false, true, nil
-		}
-		line = append(line, fragment...)
-		total += int64(len(fragment))
-		if err == nil {
-			return line, total, true, false, nil
-		}
-		if err == bufio.ErrBufferFull {
-			continue
-		}
-		if err == io.EOF {
-			return line, total, false, false, nil
-		}
-		return nil, total, false, false, err
-	}
+	return tailfile.ReadRecord(ctx, reader, maxBytes)
 }
 
 // transcriptLineMayContainUsage is a cheap lexical gate for the JSONL hot
@@ -1141,7 +1140,7 @@ func normalizeTranscriptRecord(source TranscriptSource, state *TranscriptScanner
 		threadID, _ := payload["thread_id"].(string)
 		if threadID != "" {
 			if state.CodexThreadID != "" && state.CodexThreadID != threadID {
-				state.CodexUsage = nil
+				resetCodexUsageState(state)
 				state.CodexForkID = ""
 			}
 			state.CodexThreadID = threadID
@@ -1167,25 +1166,28 @@ func normalizeTranscriptRecord(source TranscriptSource, state *TranscriptScanner
 		threadUsage, hasThreadUsage := payload["thread_token_usage"].(map[string]any)
 		usage, hasUsage := payload["usage"].(map[string]any)
 		turnUsage, hasTurnUsage := payload["turn_token_usage"].(map[string]any)
-		current := UsageCounters{}
-		baseline := UsageCounters{}
-		cumulative := false
+		responseID, _ := payload["response_id"].(string)
+		turnID, _ := payload["turn_id"].(string)
 		switch {
 		case hasThreadUsage:
-			current = codexUsageCounters(threadUsage)
-			baseline = current
-			cumulative = true
+			return normalizeCodexUsageSnapshot(source, state, observed, metadata, "thread", codexUsageCounters(threadUsage), codexUsageCounters(threadUsage), true, responseID, codexUsageCounters(usage))
 		case hasUsage:
-			current = codexUsageCounters(usage)
+			return normalizeCodexUsageSnapshot(source, state, observed, metadata, "response", codexUsageCounters(usage), nil, false, responseID, nil)
 		case hasTurnUsage:
-			current = codexUsageCounters(turnUsage)
+			if turnID == "" {
+				turnID = "unknown-turn"
+			}
+			if state.CodexTurnID != turnID {
+				state.CodexTurnID = turnID
+				delete(codexUsageDomains(state), "turn")
+			}
+			return normalizeCodexUsageSnapshot(source, state, observed, metadata, "turn", codexUsageCounters(turnUsage), codexUsageCounters(turnUsage), true, responseID, nil)
 		default:
 			return nil, nil
 		}
-		return normalizeCodexUsageSnapshot(source, state, observed, metadata, current, baseline, cumulative)
 	}
 	info, _ := payload["info"].(map[string]any)
-	total, _ := info["total_token_usage"].(map[string]any)
+	total, hasTotal := info["total_token_usage"].(map[string]any)
 	last, _ := info["last_token_usage"].(map[string]any)
 	if len(total) == 0 && len(last) == 0 {
 		return nil, nil
@@ -1208,14 +1210,19 @@ func normalizeTranscriptRecord(source TranscriptSource, state *TranscriptScanner
 	metadata.PricingProfile = firstNonEmpty(state.CodexPricingProfile, "default")
 	metadata.ServiceTier = firstNonEmpty(state.CodexServiceTier, "default")
 	metadata.ModelEvidence = firstNonEmpty(state.CodexModelEvidence, "unknown")
-	counters := UsageCounters{}
 	usageSource := total
-	for key, value := range map[string]string{"input_tokens": "input_tokens", "cached_input_tokens": "cached_input_tokens", "output_tokens": "output_tokens"} {
-		if number, ok := usageSource[value].(float64); ok {
-			counters[key] = number
-		}
+	if !hasTotal {
+		usageSource = last
 	}
-	return normalizeCodexUsageSnapshot(source, state, observed, metadata, counters, counters, len(total) > 0)
+	responseID, _ := info["response_id"].(string)
+	domain := "legacy"
+	var baseline UsageCounters
+	if hasTotal {
+		baseline = codexUsageCounters(total)
+	} else {
+		domain = "last"
+	}
+	return normalizeCodexUsageSnapshot(source, state, observed, metadata, domain, codexUsageCounters(usageSource), baseline, hasTotal, responseID, codexUsageCounters(last))
 }
 
 func boundClaudeMessageState(state *TranscriptScannerState) {
@@ -1321,7 +1328,7 @@ func validateClaudeMessageOrderRebuildState(state TranscriptScannerState) error 
 // Go cursor sidecars. It scans only through the already-committed byte offset,
 // in the same byte/record budget as ordinary collection, and persists bounded
 // progress so large transcripts do not turn an upgrade into one unbounded read.
-func rebuildLegacyClaudeMessageOrder(file *os.File, state *TranscriptScannerState, options TranscriptScanOptions, remaining *int64, result *TranscriptScanResult) (bool, error) {
+func rebuildLegacyClaudeMessageOrder(file io.ReaderAt, state *TranscriptScannerState, options TranscriptScanOptions, remaining *int64, result *TranscriptScanResult) (bool, error) {
 	if !state.ClaudeMessageOrderRebuildActive {
 		state.ClaudeMessageOrderRebuildActive = true
 		state.ClaudeMessageOrderRebuildOffset = 0
@@ -1543,24 +1550,75 @@ func codexUsageCounters(values map[string]any) UsageCounters {
 	return result
 }
 
-func normalizeCodexUsageSnapshot(source TranscriptSource, state *TranscriptScannerState, observed float64, metadata UsageMetadata, current, baseline UsageCounters, cumulative bool) ([]UsageAtom, error) {
-	if state.CodexUsage == nil {
-		state.CodexUsage = UsageCounters{}
+func normalizeCodexUsageSnapshot(source TranscriptSource, state *TranscriptScannerState, observed float64, metadata UsageMetadata, domain string, current, baseline UsageCounters, cumulative bool, responseID string, transitionUsage UsageCounters) ([]UsageAtom, error) {
+	hasDomainCursor := state.CodexUsageDomains != nil
+	domains := codexUsageDomains(state)
+	delta := cloneCounters(current)
+	if domain == "legacy" && len(domains["thread"]) > 0 {
+		// Codex can write a legacy cumulative mirror beside the modern thread
+		// total. Once modern totals are present they own the thread baseline.
+		return nil, nil
 	}
-	delta := current
 	if cumulative {
-		var err error
-		delta, _, err = DeltaUsageCounters(state.CodexUsage, current)
-		if err != nil {
-			return nil, err
+		if !hasDomainCursor && len(state.CodexUsage) > 0 {
+			// Upgrade a cursor written by the older shared-baseline normalizer.
+			// Its source domain is unknown, so seed this domain without turning a
+			// format transition into new usage.
+			domains[domain] = cloneCounters(current)
+			delta = cloneCounters(transitionUsage)
 		}
-	}
-	if cumulative || len(baseline) > 0 {
+		if domain == "thread" && len(domains["legacy"]) > 0 && len(domains[domain]) == 0 {
+			domains[domain] = cloneCounters(baseline)
+			delta = cloneCounters(transitionUsage)
+		} else {
+			var err error
+			delta, _, err = DeltaUsageCounters(domains[domain], current)
+			if err != nil {
+				return nil, err
+			}
+			domains[domain] = cloneCounters(baseline)
+		}
 		state.CodexUsage = cloneCounters(baseline)
+	}
+	if responseID != "" && !cumulative && !rememberCodexResponse(state, responseID) {
+		delta = UsageCounters{}
 	}
 	atoms, err := NormalizeCodexUsageMap(anyCounters(delta), observed, metadata)
 	addAgentIDs(atoms, source.AgentIDOrThread())
 	return atoms, err
+}
+
+const maxCodexResponseIDs = 1024
+
+func codexUsageDomains(state *TranscriptScannerState) map[string]UsageCounters {
+	if state.CodexUsageDomains == nil {
+		state.CodexUsageDomains = make(map[string]UsageCounters)
+	}
+	return state.CodexUsageDomains
+}
+
+func rememberCodexResponse(state *TranscriptScannerState, responseID string) bool {
+	if state.CodexResponseIDs == nil {
+		state.CodexResponseIDs = make(map[string]struct{})
+	}
+	if _, exists := state.CodexResponseIDs[responseID]; exists {
+		return false
+	}
+	state.CodexResponseIDs[responseID] = struct{}{}
+	state.CodexResponseOrder = append(state.CodexResponseOrder, responseID)
+	if len(state.CodexResponseOrder) > maxCodexResponseIDs {
+		delete(state.CodexResponseIDs, state.CodexResponseOrder[0])
+		state.CodexResponseOrder = state.CodexResponseOrder[1:]
+	}
+	return true
+}
+
+func resetCodexUsageState(state *TranscriptScannerState) {
+	state.CodexUsage = nil
+	state.CodexUsageDomains = nil
+	state.CodexTurnID = ""
+	state.CodexResponseIDs = nil
+	state.CodexResponseOrder = nil
 }
 
 func transcriptThreadIdentity(source TranscriptSource, state *TranscriptScannerState) string {
@@ -1784,6 +1842,18 @@ func cloneTranscriptState(state TranscriptScannerState) TranscriptScannerState {
 	}
 	copyState.ClaudeSequence = state.ClaudeSequence
 	copyState.CodexUsage = cloneCounters(state.CodexUsage)
+	if state.CodexUsageDomains != nil {
+		copyState.CodexUsageDomains = make(map[string]UsageCounters, len(state.CodexUsageDomains))
+		for domain, counters := range state.CodexUsageDomains {
+			copyState.CodexUsageDomains[domain] = cloneCounters(counters)
+		}
+	}
+	copyState.CodexResponseIDs = make(map[string]struct{}, len(state.CodexResponseIDs))
+	for responseID := range state.CodexResponseIDs {
+		copyState.CodexResponseIDs[responseID] = struct{}{}
+	}
+	copyState.CodexResponseOrder = append([]string(nil), state.CodexResponseOrder...)
+	copyState.CodexTurnID = state.CodexTurnID
 	copyState.CodexModel = state.CodexModel
 	copyState.CodexModelEvidence = state.CodexModelEvidence
 	copyState.CodexEffort = state.CodexEffort

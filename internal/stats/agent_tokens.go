@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/keivenchang/yomux/internal/tailfile"
 )
 
 const (
@@ -65,18 +67,21 @@ type AgentTokenInventory func(context.Context) ([]AgentRecord, []error)
 type AgentTokenSources func(context.Context, []AgentRecord) ([]TranscriptSource, error)
 
 type AgentTokenCollectorConfig struct {
-	ActiveCadence        time.Duration
-	IdleCadence          time.Duration
-	Inventory            AgentTokenInventory
-	OpenCodeInventory    AgentTokenInventory
-	TranscriptSources    AgentTokenSources
-	UsagePricingProfile  func(UsageAtom) string
-	ClaudeTranscriptRoot string
-	CodexTranscriptRoot  string
-	OpenCodeDatabase     string
-	CursorPath           string
-	TranscriptCursorPath string
-	SkipTranscriptScan   bool
+	TranscriptSourceDiscovered func(TranscriptSource)
+	Ingestion                  *tailfile.Ingestion
+	DirectoryDiscovery         *SharedTranscriptDiscovery
+	ActiveCadence              time.Duration
+	IdleCadence                time.Duration
+	Inventory                  AgentTokenInventory
+	OpenCodeInventory          AgentTokenInventory
+	TranscriptSources          AgentTokenSources
+	UsagePricingProfile        func(UsageAtom) string
+	ClaudeTranscriptRoot       string
+	CodexTranscriptRoot        string
+	OpenCodeDatabase           string
+	CursorPath                 string
+	TranscriptCursorPath       string
+	SkipTranscriptScan         bool
 	// RequireTmuxPane limits production attribution to agents visible in the
 	// machine-wide tmux roster. Fixture collectors leave this false so they can
 	// scan synthetic transcript records without creating a tmux server.
@@ -155,11 +160,11 @@ func (c AgentTokenCollectorConfig) withDefaults() AgentTokenCollectorConfig {
 	if c.TranscriptSources == nil {
 		discoveryCursors := newTranscriptDiscoveryCursorStore()
 		c.TranscriptSources = func(ctx context.Context, records []AgentRecord) ([]TranscriptSource, error) {
-			return defaultAgentTokenSourcesBoundedWithCursor(ctx, records, transcriptDiscoveryBounds{
+			return defaultAgentTokenSourcesShared(ctx, records, transcriptDiscoveryBounds{
 				maxFiles: c.TranscriptDiscoveryMaxFiles,
 				maxDirs:  c.TranscriptDiscoveryMaxDirs,
 				maxBytes: c.TranscriptDiscoveryMaxBytes,
-			}, discoveryCursors, c.ClaudeTranscriptRoot, c.CodexTranscriptRoot)
+			}, discoveryCursors, c.DirectoryDiscovery, c.ClaudeTranscriptRoot, c.CodexTranscriptRoot)
 		}
 	}
 	return c
@@ -336,6 +341,8 @@ type agentTokenDiagnostics struct {
 // AgentTokenCollector owns one bounded collection goroutine. RunOnce is safe
 // for deterministic callers and is the transaction boundary used by tests.
 type AgentTokenCollector struct {
+	health                     CollectorHealthTracker
+	healthCommitted            bool
 	writer                     BatchWriter
 	clock                      HostCollectorClock
 	config                     AgentTokenCollectorConfig
@@ -445,6 +452,8 @@ func (c *AgentTokenCollector) Snapshot() AgentTokenCollectionSnapshot {
 }
 
 func (c *AgentTokenCollector) setAttempt(at time.Time) {
+	c.healthCommitted = false
+	c.health.Attempt("agent_tokens", at)
 	c.diagnosticMu.Lock()
 	c.diagnostics.lastAttemptAt = at
 	c.diagnostics.lastReason = ""
@@ -452,20 +461,14 @@ func (c *AgentTokenCollector) setAttempt(at time.Time) {
 }
 
 func (c *AgentTokenCollector) setSuccess(at time.Time) {
+	if c.healthCommitted {
+		c.health.Record("agent_tokens", c.clock.Now(), nil, 0, 0)
+	}
 	c.diagnosticMu.Lock()
 	c.diagnostics.lastSuccessAt = at
 	if c.diagnostics.lastReason == "" {
 		c.diagnostics.lastReason = "ok"
 	}
-	c.diagnosticMu.Unlock()
-}
-
-func (c *AgentTokenCollector) setLastReason(reason string) {
-	if reason == "" {
-		return
-	}
-	c.diagnosticMu.Lock()
-	c.diagnostics.lastReason = diagnosticText(reason)
 	c.diagnosticMu.Unlock()
 }
 
@@ -533,7 +536,7 @@ func (c *AgentTokenCollector) recordInventoryFailure(err error) {
 	c.diagnosticMu.Lock()
 	c.diagnostics.opencodeInventoryLastError = diagnosticText(err.Error())
 	c.diagnosticMu.Unlock()
-	c.setLastReason(err.Error())
+	c.setReason(err.Error())
 }
 
 func (c *AgentTokenCollector) recordBatch(batch AppendBatch) {
@@ -555,11 +558,13 @@ func (c *AgentTokenCollector) recordBatch(batch AppendBatch) {
 }
 
 func (c *AgentTokenCollector) recordCollectionError(err error) {
+	c.health.Record("agent_tokens", c.clock.Now(), err, 0, 0)
 	c.counters.errors.Add(1)
 	c.setReason(err.Error())
 }
 
 func (c *AgentTokenCollector) recordAppendError(err error, metadata bool) {
+	c.health.Record("agent_tokens", c.clock.Now(), err, 0, 0)
 	message := "append failed"
 	if err != nil {
 		message = err.Error()
@@ -716,10 +721,22 @@ func openCodeWALIdentity(path string) (uint64, uint64, error) {
 func (c *AgentTokenCollector) loop(ctx context.Context) {
 	runWithStatsProfileLabels(ctx, "agent_token_collector", "", func(ctx context.Context) {
 		defer func() { c.mu.Lock(); c.run = false; close(c.done); c.mu.Unlock() }()
+		var ticks <-chan time.Time
+		if c.config.Ingestion != nil && c.config.ActiveCadence == AgentTokenActiveCadence && c.config.IdleCadence == AgentTokenIdleCadence {
+			ch, unsubscribe := c.config.Ingestion.Subscribe()
+			defer unsubscribe()
+			ticks = ch
+		}
 		first := true
 		for {
 			if !first {
-				if !waitCollectorCadence(ctx, c.clock, c.config.ActiveCadence, c.config.IdleCadence, c.config.ActiveFunc) {
+				if ticks != nil {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticks:
+					}
+				} else if !waitCollectorCadence(ctx, c.clock, c.config.ActiveCadence, c.config.IdleCadence, c.config.ActiveFunc) {
 					return
 				}
 			}
@@ -971,6 +988,7 @@ func (c *AgentTokenCollector) appendOpenCodeCollected(ctx context.Context, batch
 		if err != nil {
 			return false, false, err
 		}
+		c.healthCommitted = true
 		c.counters.usage.Add(uint64(result.UsageAccepted))
 		c.counters.usageDuplicates.Add(uint64(result.UsageDuplicate))
 	}
@@ -1078,6 +1096,10 @@ func retryCodexForkRepairBlockedFiles(catalog *codexForkRepairCatalog) {
 func isUnavailableIntervalConflict(err error) bool {
 	if err == nil {
 		return false
+	}
+	var detail *AppendError
+	if errors.As(err, &detail) {
+		err = detail.Unwrap()
 	}
 	message := err.Error()
 	return strings.Contains(message, "unavailable spans overlap") ||
@@ -1253,6 +1275,13 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 	discoveryCtx, discoveryCancel := context.WithTimeout(parent, c.config.TranscriptDiscoveryTimeout)
 	sources, err := c.config.TranscriptSources(discoveryCtx, records)
 	discoveryCancel()
+	if c.config.TranscriptSourceDiscovered != nil {
+		for _, source := range sources {
+			if !source.CodexForkRepairOnly {
+				c.config.TranscriptSourceDiscovered(source)
+			}
+		}
+	}
 	completeTranscriptDiscovery := err == nil && len(inventoryErrors) == 0
 	if err != nil {
 		// Discovery budgets describe deferred backlog, not an outage. Keep the
@@ -1572,7 +1601,7 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 				c.counters.checkpointOversized.Add(1)
 			}
 		}
-		result, scanErr := ScanTranscript(source, state, TranscriptScanOptions{Context: parent, MaxBytes: remainingBytes, MaxRecords: remainingRecords, ForceReset: verification.SourceChanged})
+		result, scanErr := ScanTranscript(source, state, TranscriptScanOptions{Ingestion: c.config.Ingestion, Context: parent, MaxBytes: remainingBytes, MaxRecords: remainingRecords, ForceReset: verification.SourceChanged})
 		if scanErr != nil {
 			reason := scanErr.Error()
 			if errors.Is(scanErr, context.Canceled) || errors.Is(scanErr, context.DeadlineExceeded) {
@@ -3308,6 +3337,16 @@ func defaultAgentTokenSourcesBounded(ctx context.Context, records []AgentRecord,
 }
 
 func defaultAgentTokenSourcesBoundedWithCursor(ctx context.Context, records []AgentRecord, bounds transcriptDiscoveryBounds, cursors *transcriptDiscoveryCursorStore, configuredRoots ...string) ([]TranscriptSource, error) {
+	return defaultAgentTokenSourcesShared(ctx, records, bounds, cursors, nil, configuredRoots...)
+}
+func defaultAgentTokenSourcesShared(ctx context.Context, records []AgentRecord, bounds transcriptDiscoveryBounds, cursors *transcriptDiscoveryCursorStore, shared *SharedTranscriptDiscovery, configuredRoots ...string) ([]TranscriptSource, error) {
+	discover := func(ctx context.Context, root string, bounds transcriptDiscoveryBounds, cursors *transcriptDiscoveryCursorStore) ([]transcriptCandidate, error) {
+		if shared != nil {
+			return shared.candidates(ctx, root, bounds, cursors)
+		}
+		return recentTranscriptCandidatesWithCursor(ctx, root, bounds, cursors)
+	}
+
 	if cursors == nil {
 		cursors = newTranscriptDiscoveryCursorStore()
 	}
@@ -3322,14 +3361,13 @@ func defaultAgentTokenSourcesBoundedWithCursor(ctx context.Context, records []Ag
 		if claudeCandidateCached[root] {
 			return claudeCandidateCache[root], claudeCandidateErrors[root]
 		}
-		candidates, err := recentTranscriptCandidatesWithCursor(ctx, root, bounds, cursors)
+		candidates, err := discover(ctx, root, bounds, cursors)
 		claudeCandidateCache[root] = candidates
 		claudeCandidateErrors[root] = err
 		claudeCandidateCached[root] = true
 		return candidates, err
 	}
 	fallbackRecords := make([]AgentRecord, 0, len(records))
-	exactCodexScopes := make(map[string]bool)
 	// Resolve exact Codex rollouts from the live process file descriptors before
 	// walking either transcript root. A large historical root can consume the
 	// bounded discovery interval; letting an unrelated Claude walk run first
@@ -3355,9 +3393,6 @@ func defaultAgentTokenSourcesBoundedWithCursor(ctx context.Context, records []Ag
 					return out, err
 				}
 			}
-			if record.Kind == "codex" {
-				exactCodexScopes[agentTokenScope(record)] = true
-			}
 			continue
 		}
 		if record.Kind == "codex" {
@@ -3368,7 +3403,6 @@ func defaultAgentTokenSourcesBoundedWithCursor(ctx context.Context, records []Ag
 			// An active Codex process owns its rollout through an open descriptor.
 			// Guessing from the newest historical file in the same directory can
 			// attribute two panes' usage to the wrong session.
-			exactCodexScopes[agentTokenScope(record)] = true
 			continue
 		}
 		fallbackRecords = append(fallbackRecords, record)
@@ -3377,23 +3411,11 @@ func defaultAgentTokenSourcesBoundedWithCursor(ctx context.Context, records []Ag
 		if err := ctx.Err(); err != nil {
 			return out, err
 		}
-		// The native Codex process and its launcher wrapper can both appear in
-		// one pane. Once the native process supplied an exact open rollout, do
-		// not make the wrapper trigger a second historical-root walk.
-		if record.Kind == "codex" && exactCodexScopes[agentTokenScope(record)] {
-			continue
-		}
 		root := defaultTranscriptRoot(record.Kind, configuredRoots...)
 		if root == "" {
 			return out, errors.New("transcript-root-unconfigured")
 		}
-		var candidates []transcriptCandidate
-		var err error
-		if record.Kind == "claude" {
-			candidates, err = claudeCandidates(root)
-		} else {
-			candidates, err = recentTranscriptCandidatesWithCursor(ctx, root, bounds, cursors)
-		}
+		candidates, err := claudeCandidates(root)
 		for priority, candidate := range candidates {
 			if len(out) >= maxAgentTokenSources {
 				break
@@ -3420,16 +3442,6 @@ func defaultAgentTokenSourcesBoundedWithCursor(ctx context.Context, records []Ag
 		return out[i].Path < out[j].Path
 	})
 	return out, nil
-}
-
-func agentTokenScope(record AgentRecord) string {
-	if record.TmuxPaneID != "" {
-		return "pane:" + record.TmuxPaneID
-	}
-	if record.TmuxSession != "" {
-		return "session:" + record.TmuxSession
-	}
-	return fmt.Sprintf("pid:%d", record.PID)
 }
 
 // codexTranscriptFromProcessFD mirrors the Python session resolver's
@@ -3538,3 +3550,5 @@ func openCodeRevision(part OpenCodeStepFinishPart) string {
 
 var _ = openCodeRevision
 var _ = strings.TrimSpace
+
+func (c *AgentTokenCollector) Health() map[string]CollectorHealth { return c.health.Snapshot() }

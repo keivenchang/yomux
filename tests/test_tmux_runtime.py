@@ -2,6 +2,7 @@ from pathlib import Path
 import ast
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -10,11 +11,62 @@ from types import SimpleNamespace
 import pytest
 
 from tests import tmux_runtime
+from tests.helpers.mock_agents import short_tmux_socket_path, tmux_cmd
 from yomux_lib.tmux import session_retirement
 from yomux_lib.local_services.registry import ProcessTableEntry
 from yomux_lib.tmux.session_retirement import ProcessBirthIdentity
 from yomux_lib.tmux.session_retirement import SessionRetirementIdentity
 from yomux_lib.tmux.session_retirement import retained_tmux_session_births
+
+
+@pytest.mark.parametrize("owner", ["mock", "explicit", "default"])
+def test_private_tmux_starters_ignore_user_configuration(monkeypatch, tmp_path, owner):
+    binary = shutil.which("tmux")
+    if not binary:
+        pytest.skip("tmux is not installed")
+    home = tmp_path / "private-home"
+    home.mkdir()
+    (home / ".tmux.conf").write_text('set-option -g @fixture_config_leak "loaded"\n', encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "xdg"))
+    runtime = None
+    socket = short_tmux_socket_path("private-config") if owner == "mock" else None
+    try:
+        if owner == "mock":
+            created = tmux_cmd(binary, socket, "new-session", "-d", "-s", "private-config", "exec sleep 20")
+            assert created.returncode == 0, created.stderr
+            observed = tmux_cmd(binary, socket, "show-option", "-gv", "@fixture_config_leak")
+        else:
+            starter = tmux_runtime.start_isolated_default_tmux_runtime if owner == "default" else tmux_runtime.start_isolated_tmux_runtime
+            runtime = starter(monkeypatch, tmp_path)
+            observed = tmux_runtime.run_isolated_tmux(runtime, "show-option", "-gv", "@fixture_config_leak")
+        assert observed.returncode != 0, "private tmux loaded the user's configuration"
+        assert observed.stdout.strip() != "loaded"
+    finally:
+        if owner == "mock":
+            stopped = tmux_cmd(binary, socket, "kill-server")
+            assert stopped.returncode == 0, stopped.stderr
+            tmux_runtime.remove_isolated_tmux_socket_dir(socket.parent)
+        elif runtime is not None:
+            tmux_runtime.stop_isolated_tmux_runtime(runtime)
+
+
+@pytest.mark.parametrize("failure", ["first-snapshot", "second-snapshot", "pgid-permission"])
+def test_live_session_birth_cannot_be_certified_retired_on_unreadable_identity(monkeypatch, failure):
+    pid = os.getpid()
+    snapshot = session_retirement.process_identity_snapshot(pid)
+    assert snapshot is not None
+    pgid = os.getpgid(pid)
+    identity = SessionRetirementIdentity("fixture", (ProcessBirthIdentity(pid, pgid, snapshot.start_identity, "fixture"),))
+    snapshots = iter([None] if failure == "first-snapshot" else [snapshot, None] if failure == "second-snapshot" else [snapshot])
+    monkeypatch.setattr(session_retirement, "process_identity_snapshot", lambda _: next(snapshots))
+    if failure == "pgid-permission":
+        def denied(_pid):
+            raise PermissionError("pgid sentinel")
+        monkeypatch.setattr(session_retirement.os, "getpgid", denied)
+    with pytest.raises(session_retirement.SessionRetirementError):
+        session_retirement.join_tmux_session_retirement(identity, timeout=0)
+    os.kill(pid, 0)
 
 
 def test_isolated_tmux_session_creation_has_one_cwd_owner():
@@ -58,8 +110,8 @@ def test_stop_isolated_tmux_runtime_declares_private_socket_for_kill_server(monk
     tmux_runtime.stop_isolated_tmux_runtime(runtime)
 
     assert calls == [
-        ["tmux", "-S", str(socket_path), "list-panes", "-a", "-F", "#{pane_pid}"],
-        ["tmux", "-S", str(socket_path), "kill-server"],
+        ["tmux", "-f", os.devnull, "-S", str(socket_path), "list-panes", "-a", "-F", "#{pane_pid}"],
+        ["tmux", "-f", os.devnull, "-S", str(socket_path), "kill-server"],
     ]
 
 
@@ -112,18 +164,41 @@ def test_stop_isolated_tmux_runtime_refuses_live_pane_without_start_identity(mon
         tmux_runtime.stop_isolated_tmux_runtime(runtime)
 
     assert calls == [
-        ["tmux", "-S", str(socket_path), "list-panes", "-a", "-F", "#{pane_pid}"],
+        ["tmux", "-f", os.devnull, "-S", str(socket_path), "list-panes", "-a", "-F", "#{pane_pid}"],
     ]
     assert socket_dir.exists()
     assert runtime.stopped is False
 
 
-def test_wait_for_isolated_tmux_pane_exit_refuses_unavailable_identity_for_live_pid(monkeypatch):
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_wait_for_isolated_tmux_pane_exit_refuses_unavailable_identity_at_deadline(monkeypatch, platform):
+    monkeypatch.setattr(tmux_runtime, "sys", SimpleNamespace(platform=platform))
     monkeypatch.setattr(tmux_runtime, "process_start_identity", lambda _pid: None)
     monkeypatch.setattr(tmux_runtime, "pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(tmux_runtime, "process_state", lambda _pid: "S")
+    monkeypatch.setattr(tmux_runtime._TMUX_PROCESS_EXIT_POLL, "wait", lambda _seconds: None)
 
     with pytest.raises(AssertionError, match="cannot prove isolated tmux pane PID 43211 exited"):
-        tmux_runtime.wait_for_isolated_tmux_pane_exit(((43211, "proc:123"),))
+        tmux_runtime.wait_for_isolated_tmux_pane_exit(((43211, "proc:123"),), timeout=0)
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_wait_for_isolated_tmux_pane_exit_waits_for_unavailable_live_pid_to_exit(monkeypatch, platform):
+    alive = iter((True, False))
+    monkeypatch.setattr(tmux_runtime, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(tmux_runtime, "process_start_identity", lambda _pid: None)
+    monkeypatch.setattr(tmux_runtime, "pid_is_alive", lambda _pid: next(alive))
+    monkeypatch.setattr(tmux_runtime._TMUX_PROCESS_EXIT_POLL, "wait", lambda _seconds: None)
+
+    tmux_runtime.wait_for_isolated_tmux_pane_exit(((43211, "proc:123"),))
+
+
+def test_wait_for_isolated_tmux_pane_exit_accepts_observed_darwin_zombie(monkeypatch):
+    monkeypatch.setattr(tmux_runtime, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(tmux_runtime, "process_start_identity", lambda _pid: None)
+    monkeypatch.setattr(tmux_runtime, "pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(tmux_runtime, "process_state", lambda _pid: "Z")
+    tmux_runtime.wait_for_isolated_tmux_pane_exit(((43211, "darwin:123"),))
 
 
 def test_wait_for_isolated_tmux_pane_exit_accepts_proven_absent_pid(monkeypatch):
@@ -146,6 +221,9 @@ def test_tmux_session_birth_retirement_excludes_zombies_and_same_pgid_foreign_bi
     retained = ProcessTableEntry(1, 43213, 0.0, "fixture command", 125, 43213, "proc:125")
     expected = ({"pid": 43213, "pgid": 43213, "state": "S", "start_identity": "proc:125", "command": "fixture command"},)
     assert retained_tmux_session_births(identity, table={43213: retained}) == expected
+    monkeypatch.setattr(session_retirement, "process_state", lambda _pid: "Z")
+    assert retained_tmux_session_births(identity, table={43213: retained}) == ()
+    monkeypatch.setattr(session_retirement, "process_state", lambda _pid: "S")
     # The join-side path double-fences only the captured PID around its current PGID read.
     # It must not pay for or depend on another complete process-table sweep.
     live = SimpleNamespace(state="S", start_identity="proc:125")

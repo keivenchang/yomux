@@ -21,6 +21,8 @@ def test_installed_entrypoint_aliases_forward_to_native_cli(tmp_path):
     installed = subprocess.run([str(REPO_ROOT / "tools/install.sh"), "--prefix", str(prefix)],
                                env=environment, capture_output=True, text=True, timeout=30)
     assert installed.returncode == 0, installed.stderr
+    for name in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"):
+        assert (prefix / "lib/yomux" / name).read_bytes() == (REPO_ROOT / name).read_bytes()
     outputs = []
     for command in ("yomux", "yolomux"):
         result = subprocess.run([str(prefix / "bin" / command), "--version"],

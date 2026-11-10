@@ -41,6 +41,7 @@ from ..host_identity import LocalProcessDiagnostic
 from ..host_identity import LocalProcessReason
 from ..host_identity import current_host_identity
 from ..host_identity import is_current_local_process
+from ..host_identity import linux_process_stat_fields
 from ..host_identity import process_start_identity
 from ..host_identity import process_start_ticks
 from ..host_identity import process_identity_snapshot
@@ -195,6 +196,13 @@ def record_transport_teardown(exception_type: str = "unknown") -> None:
         )
 
 
+def _read_linux_process_resources(pid: int) -> tuple[int, float, int]:
+    fields = linux_process_stat_fields((Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8"))
+    statm = (Path("/proc") / str(pid) / "statm").read_text(encoding="utf-8").split()
+    cpu_seconds = (float(fields[11]) + float(fields[12])) / float(os.sysconf("SC_CLK_TCK"))
+    return int(fields[1]), cpu_seconds, int(statm[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+
+
 def read_process_cpu_seconds_and_rss(pid: int) -> tuple[float, int] | None:
     """Return cumulative CPU seconds and RSS bytes for one local process."""
 
@@ -202,10 +210,7 @@ def read_process_cpu_seconds_and_rss(pid: int) -> tuple[float, int] | None:
         return None
     if platform.system() == "Linux":
         try:
-            stat_fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").split()
-            statm_fields = (Path("/proc") / str(pid) / "statm").read_text(encoding="utf-8").split()
-            cpu_seconds = (float(stat_fields[13]) + float(stat_fields[14])) / float(os.sysconf("SC_CLK_TCK"))
-            rss_bytes = int(statm_fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+            _parent_pid, cpu_seconds, rss_bytes = _read_linux_process_resources(pid)
         except (IndexError, OSError, ValueError):
             return None
         return (cpu_seconds, rss_bytes)
@@ -1327,14 +1332,7 @@ def _repair_one_claimed_survivor(
         )
     outcome = terminate_authorized_process(
         authorization,
-        still_current=lambda: process_record_diagnostic(
-            record,
-            host_identity=identity,
-        ).current,
-        identity_replaced=lambda: process_record_diagnostic(
-            record,
-            host_identity=identity,
-        ).reason is LocalProcessReason.PROCESS_IDENTITY_REUSED,
+        identity_diagnostic=lambda: process_record_diagnostic(record, host_identity=identity),
         signal_process=kill,
         grace_seconds=grace_seconds,
         force_seconds=force_seconds,
@@ -1466,7 +1464,7 @@ def _terminate_group_member(
     )
     return terminate_authorized_process(
         authorization,
-        still_current=lambda: pid_is_serving(member_pid, table=table_reader()),
+        identity_diagnostic=lambda: process_record_diagnostic(record, table=table_reader()),
         signal_process=kill,
         # The leader's own SIGTERM window has already elapsed by the time this
         # runs, so a second graceful window would only double the teardown.
@@ -1552,11 +1550,7 @@ def shutdown_owned_local_services(
         )
         outcome = terminate_authorized_process(
             authorization,
-            # Liveness comes from the SAME reader that resolved the group. A
-            # caller injecting `table_reader` is telling this function what it is
-            # allowed to see; polling /proc directly instead would quietly ignore
-            # that and answer from a process table the caller never authorized.
-            still_current=lambda pid=leader_pid: pid_is_serving(pid, table=table_reader()),
+            identity_diagnostic=lambda: process_record_diagnostic(record, table=table_reader()),
             signal_process=kill,
             grace_seconds=grace_seconds,
             force_seconds=force_seconds,
@@ -2129,14 +2123,17 @@ class LocalServiceRegistry:
             incoming_pid = int(incoming.get("pid") or 0)
         except (TypeError, ValueError):
             return "unreadable_record_identity"
-        if existing_pid == incoming_pid and recorded_start_identity(existing) == recorded_start_identity(incoming):
-            return ""
-        if process_record_diagnostic(existing, host_identity=self.host_identity).current:
+        diagnostic = process_record_diagnostic(existing, host_identity=self.host_identity)
+        if diagnostic.current:
+            if existing_pid == incoming_pid and recorded_start_identity(existing) == recorded_start_identity(incoming):
+                return ""
             # A different process is alive and this record names it. Overwriting
             # would silently retarget every destructive decision downstream --
             # the watchdog, preflight, and launcher-exit teardown all resolve
             # their targets from exactly this file.
             return f"record_owned_by_live_pid_{existing_pid}"
+        if not diagnostic.may_remove_stale_record and not diagnostic.may_remove_unidentifiable_record:
+            return diagnostic.reason.value
         return ""
 
     def _merge_supervision_provenance(self, existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
@@ -2568,10 +2565,7 @@ class LocalServiceRegistry:
         )
         return terminate_authorized_process(
             authorization,
-            still_current=lambda: process_record_diagnostic(record, host_identity=self.host_identity).current,
-            identity_replaced=lambda: process_record_diagnostic(
-                record, host_identity=self.host_identity
-            ).reason is LocalProcessReason.PROCESS_IDENTITY_REUSED,
+            identity_diagnostic=lambda: process_record_diagnostic(record, host_identity=self.host_identity),
             grace_seconds=LOCAL_SERVICE_RETIRE_GRACE_SECONDS,
             force_seconds=LOCAL_SERVICE_RETIRE_FORCE_SECONDS,
             clock=self.clock,
@@ -3964,12 +3958,10 @@ class LocalServiceRegistry:
             readings: dict[int, tuple[float, int]] = {}
             for pid in pids:
                 try:
-                    stat_fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").split()
-                    statm_fields = (Path("/proc") / str(pid) / "statm").read_text(encoding="utf-8").split()
-                    if pid != parent_pid and int(stat_fields[3]) != parent_pid:
+                    observed_parent, cpu_seconds, rss_bytes = _read_linux_process_resources(pid)
+                    if pid != parent_pid and observed_parent != parent_pid:
                         continue
-                    cpu_seconds = (float(stat_fields[13]) + float(stat_fields[14])) / float(os.sysconf("SC_CLK_TCK"))
-                    readings[pid] = (cpu_seconds, int(statm_fields[1]) * int(os.sysconf("SC_PAGE_SIZE")))
+                    readings[pid] = (cpu_seconds, rss_bytes)
                 except (IndexError, OSError, ValueError):
                     continue
             return readings if parent_pid in readings else {}

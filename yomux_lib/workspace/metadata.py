@@ -253,41 +253,22 @@ def git_local_repository_identity(cwd: str, toplevel: str, scope: Any | None = N
     }
 
 
-def admitted_git_status_lines(repo: Path, output: str) -> list[str]:
+def admitted_git_status_entries(repo: Path, output: str) -> list[dict[str, str]]:
     """Project porcelain rows only after every referenced path passes filesystem policy."""
 
-    fields = output.split("\0")
-    rows: list[str] = []
-    index = 0
-    while index < len(fields):
-        record = fields[index]
-        index += 1
-        if not record:
-            continue
-        if len(record) < 4 or record[2] != " ":
-            continue
-        status = record[:2]
-        target = record[3:]
-        paths = [target]
-        source = ""
-        if "R" in status or "C" in status:
-            if index >= len(fields):
-                continue
-            source = fields[index]
-            index += 1
-            paths.append(source)
-        if not all(repository_snapshot_admits_path(repo, path) for path in paths):
-            continue
-        rows.append(record if not source else f"{status} {source} -> {target}")
-    return rows
+    entries, _truncated = filesystem_git_ops._parse_git_status_porcelain_z(
+        output.encode("utf-8"), output_truncated=False,
+    )
+    return [entry for entry in entries if entry["path"] and all(
+        repository_snapshot_admits_path(repo, path)
+        for path in (entry["path"], entry.get("old_path")) if path
+    )]
 
 
-def pinned_dirty_activity_ts(scope: Any, status_lines: list[str]) -> float:
+def pinned_dirty_activity_ts(scope: Any, status_entries: list[dict[str, str]]) -> float:
     latest = 0.0
-    for line in status_lines[:200]:
-        relative_path = status_entry_path(line)
-        if not relative_path:
-            continue
+    for entry in status_entries[:200]:
+        relative_path = entry["path"]
         try:
             with filesystem_paths.safe_descendant(
                 scope.repo_handle.descriptor,
@@ -348,8 +329,10 @@ def git_metadata_base(
         upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else None
         ahead, behind = git_ahead_behind(root_text, upstream_name, runner=runner)
         commit_activity_ts = repo_commit_activity_ts(root_text, runner=runner)
-        status_lines = admitted_git_status_lines(Path(root_text), status.stdout) if status.returncode == 0 else []
-        dirty_activity_ts = pinned_dirty_activity_ts(scope, status_lines)
+        status_entries = admitted_git_status_entries(Path(root_text), status.stdout) if status.returncode == 0 else []
+        status_lines = [f"{entry['status']} {entry.get('old_path', '') + ' -> ' if entry.get('old_path') else ''}{entry['path']}"
+            for entry in status_entries]
+        dirty_activity_ts = pinned_dirty_activity_ts(scope, status_entries)
         worktree = git_worktree_identity(root_text, root_text, scope)
         local_repository = git_local_repository_identity(root_text, root_text, scope)
         pull_requests_by_sha = local_pull_request_by_sha(root_text, runner=runner)
@@ -1793,23 +1776,14 @@ def enrich_branch_pull_requests(git_data: dict[str, Any], cache: MetadataCache, 
             )
             if isinstance(by_number, dict):
                 known.append(by_number)
-        # No local (#N) marker — that only appears after a squash-merge, so an OPEN PR on this branch
-        # has none and the by-number path above can't find it. Resolve it by HEAD BRANCH instead,
-        # mirroring current_branch_pull_request's fallback, so YO!info surfaces open PRs on non-current
-        # branches (not just merged ones). Skip the current branch (current_branch_pull_request already
-        # resolved its PR) and main/HEAD (no feature PR). github_pull_request_by_branch is cache-keyed,
-        # so this is bounded to at most OTHER_BRANCH_LIMIT branch lookups per repo per cache window.
+        # Resolve every feature branch through the plural cache. The compact current-branch
+        # projection selects one PR, so it cannot stand in for the complete branch inventory.
         name = branch.get("name")
         if not isinstance(name, str) or name in MAIN_BRANCHES or name == "HEAD":
             branch["pull_request_lookup_state"] = "ready" if known else "none"
             if known:
                 branch["pull_requests"] = known
                 branch["pull_request"] = known[0]
-            continue
-        if branch.get("current") and not known:
-            # The current branch is resolved by current_branch_pull_request(), whose local-ref/subject/
-            # branch-name fallbacks carry richer context than a duplicate by-head lookup.
-            branch["pull_request_lookup_state"] = "not-requested" if not allow_network else "none"
             continue
         found, lookup_state = branch_pull_requests(repo, name, cache, allow_network=allow_network, known=known)
         branch["pull_request_lookup_state"] = lookup_state
@@ -1859,17 +1833,6 @@ def cached_linear_issue_metadata(identifier: str, cache: MetadataCache, *, allow
     value = linear_issue_metadata(identifier, cache, allow_network=allow_network)
     cache.set(key, copy.deepcopy(value))
     return value
-
-def status_entry_path(line: str) -> str:
-    if len(line) < 4:
-        return ""
-    path = line[3:].strip()
-    if " -> " in path:
-        path = path.rsplit(" -> ", 1)[-1].strip()
-    if len(path) >= 2 and path[0] == path[-1] == '"':
-        path = path[1:-1]
-    return path
-
 
 def repo_commit_activity_ts(cwd: str, *, runner: Any | None = None) -> float:
     if runner is None:

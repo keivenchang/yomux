@@ -1,22 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Interactive browser terminals for local tmux sessions.
-
-This starts a local HTTP/WebSocket server and attaches one PTY-backed tmux
-client per browser panel. The server is intentionally dependency-free on the
-Python side so it can run from a normal host checkout.
-"""
+"""Shared runtime paths and compatibility utilities for retained Python tooling."""
 
 from __future__ import annotations
 
 import contextvars
 import hashlib
 import logging
-import math
 import os
 import platform
 import re
-import signal
 import shutil
 import socket
 import subprocess
@@ -36,6 +29,7 @@ from zoneinfo import ZoneInfo
 
 from .cache import MISS as cache_MISS
 from .host_identity import current_host_identity
+from .numeric import is_finite_number
 from .host_identity import HostIdentity
 from .host_partition import HOST_PARTITION_DIRNAME
 from .host_partition import host_partitioned_state_dir
@@ -57,7 +51,6 @@ from .runtime_env import healed_runtime_path
 from ..tmux.tmux_utils import list_tmux_session_names
 from ..tmux.tmux_utils import run_cmd
 from ..tmux.tmux_utils import unique_session_names
-from ..tmux.process_group_ownership import signal_recorded_process_group
 
 
 DEFAULT_SESSIONS: tuple[str, ...] = ()
@@ -171,7 +164,7 @@ def _ensure_private_runtime_directory(candidate: Path) -> None:
     """Create or upgrade one application-owned runtime path component safely."""
 
     if not candidate.exists() and not candidate.is_symlink():
-        candidate.mkdir(mode=0o700)
+        candidate.mkdir(mode=0o700, exist_ok=True)
     metadata = candidate.lstat()
     if stat.S_ISLNK(metadata.st_mode):
         raise _runtime_directory_error(
@@ -379,111 +372,6 @@ class ErrorPayload(TypedDict, total=False):
     status: int
 
 
-class ProductMetadata(TypedDict):
-    format: str
-    content_type: str
-    length: int
-    sha256: str
-    disposition: str
-    filename: str
-
-
-PRODUCT_METADATA_FIELDS = frozenset(ProductMetadata.__required_keys__)
-PRODUCT_CONTENT_TYPE_RE = re.compile(
-    r"^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}(?:; charset=[a-z0-9._-]{1,32})?$",
-)
-PRODUCT_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,254}$")
-
-
-def product_filename(raw_name: object, *, fallback: str) -> str:
-    """Return one metadata-safe attachment basename for an untrusted path name."""
-    name = Path(str(raw_name or "")).name
-    safe = "".join(char if 32 <= ord(char) < 127 and char not in {'"', "\\", ";", "/"} else "_" for char in name).strip()
-    if PRODUCT_FILENAME_RE.fullmatch(safe) is None or safe in {".", ".."} or safe[-1:] in {" ", "."}:
-        return fallback
-    return safe
-
-
-def inline_json_product_metadata(data: bytes) -> ProductMetadata:
-    """Describe one pre-encoded JSON object for the shared opaque-product writer."""
-
-    if not isinstance(data, bytes):
-        raise TypeError("JSON product data must be bytes")
-    return {
-        "format": "json",
-        "content_type": "application/json; charset=utf-8",
-        "length": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
-        "disposition": "inline",
-        "filename": "",
-    }
-
-
-def validated_product_metadata(value: object, *, body_length: int) -> ProductMetadata:
-    """Validate the uniform bounded control block without inspecting product bytes."""
-
-    if not isinstance(value, dict) or set(value) != PRODUCT_METADATA_FIELDS:
-        raise ValueError("product metadata fields do not match the shared contract")
-    product_format = value["format"]
-    content_type = value["content_type"]
-    length = value["length"]
-    sha256 = value["sha256"]
-    disposition = value["disposition"]
-    filename = value["filename"]
-    if product_format not in {"json", "opaque_bytes"}:
-        raise ValueError("product format must be json or opaque_bytes")
-    if not isinstance(content_type, str) or not PRODUCT_CONTENT_TYPE_RE.fullmatch(content_type):
-        raise ValueError("product content_type is invalid")
-    if product_format == "json" and content_type != "application/json; charset=utf-8":
-        raise ValueError("JSON products require the canonical content type")
-    if isinstance(length, bool) or not isinstance(length, int) or length < 0 or length != body_length:
-        raise ValueError("product length does not match its body")
-    if not isinstance(sha256, str) or re.fullmatch(r"[0-9a-f]{64}", sha256) is None:
-        raise ValueError("product sha256 is invalid")
-    if disposition not in {"inline", "attachment"}:
-        raise ValueError("product disposition must be inline or attachment")
-    if not isinstance(filename, str) or (
-        filename
-        and (
-            PRODUCT_FILENAME_RE.fullmatch(filename) is None
-            or filename in {".", ".."}
-            or filename[-1] in {" ", "."}
-        )
-    ):
-        raise ValueError("product filename must be an empty string or validated basename")
-    if disposition == "attachment" and not filename:
-        raise ValueError("attachment product requires a filename")
-    return {
-        "format": product_format,
-        "content_type": content_type,
-        "length": length,
-        "sha256": sha256,
-        "disposition": disposition,
-        "filename": filename,
-    }
-
-
-def ready_response_envelope_bytes(data: bytes, request_id: str) -> bytes:
-    """Frame one opaque JSON object while preserving its established top-level aliases."""
-
-    normalized_request_id = str(request_id or "").strip()
-    if not re.fullmatch(r"r-[A-Za-z0-9._-]{1,120}", normalized_request_id):
-        raise ValueError("ready API response requires a validated request.id")
-    if not isinstance(data, bytes) or len(data) < 2 or data[:1] != b"{" or data[-1:] != b"}":
-        raise ValueError("ready API product must be an encoded JSON object")
-    aliases = data[1:-1]
-    framed = (
-        b'{"state":"ready","request":{"id":"'
-        + normalized_request_id.encode("ascii")
-        + b'"},"data":'
-        + data
-        + b',"ok":true,"terminal":true'
-    )
-    if aliases.strip():
-        framed += b"," + aliases
-    return framed + b"}"
-
-
 def validated_causal_stack(stack: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """Return the one causal stack a canonical failure envelope is allowed to carry.
 
@@ -628,9 +516,9 @@ def positive_finite_number(value: Any) -> float:
     """Normalize counters and rates that cannot be negative, infinite, or NaN."""
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0.0
-    return number if math.isfinite(number) and number > 0 else 0.0
+    return number if is_finite_number(number) and number > 0 else 0.0
 
 
 def path_mtime_or_zero(path: Path) -> float:
@@ -936,10 +824,7 @@ if product_env_present('FILE_TRANSFER_MAX_BYTES', environ=os.environ):
 else:
     FILE_TRANSFER_MAX_BYTES = positive_env_int('UPLOAD_MAX_BYTES', _FILE_TRANSFER_MAX_BYTES_DEFAULT)
 UPLOAD_MAX_BYTES = FILE_TRANSFER_MAX_BYTES
-UPLOAD_MAX_FILES = positive_env_int('UPLOAD_MAX_FILES', 16)
 DEFAULT_UPLOAD_FILENAME_TEMPLATE = "{date:%Y%m%d}-{seq:03d}-{name}{ext}"
-UPLOAD_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
-PASTE_UPLOAD_NAME_RE = re.compile(r"^(?P<date>\d{8})-(?P<index>\d{3})(?P<suffix>\.[A-Za-z0-9]{1,8})$")
 UPLOAD_GENERATED_NAME_RE = re.compile(r"^\d{8}-\d{3}(?:-[^/]+)?\.[A-Za-z0-9]{1,12}$")
 
 
@@ -1000,12 +885,6 @@ class SessionInfo:
     panes: list[TmuxPaneInfo]
     selected_pane: TmuxPaneInfo | None
     agents: list[AgentInfo]
-
-
-@dataclass(frozen=True)
-class UploadedFile:
-    filename: str
-    content: bytes
 
 
 def default_session_names() -> list[str]:
@@ -1244,33 +1123,6 @@ def tail_file_lines(path: Path, lines: int) -> str:
 
 def parse_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
-
-def terminate_process_group(process: subprocess.Popen[Any]) -> None:
-    if process.poll() is not None:
-        return
-    term_outcome = signal_recorded_process_group(process, signal.SIGTERM)
-    if not term_outcome["signalled"]:
-        logging.getLogger(__name__).warning(
-            "refused SIGTERM for process group %s: %s",
-            process.pid,
-            term_outcome["reason"],
-        )
-        return
-    try:
-        process.wait(timeout=2.0)
-    except subprocess.TimeoutExpired:
-        kill_outcome = signal_recorded_process_group(process, signal.SIGKILL)
-        if not kill_outcome["signalled"]:
-            logging.getLogger(__name__).warning(
-                "refused SIGKILL for process group %s: %s",
-                process.pid,
-                kill_outcome["reason"],
-            )
-            return
-        try:
-            process.wait(timeout=2.0)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
-            return
 
 def truncate_text(text: str, limit: int) -> str:
     if len(text) <= limit:

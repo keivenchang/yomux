@@ -18,6 +18,72 @@ type failedFile struct {
 	closed bool
 }
 
+func TestPrivateDatabaseFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.sqlite3")
+	if err := PrivateDatabaseFiles(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Lstat(path + suffix); !os.IsNotExist(err) {
+			t.Fatalf("absent sidecar %s was created: %v", suffix, err)
+		}
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.WriteFile(path+suffix, []byte("retained"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path+suffix, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := PrivateDatabaseFiles(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		info, err := os.Stat(path + suffix)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("private mode for %s: %v %v", suffix, info, err)
+		}
+		data, err := os.ReadFile(path + suffix)
+		if err != nil || string(data) != "retained" {
+			t.Fatalf("contents for %s: %q %v", suffix, data, err)
+		}
+	}
+}
+
+func TestPrivateDatabaseFilesRejectsAliasesAndSpecialFiles(t *testing.T) {
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		for _, kind := range []string{"symlink", "directory"} {
+			t.Run(suffix+"/"+kind, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "state.sqlite3")
+				target := filepath.Join(t.TempDir(), "target")
+				if err := os.WriteFile(target, []byte("untouched"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(target, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				if kind == "symlink" {
+					err = os.Symlink(target, path+suffix)
+				} else {
+					err = os.Mkdir(path+suffix, 0o700)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := PrivateDatabaseFiles(path); err == nil {
+					t.Fatal("unsafe database artifact was admitted")
+				}
+				info, err := os.Stat(target)
+				if err != nil || info.Mode().Perm() != 0o644 {
+					t.Fatalf("alias target changed: %v %v", info, err)
+				}
+			})
+		}
+	}
+}
+
 var failure = errors.New("injected persistence failure")
 
 func (f *failedFile) Write(p []byte) (int, error) {

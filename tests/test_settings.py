@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 
 from yomux_lib import settings as settings_module
@@ -18,17 +19,125 @@ from yomux_lib.settings import settings_catalog
 from yomux_lib.settings import settings_payload
 from yomux_lib.settings import usage_pricing_profile
 from yomux_lib.settings import write_settings_file
-from yomux_lib.activity_summary import deterministic_yoagent_reply
 from yomux_lib.web import current_language_pref
 from yomux_lib.web import html_lang_dir_attrs
 from yomux_lib.web import LOGIN_LOCALE_CHOICES
 from yomux_lib.web import login_html
 from yomux_lib.web import save_login_locale
-from yomux_lib.yoagent.actions import parse_yoagent_action_intent
-from yomux_lib.yoagent.preferences import parse_settings_write
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize('content', [b'appearance: [', b'\xff'], ids=['yaml', 'utf8'])
+def test_whole_settings_write_repairs_a_cached_load_error(tmp_path, content):
+    path = tmp_path / 'settings.yaml'
+    path.write_bytes(content)
+    assert settings_payload(path)['error']
+    expected = default_settings()
+    expected['appearance']['theme'] = 'light'
+    write_settings_file(expected, path)
+    actual = settings_payload(path)
+    assert not actual['error']
+    assert actual['settings']['appearance']['theme'] == 'light'
+
+
+@pytest.mark.parametrize('section,key', [('appearance', 'global_font_size'), ('performance', 'workflow_transition_glow_seconds')])
+@pytest.mark.parametrize('value', [10**1000, float('nan'), float('inf'), -float('inf')], ids=['huge', 'nan', 'infinity', 'negative-infinity'])
+def test_settings_reject_nonrepresentable_numeric_preferences(section, key, value):
+    coerced = []
+    actual = sanitize_settings({section: {key: value}}, coerced)
+    assert actual[section][key] == default_settings()[section][key]
+    assert f'{section}.{key}' in coerced
+
+
+def test_settings_cache_observes_same_size_edit_with_preserved_mtime(tmp_path):
+    path = tmp_path / 'settings.yaml'
+    write_settings_file(default_settings(), path)
+    assert settings_payload(path)['settings']['appearance']['ui_font_size'] == 14
+    original = path.stat()
+    path.write_text(path.read_text().replace('ui_font_size: 14', 'ui_font_size: 15'))
+    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+    assert settings_payload(path)['settings']['appearance']['ui_font_size'] == 15
+
+
+def test_settings_cache_does_not_stamp_old_payload_with_new_file_identity(monkeypatch, tmp_path):
+    path = tmp_path / 'settings.yaml'
+    write_settings_file(default_settings(), path)
+    original = settings_module._settings_payload_unlocked
+    changed = False
+
+    def replace_after_read(target):
+        nonlocal changed
+        result = original(target)
+        if not changed:
+            changed = True
+            path.write_text(path.read_text().replace('ui_font_size: 14', 'ui_font_size: 15'))
+        return result
+
+    monkeypatch.setattr(settings_module, '_settings_payload_unlocked', replace_after_read)
+    assert settings_payload(path)['settings']['appearance']['ui_font_size'] == 14
+    assert settings_payload(path)['settings']['appearance']['ui_font_size'] == 15
+
+
+def test_settings_read_reconciliation_preserves_a_concurrent_save(monkeypatch, tmp_path):
+    path = tmp_path / 'settings.yaml'
+    initial = default_settings()
+    initial['cost']['openai_pricing_profile'] = 'subscription'
+    path.write_text(settings_module.settings_template(initial))
+    reading = threading.Event()
+    resume = threading.Event()
+    writing = threading.Event()
+    written = threading.Event()
+    errors = []
+    original = settings_module._write_settings_file_unlocked
+
+    def delayed_write(value, target):
+        if threading.current_thread().name == 'settings-reconciliation-reader':
+            reading.set()
+            if not resume.wait(5):
+                raise RuntimeError('settings reconciliation resume deadline')
+        original(value, target)
+
+    def read():
+        try:
+            read_settings_file(path)
+        except Exception as error:
+            errors.append(error)
+
+    def write():
+        writing.set()
+        try:
+            save_settings({'appearance': {'theme': 'light'}}, path)
+        except Exception as error:
+            errors.append(error)
+        finally:
+            written.set()
+
+    monkeypatch.setattr(settings_module, '_write_settings_file_unlocked', delayed_write)
+    reader = threading.Thread(target=read, name='settings-reconciliation-reader')
+    writer = threading.Thread(target=write)
+    reader.start()
+    try:
+        assert reading.wait(5)
+        writer.start()
+        assert writing.wait(5)
+        assert not written.wait(0.2), 'a stale reconciliation must own the same configuration transaction as a save'
+    finally:
+        resume.set()
+        reader.join(5)
+        if writer.ident is not None:
+            writer.join(5)
+    assert not reader.is_alive() and not writer.is_alive()
+    assert not errors
+    assert read_settings_file(path)[0]['appearance']['theme'] == 'light'
+
+
+def test_settings_payload_reports_invalid_utf8(tmp_path):
+    path = tmp_path / 'settings.yaml'
+    path.write_bytes(b'\xff')
+    payload = settings_payload(path)
+    assert payload['settings'] is None and payload['error']
 
 
 def test_pane_spacing_default_is_3px():
@@ -244,7 +353,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["appearance"]["editor_light_color_scheme"] == "yomux-light"
     assert settings["appearance"]["editor_cursor_style"] == "block"  # C3: invalid choice clamps to the new block default
     assert settings["appearance"]["editor_cursor_color"] == "yellow"  # invalid choice clamps to the default
-    assert sanitize_settings({"appearance": {"editor_cursor_color": "laser-lime"}})["appearance"]["editor_cursor_color"] == "laser-lime"
+    assert sanitize_settings({"appearance": {"editor_cursor_color": "laser-lime"}})["appearance"]["editor_cursor_color"] == "neon-green"
     assert settings["appearance"]["separator_color"] == "theme"
     assert sanitize_settings({"appearance": {"separator_color": "purple"}})["appearance"]["separator_color"] == "purple"
     assert settings["appearance"]["file_explorer_font_size"] == 1
@@ -348,7 +457,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert "wall" not in payload["catalog"]["general.default_layout"]["choices"]
     assert payload["choices"]["appearance.active_color"] == ["green", "blue", "orange", "yellow", "purple", "white"]
     assert payload["choices"]["appearance.separator_color"] == ["theme", "green", "blue", "orange", "yellow", "purple", "white"]
-    assert payload["choices"]["appearance.editor_cursor_color"] == ["green", "blue", "orange", "yellow", "purple", "white", "laser-lime", "neon-green", "neon-cyan", "neon-magenta", "neon-orange", "theme"]
+    assert payload["choices"]["appearance.editor_cursor_color"] == ["green", "blue", "orange", "yellow", "purple", "white", "neon-green", "neon-cyan", "neon-magenta", "neon-orange", "theme"]
     assert payload["choices"]["updates.notify_level"] == ["major", "minor", "patch", "none"]
     assert {".git", ".ssh", ".uploads", ".coverage", ".hypothesis", ".nox", ".pnpm-store", ".yarn", ".vscode", ".idea", "__pycache__", "node_modules", "coverage", "htmlcov"} <= set(payload["settings"]["file_explorer"]["index_exclude_dir_names"])
     assert {"~/.config/gh", "~/.config/git", "~/.cache/huggingface"} <= set(payload["settings"]["file_explorer"]["index_exclude_paths"])
@@ -610,12 +719,10 @@ def test_save_settings_preserves_concurrent_section_updates(tmp_path):
         {"terminal_editor": {"word_wrap": True}},
         {"notifications": {"throttle_seconds": 17}},
     ]
-    threads = [threading.Thread(target=save_settings, args=(patch, path)) for patch in patches]
-
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    with ThreadPoolExecutor(max_workers=len(patches)) as executor:
+        writers = [executor.submit(save_settings, patch, path) for patch in patches]
+        for writer in writers:
+            writer.result()
 
     settings, error = read_settings_file(path)
     assert error == ""
@@ -626,6 +733,20 @@ def test_save_settings_preserves_concurrent_section_updates(tmp_path):
     assert settings["notifications"]["throttle_seconds"] == 17
     assert not (tmp_path / "settings.yaml.tmp").exists()
     assert list(tmp_path.glob(".settings.yaml.*.tmp")) == []
+
+
+def test_settings_concurrency_gate_rejects_failure_after_a_successful_write(monkeypatch, tmp_path):
+    save = save_settings
+
+    def fail_after_write(*args, **kwargs):
+        result = save(*args, **kwargs)
+        if threading.current_thread() is not threading.main_thread():
+            raise RuntimeError("fixture concurrent settings writer failed")
+        return result
+
+    monkeypatch.setitem(globals(), "save_settings", fail_after_write)
+    with pytest.raises(RuntimeError, match="fixture concurrent settings writer failed"):
+        test_save_settings_preserves_concurrent_section_updates(tmp_path)
 
 
 def test_save_settings_reports_coerced_keys(tmp_path):

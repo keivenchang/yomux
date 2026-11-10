@@ -1,4 +1,7 @@
 from pathlib import Path
+import errno
+import os
+import sqlite3
 import subprocess
 from threading import Event
 
@@ -14,8 +17,105 @@ from yomux_lib.infra.atomic_file import open_wal_database
 from yomux_lib.local_services.runtime import run_local_rpc_service
 from yomux_lib.observability.pricing_catalog import PricingCatalog
 from yomux_lib.search import file_index
+from yomux_lib.filesystem import listing
 from yomux_lib.stats_current.storage import DATABASE_FILENAME
 from yomux_lib.stats_current.storage import Store
+
+
+@pytest.mark.parametrize("subtree", ["a_b", "a%b", "a\\b", "aB", "/"])
+def test_index_subtree_delta_deletes_only_literal_case_sensitive_descendants(subtree):
+    prefix = "/" if subtree == "/" else f"/root/{subtree}"
+    neighbors = [] if subtree == "/" else ["/root/axb/neighbor", "/root/AB/case-neighbor", f"{prefix}-sibling/neighbor"]
+    owned = [prefix, f"{prefix.rstrip('/')}/child"]
+    with sqlite3.connect(":memory:") as connection:
+        file_index._ensure_sqlite_schema(connection)
+        file_index._replace_sqlite_entries(connection, [
+            (path, Path(path).name, path, 1, 1) for path in [*owned, *neighbors]
+        ])
+        index = file_index.RootIndex(Path("/"))
+        index.pending_subtree_deletes.add(prefix)
+        file_index._apply_sqlite_delta(connection, index)
+        assert {row[0] for row in connection.execute("SELECT path FROM entries")} == set(neighbors)
+        assert {row[0] for row in connection.execute("SELECT path FROM change_journal")} == set(owned)
+
+
+@pytest.mark.parametrize("manifest", [[], "invalid", 123, False])
+def test_index_root_discovery_skips_wrong_typed_manifests(monkeypatch, tmp_path, manifest):
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path)
+    monkeypatch.setattr(file_index, "read_json_file", lambda *_args: manifest)
+    (tmp_path / "invalid.manifest.json").touch()
+    assert file_index.persisted_index_roots_within(tmp_path) == []
+
+
+@pytest.mark.parametrize("marker", [b"nan\n", b"inf\n", b"identity\nnan\n", b"\xff"])
+def test_index_malformed_tombstones_fail_closed(monkeypatch, tmp_path, marker):
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path)
+    root = tmp_path / "root"
+    file_index._tombstone_path(root).write_bytes(marker)
+    assert file_index._snapshot_is_tombstoned(root, {"built_at": 1, "tombstone_identity": "identity"})
+
+
+def test_listing_closes_its_directory_when_scandir_setup_fails(monkeypatch, tmp_path):
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    real_open = os.open
+    opened = []
+
+    def capture_open(*args, **kwargs):
+        descriptor = real_open(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    def fail_scandir(_descriptor):
+        raise OSError(errno.EMFILE, "exhausted descriptor limit")
+
+    monkeypatch.setattr(listing.os, "open", capture_open)
+    monkeypatch.setattr(listing.os, "scandir", fail_scandir)
+    try:
+        with pytest.raises(OSError) as raised:
+            listing._visible_directory_names(root_fd, resolved_parent=tmp_path, requested_path=tmp_path)
+        assert raised.value.errno == errno.EMFILE
+        assert len(opened) == 1
+        with pytest.raises(OSError) as closed:
+            os.fstat(opened[0])
+        assert closed.value.errno == errno.EBADF
+        os.fstat(root_fd)
+    finally:
+        for descriptor in [*opened, root_fd]:
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                if error.errno != errno.EBADF:
+                    raise
+
+
+@pytest.mark.parametrize("directory", ["cache#reserved", "cache?mode=memory", "cache%25", "cache with spaces"])
+def test_index_readers_preserve_literal_database_paths(monkeypatch, tmp_path, directory):
+    root = tmp_path / "root"
+    root.mkdir()
+    index_dir = tmp_path / directory
+    index_dir.mkdir()
+    monkeypatch.setattr(file_index, "INDEX_DIR", index_dir)
+    identity = file_index._current_root_identity(root)
+    metadata = {
+        "version": str(file_index.INDEX_FORMAT_VERSION), "storage": "sqlite", "root": str(root),
+        file_index.AUTHORIZED_ROOT_IDENTITY_FIELD: file_index._root_identity_metadata_value(identity),
+        "skip_signature": file_index._disk_skip_signature(root, set()),
+        "entries_signature": "persisted-snapshot", "entry_count": "17",
+    }
+    with file_index._sqlite_index_connection(root) as connection:
+        file_index._ensure_sqlite_schema(connection)
+        file_index._replace_sqlite_metadata(connection, metadata)
+    assert file_index._authoritative_store_metadata(root) == metadata
+    assert file_index._coverage_from_live_sqlite(root)["entry_count"] == 17
+    opened = file_index._open_sqlite_snapshot(root, set(), honor_tombstone=True)
+    assert opened is not None
+    connection, actual = opened
+    try:
+        assert actual == metadata
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute("DELETE FROM metadata")
+    finally:
+        connection.close()
 
 
 def test_preflight_allows_a_known_local_ext_root(tmp_path):

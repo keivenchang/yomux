@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -399,7 +400,7 @@ func TestTabberActivityTouchAppearsInExistingActivitySnapshot(t *testing.T) {
 		t.Fatalf("create isolated tmux session: %v %s", err, output)
 	}
 	t.Cleanup(func() { _ = s.tmuxCommand("kill-server").Run() })
-	for _, item := range []string{"file:/tmp/2026.md", "gitdiff:%2Ftmp%2Frepo"} {
+	for _, item := range []string{"file:/tmp/2026.md", "filecopy:1:/tmp/2026.md", "filediff:/tmp/2026.md", "filehistory:1:/tmp/2026.md", "gitdiff:%2Ftmp%2Frepo"} {
 		request := httptest.NewRequest(http.MethodPost, "/api/activity/touch", strings.NewReader(`{"item":"`+item+`"}`))
 		response := httptest.NewRecorder()
 		s.activityTouch(response, request)
@@ -407,13 +408,13 @@ func TestTabberActivityTouchAppearsInExistingActivitySnapshot(t *testing.T) {
 			t.Fatalf("touch %q: %d %s", item, response.Code, response.Body.String())
 		}
 	}
-	for _, item := range []string{"file:/tmp/2026.md", "gitdiff:%2Ftmp%2Frepo"} {
+	for _, item := range []string{"file:/tmp/2026.md", "filecopy:1:/tmp/2026.md", "filediff:/tmp/2026.md", "filehistory:1:/tmp/2026.md", "gitdiff:%2Ftmp%2Frepo"} {
 		row := terminalActivityPayload(t, s)[item]
 		if row["active_recency_ts"] == nil || row["last_user_input_ts"] == nil {
 			t.Fatalf("activity snapshot omitted touched utility item %q: %#v", item, row)
 		}
 	}
-	for _, invalid := range []string{"", "terminal:one", "file:", "gitdiff:"} {
+	for _, invalid := range []string{"", "terminal:one", "file:", "filecopy:", "filediff:", "filehistory:", "gitdiff:"} {
 		payload, _ := json.Marshal(map[string]string{"item": invalid})
 		response := httptest.NewRecorder()
 		s.activityTouch(response, httptest.NewRequest(http.MethodPost, "/api/activity/touch", bytes.NewReader(payload)))
@@ -425,5 +426,18 @@ func TestTabberActivityTouchAppearsInExistingActivitySnapshot(t *testing.T) {
 	s.activityTouch(methodResponse, httptest.NewRequest(http.MethodGet, "/api/activity/touch", nil))
 	if methodResponse.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("touch method status = %d, want 405", methodResponse.Code)
+	}
+}
+
+func TestActivityClockBoundSurvivesEqualAndRewoundTime(t *testing.T) {
+	for _, now := range []float64{10, 9} {
+		clocks := map[string]float64{}
+		for i := range 4096 {
+			clocks[strconv.Itoa(i)] = 10
+		}
+		clocks = recordActivityClock(clocks, "new", now)
+		if len(clocks) != 4096 || clocks["new"] != now {
+			t.Fatalf("clock bound lost at time%v: count%d new%v", now, len(clocks), clocks["new"])
+		}
 	}
 }

@@ -97,6 +97,13 @@ def _darwin_process_identity_snapshot(pid: int) -> ProcessIdentitySnapshot | Non
     )
 
 
+def linux_process_stat_fields(stat_text: str) -> list[str]:
+    """Read fields after comm, which may itself contain spaces and parentheses."""
+
+    closing_paren = stat_text.rfind(")")
+    return stat_text[closing_paren + 1 :].split() if closing_paren >= 0 else []
+
+
 def process_identity_snapshot(
     pid: int,
     *,
@@ -114,18 +121,16 @@ def process_identity_snapshot(
         stat_text = (proc_root / str(clean_pid) / "stat").read_text(encoding="utf-8")
     except OSError:
         stat_text = ""
-    closing_paren = stat_text.rfind(")")
-    if closing_paren >= 0:
-        fields = stat_text[closing_paren + 1 :].split()
-        if len(fields) > 19:
-            try:
-                return ProcessIdentitySnapshot(
-                    state=fields[0],
-                    start_identity=f"proc:{int(fields[19])}",
-                    parent_pid=int(fields[1]),
-                )
-            except ValueError:
-                pass
+    fields = linux_process_stat_fields(stat_text)
+    if len(fields) > 19:
+        try:
+            return ProcessIdentitySnapshot(
+                state=fields[0],
+                start_identity=f"proc:{int(fields[19])}",
+                parent_pid=int(fields[1]),
+            )
+        except ValueError:
+            pass
     if platform_name.casefold() == "darwin":
         # libproc is the authoritative, constant-time owner on macOS. Falling back to one
         # `ps` subprocess per inaccessible PID makes a bounded process-table read take minutes.
@@ -168,6 +173,20 @@ def normalize_stable_host_id(value: object, *, source: str) -> str:
             f"invalid stable host ID from {source}; use 1-128 ASCII letters, digits, dots, underscores, or hyphens"
         )
     return normalized
+
+
+def pid_is_alive(pid: int) -> bool:
+    """Return basic liveness for local-service record readers."""
+
+    if int(pid) <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def process_start_identity(
@@ -634,15 +653,15 @@ def is_current_local_process(
     except OSError:
         return result(LocalProcessReason.PROCESS_IDENTITY_UNAVAILABLE, recorded=recorded_start)
     if not observed_start:
-        if pid_probe is not None:
-            try:
-                alive_without_identity = bool(pid_probe(pid))
-            except ProcessLookupError:
-                alive_without_identity = False
-            except (PermissionError, OSError):
-                return result(LocalProcessReason.PROCESS_IDENTITY_UNAVAILABLE, recorded=recorded_start)
-            if alive_without_identity:
-                return result(LocalProcessReason.PROCESS_IDENTITY_UNAVAILABLE, recorded=recorded_start)
+        probe = pid_is_alive if pid_probe is None else pid_probe
+        try:
+            alive_without_identity = bool(probe(pid))
+        except ProcessLookupError:
+            alive_without_identity = False
+        except (PermissionError, OSError):
+            return result(LocalProcessReason.PROCESS_IDENTITY_UNAVAILABLE, recorded=recorded_start)
+        if alive_without_identity:
+            return result(LocalProcessReason.PROCESS_IDENTITY_UNAVAILABLE, recorded=recorded_start)
         return result(LocalProcessReason.PROCESS_NOT_FOUND, recorded=recorded_start)
     if str(observed_start) != recorded_start:
         return result(LocalProcessReason.PROCESS_IDENTITY_REUSED, observed=str(observed_start), recorded=recorded_start)

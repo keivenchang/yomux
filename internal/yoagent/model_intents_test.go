@@ -4,9 +4,46 @@
 package yoagent
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
+
+func TestModelIntentFileAndRuntimeAdmissionAgree(t *testing.T) {
+	for _, example := range []struct {
+		name   string
+		change func(*Skill)
+		valid  bool
+	}{
+		{"valid", func(*Skill) {}, true},
+		{"scalar-default", func(s *Skill) { s.ModelIntent["defaults"] = map[string]any{"notify": true} }, true},
+		{"null-default", func(s *Skill) { s.ModelIntent["defaults"] = map[string]any{"value": nil} }, false},
+		{"object-default", func(s *Skill) { s.ModelIntent["defaults"] = map[string]any{"value": map[string]any{}} }, false},
+		{"list-default", func(s *Skill) { s.ModelIntent["defaults"] = map[string]any{"value": []any{}} }, false},
+		{"disabled", func(s *Skill) { s.Enabled = false }, false},
+		{"user", func(s *Skill) { s.Builtin = false }, false},
+		{"invalid-name", func(s *Skill) { s.Name = "Bad Name" }, false},
+		{"unknown-handler", func(s *Skill) { s.ModelIntent["handler"] = "unknown-handler" }, false},
+		{"invalid-priority", func(s *Skill) { object(s.ModelIntent["candidate"])["priority"] = 101 }, false},
+		{"unknown-schema", func(s *Skill) { object(s.ModelIntent["output"])["schema"] = "unknown-schema" }, false},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			skill := testLoopIntentSkill()
+			example.change(&skill)
+			encoded, err := json.Marshal(map[string]any{
+				"name": skill.Name, "description": "Plan a bounded send", "enabled": skill.Enabled, "model_intent": skill.ModelIntent,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, fileErr := parseSkill(encoded, "fixture.yaml", skill.Name, skill.Builtin)
+			_, runtimeAccepted := modelIntentFromSkill(skill)
+			if (fileErr == nil) != example.valid || runtimeAccepted != example.valid {
+				t.Fatalf("file err=%v runtime accepted=%t, want valid=%t", fileErr, runtimeAccepted, example.valid)
+			}
+		})
+	}
+}
 
 func testLoopIntentSkill() Skill {
 	return Skill{

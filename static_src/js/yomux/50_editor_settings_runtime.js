@@ -255,14 +255,14 @@ function applyEditorThemeMode(options = {}) {
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
 }
 
-function setFileEditorThemeMode(mode) {
+function setFileEditorThemeMode(mode, options = {}) {
   fileEditorThemeMode = normalizeEditorThemeMode(mode);
   writeStoredEditorThemeMode(fileEditorThemeMode);
-  if (fileEditorPreviewDisplayMode !== 'theme') {
+  if (options.resetPreviewDisplay !== false && fileEditorPreviewDisplayMode !== 'theme') {
     fileEditorPreviewDisplayMode = 'theme';
     writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
   }
-  applyEditorThemeMode({refreshEditors: true});
+  if (options.apply !== false) applyEditorThemeMode({refreshEditors: true});
 }
 
 function setFileEditorPreviewDisplayMode(mode) {
@@ -776,7 +776,9 @@ async function focusFileEditorSearch(panel = null) {
 }
 
 function applyEditorWrapPreference() {
-  document.querySelectorAll('.file-editor-panel').forEach(panel => {
+  const panels = [...document.querySelectorAll('.file-editor-panel')];
+  for (const path of new Set(panels.map(panel => panel.dataset.filePath).filter(Boolean))) syncOpenFileContentFromPanels(path);
+  panels.forEach(panel => {
     panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
     panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
     updateEditorWrapButton(panel.querySelector('.file-editor-wrap-panel'));
@@ -785,8 +787,6 @@ function applyEditorWrapPreference() {
     const item = panel.dataset.layoutItem || fileEditorItemFor(path);
     const state = fileEditorStateForItem(path, item);
     if (path && state?.kind === 'text') {
-      const liveText = typeof codeMirrorCurrentText === 'function' ? codeMirrorCurrentText(panel) : null;
-      if (state.historical !== true && liveText !== null && state.content !== liveText) state.content = liveText;
       if (panel?._pmView) syncProseMirrorPanelSource(panel, path, state);
       else renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
       if (typeof reconfigureCodeMirrorPanelEditorOptions === 'function' && reconfigureCodeMirrorPanelEditorOptions(panel)) {
@@ -943,22 +943,21 @@ const BAD_CONNECTION_BODY_CLASS = 'bad-connection';
 const BAD_CONNECTION_CURSOR_COLORS = Object.freeze({dark: '#ff6673', light: '#b91c1c'});
 const BAD_CONNECTION_CURSOR_ACCENT = '#fff3f4';
 const SEPARATOR_COLOR_CHOICES = ['theme', ...UI_COLOR_CHOICES];
-const NEON_CURSOR_COLOR_CHOICES = ['laser-lime', 'neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange'];
+const NEON_CURSOR_COLOR_CHOICES = ['neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange'];
 const CURSOR_COLOR_CHOICES = [...UI_COLOR_CHOICES, ...NEON_CURSOR_COLOR_CHOICES, 'theme'];
 // One parent for the named UI colors. Active color and cursor color must both derive from this map so
-// labels, swatches, and palette membership cannot drift.
+// swatches and palette membership stay shared while cursor labels use plain color names.
 const UI_COLOR_PRESETS = {
-  green:  {labelKey: 'pref.appearance.active_color.green', cursorLabelKey: 'pref.appearance.editor_cursor_color.green', cursor: {dark: '#76b900', light: '#4f7f00'}, active: null},
-  blue:   {labelKey: 'pref.appearance.active_color.blue', cursorLabelKey: 'pref.appearance.editor_cursor_color.blue', cursor: {dark: '#00b7ff', light: '#0069b8'}, active: {dark: {accent: '#3b82f6', bright: '#3b82f6', text: '#ffffff'}, light: {accent: '#2563eb', bright: '#2563eb', text: '#ffffff'}}},
-  orange: {labelKey: 'pref.appearance.active_color.orange', cursorLabelKey: 'pref.appearance.editor_cursor_color.orange', cursor: {dark: '#ff7a00', light: '#b91c1c'}, active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#b91c1c', bright: '#b91c1c', text: '#ffffff'}}},
-  yellow: {labelKey: 'pref.appearance.active_color.yellow', cursorLabelKey: 'pref.appearance.editor_cursor_color.yellow', cursor: {dark: '#ffea00', light: '#9a6700'}, active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#d6a400', bright: '#d6a400', text: '#1a1500'}}},
-  purple: {labelKey: 'pref.appearance.active_color.purple', cursorLabelKey: 'pref.appearance.editor_cursor_color.purple', cursor: {dark: '#d946ef', light: '#7c3aed'}, active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}},
-  white:  {labelKey: 'pref.appearance.active_color.white', cursorLabelKey: 'pref.appearance.editor_cursor_color.white', cursor: {dark: '#ffffff', light: '#6b7280'}, active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#64748b', bright: '#aeb8c5', text: '#0b0e14', tabMuted: '#d3dbe6', tabMutedHover: '#c2ccd9', tabMutedBorder: '#8290a3'}}},
-  'laser-lime':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.laser-lime', cursor: {dark: '#ccff00', light: '#6b8f00'}},
-  'neon-green':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-green', cursor: {dark: '#39ff14', light: '#16825d'}},
-  'neon-cyan':    {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-cyan', cursor: {dark: '#00ffff', light: '#0e7490'}},
-  'neon-magenta': {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-magenta', cursor: {dark: '#ff00ff', light: '#a21caf'}},
-  'neon-orange':  {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-orange', cursor: {dark: '#ff9f0a', light: '#b45309'}},
+  green:  {labelKey: 'pref.appearance.active_color.green', inverseColor: 'yellow', cursorVariants: ['neon-green'], cursorLabelKey: 'legend.color.green.label', cursor: {dark: '#76b900', light: '#4f7f00'}, active: null, plainLabelKey: 'legend.color.green.label'},
+  blue:   {labelKey: 'pref.appearance.active_color.blue', inverseColor: 'yellow', cursorVariants: ['neon-cyan'], cursorLabelKey: 'pref.appearance.editor_cursor_color.blue', cursor: {dark: '#00b7ff', light: '#0069b8'}, active: {dark: {accent: '#3b82f6', bright: '#3b82f6', text: '#ffffff'}, light: {accent: '#2563eb', bright: '#2563eb', text: '#ffffff'}}, plainLabelKey: 'pref.appearance.editor_cursor_color.blue'},
+  orange: {labelKey: 'pref.appearance.active_color.orange', inverseColor: 'blue', cursorVariants: ['neon-orange'], cursorLabelKey: 'pref.appearance.editor_cursor_color.orange', cursor: {dark: '#ff7a00', light: '#b91c1c'}, active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#b91c1c', bright: '#b91c1c', text: '#ffffff'}}, plainLabelKey: 'pref.appearance.editor_cursor_color.orange'},
+  yellow: {labelKey: 'pref.appearance.active_color.yellow', inverseColor: 'blue', cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-yellow', cursor: {dark: '#ffea00', light: '#9a6700'}, active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#d6a400', bright: '#d6a400', text: '#1a1500'}}, plainLabelKey: 'legend.color.yellow.label'},
+  purple: {labelKey: 'pref.appearance.active_color.purple', inverseColor: 'white', cursorVariants: ['neon-magenta'], cursorLabelKey: 'legend.color.purple.label', cursor: {dark: '#d946ef', light: '#7c3aed'}, active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}, plainLabelKey: 'legend.color.purple.label'},
+  white:  {labelKey: 'pref.appearance.active_color.white', inverseColor: 'purple', cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-white', cursor: {dark: '#ffffff', light: '#6b7280'}, active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#64748b', bright: '#aeb8c5', text: '#0b0e14', tabMuted: '#d3dbe6', tabMutedHover: '#c2ccd9', tabMutedBorder: '#8290a3'}}, plainLabelKey: 'pref.appearance.editor_cursor_color.white'},
+  'neon-green':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-green', cursor: {dark: '#ccff00', light: '#6b8f00'}},
+  'neon-cyan':    {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-cyan', cursor: {dark: '#66ffff', light: '#0e7490'}},
+  'neon-magenta': {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-magenta', cursor: {dark: '#ff66ff', light: '#a21caf'}},
+  'neon-orange':  {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-orange', cursor: {dark: '#ffb52e', light: '#b45309'}},
 };
 
 const ACTIVE_COLOR_PRESETS = Object.fromEntries(
@@ -968,7 +967,9 @@ const ACTIVE_COLOR_PRESETS = Object.fromEntries(
 );
 
 function normalizeEditorCursorColor(value) {
-  return value === 'theme' || UI_COLOR_PRESETS[value]?.cursor ? value : DEFAULT_CURSOR_COLOR;
+  if (value === 'laser-lime') return 'neon-green';
+  const preset = UI_COLOR_PRESETS[value];
+  return preset?.cursorVariants?.[0] || (value === 'theme' || preset?.cursor ? value : DEFAULT_CURSOR_COLOR);
 }
 
 function cursorColorForPreset(value, light = false) {
@@ -977,15 +978,21 @@ function cursorColorForPreset(value, light = false) {
   return light ? cursor?.light : cursor?.dark;
 }
 
-function editorCursorColorForScheme(scheme = activeEditorScheme()) {
+function configuredCursorColorForMode(light = false) {
   const value = normalizeEditorCursorColor(fileEditorCursorColor);
-  return value === 'theme' ? scheme.cursor : cursorColorForPreset(value, scheme?.dark === false);
+  return cursorColorForPreset(value === 'theme' ? normalizeEditorCursorColor(inverseGlobalThemeColor()) : value, light);
 }
 
-function activeTerminalCursorColorForTheme(baseTheme = terminalThemeForGlobalTheme()) {
-  const value = normalizeEditorCursorColor(fileEditorCursorColor);
-  if (value === 'theme' && resolvedTerminalThemeMode() === 'light') return terminalThemeForGlobalTheme().cursor;
-  return value === 'theme' ? baseTheme.cursor : cursorColorForPreset(value, resolvedTerminalThemeMode() === 'light');
+function inverseGlobalThemeColor() {
+  return UI_COLOR_PRESETS[initialSetting('appearance.active_color', 'green')]?.inverseColor;
+}
+
+function editorCursorColorForScheme(scheme = activeEditorScheme()) {
+  return configuredCursorColorForMode(scheme?.dark === false);
+}
+
+function activeTerminalCursorColorForTheme() {
+  return configuredCursorColorForMode(resolvedTerminalThemeMode() === 'light');
 }
 
 function badConnectionCursorStateActive() {
@@ -1008,7 +1015,7 @@ function terminalCursorColorsForSession(session, baseTheme = terminalRenderTheme
   if (badConnectionCursorStateActive()) return terminalThemeWithBadConnectionCursor({});
   const displayTheme = resolvedTerminalThemeMode() === 'light' ? terminalThemeForGlobalTheme() : baseTheme;
   return {
-    cursor: session === focusedPanelItem ? activeTerminalCursorColorForTheme(displayTheme) : displayTheme.cursor,
+    cursor: session === focusedPanelItem ? activeTerminalCursorColorForTheme() : displayTheme.cursor,
     cursorAccent: displayTheme.cursorAccent,
   };
 }
@@ -1025,6 +1032,9 @@ function applyCursorColorSetting() {
 }
 
 function applyEditorCursorStyle() {
+  const delay = Number(initialSetting('editor.cursor_blink_delay_ms', 600));
+  document.documentElement?.style.setProperty('--editor-cursor-blink-cycle', `${Math.max(1, delay * 2)}ms`);
+  document.body?.classList.toggle('editor-cursor-static', delay === 0);
   fileEditorCursorStyle = normalizeEditorCursorStyle(fileEditorCursorStyle);
   document.body?.classList.remove('editor-cursor-line', 'editor-cursor-block');
   document.body?.classList.add(`editor-cursor-${fileEditorCursorStyle}`);
@@ -1102,9 +1112,10 @@ function applySeparatorColor(value) {
   const styles = [document.documentElement?.style, document.body?.style].filter(Boolean);
   if (!styles.length) return;
   const vars = ['--pane-resizer-bg', '--pane-resizer-hover-bg', '--pane-resizer-shadow'];
-  const preset = String(value || 'theme') === 'theme'
-    ? null
-    : uiColorVisualPreset(value, document.body?.classList?.contains('theme-resolved-light'));
+  const color = String(value || 'theme') === 'theme'
+    ? inverseGlobalThemeColor()
+    : value;
+  const preset = uiColorVisualPreset(color, document.body?.classList?.contains('theme-resolved-light'));
   if (!preset) {
     styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
     return;
@@ -1136,8 +1147,7 @@ function applyCssSettings() {
   const syncFontSizes = boolSetting('appearance.sync_font_sizes', true);
   if (syncFontSizes) {
     terminalFontSize = globalFontSize;
-    editorFontSize = globalFontSize;
-    editorPreviewFontSize = globalFontSize;
+    setEditorAndPreviewFontSizes(globalFontSize);
     fileExplorerFontSize = syncedFinderFontSize(globalFontSize);
   }
   root.setProperty('--ui-font-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
@@ -1182,8 +1192,17 @@ function applyCssSettings() {
 }
 
 function applyGlobalThemeMode(options = {}) {
+  const previousResolvedTheme = document.body?.classList.contains(themeResolvedBodyClass('dark'))
+    ? 'dark'
+    : document.body?.classList.contains(themeResolvedBodyClass('light')) ? 'light' : null;
   globalThemeMode = normalizeGlobalThemeMode(globalThemeMode);
   const resolved = resolvedGlobalThemeMode();
+  if (previousResolvedTheme && previousResolvedTheme !== resolved
+      && fileEditorThemeMode === configuredEditorSchemeForMode(previousResolvedTheme === 'dark')) {
+    // Older preference saves pinned the current configured scheme. Resume global following when
+    // that stale override is exactly the scheme for the appearance we are leaving.
+    setFileEditorThemeMode(editorThemeInheritMode, {apply: false, resetPreviewDisplay: false});
+  }
   document.body?.classList.remove(...THEME_BODY_CLASSES);
   document.body?.classList.add(themeBodyClass(resolved), themeResolvedBodyClass(resolved));
   if (globalThemeMode === 'system') document.body?.classList.add(themeBodyClass('system'));
@@ -1194,6 +1213,7 @@ function applyGlobalThemeMode(options = {}) {
   // the active-color presets are theme-specific, so re-apply on every theme switch.
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
+  if (typeof refreshPreferenceColorChoices === 'function') refreshPreferenceColorChoices();
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
 }
 
@@ -1303,11 +1323,11 @@ const SETTINGS_APPLY_DEPENDENCIES = Object.freeze({
     'file_explorer.image_preview_max_px',
   ],
   globalTheme: ['appearance.theme'],
-  editorTheme: ['appearance.theme', 'appearance.editor_dark_color_scheme', 'appearance.editor_light_color_scheme'],
-  editorCursor: ['appearance.editor_cursor_style'],
+  editorTheme: ['appearance.theme', 'appearance.editor_dark_color_scheme', 'appearance.editor_light_color_scheme', 'appearance.editor_cursor_color', 'appearance.active_color'],
+  editorCursor: ['appearance.editor_cursor_style', 'editor.cursor_blink_delay_ms'],
   terminal: [
     'appearance.theme', 'appearance.terminal_theme', 'appearance.terminal_font_size', 'appearance.global_font_size',
-    'appearance.sync_font_sizes', 'appearance.editor_cursor_color', 'terminal_editor.scrollback',
+    'appearance.sync_font_sizes', 'appearance.editor_cursor_color', 'appearance.active_color', 'terminal_editor.scrollback',
   ],
   editorWrap: ['terminal_editor.word_wrap', 'terminal_editor.line_numbers'],
   explorerRoot: ['file_explorer.root_mode'],
@@ -1328,6 +1348,7 @@ const SETTINGS_APPLY_DEPENDENCIES = Object.freeze({
   locale: ['general.language'],
   tabberMode: ['general.default_tabber_mode'],
   chrome: [
+    'general.enable_experimental_features',
     'appearance.theme', 'appearance.terminal_theme',
     'appearance.editor_dark_color_scheme', 'appearance.editor_light_color_scheme',
   ],
@@ -1410,8 +1431,7 @@ function applySettingsPayload(payload, options = {}) {
   }
   uploadMaxBytes = numberSetting('uploads.max_bytes');
   terminalFontSize = numberSetting('appearance.terminal_font_size', 14);
-  editorFontSize = numberSetting('appearance.editor_font_size', 14);
-  editorPreviewFontSize = numberSetting('appearance.preview_font_size', 14);
+  setEditorAndPreviewFontSizes(numberSetting('appearance.editor_font_size', 14));
   fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size', 14);
   terminalScrollback = numberSetting('terminal_editor.scrollback');
   fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
@@ -1459,7 +1479,7 @@ function applySettingsPayload(payload, options = {}) {
   }
   const editorThemeChanged = previousEditorSchemeId !== activeEditorScheme().id;
   const editorCursorColorChanged = previousCursorColor !== fileEditorCursorColor;
-  if (editorThemeChanged || editorCursorColorChanged) {
+  if (editorThemeChanged || editorCursorColorChanged || (groupChanged.editorTheme && fileEditorCursorColor === 'theme')) {
     // re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain
     // renderFileEditorPanel short-circuits because codeMirrorConfigSignature omits the scheme, so the
     // CM view would keep its old theme; refreshOpenEditorThemePanels reconfigures the theme directly.

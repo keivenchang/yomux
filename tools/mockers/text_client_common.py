@@ -64,6 +64,25 @@ PASTE_PLACEHOLDER_PREFIX = "[Pasted content "
 PASTE_PLACEHOLDER_SUFFIX = " chars]"
 
 
+def read_input_byte(fd: int) -> bytes:
+    """Make EOF terminate every terminal input transaction, including partial sequences."""
+    byte = os.read(fd, 1)
+    if not byte:
+        raise EOFError
+    return byte
+
+
+def read_input_character(fd: int, first: bytes | None = None) -> str:
+    data = read_input_byte(fd) if first is None else first
+    while True:
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            if exc.reason != "unexpected end of data":
+                return data.decode("utf-8", "replace")
+            data += read_input_byte(fd)
+
+
 def configure_readline(commands: Iterable[str]) -> None:
     readline.parse_and_bind("set editing-mode emacs")
     readline.parse_and_bind("set enable-bracketed-paste on")
@@ -148,9 +167,7 @@ class PromptLineEditor:
         try:
             tty.setraw(fd)
             while True:
-                byte = os.read(fd, 1)
-                if not byte:
-                    raise EOFError
+                byte = read_input_byte(fd)
                 result = self.handle_byte(fd, byte)
                 if result is not None:
                     self.session.add_history(result)
@@ -196,31 +213,21 @@ class PromptLineEditor:
         elif byte == b"\x1b":
             self.handle_escape(fd)
         elif byte >= b" ":
-            self.insert_text(self.read_utf8_char(fd, byte))
+            self.insert_text(read_input_character(fd, byte))
         self.cursor = self.normalized_cursor(self.cursor)
         self.redraw()
         return None
-
-    def read_utf8_char(self, fd: int, first: bytes) -> str:
-        data = first
-        while True:
-            try:
-                return data.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                if exc.reason != "unexpected end of data":
-                    return data.decode("utf-8", "replace")
-                data += os.read(fd, 1)
 
     def read_escape_tail(self, fd: int) -> bytes:
         ready, _, _ = select.select([fd], [], [], 0.03)
         if not ready:
             return b""
-        first = os.read(fd, 1)
+        first = read_input_byte(fd)
         if first != b"[":
             return first
         tail = bytearray(first)
         while True:
-            next_byte = os.read(fd, 1)
+            next_byte = read_input_byte(fd)
             tail.extend(next_byte)
             if next_byte.isalpha() or next_byte == b"~":
                 return bytes(tail)
@@ -253,7 +260,7 @@ class PromptLineEditor:
     def read_bracketed_paste(self, fd: int) -> str:
         data = bytearray()
         while True:
-            data.extend(os.read(fd, 1))
+            data.extend(read_input_byte(fd))
             if data.endswith(BRACKETED_PASTE_END):
                 return bytes(data[: -len(BRACKETED_PASTE_END)]).decode("utf-8", "replace")
 

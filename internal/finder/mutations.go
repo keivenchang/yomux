@@ -388,12 +388,31 @@ func (s *Service) Mkdir(ctx context.Context, raw string) (map[string]any, *Error
 	return map[string]any{"ok": true, "path": requested, "created": true, "kind": "dir", "operation_id": operationID()}, nil
 }
 
-func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime *int64) (map[string]any, *Error) {
+func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime *int64, expectedFileIDs ...string) (map[string]any, *Error) {
+	expectedFileID := ""
+	if len(expectedFileIDs) > 0 {
+		expectedFileID = expectedFileIDs[0]
+	}
+	return s.write(ctx, raw, content, expectedMtime, expectedFileID, false)
+}
+
+func (s *Service) CreateFile(ctx context.Context, raw, content string) (map[string]any, *Error) {
+	return s.write(ctx, raw, content, nil, "", true)
+}
+
+func (s *Service) write(ctx context.Context, raw, content string, expectedMtime *int64, expectedFileID string, createOnly bool) (map[string]any, *Error) {
+	if err := s.openFileMutationMu.LockContext(ctx, s.stop); err != nil {
+		return nil, cancelled(raw)
+	}
+	defer s.openFileMutationMu.Unlock()
 	if len([]byte(content)) > MaxWriteBytes {
 		return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "content_too_large", MessageKey: "fs.error.contentTooLarge", Path: raw, Message: fmt.Sprintf("content is too large (max %d bytes)", MaxWriteBytes)}
 	}
 	parent, finderErr := s.openMutationParent(raw)
 	if finderErr != nil {
+		if expectedFileID != "" && finderErr.Status == http.StatusNotFound {
+			return nil, changed(raw)
+		}
 		return nil, finderErr
 	}
 	defer parent.Close()
@@ -405,8 +424,19 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 	if finderErr != nil {
 		return nil, finderErr
 	}
+	if createOnly && existing != nil {
+		return nil, targetExists(requested)
+	}
+	if expectedFileID != "" && (existing == nil || fileID(existing) != expectedFileID) {
+		return nil, changed(requested)
+	}
 	if existing != nil && existing.IsDir() {
 		return nil, invalid(requested, "path is a directory")
+	}
+	if existing != nil {
+		if failure := contentWriteAccessAt(parent.directory, parent.name, requested, existing); failure != nil {
+			return nil, failure
+		}
 	}
 	if expectedMtime != nil && existing != nil && !mtimeMatches(*expectedMtime, existing.ModTime().UnixNano(), existing.ModTime().Unix()) {
 		return nil, changed(requested)
@@ -443,13 +473,19 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 	if err != nil {
 		return nil, filesystemError(requested, err)
 	}
+	if s.beforeWriteConflictRecheck != nil {
+		s.beforeWriteConflictRecheck()
+	}
 	if existing != nil {
-		if s.beforeWriteConflictRecheck != nil {
-			s.beforeWriteConflictRecheck()
-		}
 		current, currentErr := s.requireMutationTarget(parent, false)
 		if currentErr != nil {
+			if expectedFileID != "" && currentErr.Status == http.StatusNotFound {
+				return nil, changed(requested)
+			}
 			return nil, currentErr
+		}
+		if failure := contentWriteAccessAt(parent.directory, parent.name, requested, current); failure != nil {
+			return nil, failure
 		}
 		if expectedMtime != nil && !mtimeMatches(*expectedMtime, current.ModTime().UnixNano(), current.ModTime().Unix()) {
 			return nil, changed(requested)
@@ -465,33 +501,36 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 	} else {
 		quarantine, quarantineErr := s.quarantineMutationTarget(parent)
 		if quarantineErr != nil {
+			if expectedFileID != "" && quarantineErr.Status == http.StatusNotFound {
+				return nil, changed(requested)
+			}
 			return nil, quarantineErr
 		}
 		// Re-read the quarantined name after the namespace move. The initial mtime check can race
 		// with an in-place editor write while the temporary file is being filled; device/inode still
 		// matches in that case, but the caller's expected content version does not. Restore the
 		// original name before returning the typed conflict so the external edit remains authoritative.
+		quarantinedInfo, statErr := lstatAt(parent.directory, quarantine)
+		if statErr != nil {
+			return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, filesystemError(requested, statErr)))
+		}
+		if failure := contentWriteAccessAt(parent.directory, quarantine, requested, quarantinedInfo); failure != nil {
+			return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, failure))
+		}
 		if expectedMtime != nil {
-			quarantinedInfo, statErr := lstatAt(parent.directory, quarantine)
-			if statErr != nil {
-				_ = restoreMutationTarget(parent, quarantine)
-				return nil, filesystemError(requested, statErr)
-			}
 			if !mtimeMatches(*expectedMtime, quarantinedInfo.ModTime().UnixNano(), quarantinedInfo.ModTime().Unix()) {
-				_ = restoreMutationTarget(parent, quarantine)
-				return nil, changed(requested)
+				return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, changed(requested)))
 			}
 		}
 		if err := ctx.Err(); err != nil {
-			_ = restoreMutationTarget(parent, quarantine)
-			return nil, cancelled(requested)
+			return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, cancelled(requested)))
 		}
 		if err := publishRegularNoReplace(parent.directory, temporaryName, parent.name); err != nil {
-			_ = restoreMutationTarget(parent, quarantine)
+			cause := filesystemError(requested, err)
 			if errors.Is(err, syscall.EEXIST) || errors.Is(err, syscall.ENOENT) {
-				return nil, changed(requested)
+				cause = changed(requested)
 			}
-			return nil, filesystemError(requested, err)
+			return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, cause))
 		}
 		if err := unlinkAt(parent.directory, quarantine, false); err != nil {
 			return nil, filesystemError(requested, err)
@@ -503,21 +542,79 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 		return nil, filesystemError(requested, err)
 	}
 	result := map[string]any{"path": requested, "size": stat.Size(), "mtime": stat.ModTime().Unix(), "mtime_ns": stat.ModTime().UnixNano(), "file_id": fileID(stat), "file_identity": "id:" + fileID(stat)}
+	addEntryMetadata(result, stat)
+	s.addContentWriteMetadata(result, requested, stat)
+	if rotationErr := s.rotateOpenFileDescriptors(requested, filepath.Join(parent.resolvedParent, parent.name), existing, file); rotationErr != nil {
+		return nil, filesystemError(requested, rotationErr)
+	}
 	s.noteChange([]string{requested}, "write")
 	return result, nil
 }
 
-func (s *Service) Rename(ctx context.Context, raw, newName string) (map[string]any, *Error) {
+// preparedRename keeps both authorized parents live through publication.
+type preparedRename struct {
+	source *mutationParent
+	target *mutationParent
+}
+
+func (p *preparedRename) Close() { p.source.Close(); p.target.Close() }
+
+func (s *Service) prepareRename(ctx context.Context, raw, targetPath string) (*preparedRename, *Error) {
 	parent, finderErr := s.openMutationParent(raw)
 	if finderErr != nil {
 		return nil, finderErr
 	}
-	defer parent.Close()
-	requested := parent.requested
+	target, finderErr := s.openMutationParent(targetPath)
+	if finderErr != nil {
+		parent.Close()
+		return nil, finderErr
+	}
+	plan := &preparedRename{source: parent, target: target}
+	info, finderErr := s.requireMutationTarget(parent, false)
+	if finderErr != nil {
+		plan.Close()
+		return nil, finderErr
+	}
+	sourceResolved := filepath.Join(parent.resolvedParent, parent.name)
+	targetResolved := filepath.Join(target.resolvedParent, target.name)
+	if sourceResolved == targetResolved || (info.IsDir() && strings.HasPrefix(targetResolved, sourceResolved+string(filepath.Separator))) {
+		plan.Close()
+		return nil, invalid(raw, "cannot move an item into itself or its descendants")
+	}
+	if _, err := lstatAt(target.directory, target.name); err == nil {
+		plan.Close()
+		return nil, targetExists(targetPath)
+	} else if !os.IsNotExist(err) {
+		plan.Close()
+		return nil, filesystemError(targetPath, err)
+	}
+	if finderErr := checkGitRenameDestination(ctx, target); finderErr != nil {
+		plan.Close()
+		return nil, finderErr
+	}
+	return plan, nil
+}
+
+func (s *Service) Rename(ctx context.Context, raw, newName string) (map[string]any, *Error) {
 	newName = strings.TrimSpace(newName)
 	if newName == "" || newName == "." || newName == ".." || strings.ContainsAny(newName, "/\\\x00\r\n") {
-		return nil, invalid(requested, "name contains illegal characters")
+		return nil, invalid(raw, "name contains illegal characters")
 	}
+	plan, finderErr := s.prepareRename(ctx, raw, filepath.Join(filepath.Dir(raw), newName))
+	if finderErr != nil {
+		return nil, finderErr
+	}
+	defer plan.Close()
+	return s.commitRename(ctx, plan)
+}
+
+func (s *Service) commitRename(ctx context.Context, plan *preparedRename) (map[string]any, *Error) {
+	if err := s.openFileMutationMu.LockContext(ctx, s.stop); err != nil {
+		return nil, cancelled(plan.source.requested)
+	}
+	defer s.openFileMutationMu.Unlock()
+	parent, target := plan.source, plan.target
+	requested := parent.requested
 	if err := ctx.Err(); err != nil {
 		return nil, cancelled(requested)
 	}
@@ -531,52 +628,66 @@ func (s *Service) Rename(ctx context.Context, raw, newName string) (map[string]a
 		}
 		return nil, filesystemError(requested, err)
 	}
-	target := filepath.Join(filepath.Dir(requested), newName)
-	if _, err := lstatAt(parent.directory, newName); err == nil {
-		return nil, targetExists(target)
-	} else if !os.IsNotExist(err) {
-		return nil, filesystemError(target, err)
+	defer gitPlan.close()
+	// Crossing a repository boundary is a working-tree move, never an index rewrite.
+	if gitPlan != nil {
+		root, rootErr := gitRenameRoot(ctx, target.resolvedParent)
+		if rootErr != nil {
+			return nil, filesystemError(target.requested, rootErr)
+		}
+		if root != gitPlan.root {
+			gitPlan.close()
+			gitPlan = nil
+		}
 	}
-	quarantine, quarantineErr := s.quarantineMutationTarget(parent)
-	if quarantineErr != nil {
-		return nil, quarantineErr
+	if finderErr := checkGitRenameDestination(ctx, target); finderErr != nil {
+		return nil, finderErr
+	}
+	quarantine, finderErr := s.quarantineMutationTarget(parent)
+	if finderErr != nil {
+		return nil, finderErr
+	}
+	restore := func(cause *Error) (map[string]any, *Error) {
+		return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, cause))
 	}
 	if err := ctx.Err(); err != nil {
-		_ = restoreMutationTarget(parent, quarantine)
-		return nil, cancelled(requested)
+		return restore(cancelled(requested))
 	}
-	if err := renameNoReplace(parent.directory, quarantine, newName); err != nil {
-		_ = restoreMutationTarget(parent, quarantine)
+	if err := renameBetweenNoReplace(parent.directory, quarantine, target.directory, target.name); err != nil {
 		if errors.Is(err, syscall.EEXIST) {
-			return nil, targetExists(target)
+			return restore(targetExists(target.requested))
 		}
-		if os.IsNotExist(err) {
-			return nil, changed(requested)
+		if errors.Is(err, syscall.EXDEV) {
+			return restore(invalid(target.requested, "moves across filesystems are not supported; source was preserved"))
 		}
-		return nil, filesystemError(requested, err)
+		return restore(filesystemError(target.requested, err))
 	}
 	if gitPlan != nil {
-		newRelative, relativeErr := filepath.Rel(gitPlan.root, filepath.Join(parent.resolvedParent, newName))
-		if relativeErr != nil || newRelative == "." || strings.HasPrefix(newRelative, ".."+string(filepath.Separator)) {
-			if restoreErr := restoreMutationTarget(parent, quarantine); restoreErr != nil {
-				return nil, filesystemError(requested, fmt.Errorf("Git rename target escaped repository and filesystem rollback failed: %w", restoreErr))
-			}
-			return nil, gitIndexChanged(requested, errors.New("Git rename target escaped repository"))
+		newRelative, relativeErr := filepath.Rel(gitPlan.root, filepath.Join(target.resolvedParent, target.name))
+		if relativeErr != nil {
+			return nil, filesystemError(target.requested, relativeErr)
 		}
 		publish := gitPlan.publish
 		if s.publishGitRename != nil {
 			publish = func(ctx context.Context, path string) error { return s.publishGitRename(ctx, gitPlan, path) }
 		}
 		if publishErr := publish(ctx, newRelative); publishErr != nil {
-			rollbackErr := gitPlan.rollback(ctx, newRelative)
-			if restoreErr := renameNoReplace(parent.directory, newName, parent.name); restoreErr != nil {
+			// Cancellation must not prevent restoring an already-mutated filesystem/index.
+			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			rollbackErr := gitPlan.rollback(rollbackCtx, newRelative)
+			restoreErr := renameBetweenNoReplace(target.directory, target.name, parent.directory, parent.name)
+			if rollbackErr != nil || restoreErr != nil {
+				s.noteChange([]string{requested, target.requested}, "rename")
+				cause := fmt.Errorf("Git rename failed: %w", publishErr)
 				if rollbackErr != nil {
-					return nil, filesystemError(requested, fmt.Errorf("Git rename failed, index rollback failed: %v, and filesystem rollback failed: %w", rollbackErr, restoreErr))
+					cause = errors.Join(cause, fmt.Errorf("index rollback: %w", rollbackErr))
 				}
-				return nil, filesystemError(requested, fmt.Errorf("Git rename failed and filesystem rollback failed: %w", restoreErr))
-			}
-			if rollbackErr != nil {
-				return nil, filesystemError(requested, fmt.Errorf("Git rename failed and index rollback failed: %v", rollbackErr))
+				if restoreErr != nil {
+					cause = mutationRecoveryFailure(target.requested, errors.Join(cause, fmt.Errorf("filesystem rollback: %w", restoreErr)))
+					return nil, filesystemError(requested, cause)
+				}
+				return nil, detailedFilesystemError(requested, cause)
 			}
 			if errors.Is(publishErr, errGitIndexChanged) {
 				return nil, gitIndexChanged(requested, publishErr)
@@ -584,8 +695,71 @@ func (s *Service) Rename(ctx context.Context, raw, newName string) (map[string]a
 			return nil, filesystemError(requested, publishErr)
 		}
 	}
-	s.noteChange([]string{requested, target}, "rename")
-	return map[string]any{"path": target, "old_path": requested, "name": newName}, nil
+	s.reconcileOpenFilesWithinMutation(plan)
+	s.noteChange([]string{requested, target.requested}, "rename")
+	return map[string]any{"path": target.requested, "old_path": requested, "name": target.name}, nil
+}
+
+// Move preflights the complete bounded selection before the first namespace mutation.
+// Runtime failures stop the batch and retain the successful mappings in its receipt.
+func (s *Service) Move(ctx context.Context, paths []string, destination string) (map[string]any, *Error) {
+	if len(paths) == 0 || len(paths) > MaxBatchRequests {
+		return nil, invalid(destination, "invalid move selection size")
+	}
+	plans := make([]*preparedRename, 0, len(paths))
+	defer func() {
+		for _, plan := range plans {
+			plan.Close()
+		}
+	}()
+	seen := make(map[string]bool)
+	for _, path := range paths {
+		if !filepath.IsAbs(path) || !filepath.IsAbs(destination) {
+			return nil, invalid(path, "move paths must be absolute")
+		}
+		path = filepath.Clean(path)
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		covered := false
+		for _, other := range paths {
+			if filepath.Clean(other) != path && strings.HasPrefix(path, filepath.Clean(other)+string(filepath.Separator)) {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			continue
+		}
+		plan, finderErr := s.prepareRename(ctx, path, filepath.Join(destination, filepath.Base(path)))
+		if finderErr != nil {
+			return nil, finderErr
+		}
+		plans = append(plans, plan)
+	}
+	// Different source directories can contain the same basename.
+	targets := make(map[string]bool)
+	for _, plan := range plans {
+		key := filepath.Join(plan.target.resolvedParent, plan.target.name)
+		if targets[key] {
+			return nil, targetExists(plan.target.requested)
+		}
+		targets[key] = true
+	}
+	moved := make([]map[string]any, 0, len(plans))
+	for index, plan := range plans {
+		result, finderErr := s.commitRename(ctx, plan)
+		if finderErr != nil {
+			unattempted := make([]string, 0, len(plans)-index-1)
+			for _, pending := range plans[index+1:] {
+				unattempted = append(unattempted, pending.source.requested)
+			}
+			return map[string]any{"moved": moved, "failed": finderErr.Payload(), "unattempted": unattempted, "complete": false}, nil
+		}
+		moved = append(moved, result)
+	}
+	return map[string]any{"moved": moved, "complete": true, "unattempted": []string{}}, nil
 }
 
 func (s *Service) Delete(ctx context.Context, raw string, recursive ...bool) (map[string]any, *Error) {
@@ -607,18 +781,18 @@ func (s *Service) Delete(ctx context.Context, raw string, recursive ...bool) (ma
 		return nil, quarantineErr
 	}
 	if err := ctx.Err(); err != nil {
-		_ = restoreMutationTarget(parent, quarantine)
-		return nil, cancelled(requested)
+		return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, cancelled(requested)))
 	}
 	removeRecursively := len(recursive) > 0 && recursive[0]
 	if info.IsDir() && !removeRecursively {
 		if err := unlinkAt(parent.directory, quarantine, true); err != nil {
 			if errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST) {
-				_ = restoreMutationTarget(parent, quarantine)
+				if restoreErr := restoreMutationFailure(parent, quarantine, nil); restoreErr != nil {
+					return nil, filesystemError(requested, restoreErr)
+				}
 				return map[string]any{"path": requested, "deleted": false, "kind": "dir", "pending": "subtree"}, nil
 			}
-			_ = restoreMutationTarget(parent, quarantine)
-			return nil, filesystemError(requested, err)
+			return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, filesystemError(requested, err)))
 		}
 		s.noteChange([]string{requested}, "delete")
 		return map[string]any{"path": requested, "deleted": true, "kind": "dir"}, nil
@@ -626,14 +800,19 @@ func (s *Service) Delete(ctx context.Context, raw string, recursive ...bool) (ma
 	if info.IsDir() {
 		directory, err := openAt(parent.directory, quarantine, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 		if err != nil {
-			_ = restoreMutationTarget(parent, quarantine)
-			return nil, filesystemError(requested, err)
+			return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, filesystemError(requested, err)))
 		}
 		deleted := make([]string, 0)
 		deleteErr := s.deleteDirectoryContents(ctx, directory, requested, &deleted)
 		_ = directory.Close()
 		if deleteErr != nil {
-			_ = restoreMutationTarget(parent, quarantine)
+			deleteErr = restoreMutationFailure(parent, quarantine, deleteErr)
+			var recovery *mutationRestoreError
+			if errors.As(deleteErr, &recovery) {
+				failure := filesystemError(requested, deleteErr)
+				failure.Partial, failure.DeleteReason, failure.DeletedPaths = len(deleted) > 0, "restoration_failed", deleted
+				return nil, failure
+			}
 			if stopped, ok := deleteErr.(recursiveDeleteError); ok {
 				return nil, partialDelete(requested, stopped.reason, stopped.failedPath, deleted)
 			}
@@ -649,18 +828,17 @@ func (s *Service) Delete(ctx context.Context, raw string, recursive ...bool) (ma
 			return nil, filesystemError(requested, deleteErr)
 		}
 		if err := unlinkAt(parent.directory, quarantine, true); err != nil {
-			_ = restoreMutationTarget(parent, quarantine)
+			cause := filesystemError(requested, err)
 			if len(deleted) > 0 {
-				return nil, partialDelete(requested, "entry_failed", requested, deleted)
+				cause = partialDelete(requested, "entry_failed", requested, deleted)
 			}
-			return nil, filesystemError(requested, err)
+			return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, cause))
 		}
 		s.noteChange([]string{requested}, "delete")
 		return map[string]any{"path": requested, "deleted": true, "kind": "dir"}, nil
 	}
 	if err := unlinkAt(parent.directory, quarantine, false); err != nil {
-		_ = restoreMutationTarget(parent, quarantine)
-		return nil, filesystemError(requested, err)
+		return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, filesystemError(requested, err)))
 	}
 	s.noteChange([]string{requested}, "delete")
 	return map[string]any{"path": requested, "deleted": true, "kind": "file"}, nil
@@ -693,37 +871,32 @@ func (s *Service) deleteDirectoryContents(ctx context.Context, directory *os.Fil
 			}
 			return recursiveDeleteError{reason: "entry_failed", failedPath: childPath, err: statErr}
 		}
-		quarantine, quarantineErr := quarantineDeleteEntry(directory, name, identityFor(linkInfo))
+		quarantine, quarantineErr := quarantineDeleteEntry(directory, name, identityFor(linkInfo), childPath)
 		if quarantineErr != nil {
 			return recursiveDeleteError{reason: "changed_on_disk", failedPath: childPath, err: quarantineErr}
 		}
 		quarantinedInfo, infoErr := lstatAt(directory, quarantine)
 		if infoErr != nil {
-			_ = restoreMutationTarget(&mutationParent{directory: directory, name: name}, quarantine)
-			return recursiveDeleteError{reason: "entry_failed", failedPath: childPath, err: infoErr}
+			return recursiveDeleteError{reason: "entry_failed", failedPath: childPath, err: restoreMutationFailure(&mutationParent{directory: directory, name: name, requested: childPath}, quarantine, infoErr)}
 		}
 		if quarantinedInfo.Mode()&os.ModeSymlink != 0 || !quarantinedInfo.IsDir() {
 			if err := unlinkAt(directory, quarantine, false); err != nil {
-				_ = restoreMutationTarget(&mutationParent{directory: directory, name: name}, quarantine)
-				return recursiveDeleteError{reason: "entry_failed", failedPath: childPath, err: err}
+				return recursiveDeleteError{reason: "entry_failed", failedPath: childPath, err: restoreMutationFailure(&mutationParent{directory: directory, name: name, requested: childPath}, quarantine, err)}
 			}
 			*deleted = append(*deleted, childPath)
 			continue
 		}
 		child, openErr := openAt(directory, quarantine, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 		if openErr != nil {
-			_ = restoreMutationTarget(&mutationParent{directory: directory, name: name}, quarantine)
-			return recursiveDeleteError{reason: "entry_failed", failedPath: childPath, err: openErr}
+			return recursiveDeleteError{reason: "entry_failed", failedPath: childPath, err: restoreMutationFailure(&mutationParent{directory: directory, name: name, requested: childPath}, quarantine, openErr)}
 		}
 		childErr := s.deleteDirectoryContents(ctx, child, childPath, deleted)
 		_ = child.Close()
 		if childErr != nil {
-			_ = restoreMutationTarget(&mutationParent{directory: directory, name: name}, quarantine)
-			return childErr
+			return restoreMutationFailure(&mutationParent{directory: directory, name: name, requested: childPath}, quarantine, childErr)
 		}
 		if err := unlinkAt(directory, quarantine, true); err != nil {
-			_ = restoreMutationTarget(&mutationParent{directory: directory, name: name}, quarantine)
-			return recursiveDeleteError{reason: "entry_failed", failedPath: childPath, err: err}
+			return recursiveDeleteError{reason: "entry_failed", failedPath: childPath, err: restoreMutationFailure(&mutationParent{directory: directory, name: name, requested: childPath}, quarantine, err)}
 		}
 		*deleted = append(*deleted, childPath)
 	}
@@ -732,7 +905,7 @@ func (s *Service) deleteDirectoryContents(ctx context.Context, directory *os.Fil
 
 func childPathForDelete(root, name string) string { return filepath.Join(root, name) }
 
-func quarantineDeleteEntry(directory *os.File, name string, expected descriptorIdentity) (string, error) {
+func quarantineDeleteEntry(directory *os.File, name string, expected descriptorIdentity, requested string) (string, error) {
 	// Threat-model boundary: the service does not grant unrelated principals write access to this
 	// directory, so the checked quarantine name is protected from ordinary path replacement races.
 	// Linux has no unlink-by-file-descriptor primitive; a same-UID actor that can concurrently
@@ -752,12 +925,9 @@ func quarantineDeleteEntry(directory *os.File, name string, expected descriptorI
 			return quarantine, nil
 		}
 		if err == nil {
-			if restoreErr := renameNoReplace(directory, quarantine, name); restoreErr != nil {
-				_ = unlinkAt(directory, quarantine, info.IsDir())
-			}
-			return "", errChangedOnDisk
+			err = errChangedOnDisk
 		}
-		return "", err
+		return "", restoreMutationFailure(&mutationParent{directory: directory, name: name, requested: requested}, quarantine, err)
 	}
 	return "", errors.New("unable to reserve recursive delete entry")
 }
@@ -1469,11 +1639,11 @@ func (s *Service) quarantineMutationTarget(parent *mutationParent) (string, *Err
 		if err == nil && sameDescriptorIdentity(identityFor(info), *parent.targetIdentity) {
 			return name, nil
 		}
-		if err == nil {
-			_ = restoreMutationTarget(parent, name)
-			return "", changed(parent.requested)
+		cause := changed(parent.requested)
+		if err != nil {
+			cause = filesystemError(parent.requested, err)
 		}
-		return "", filesystemError(parent.requested, err)
+		return "", filesystemError(parent.requested, restoreMutationFailure(parent, name, cause))
 	}
 	return "", filesystemError(parent.requested, errors.New("unable to reserve mutation target"))
 }
@@ -1481,6 +1651,27 @@ func (s *Service) quarantineMutationTarget(parent *mutationParent) (string, *Err
 func restoreMutationTarget(parent *mutationParent, name string) error {
 	return renameNoReplace(parent.directory, name, parent.name)
 }
+
+// Restoration never replaces a competing name or discards the retained source.
+func restoreMutationFailure(parent *mutationParent, name string, cause error) error {
+	if err := restoreMutationTarget(parent, name); err != nil {
+		path := filepath.Join(filepath.Dir(parent.requested), name)
+		return mutationRecoveryFailure(path, errors.Join(cause, err))
+	}
+	return cause
+}
+
+func mutationRecoveryFailure(path string, cause error) error {
+	return &mutationRestoreError{path: path, cause: fmt.Errorf("source restoration failed (retained as %s): %w", path, cause)}
+}
+
+type mutationRestoreError struct {
+	path  string
+	cause error
+}
+
+func (e *mutationRestoreError) Error() string { return e.cause.Error() }
+func (e *mutationRestoreError) Unwrap() error { return e.cause }
 
 func (s *Service) Upload(ctx context.Context, session, username, editorPath, baseDir string, files []UploadFile) (map[string]any, *Error) {
 	uploadLimits := s.currentUploadLimits()

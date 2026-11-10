@@ -4,12 +4,14 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBrowserOriginAdmission(t *testing.T) {
@@ -87,7 +89,7 @@ func TestBrowserOriginAdmission(t *testing.T) {
 }
 
 func TestProtectedBrowserOriginStopsEveryMutationBeforeAuthentication(t *testing.T) {
-	for _, path := range []string{"/api/settings", "/api/fs/write", "/api/fs/delete", "/api/fs/rename", "/api/fs/mkdir", "/api/kill-session", "/api/kill-window", "/api/rename-session", "/api/auto-approve", "/api/operations/cancel", "/api/yoagent/jobs"} {
+	for _, path := range []string{"/api/settings", "/api/fs/write", "/api/fs/delete", "/api/fs/rename", "/api/fs/move", "/api/fs/mkdir", "/api/kill-session", "/api/kill-window", "/api/rename-session", "/api/auto-approve", "/api/operations/cancel", "/api/yoagent/jobs"} {
 		t.Run(path, func(t *testing.T) {
 			s := authFixture(t)
 			called := false
@@ -183,4 +185,76 @@ func TestKillSessionRejectsSafeAndUnsupportedMethods(t *testing.T) {
 			t.Fatalf("%s status=%d, want 405 before touching tmux", method, w.Code)
 		}
 	}
+}
+
+func TestArbitraryFilesystemContentRequiresAdmin(t *testing.T) {
+	for _, path := range []string{"/api/fs/read", "/api/fs/raw", "/api/fs/diff", "/api/fs/git-commit", "/api/batch/blame", "/api/batch/zip", "/api/batch/html-preview"} {
+		for _, role := range []string{"readonly", "admin"} {
+			t.Run(path+"/"+role, func(t *testing.T) {
+				reached := false
+				s := &server{}
+				handler := s.protected(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { reached = true; w.WriteHeader(http.StatusNoContent) }))
+				request := httptest.NewRequest(http.MethodGet, path+"?path=/fixture/note", nil)
+				request = request.WithContext(context.WithValue(request.Context(), authContextKey{}, authUser{username: "fixture", role: role}))
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				if role == "readonly" && (reached || response.Code != http.StatusForbidden) {
+					t.Fatalf("readonly filesystem content admitted: reached=%v status=%d", reached, response.Code)
+				}
+				if role == "admin" && (!reached || response.Code != http.StatusNoContent) {
+					t.Fatalf("admin filesystem content unavailable: reached=%v status=%d", reached, response.Code)
+				}
+			})
+		}
+	}
+}
+
+func TestOperationResultsRetainTheirOriginatingRouteAuthority(t *testing.T) {
+	for _, route := range []string{"/api/fs/git-commit", "/api/fs/git-history"} {
+		for _, transport := range []string{"status", "stream", "live"} {
+			t.Run(route+"/"+transport, func(t *testing.T) {
+				result := map[string]any{"fixture_marker": "private-content-marker"}
+				s := &server{events: newEventBroker()}
+				s.operations = map[string]*goOperation{"fixture": {ID: "fixture", Route: route, State: "terminal", HTTPStatus: 200, Result: result, TerminalEvent: map[string]any{"operation": map[string]any{"id": "fixture"}, "result": result}}}
+				path := "/api/operations/fixture"
+				callback := s.operation
+				if transport != "status" {
+					path = "/api/client-events?operation_id=fixture"
+					callback = s.clientEvents
+				}
+				if transport == "live" {
+					path = "/api/client-events?client_id=fixture"
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				defer cancel()
+				ctx = context.WithValue(ctx, authContextKey{}, authUser{username: "fixture", role: "readonly"})
+				request := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+				response := httptest.NewRecorder()
+				var output http.ResponseWriter = response
+				if transport == "live" {
+					output = &operationPublishRecorder{ResponseRecorder: response, publish: func() { _, _ = s.events.publish("operation_terminal", s.operations["fixture"].TerminalEvent) }}
+				}
+				s.protected(http.HandlerFunc(callback)).ServeHTTP(output, request)
+				visible := strings.Contains(response.Body.String(), "private-content-marker")
+				if visible != (route == "/api/fs/git-history") {
+					t.Fatalf("origin%s %s contentvisible=%v status=%d", route, transport, visible, response.Code)
+				}
+			})
+		}
+	}
+}
+
+type operationPublishRecorder struct {
+	*httptest.ResponseRecorder
+	publish func()
+}
+
+func (w *operationPublishRecorder) Write(data []byte) (int, error) {
+	n, err := w.ResponseRecorder.Write(data)
+	if w.publish != nil && strings.Contains(string(data), "event: ready") {
+		publish := w.publish
+		w.publish = nil
+		publish()
+	}
+	return n, err
 }

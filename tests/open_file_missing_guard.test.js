@@ -499,7 +499,9 @@ async function runOpenFileMissingGuardSuite() {
     await flush();
     const st = stateOf(api);
     assert.equal(st.externalMissing, true, 'a real exact-path 404 (deletion) marks the editor missing');
-    assert.equal(st.kind, 'error', 'genuine-missing state is preserved');
+    assert.equal(st.kind, 'text', 'deletion preserves the loaded text document');
+    assert.equal(api.currentFileStateForTest(MD).content, CONTENT);
+    assert.equal(api.currentFileStateForTest(MD).original, CONTENT);
     // The confirmation probe's expected 404 is this lane's deletion verdict, NOT an API failure: it must
     // leave no jsDebug/API-failure residue (else strict browser error gate teardown flags it).
     assert.deepEqual(apiFailureResidueFor(api, '/api/fs/read'), [], 'genuine deletion marks missing without a jsDebug /api/fs/read failure residue');
@@ -567,7 +569,9 @@ async function runOpenFileMissingGuardSuite() {
     await flush();
     const st = stateOf(api);
     assert.equal(st.externalMissing, true, 'poll marks missing on a genuine exact-path 404 / deletion');
-    assert.equal(st.kind, 'error', 'genuine-missing state is preserved on the poll lane');
+    assert.equal(st.kind, 'text', 'poll deletion preserves the loaded text document');
+    assert.equal(api.currentFileStateForTest(MD).content, CONTENT);
+    assert.equal(api.currentFileStateForTest(MD).original, CONTENT);
   });
 
   // ---------- Media lane: loadFileEditorState (image/media) ----------

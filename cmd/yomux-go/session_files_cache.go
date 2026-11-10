@@ -52,6 +52,8 @@ type sessionFilesCacheState struct {
 	generation    uint64
 	recencyTouch  map[string]chan struct{}
 	refresh       map[string]uint64
+	producers     map[string]*sessionFilesProducer
+	producerBytes int
 }
 
 func sessionFilesCachePayload(record sessionFilesCacheRecord) map[string]any {
@@ -453,6 +455,11 @@ func (s *server) admitLiveSessionFilesCache(request sessionFilesRequest, viewID 
 	admission.record = record
 	admission.hit = true
 	admission.stale = sessionFilesCacheAge(record, time.Now()) > sessionFilesCacheTTL.Seconds()
+	if s.finder != nil {
+		progress := s.finder.AttributionPreparation()
+		admission.stale = admission.stale || progress.Updated > record.StoredAt
+	}
+
 	if admission.stale {
 		plan := newSessionFilesPlan(request)
 		admission.refreshing = s.scheduleSessionFilesRefresh(request, viewID, s.sessionFilesRefreshTask(plan)) || s.sessionFilesRefreshInFlight(viewID)
@@ -625,17 +632,55 @@ func sessionFilesCacheRecordMatchesRequestIdentity(request sessionFilesRequest, 
 	return request.session == "" || (request.sessionIdentity != "" && record.SessionIdentity == request.sessionIdentity)
 }
 
+func mergeSessionFilesPartialPayload(payload, saved map[string]any) map[string]any {
+	merged := cloneSessionFilesPayloadEnvelope(payload)
+	repos := sessionFilesPayloadRows(payload, "repos")
+	files := []map[string]any{}
+	fileIndexes := make(map[string]int)
+	present := make(map[string]bool, len(repos))
+	for _, repo := range repos {
+		path, _ := repo["repo"].(string)
+		present[path] = true
+	}
+	refs := make(map[string]any)
+	if current, ok := payload["refs_by_repo"].(map[string]any); ok {
+		for path, value := range current {
+			refs[path] = value
+		}
+	}
+	savedRefs, _ := saved["refs_by_repo"].(map[string]any)
+	for _, repo := range sessionFilesPayloadRows(saved, "repos") {
+		path, _ := repo["repo"].(string)
+		if !present[path] {
+			repos = append(repos, repo)
+			if value, ok := savedRefs[path]; ok {
+				refs[path] = value
+			}
+		}
+	}
+	for _, source := range []map[string]any{saved, payload} {
+		for _, file := range sessionFilesPayloadRows(source, "files") {
+			repo, _ := file["repo"].(string)
+			path, _ := file["path"].(string)
+			key := repo + "\x00" + path
+			if index, ok := fileIndexes[key]; ok {
+				files[index] = file
+			} else {
+				fileIndexes[key] = len(files)
+				files = append(files, file)
+			}
+		}
+	}
+	merged["repos"], merged["files"], merged["refs_by_repo"] = repos, files, refs
+	return merged
+}
+
 func (s *server) writeSessionFilesCache(request sessionFilesRequest, viewID string, payload map[string]any, status int, expectedGeneration ...uint64) bool {
 	if payload == nil || status < http.StatusOK || status >= http.StatusMultipleChoices || (request.session != "" && request.sessionIdentity == "") {
 		return false
 	}
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return false
-	}
 	s.sessionFilesCache.writeMu.Lock()
 	defer s.sessionFilesCache.writeMu.Unlock()
-	oversized := int64(len(payloadJSON)) > sessionFilesCacheMaxEntryBytes
 	s.sessionFilesCache.mu.Lock()
 	var existing sessionFilesCacheRecord
 	var exists bool
@@ -643,9 +688,19 @@ func (s *server) writeSessionFilesCache(request sessionFilesRequest, viewID stri
 		existing, exists = s.sessionFilesCache.records.Peek(viewID)
 	}
 	s.sessionFilesCache.mu.Unlock()
+	if exists && existing.SessionIdentity == request.sessionIdentity && existing.CacheViewID == viewID && existing.RequestDescriptor == sessionFilesRequestDescriptor(request) {
+		if preparation, ok := payload["preparation"].(finder.AttributionProgress); ok && preparation.Partial {
+			payload = mergeSessionFilesPartialPayload(payload, sessionFilesCachePayload(existing))
+		}
+	}
 	if exists && request.session != "" && existing.SessionIdentity != request.sessionIdentity && !s.sessionFilesIdentityMatches(request.session, request.sessionIdentity) {
 		return false
 	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return false
+	}
+	oversized := int64(len(payloadJSON)) > sessionFilesCacheMaxEntryBytes
 	if oversized {
 		s.sessionFilesCache.publicationMu.Lock()
 		s.sessionFilesCache.mu.Lock()
@@ -734,4 +789,12 @@ func (s *server) writeSessionFilesCache(request sessionFilesRequest, viewID stri
 		}
 	}
 	return true
+}
+
+func (s *server) sessionFilesPayloadWithCache(record sessionFilesCacheRecord, descriptor, viewID string, hit, stale, refreshing bool, now time.Time) map[string]any {
+	payload := sessionFilesPayloadWithCache(record, descriptor, viewID, hit, stale, refreshing, now)
+	if s.finder != nil {
+		payload["preparation"] = s.finder.AttributionPreparation()
+	}
+	return payload
 }

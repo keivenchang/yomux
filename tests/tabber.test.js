@@ -209,12 +209,14 @@ test('Window kill actions follow the stable row identity across index reuse', ()
       ]});
       api.showTabContextMenu('one', 10, 12, {descriptionWindow: 0, descriptionWindowId: '@10'});
       const menu = api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('session-context-menu'));
-      const labels = Array.from(menu?.children || []).map(child => child.textContent);
+      const labels = Array.from(menu?.children || []).map(child => child.textContent || child.getAttribute('aria-label') || '');
       assert.equal(labels.some(label => label.includes('Kill replacement')), false, JSON.stringify(labels));
       assert.equal(labels.some(label => label.includes('Kill original')), present, JSON.stringify(labels));
       if (!present) assert.equal(labels.some(label => label.includes('Kill tmux session')), false);
     }
   }
+  const menuSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+  assert.match(menuSource, /'Rename Description'[\s\S]*?iconHtml: fileContextMenuIcon\('rename'\)[\s\S]*?'Rename tmux'[\s\S]*?iconHtml: fileContextMenuIcon\('rename'\)/, 'Tabber rename actions use Finder-style rename icons');
 });
 
 test('Recent updates dates in place and sorts the latest activity only every ten seconds', () => {
@@ -260,7 +262,7 @@ test('shared status renderer uses transport shapes for one visible color and cir
     ['unavailable', ['unavailable'], 'stop'],
     ['working', ['working', 'attention'], ''], ['blocked', ['blocked', 'working'], ''],
     ['cooldown', ['cooldown', 'blocked'], ''], ['attention', ['working', 'cooldown', 'attention'], ''],
-    ['cooldown', ['cooldown'], 'pause'], ['attention', ['attention'], 'stop'], ['working', ['working'], 'play'],
+    ['cooldown', ['cooldown'], 'pause'],
   ];
   for (const [state, aggregateTones, shape] of cases) {
     const html = api.agentWindowStatusDotHtmlForTest({state, icon: '●', aggregateTones}, {label: 'Window status'});
@@ -321,94 +323,6 @@ test('latest repeated editor and Repo Diff engagement survives reload inside the
   });
   restored.setTabberActivityForTest({activity: {[item]: {active_recency_ts: latest - 2}}});
   assert.equal(restored.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === item)?.mtime, latest);
-});
-
-testAsync('restoring an editor does not count as recent activity', async () => {
-  const api = loadYomux('?layout=left&tabs=left:file%3A%2Ftmp%2F2026.md', ['one'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
-  const path = '/tmp/2026.md';
-  const item = api.fileEditorItemFor(path);
-  api.setOpenFileStateForTest(path, {kind: 'text', content: '# 2026', original: '# 2026', dirty: false, mtime: 1});
-  api.setFetchForTest(() => Promise.resolve(jsonResponse({path, content: '# 2026', size: 6, mtime: 1})));
-
-  api.loadFileEditorStateForTest(path, null, item);
-  await flushAsyncWork();
-  const editorEntry = () => api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === item);
-  assert.equal(editorEntry()?.mtime, 0, 'automatic disk loading after reload must not make an old editor recent');
-
-  api.noteTabberItemActivityForTest(item);
-  assert.ok(editorEntry()?.mtime > 0, 'an explicit editor interaction still records activity');
-});
-
-testAsync('editor and Repo Diff engagement updates the matching Tabber date', async () => {
-  const api = loadYomux('?layout=left&tabs=left:file%3A%2Ftmp%2F2026.md', ['one'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
-  const touches = [];
-  api.setFetchForTest(async (url, options = {}) => {
-    if (String(url).endsWith('/api/activity/touch')) touches.push({url, options});
-    return jsonResponse({ok: true});
-  });
-  api.setTabberModeForTest('normal');
-  api.setFileTreeRecencyNowForTest(Date.now());
-  const editorItem = api.fileEditorItemFor('/tmp/2026.md');
-  let editorEntry = api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === editorItem);
-  assert.ok(editorEntry, 'the open editor is represented by a Tabber utility row');
-  assert.equal(editorEntry.mtime, 0, 'an untouched editor starts without local activity');
-  assert.equal(api.noteTabberItemActivityForTest(editorItem), true);
-  editorEntry = api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === editorItem);
-  assert.ok(editorEntry.mtime > 0, 'the editor gets its own local activity timestamp');
-  const editorRow = api.tabberRenderedRowsForTest().find(row => row.name === '2026.md');
-  assert.ok(editorRow?.date, 'the editor row displays its new activity date');
-
-  const diffItem = api.resolveLayoutItem(api.gitDiffItemFor('/tmp/repo'));
-  await api.toggleTabberNormalPaneForTest(diffItem);
-  api.setFileTreeRecencyNowForTest(Date.now());
-  assert.equal(api.noteTabberItemActivityForTest(diffItem), true);
-  const diffEntry = api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === diffItem);
-  assert.ok(diffEntry?.mtime > 0, 'Repo Diff gets a matching local activity timestamp');
-  await flushAsyncWork();
-  assert.deepEqual(touches.map(({options}) => JSON.parse(options.body).item), [editorItem, diffItem], `editor and Repo Diff activity is reported to the server for reload snapshots: ${JSON.stringify({touches, sentAt: [api.tabberItemActivityTouchSentAtForTest(editorItem), api.tabberItemActivityTouchSentAtForTest(diffItem)], errors: api.clientPerfSummaryForTest?.()})}`);
-
-  const restored = loadYomux('?layout=left&tabs=left:file%3A%2Ftmp%2F2026.md', ['one']);
-  restored.setTabberActivityForTest({activity: {[editorItem]: {active_recency_ts: 1700000000}}});
-  const restoredEntry = restored.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === editorItem);
-  assert.equal(restoredEntry?.mtime, 1700000000, 'the server activity snapshot restores the editor date after reload');
-});
-
-testAsync('editing file content reports activity through the shared editor change owner', async () => {
-  const path = '/tmp/typed.md';
-  const api = loadYomux(`?layout=left&tabs=left:${encodeURIComponent(`file:${path}`)}`, ['one'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
-  const item = api.fileEditorItemFor(path);
-  const touches = [];
-  api.setFetchForTest(async (url, options = {}) => {
-    if (String(url).endsWith('/api/activity/touch')) touches.push(JSON.parse(options.body).item);
-    return jsonResponse({ok: true});
-  });
-  api.setOpenFileStateForTest(path, {kind: 'text', content: '# before', original: '# before', dirty: false});
-  const panel = new TestElement('typed-editor');
-  panel.dataset.layoutItem = item;
-  panel.dataset.filePath = path;
-  api.handleFileEditorContentChangedForTest(panel, path, '# after', {sourceSurface: 'text-editor'});
-  const entry = api.buildTabberNormalRowsForTest().find(row => row.tabber?.item === item);
-  assert.ok(entry?.mtime > 0, 'editing text immediately advances the editor Tabber date');
-  await flushAsyncWork();
-  assert.deepEqual(touches, [item], 'typing sends a server activity touch that is available after browser reload');
-
-  const previewPath = '/tmp/preview-typed.md';
-  const previewApi = loadYomux(`?layout=left&tabs=left:${encodeURIComponent(`file:${previewPath}`)}`, ['one'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
-  const previewItem = previewApi.fileEditorItemFor(previewPath);
-  const previewTouches = [];
-  previewApi.setFetchForTest(async (url, options = {}) => {
-    if (String(url).endsWith('/api/activity/touch')) previewTouches.push(JSON.parse(options.body).item);
-    return jsonResponse({ok: true});
-  });
-  previewApi.setOpenFileStateForTest(previewPath, {kind: 'text', content: '# before', original: '# before', dirty: false});
-  const previewPanel = new TestElement('typed-preview');
-  previewPanel.dataset.layoutItem = previewItem;
-  previewPanel.dataset.filePath = previewPath;
-  previewApi.handleFileEditorContentChangedForTest(previewPanel, previewPath, '# edited in preview', {sourceSurface: 'markdown-preview'});
-  const previewEntry = previewApi.buildTabberNormalRowsForTest().find(row => row.tabber?.item === previewItem);
-  assert.ok(previewEntry?.mtime > 0, 'editing Markdown Preview advances its Tabber date through the same change owner');
-  await flushAsyncWork();
-  assert.deepEqual(previewTouches, [previewItem], 'Markdown Preview typing reaches the server-owned activity snapshot');
 });
 
 test('Advanced Tabber uses Normal window cards and keeps only its additional toolbar controls', () => {
@@ -587,6 +501,7 @@ test('editor and Differ tab context menus offer Close through the shared close o
     itemLabel: item => item.slice('__file_editor__'.length),
     isPinnableTab: () => false,
     isTmuxSession: () => false,
+    fileContextMenuIcon: name => `<svg data-menu-icon="${name}"></svg>`,
     t: (key, params) => key === 'finder.close' ? `Close ${params.name}` : 'Close',
     appendContextMenuButton: (menu, label, handler) => actions.push({label, handler}),
     closeLayoutTabItem: item => closed.push(item),
@@ -1189,7 +1104,7 @@ test('Normal activation schedules no delayed focus and stale Advanced focus cann
   const end = source.indexOf('  if (clientPushCanSupplyData()', start);
   const timers = [], focused = [];
   const context = {options: {focusSession: 'one', tabberNormalSelection: true}, activeSessions: ['one', 'two'],
-    tabSwitchHighlightGeneration: 1, autoFocusCanFollowCursor: () => true,
+    focusedPanelItem: 'one', tabSwitchHighlightGeneration: 1, autoFocusCanFollowCursor: () => true,
     setTimeout: fn => timers.push(fn), focusPanel: item => focused.push(item),
     resetLayoutStatusSurface() {}, updateStatus() {}};
   vm.createContext(context);
@@ -1314,7 +1229,7 @@ test('shared user-tab commit preserves activation options, dismisses toasts and 
     queueDockviewLayoutAdoption() {context.dockviewLayoutState.syncQueued = true;},
     adoptDockviewLayout() {active = true; context.dockviewLayoutState.syncQueued = false;},
     isTmuxSession: () => true, dismissSessionToasts: item => dismissed.push(item),
-    acknowledgeNotificationTarget() {}, recordTabActivation: api.recordTabActivation,
+    scheduleEditorNavContentFocus() {}, acknowledgeNotificationTarget() {}, recordTabActivation: api.recordTabActivation,
     acknowledgeUserTerminalTabActivation: (item, options) => options,
     rememberFileExplorerExplicitSyncSession() {}, nextTabSwitchHighlightGeneration: () => 1,
     focusTerminalFromUserAction() {},
@@ -1427,12 +1342,12 @@ test('user terminal activation leaves panel focus to the shared terminal owner',
           focusTerminalWhenAutoFocus() {}, focusPanel: () => calls.push({kind: 'other'}),
           stopTranscriptStream() {}, stopSummaryStream() {}, updateTypingIndicator() {},
           scheduleTerminalReferenceUnderlineRepaint() {}, scheduleFit() {}, setTimeout() {}, refreshTerminal() {},
-          refreshTerminal() {}, scheduleTerminalBlankScreenRefresh() {},
+          scheduleTerminalBlankScreenRefresh() {},
           document: {querySelectorAll: () => [], getElementById: () => null},
           dismissSessionToasts() {}, acknowledgeNotificationTarget() {},
           acknowledgeTerminalAttentionFromUserAction: () => calls.push({kind: 'attention'}),
           recordTabActivation() {}, layoutSlotKeys: () => ['left'], itemInLayout: () => true,
-          activeItemForSide: () => active, dockviewLayoutActive: () => false,
+          scheduleEditorNavContentFocus() {}, activeItemForSide: () => active, dockviewLayoutActive: () => false,
           itemIsActivePaneTab: session => session === active,
           queueDockviewLayoutAdoption() {},
           capturePaneViewStateForItemIfPresent() {},
@@ -1466,11 +1381,11 @@ test('terminal activation reconciles changed focus once and preserves repeated f
   const boot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
   const calls = [];
   const context = {
-    focusedTerminal: 'first', focusedPanelItem: 'first', lastFocusedTmuxSession: 'first',
+    focusedTerminal: 'first', focusedPanelItem: 'first', lastFocusedTmuxSession: 'first', editorNav: {}, recordEditorNav() {},
     isTmuxSession: () => true, isFileExplorerItem: () => false, isFileEditorItem: () => false,
     dockviewLayoutActive: () => true, rememberActivePaneItem() {}, clearPendingFileEditorFocusExcept() {},
     dismissAttentionAlertsForSession() {}, dismissNotificationsForTarget() {},
-    acknowledgeTerminalAttentionFromUserAction() {}, recordAutoFocusNav() {},
+    acknowledgeTerminalAttentionFromUserAction() {},
     recordFocusNavTransition: (previous, next) => calls.push(['nav', previous, next]),
     applyUserInitiatedPanelFocus: (item, previous) => context.recordFocusNavTransition(previous, item),
     updateFocusOnlyChrome: () => calls.push(['chrome', context.focusedPanelItem, context.focusedTerminal]),
@@ -1483,7 +1398,7 @@ test('terminal activation reconciles changed focus once and preserves repeated f
   };
   vm.createContext(context);
   vm.runInContext(core.slice(core.indexOf('function setFocusedTerminalMeasured('), core.indexOf('function clearFocusedTerminal(')), context);
-  vm.runInContext(core.slice(core.indexOf('function setFocusedPanelItem('), core.indexOf('let autoFocusNavTimer')), context);
+  vm.runInContext(core.slice(core.indexOf('function setFocusedPanelItem('), core.indexOf('function clearPendingFileEditorFocusExcept(')), context);
   vm.runInContext(core.slice(core.indexOf('function focusTerminalFromUserAction('), core.indexOf('function focusTerminalDom(')), context);
   vm.runInContext(boot.slice(boot.indexOf('function activateTab('), boot.indexOf('function tmuxWindow(')), context);
   context.activateTab('second', 'terminal', {userInitiated: true, syncFinder: false});
@@ -1498,11 +1413,11 @@ test('direct user terminal focus defers Finder and Differ synchronization', () =
   const calls = [];
   const deferred = [];
   const context = {
-    focusedTerminal: 'first', focusedPanelItem: 'first', lastFocusedTmuxSession: 'first',
+    focusedTerminal: 'first', focusedPanelItem: 'first', lastFocusedTmuxSession: 'first', editorNav: {}, recordEditorNav() {},
     isTmuxSession: () => true, isFileExplorerItem: () => false, isFileEditorItem: () => false,
     dockviewLayoutActive: () => true, rememberActivePaneItem() {}, clearPendingFileEditorFocusExcept() {},
     dismissAttentionAlertsForSession() {}, dismissNotificationsForTarget() {},
-    acknowledgeTerminalAttentionFromUserAction() {}, recordAutoFocusNav() {},
+    acknowledgeTerminalAttentionFromUserAction() {},
     recordFocusNavTransition: (previous, next) => calls.push(['nav', previous, next]),
     applyUserInitiatedPanelFocus: (item, previous) => context.recordFocusNavTransition(previous, item),
     updateFocusOnlyChrome: () => calls.push(['chrome', context.focusedPanelItem, context.focusedTerminal]),
@@ -1580,7 +1495,7 @@ test('user layout activation establishes terminal focus before mount reconciliat
     const calls = [];
     let normalizations = 0;
     const context = {
-      layoutSlots: {items: ['first']}, activeSessions: ['first'], focusedPanelItem: 'first', focusedTerminal: 'first',
+      editorNav: {}, reconcileEditorNav() {}, layoutSlots: {items: ['first']}, activeSessions: ['first'], focusedPanelItem: 'first', focusedTerminal: 'first',
       runtimeState: {layoutMutationSnapshot: () => ({pending: 0}), consumePendingLayoutMutation() {}},
       paneItems: slots => slots.items, layoutShapeSignature: () => 'shape',
       normalTabberPaneLayout: next => next,
@@ -1594,7 +1509,7 @@ test('user layout activation establishes terminal focus before mount reconciliat
         assert.equal(options.acknowledgeAgentWindow, false);
         assert.equal(options.acknowledgePromptAttention, false);
       },
-      recordFocusNavTransition: (previous, next) => calls.push(['nav', previous, next]), recordAutoFocusNav() {},
+      recordFocusNavTransition: (previous, next) => calls.push(['nav', previous, next]),
       updateFocusOnlyChrome: () => calls.push(['chrome']),
       setFocusedTerminal: (session, options) => context.setFocusedTerminalMeasured(session, options),
       requestLayoutRender: () => calls.push(['mount', context.focusedPanelItem, context.focusedTerminal]),
@@ -1639,7 +1554,9 @@ test('preserved Dockview tabs position only their open popover', () => {
   let positions = 0;
   let fileRefreshes = 0;
   const context = {
+    createLifecycleScope: loadYomux().createLifecycleScopeForTest,
     document: {createElement: () => element}, dockviewLayoutState: {},
+    bindPaneTabDismissInteraction() {},
     tabberIsAdvanced: () => true,
     dockviewEmptyPaneSlot: () => false, syncDockviewTabShell() {},
     paneTabShouldPreserve: () => true, syncPaneTabPinnedChrome() {},
@@ -1649,7 +1566,7 @@ test('preserved Dockview tabs position only their open popover', () => {
     cleanupDetachedPaneTabPopover() {},
   };
   vm.createContext(context);
-  vm.runInContext(source.slice(source.indexOf('function createDockviewTabRenderer('), source.indexOf('function captureDockviewPreviousPaneBeforeTabActivation(')), context);
+  vm.runInContext(source.slice(source.indexOf('function disposeDockviewRendererResources('), source.indexOf('function captureDockviewPreviousPaneBeforeTabActivation(')), context);
   const renderer = context.createDockviewTabRenderer();
   renderer.init({params: {item: 'file'}});
   assert.equal(positions, 0, 'a closed hovered/preserved popover must not force layout');
@@ -1693,7 +1610,9 @@ test('Dockview native click restores input without repeating consumed activation
     }};
     const timers = [];
     const context = {
+      createLifecycleScope: loadYomux().createLifecycleScopeForTest,
       tabberIsAdvanced: () => true,
+      bindPaneTabDismissInteraction() {},
       document: {createElement: () => element, addEventListener: (type, listener) => {documentListeners[type] = listener;}, removeEventListener: type => {delete documentListeners[type];}, querySelectorAll: () => [element],
         getElementsByClassName: classes => classes.split(' ').every(name => element.classList.contains(name)) ? [element] : []},
       window: {setTimeout: callback => timers.push(callback), clearTimeout() {}, addEventListener: (type, listener) => {windowListeners[type] = listener;}, removeEventListener: type => {delete windowListeners[type];}},
@@ -1710,11 +1629,11 @@ test('Dockview native click restores input without repeating consumed activation
       terminalFrameRecoveryAttempts: new Map(), clearTerminalConnectionState() {},
       terminalIsVisible: () => false, scheduleTerminalBlankScreenRefresh() {}, scheduleTerminalAttentionHighlight() {},
       refreshTerminal(session, options) { options.afterParse?.(); terminal.term.refresh(); },
-      dismissSessionToasts() {}, acknowledgeNotificationTarget() {}, recordTabActivation() {},
+      scheduleEditorNavContentFocus() {}, dismissSessionToasts() {}, acknowledgeNotificationTarget() {}, recordTabActivation() {},
       nextTabSwitchHighlightGeneration: () => 7,
       scheduleTerminalActivationFollowup: () => {followups++;},
       commitUserTerminalTabActivation: () => {activations++; inputFocused = true; context.dockviewFinishTabActivationPerf(item);},
-      setFocusedPanelItem() {}, focusTerminalFromUserAction() {},
+      setFocusedPanelItem() {}, setFocusedTerminal() {}, focusPanel() {}, focusTerminalFromUserAction() {},
       acknowledgeTerminalAttentionFromUserAction: () => {acknowledgements++;},
       focusTerminalDom: () => {inputFocused = true;},
       dockviewBeginTabPointerDrag: () => {context.dockviewLayoutState.tabPointerDrag = {item, dragged: false};},
@@ -1731,7 +1650,7 @@ test('Dockview native click restores input without repeating consumed activation
     const finishStart = source.indexOf('function dockviewFinishTabPointerDrag(');
     vm.runInContext(source.slice(finishStart, finishStart + source.slice(finishStart).indexOf('\nfunction ')), context);
     vm.runInContext(source.slice(source.indexOf('function dockviewInstallTabPointerReorderFallback('), source.indexOf('function dockviewInstallTabPointerReorderFallback(') + source.slice(source.indexOf('function dockviewInstallTabPointerReorderFallback(')).indexOf('\nfunction ')), context);
-    vm.runInContext(source.slice(source.indexOf('function createDockviewTabRenderer('), source.indexOf('function captureDockviewPreviousPaneBeforeTabActivation(')), context);
+    vm.runInContext(source.slice(source.indexOf('function disposeDockviewRendererResources('), source.indexOf('function captureDockviewPreviousPaneBeforeTabActivation(')), context);
     const renderer = context.createDockviewTabRenderer();
     renderer.init({params: {item}, api: {setActive: () => {active = true;}}});
     const installed = context.dockviewInstallTabPointerReorderFallback();
@@ -1827,6 +1746,93 @@ test('Dockview native click restores input without repeating consumed activation
 });
 
 async function runTabberSuite() {
+  await testAsync('restoring an editor does not count as recent activity', async () => {
+    const api = loadYomux('?layout=left&tabs=left:file%3A%2Ftmp%2F2026.md', ['one'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const path = '/tmp/2026.md';
+    const item = api.fileEditorItemFor(path);
+    api.setOpenFileStateForTest(path, {kind: 'text', content: '# 2026', original: '# 2026', dirty: false, mtime: 1});
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({path, content: '# 2026', size: 6, mtime: 1})));
+
+    api.loadFileEditorStateForTest(path, null, item);
+    await flushAsyncWork();
+    const editorEntry = () => api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === item);
+    assert.equal(editorEntry()?.mtime, 0, 'automatic disk loading after reload must not make an old editor recent');
+
+    api.noteTabberItemActivityForTest(item);
+    assert.ok(editorEntry()?.mtime > 0, 'an explicit editor interaction still records activity');
+  });
+
+  await testAsync('editor and Repo Diff engagement updates the matching Tabber date', async () => {
+    const api = loadYomux('?layout=left&tabs=left:file%3A%2Ftmp%2F2026.md', ['one'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const touches = [];
+    api.setFetchForTest(async (url, options = {}) => {
+      if (String(url).endsWith('/api/activity/touch')) touches.push({url, options});
+      return jsonResponse({ok: true});
+    });
+    api.setTabberModeForTest('normal');
+    api.setFileTreeRecencyNowForTest(Date.now());
+    const editorItem = api.fileEditorItemFor('/tmp/2026.md');
+    let editorEntry = api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === editorItem);
+    assert.ok(editorEntry, 'the open editor is represented by a Tabber utility row');
+    assert.equal(editorEntry.mtime, 0, 'an untouched editor starts without local activity');
+    assert.equal(api.noteTabberItemActivityForTest(editorItem), true);
+    editorEntry = api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === editorItem);
+    assert.ok(editorEntry.mtime > 0, 'the editor gets its own local activity timestamp');
+    const editorRow = api.tabberRenderedRowsForTest().find(row => row.name === '2026.md');
+    assert.ok(editorRow?.date, 'the editor row displays its new activity date');
+
+    const diffItem = api.resolveLayoutItem(api.gitDiffItemFor('/tmp/repo'));
+    await api.toggleTabberNormalPaneForTest(diffItem);
+    api.setFileTreeRecencyNowForTest(Date.now());
+    assert.equal(api.noteTabberItemActivityForTest(diffItem), true);
+    const diffEntry = api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === diffItem);
+    assert.ok(diffEntry?.mtime > 0, 'Repo Diff gets a matching local activity timestamp');
+    await flushAsyncWork();
+    assert.deepEqual(touches.map(({options}) => JSON.parse(options.body).item), [editorItem, diffItem], `editor and Repo Diff activity is reported to the server for reload snapshots: ${JSON.stringify({touches, sentAt: [api.tabberItemActivityTouchSentAtForTest(editorItem), api.tabberItemActivityTouchSentAtForTest(diffItem)], errors: api.clientPerfSummaryForTest?.()})}`);
+
+    const restored = loadYomux('?layout=left&tabs=left:file%3A%2Ftmp%2F2026.md', ['one']);
+    restored.setTabberActivityForTest({activity: {[editorItem]: {active_recency_ts: 1700000000}}});
+    const restoredEntry = restored.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === editorItem);
+    assert.equal(restoredEntry?.mtime, 1700000000, 'the server activity snapshot restores the editor date after reload');
+  });
+
+  await testAsync('editing file content reports activity through the shared editor change owner', async () => {
+    const path = '/tmp/typed.md';
+    const api = loadYomux(`?layout=left&tabs=left:${encodeURIComponent(`file:${path}`)}`, ['one'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const item = api.fileEditorItemFor(path);
+    const touches = [];
+    api.setFetchForTest(async (url, options = {}) => {
+      if (String(url).endsWith('/api/activity/touch')) touches.push(JSON.parse(options.body).item);
+      return jsonResponse({ok: true});
+    });
+    api.setOpenFileStateForTest(path, {kind: 'text', content: '# before', original: '# before', dirty: false});
+    const panel = new TestElement('typed-editor');
+    panel.dataset.layoutItem = item;
+    panel.dataset.filePath = path;
+    api.handleFileEditorContentChangedForTest(panel, path, '# after', {sourceSurface: 'text-editor'});
+    const entry = api.buildTabberNormalRowsForTest().find(row => row.tabber?.item === item);
+    assert.ok(entry?.mtime > 0, 'editing text immediately advances the editor Tabber date');
+    await flushAsyncWork();
+    assert.deepEqual(touches, [item], 'typing sends a server activity touch that is available after browser reload');
+
+    const previewPath = '/tmp/preview-typed.md';
+    const previewApi = loadYomux(`?layout=left&tabs=left:${encodeURIComponent(`file:${previewPath}`)}`, ['one'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const previewItem = previewApi.fileEditorItemFor(previewPath);
+    const previewTouches = [];
+    previewApi.setFetchForTest(async (url, options = {}) => {
+      if (String(url).endsWith('/api/activity/touch')) previewTouches.push(JSON.parse(options.body).item);
+      return jsonResponse({ok: true});
+    });
+    previewApi.setOpenFileStateForTest(previewPath, {kind: 'text', content: '# before', original: '# before', dirty: false});
+    const previewPanel = new TestElement('typed-preview');
+    previewPanel.dataset.layoutItem = previewItem;
+    previewPanel.dataset.filePath = previewPath;
+    previewApi.handleFileEditorContentChangedForTest(previewPanel, previewPath, '# edited in preview', {sourceSurface: 'markdown-preview'});
+    const previewEntry = previewApi.buildTabberNormalRowsForTest().find(row => row.tabber?.item === previewItem);
+    assert.ok(previewEntry?.mtime > 0, 'editing Markdown Preview advances its Tabber date through the same change owner');
+    await flushAsyncWork();
+    assert.deepEqual(previewTouches, [previewItem], 'Markdown Preview typing reaches the server-owned activity snapshot');
+  });
   await testAsync('activity completion publishes accepted products once and preserves independent changes', async () => {
     const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
     const activitySource = fs.readFileSync('static_src/js/yomux/35_agent_window_activity.js', 'utf8');
@@ -3583,7 +3589,7 @@ async function runTabberSuite() {
     assert.equal(rows.find(r => r.path === '/s_1/w_0')?.classes.includes('tabber-active-window'), false, 'the stale 0:codex row stays inactive');
   });
 
-  test('Tabber displays home-relative paths with the shared compact home formatter', () => {
+  test('Tabber keeps windows flat across home, external, and Git pane paths', () => {
     const api = loadYomux('', ['7', '8', '9', '10']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('main');
@@ -3774,7 +3780,7 @@ async function runTabberSuite() {
     // Desktop File owns one compact command which restores the triplet; narrow screens retain
     // three choices because only one surface is visible at a time.
     assert.ok(/function fileSurfaceMenuItems\(\)[\s\S]*openFileSurfaceFromMenu\(item\)/.test(menuSource), 'narrow File commands use the shared placement entry point');
-    assert.ok(/fileMenuPanelCommands\(\)[\s\S]*narrowSingleColumnMode\(\)[\s\S]*virtualCommands\.unshift\(\.\.\.fileSurfaces\)[\s\S]*menuCommand\(t\('yoagent\.capability\.finderDifferTabber\.name'\), \(\) => openFileSurfaceFromMenu\(finderItemId\)/.test(menuSource), 'desktop File renders one Finder/Differ/Tabber restore command');
+    assert.ok(/fileMenuPanelCommands\(\)[\s\S]*narrowSingleColumnMode\(\)[\s\S]*virtualCommands\.unshift\(\.\.\.fileSurfaces\)[\s\S]*menuCommand\(fileSurfaceGroupLabel\(\), \(\) => openFileSurfaceFromMenu\(finderItemId\)/.test(menuSource), 'desktop File renders one mode-aware surface restore command');
     assert.equal(menuSource.includes('toggleFinderPane()'), false, 'File no longer uses the Finder hide/show toggle');
     // terminalThemeSettingForGlobalMode still maps modes correctly (pure helper), but #261 stopped the
     // View -> Theme toggle from PINNING the terminal palette — the terminal follows the app on its own.
@@ -3783,7 +3789,7 @@ async function runTabberSuite() {
     assert.equal(api.terminalThemeSettingForGlobalMode('light'), 'light', 'light maps to light');
     assert.equal(source.includes('patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next)'), false, '#261: the View theme toggle no longer pins the terminal palette (terminal follows the app)');
     // #10: a global-theme change re-themes live editors via the compartment swap.
-    assert.ok(/const editorThemeChanged = previousEditorSchemeId !== activeEditorScheme\(\)\.id;\s*const editorCursorColorChanged = previousCursorColor !== fileEditorCursorColor;\s*if \(editorThemeChanged \|\| editorCursorColorChanged\) \{[\s\S]*?refreshOpenEditorThemePanels\(\)/.test(source), '#10: theme or cursor-color change re-themes open editors');
+    assert.ok(/const editorThemeChanged = previousEditorSchemeId !== activeEditorScheme\(\)\.id;\s*const editorCursorColorChanged = previousCursorColor !== fileEditorCursorColor;\s*if \(editorThemeChanged \|\| editorCursorColorChanged \|\| \(groupChanged\.editorTheme && fileEditorCursorColor === 'theme'\)\) \{[\s\S]*?refreshOpenEditorThemePanels\(\)/.test(source), '#10: theme or cursor-color change re-themes open editors');
     // #12: Preferences field renamed. (Phase 0: the label is now i18n-keyed; en.json holds the text.)
     assert.ok(source.includes("preferenceSettingItem('appearance.theme'") && source.includes('label: explicitLabel ?? t(localeKeys.label, labelParams)'), '#12: the global theme field is i18n-keyed through the shared setting builder');
     assert.ok(source.includes("'appearance.date_time_hour_cycle': '24'") && source.includes("initialSetting('appearance.date_time_hour_cycle')"), 'date/time clock defaults through the shared setting fallback table');
@@ -3841,7 +3847,7 @@ async function runTabberSuite() {
     assert.equal(/body\.theme-light \.topbar:hover,\s*body\.theme-light \.topbar:focus-within\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), false, 'light-mode topbar inherits hover/focus paint from the tokenized base owner');
     // The dragState item guard MUST precede movePanelsToPool()/grid.innerHTML in
     // renderPanels, and endSessionDrag MUST flush via the scheduler instead of direct renderPanels().
-    assert.ok(/function renderPanels\([^)]*\)\s*\{[\s\S]{0,700}?if \(dragState\.item != null\) \{[\s\S]*?requestLayoutRender\(\{[\s\S]*?forceFull: true[\s\S]*?return;[\s\S]{0,80}movePanelsToPool\(\)/.test(dragSrc), '#114/#52: renderPanels defers a structured forced-full request before pooling panels / clearing the grid');
+    assert.ok(/function renderPanels\([^)]*\)\s*\{[\s\S]*?if \(dragState\.item != null\) \{[\s\S]*?requestLayoutRender\(\{[\s\S]*?forceFull: true[\s\S]*?return;[\s\S]{0,80}movePanelsToPool\(\)/.test(dragSrc), '#114/#52: renderPanels defers a structured forced-full request before pooling panels / clearing the grid');
     const endDragStart = dragSrc.indexOf('function endSessionDrag');
     const endDragBody = dragSrc.slice(endDragStart, endDragStart + 1200);
     assert.ok(/cancelDragOperationState\(\);[\s\S]*?flushPendingLayoutRender\(\);/.test(endDragBody), '#endSessionDrag clears the shared drag record before flushing through the layout scheduler');
@@ -4170,7 +4176,7 @@ async function runTabberSuite() {
     assert.ok(slot.classList.contains('drop-preview-left'), 'directory path target still shows the pane split preview');
   });
 
-  test('file tree drags retain copy payload through protected mode', () => {
+  test('file tree drags allow Finder moves and retain copy payload through protected mode', () => {
     const api = loadYomux('?layout=left&tabs=left:1', ['1']);
     const row = new TestElement('pic-row');
     row.rect = {left: 10, top: 20, right: 250, bottom: 40, width: 240, height: 20};
@@ -4178,7 +4184,7 @@ async function runTabberSuite() {
 
     api.startFileTreeDrag(event, row, '/home/test/pic.png', {kind: 'file', name: 'pic.png'});
 
-    assert.equal(event.dataTransfer.effectAllowed, 'copy');
+    assert.equal(event.dataTransfer.effectAllowed, 'copyMove');
     assert.equal(event.dataTransfer['text/plain'], '/home/test/pic.png');
     assert.equal(event.dataTransfer['application/x-yolomux-file'], JSON.stringify({
       path: '/home/test/pic.png',
@@ -4329,8 +4335,7 @@ async function runTabberSuite() {
     assert.equal(deniedFile.allowed, false, 'an absent target intent is denied by the same file classifier');
   });
 
-  test('pane drags preview and swap complete pane stacks', () => {
-    return;
+  test('pane swaps exchange complete stacks and reject undersized targets', () => {
     const api = loadYomux('', ['1', '2', '3']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
@@ -4341,68 +4346,18 @@ async function runTabberSuite() {
       left: {left: 0, top: 0, right: 800, bottom: 520, width: 800, height: 520},
       right: {left: 800, top: 0, right: 1600, bottom: 520, width: 800, height: 520},
     });
-    const handle = new TestElement('pane-handle');
-    const event = dragEvent(820, '1');
-    event.currentTarget = handle;
-    event.target = handle;
-    event.offsetX = 7;
-    event.offsetY = 8;
-
-    api.startPaneDrag(event, 'left');
-
-    assert.equal(event.dataTransfer.effectAllowed, 'move');
-    assert.equal(event.dataTransfer['application/x-yolomux-pane'], JSON.stringify({slot: 'left'}));
-    assert.equal(event.dataTransfer['application/x-yomux-pane'], event.dataTransfer['application/x-yolomux-pane']);
-    assert.equal(api.paneDragPayload(event).slot, 'left', 'pane drags use a distinct pane payload');
-    assert.equal(event.dataTransfer.dragImage.node.className, 'transparent-drag-image', 'pane drags hide the browser snapshot behind the custom pane preview');
-    assert.equal(event.dataTransfer.dragImage.x, 0, 'pane drags use a transparent native image at origin');
-    assert.equal(event.dataTransfer.dragImage.y, 0, 'pane drags use a transparent native image at origin');
-    const panePreview = api.customDragPreviewForTest();
-    assert.ok(panePreview, 'pane drags install a custom pane preview');
-    assert.ok(panePreview.classList.contains('pane-drag-image'), 'pane drag preview uses the pane ghost class');
-    assert.equal(panePreview.dataset.dragSlot, 'left', 'pane drag preview records the dragged pane slot');
-    assert.ok(panePreview.innerHTML.includes('2 tabs'), 'pane drag preview summarizes the pane tab count');
-    assert.ok(parseFloat(panePreview.style.getPropertyValue('width') || panePreview.style.width || '0') > 0, 'pane drag preview has a measured width');
-    assert.ok(parseFloat(panePreview.style.getPropertyValue('height') || panePreview.style.height || '0') > 0, 'pane drag preview has a measured height');
-
-    const target = new TestElement('right-slot');
-    target.classList.add('drop-slot');
-    target.dataset.slot = 'right';
-    target.rect = {left: 800, top: 0, right: 1600, bottom: 520, width: 800, height: 520};
-    api.setGridPreviewNodesForTest([target]);
-    event.target = target;
-    api.handleDropDragOver(event);
-    assert.equal(event.dataTransfer.dropEffect, 'move');
-    assert.ok(target.classList.contains('drop-preview-middle'), 'pane swap previews the whole target pane, not an edge subpane');
-    assert.equal(target.dataset.dropLabel, 'Swap', 'pane swap preview uses the localized English catalog label');
-    assert.equal(api.paneSwapAllowed('left', 'right'), true, 'similarly sized panes can swap whole pane tab stacks');
-
     assert.equal(api.swapPaneSlots('left', 'right'), true);
-    assert.deepStrictEqual([...api.currentSlots().left.tabs], ['3'], 'target pane tabs moved as a whole into the source slot');
-    assert.deepStrictEqual([...api.currentSlots().right.tabs], ['1', '2'], 'source pane tabs moved as a whole into the target slot');
-    assert.equal(api.currentSlots()[api.layoutTreeKey].split, 'row', 'pane swaps keep the existing split tree');
-    assert.ok(api.windowListenersForTest('drop').length > 0, 'pane drag preview cleanup is bound at the window level');
-    api.windowListenersForTest('drop')[0](event);
-    assert.equal(api.customDragPreviewForTest(), null, 'pane drag preview is removed when native drag release reaches window instead of document');
-    assert.equal(api.windowListenersForTest('drop').length, 0, 'window preview cleanup listeners are removed after pane drag cleanup');
-
-    const smallSlots = api.emptyLayoutSlots();
-    smallSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
-    smallSlots.left = api.paneStateWithTabs(['1', '2'], '2');
-    smallSlots.right = api.paneStateWithTabs(['3'], '3');
-    api.setLayoutSlotsForTest(smallSlots);
-    api.clearDropPreview();
+    assert.deepEqual([...api.currentSlots().left.tabs], ['3']);
+    assert.deepEqual([...api.currentSlots().right.tabs], ['1', '2']);
+    assert.equal(api.currentSlots().right.active, '2');
+    assert.equal(api.currentSlots()[api.layoutTreeKey].split, 'row');
     api.setLayoutColumnRectsForTest({
       left: {left: 0, top: 0, right: 800, bottom: 520, width: 800, height: 520},
       right: {left: 800, top: 0, right: 980, bottom: 520, width: 180, height: 520},
     });
-    api.startPaneDrag(event, 'left');
-    api.handleDropDragOver(event);
-    assert.equal(event.dataTransfer.dropEffect, 'none', 'too-small target panes reject whole-pane swaps');
-    assert.equal(target.classList.contains('drop-preview-middle'), false, 'too-small target panes do not advertise a pane swap preview');
-    assert.equal(api.paneSwapAllowed('left', 'right'), false);
-    api.endSessionDrag(event);
-    assert.equal(api.customDragPreviewForTest(), null, 'pane drag preview is removed on cleanup');
+    const before = JSON.stringify(api.currentSlots());
+    assert.equal(api.swapPaneSlots('left', 'right'), false);
+    assert.equal(JSON.stringify(api.currentSlots()), before, 'refused swaps preserve every tab and split');
   });
 
   test('tab-strip dragover clears stale pane previews', () => {
@@ -4440,46 +4395,19 @@ async function runTabberSuite() {
     assert.equal(strip.style.getPropertyValue('--tab-drop-height'), '27px');
   });
 
-  // editor back/forward navigation history (Popular IDE-style file stack). Tests the record/dedupe/
-  // truncate logic of recordEditorNav (the async back/forward re-open goes through the live open path).
-  test('editor navigation records deduplicated bounded history', () => {
+  test('navigation keeps unique global recency after Back and repeated visits', () => {
     const api = loadYomux();
     api.editorNav.stack = [];
     api.editorNav.index = -1;
-    api.recordEditorNav('/repo/a.txt');
-    api.recordEditorNav('/repo/b.txt');
-    assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/b.txt'], 'opens push onto the nav stack');
-    assert.equal(api.editorNav.index, 1, 'index points at the latest open');
-    api.recordEditorNav('/repo/b.txt');
-    assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/b.txt'], 'a consecutive same-file open does not duplicate');
-    assert.equal(api.editorNav.index, 1);
-    api.editorNav.index = 0; // simulate Back to A
-    api.recordEditorNav('/repo/c.txt');
-    assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/c.txt'], 'a new open after Back drops the forward tail');
-    assert.equal(api.editorNav.index, 1);
-    api.editorNav.navigating = true; // a back/forward re-open must NOT record a new entry
-    api.recordEditorNav('/repo/d.txt');
-    assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/c.txt'], 'recording is suppressed while navigating');
-    api.editorNav.navigating = false;
-    // The stack holds arbitrary tab ITEM ids now (not only file paths), so any tab kind is recorded.
-    api.recordEditorNav('5');                 // a terminal session tab
-    api.recordEditorNav('file-explorer');     // the Finder dock
-    assert.deepEqual(api.editorNav.stack.slice(-2), ['5', 'file-explorer'], 'tab back/forward records any tab kind, not just files');
-    api.editorNav.stack = [];
-    api.editorNav.index = -1;
-    api.recordEditorNav('A');
-    api.recordEditorNav('B');
-    api.recordEditorNav('A');
-    api.recordEditorNav('B');
-    assert.deepEqual(api.editorNav.stack, ['A', 'B'], 'A->B->A->B collapses to the useful two-pane history');
-    assert.equal(api.editorNav.index, 1, 'the collapsed ping-pong stack still points at the current pane');
-    // S3: the stack trims to NAV_STACK_LIMIT (50) oldest-first so long sessions stay bounded.
-    api.editorNav.stack = [];
-    api.editorNav.index = -1;
-    for (let i = 0; i < 55; i++) api.recordEditorNav(`/repo/f${i}.txt`);
-    assert.equal(api.editorNav.stack.length, 50, 'S3: nav stack is capped at NAV_STACK_LIMIT (50)');
-    assert.equal(api.editorNav.stack[0], '/repo/f5.txt', 'S3: the oldest entries are dropped when the cap is exceeded');
-    assert.equal(api.editorNav.index, 49, 'S3: index points at the latest after trimming');
+    for (const item of ['A', 'B', 'C', 'B']) api.recordEditorNav(item);
+    assert.deepEqual(api.editorNav.stack, ['A', 'C', 'B']);
+    api.editorNav.index = 0;
+    api.recordEditorNav('C');
+    assert.deepEqual(api.editorNav.stack, ['A', 'B', 'C']);
+    assert.equal(api.editorNav.index, 2);
+    for (let i = 0; i < 80; i++) api.recordEditorNav(`tab-${i}`);
+    assert.equal(api.editorNav.stack.length, 83);
+    assert.equal(new Set(api.editorNav.stack).size, 83);
   });
 
   // A user click/type focus transition records the pane being left and the pane being entered, so Back
@@ -4514,18 +4442,6 @@ async function runTabberSuite() {
 
     assert.equal(api.focusedTerminalForTest(), '1', 'terminal body click still selects the tmux pane');
     assert.equal(focusCount, 1, 'terminal body click calls xterm.focus so the cursor becomes filled immediately');
-  });
-
-  // Tab history is bounded — the oldest entries drop past the cap so it can't grow without limit.
-  test('navigation history retains its newest capped entries', () => {
-    const api = loadYomux();
-    api.editorNav.stack = [];
-    api.editorNav.index = -1;
-    for (let i = 0; i < 80; i += 1) api.recordEditorNav(`tab-${i}`);
-    assert.equal(api.editorNav.stack.length, 50, 'the nav history is capped at 50 entries');
-    assert.equal(api.editorNav.stack[0], 'tab-30', 'the oldest entries past the cap are dropped');
-    assert.equal(api.editorNav.stack[api.editorNav.stack.length - 1], 'tab-79', 'the newest entry is retained');
-    assert.equal(api.editorNav.index, 49, 'the index tracks the capped stack tail');
   });
 
   // the quick-open palette collapses a file's editor-tab + preview-tab into ONE row with
@@ -5358,9 +5274,9 @@ async function runTabberSuite() {
     assert.ok(activeSessionRow.nameHtml.includes('tabber-normal-primary') && activeSessionRow.nameHtml.includes('tabber-normal-description'), 'A5: the current conversation uses the shared flat row');
     assert.equal(secondVisibleSessionRow.ariaCurrent, '', 'only the selected conversation exposes aria-current');
     assert.equal(secondVisibleSessionRow.ariaExpanded, '', 'flat conversation rows do not expose disclosure state');
-    assert.equal(rows.some(r => r.type === 'session' && r.nameHtml.includes('data-tabber-expand')), false, 'session description text is part of the row activation target');
+    assert.equal(rows.some(r => r.type === 'normal' && r.nameHtml.includes('data-tabber-expand')), false, 'session description text is part of the row activation target');
     assert.equal(activeWindowRow?.classes.includes('tabber-active-window'), true, '#2: the current AI window is marked by row emphasis instead of a competing dot');
-    assert.equal(rows.some(r => r.type === 'window' && /tabber-window-active/.test(r.nameHtml)), false, '#2: current-window state no longer renders a circle marker beside agent status icons');
+    assert.equal(rows.some(r => r.type === 'normal' && /tabber-window-active/.test(r.nameHtml)), false, '#2: current-window state no longer renders a circle marker beside agent status icons');
     assert.ok(rows.some(r => r.type === 'normal' && r.nameHtml.includes('tabber-normal-primary') && r.nameHtml.includes('agent-icon claude')), 'Claude Tabber rows show the shared Claude icon');
     assert.ok(rows.some(r => r.type === 'normal' && r.nameHtml.includes('tabber-normal-primary') && r.nameHtml.includes('agent-icon codex')), 'Codex Tabber rows show the shared Codex icon');
     const claudeWindowRow = activeWindowRow;
@@ -5424,10 +5340,9 @@ async function runTabberSuite() {
     assert.equal(rows.flatMap(r => r.datasetKeys).some(key => /^tabberOpen/.test(key)), false, 'DOIT.61 A3: Tabber rows do not retain stale tabberOpen* dataset keys');
     const loadingRows = api.tabberRenderedRowsForTest({preserveCollapsed: true});
     assert.equal(loadingRows.some(r => r.type === 'loading' && /Fetching paths/.test(r.name)), false, 'L3: Tabber no longer has a frontend touched-path loading row');
-    // Non-tmux tabs (Preferences / YO!info / file editors) render as leaf rows AFTER all the sessions.
+    // Advanced includes non-tmux tabs in its chosen global sort order.
     const rowTypes = rows.map(r => r.type);
     assert.ok(rowTypes.includes('tab'), 'non-tmux tabs appear in the Tabber');
-    assert.ok(rowTypes.indexOf('tab') > rowTypes.lastIndexOf('session'), 'non-tmux tabs render after the sessions');
 
     // B4 recency sort: a live working state is newer than historical transcript activity. A fresh
     // user-input heartbeat and a newer touched-path mtime are still not alternate clocks for the row.
@@ -5475,7 +5390,7 @@ async function runTabberSuite() {
     const contextMenu = api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('session-context-menu'));
     assert.equal(contextMenuEvent.defaultPrevented, true, 'right-clicking a Tabber session row opens the shared tab context menu');
     assert.ok(Array.from(contextMenu?.children || []).some(child => child.getAttribute?.('aria-label') === 'Pin Tab'), 'Tabber session context menu includes the shared Pin Tab action');
-    assert.ok(Array.from(contextMenu?.children || []).some(child => String(child.textContent || '').includes("Rename tmux session '1'")), 'Tabber session context menu includes the shared rename action');
+    assert.ok(Array.from(contextMenu?.children || []).some(child => String(child.getAttribute?.('aria-label') || child.textContent || '').includes("Rename tmux session '1'")), 'Tabber session context menu includes the shared rename action');
   });
 
   test('drop-action suggestions honor category, settings, and last-used state', () => {

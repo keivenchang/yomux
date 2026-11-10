@@ -5,13 +5,11 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"io"
 	"math"
 	"net/http"
 	"os"
@@ -837,7 +835,19 @@ func (s *server) contextStream(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"session": session, "error": selectionError})
 		return
 	}
-	items, err := readContextItemsForAgent(path, agent, limit)
+	s.streamContextTranscript(w, r, session, path, agent, limit)
+}
+
+func (s *server) streamContextTranscript(w http.ResponseWriter, r *http.Request, session, path string, agent map[string]any, limit int) {
+	isOpenCode := agent["kind"] == "opencode"
+	var items []map[string]any
+	var position tailfile.Position
+	var err error
+	if isOpenCode {
+		items, err = readContextItemsForAgent(path, agent, limit)
+	} else {
+		items, position, err = s.readContextSnapshot(r.Context(), path, limit)
+	}
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"session": session, "error": "transcript read failed"})
 		return
@@ -848,23 +858,11 @@ func (s *server) contextStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer stream.close()
-	writeSSE := func(event string, value any) bool {
-		return stream.write(event, value) == nil
-	}
+	writeSSE := func(event string, value any) bool { return stream.write(event, value) == nil }
 	if !writeSSE("reset", map[string]any{"session": session, "path": path, "items": items, "pending": false, "stale": false, "agent": agent, "errors": []any{}}) {
 		return
 	}
 	lastSize, lastMod := transcriptSignature(path)
-	isOpenCode := false
-	if kind, _ := agent["kind"].(string); kind == "opencode" {
-		isOpenCode = true
-	}
-	var offset int64
-	var pending []byte
-	var lastFileID string
-	if !isOpenCode {
-		offset, _, lastFileID = transcriptPathIdentity(path)
-	}
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	ping := time.NewTicker(15 * time.Second)
@@ -874,32 +872,40 @@ func (s *server) contextStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
-			size, mod := transcriptSignature(path)
-			if size == lastSize && mod == lastMod {
-				continue
+			var size, mod int64
+			if isOpenCode {
+				size, mod = transcriptSignature(path)
+				if size == lastSize && mod == lastMod {
+					continue
+				}
 			}
-			_, _, fileID := transcriptPathIdentity(path)
-			if !isOpenCode && fileID == lastFileID && size > offset {
-				updated, nextOffset, nextPending, readErr := readTranscriptItemsSinceWithPending(path, offset, pending)
+			if !isOpenCode {
+				updated, batch, readErr := s.readTranscriptItems(r.Context(), path, position)
 				if readErr != nil {
+					_ = writeSSE("error", map[string]any{"error": "transcript read failed", "gap": batch.Gap})
 					return
 				}
-				offset, pending = nextOffset, nextPending
-				lastFileID = fileID
-				lastSize, lastMod = size, mod
-				if len(updated) > 0 && !writeSSE("items", map[string]any{"items": updated}) {
-					return
+				if !batch.Reset {
+					position = batch.After
+					lastSize, lastMod = size, mod
+					if len(updated) > 0 && !writeSSE("items", map[string]any{"items": updated}) {
+						return
+					}
+					continue
 				}
-				continue
 			}
-			updated, readErr := readContextItemsForAgent(path, agent, limit)
+			var updated []map[string]any
+			var readErr error
+			if isOpenCode {
+				updated, readErr = readContextItemsForAgent(path, agent, limit)
+			} else {
+				updated, position, readErr = s.readContextSnapshot(r.Context(), path, limit)
+			}
 			if readErr != nil {
+				_ = writeSSE("error", map[string]any{"error": "transcript read failed"})
 				return
 			}
 			lastSize, lastMod = size, mod
-			if !isOpenCode {
-				offset, pending, lastFileID = size, nil, fileID
-			}
 			if !writeSSE("reset", map[string]any{"session": session, "path": path, "items": updated, "pending": false, "stale": false, "agent": agent, "errors": []any{}}) {
 				return
 			}
@@ -1292,7 +1298,7 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 		}
 		status := "idle"
 		queuedFollowupQuestion := false
-		attentionSignature := ""
+		attentionSignature, attentionKind := "", ""
 		statusObservedAt := time.Now()
 		if s.agentStatusClassifier != nil {
 			classified := s.agentStatusClassifier(context.Background(), stats.AgentStatusRequest{
@@ -1301,6 +1307,7 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 			status = liveAgentWindowState(classified.Status)
 			queuedFollowupQuestion = classified.QueuedFollowupQuestion
 			attentionSignature = classified.AttentionSignature
+			attentionKind = classified.AttentionKind
 			if !classified.ObservedAt.IsZero() {
 				statusObservedAt = classified.ObservedAt
 			}
@@ -1313,7 +1320,7 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 		}
 		agent := map[string]any{
 			"session": session, "kind": kind, "pid": agentPID, "pane_target": parts[4], "command": agentCommand, "executable": agentExecutable,
-			"cwd": cwd, "status": status, "queued_followup_question": queuedFollowupQuestion, "attention_signature": attentionSignature,
+			"cwd": cwd, "status": status, "queued_followup_question": queuedFollowupQuestion, "attention_signature": attentionSignature, "attention_kind": attentionKind,
 			"status_observed_at": float64(statusObservedAt.UnixNano()) / 1e9, "session_id": sessionID, "transcript": transcript,
 			"process_instance_id": processInstanceID, "attention_pending": s.agentStatusCollector != nil && attentionSignature != "",
 			"error": "", "window": parts[1], "window_index": windowIndex, "pane": parts[3],
@@ -1792,60 +1799,59 @@ func transcriptSignature(path string) (int64, int64) {
 	return size, int64(hasher.Sum64())
 }
 
-func readTranscriptItemsSince(path string, offset int64) ([]map[string]any, int64, error) {
-	items, nextOffset, _, err := readTranscriptItemsSinceWithPending(path, offset, nil)
-	return items, nextOffset, err
-}
-
-func readTranscriptItemsSinceWithPending(path string, offset int64, pending []byte) ([]map[string]any, int64, []byte, error) {
+func (s *server) checkpointTranscript(ctx context.Context, path string) (tailfile.Position, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, offset, pending, err
+		return tailfile.Position{}, err
 	}
 	defer file.Close()
-	info, err := file.Stat()
+	snapshot, err := s.transcriptIngestion.Snapshot(file)
 	if err != nil {
-		return nil, offset, pending, err
+		return tailfile.Position{}, err
 	}
-	readStart := offset + int64(len(pending))
-	if offset < 0 || readStart < offset || readStart > info.Size() {
-		return nil, 0, nil, fmt.Errorf("transcript offset is outside file")
-	}
-	if _, err := file.Seek(readStart, io.SeekStart); err != nil {
-		return nil, offset, pending, err
-	}
-	data, err := io.ReadAll(file)
-	if err != nil {
-		return nil, offset, pending, err
-	}
-	data = append(append([]byte(nil), pending...), data...)
-	items := make([]map[string]any, 0)
-	nextOffset := offset
-	consumedTotal := 0
-	for {
-		newline := bytes.IndexByte(data, '\n')
-		if newline < 0 {
-			break
-		}
-		line := data[:newline+1]
-		var record map[string]any
-		if json.Unmarshal(line, &record) == nil && record != nil {
-			items = append(items, transcriptItems(record)...)
-		}
-		consumed := newline + 1
-		consumedTotal += consumed
-		nextOffset = offset + int64(consumedTotal)
-		data = data[consumed:]
-	}
-	return items, nextOffset, data, nil
+	return snapshot.Checkpoint(ctx, snapshot.Size())
 }
 
-func transcriptPathIdentity(path string) (int64, int64, string) {
-	info, err := os.Stat(path)
+func (s *server) readTranscriptItems(ctx context.Context, path string, position tailfile.Position) ([]map[string]any, tailfile.Batch, error) {
+	batch, err := s.transcriptIngestion.ReadBatch(ctx, path, position, tailfile.CompleteRecordBatchBytes, maxContextTranscriptLines)
 	if err != nil {
-		return 0, 0, ""
+		return nil, batch, err
 	}
-	return info.Size(), info.ModTime().UnixNano(), fmt.Sprintf("%d:%v", info.Size(), info.Sys())
+	items := make([]map[string]any, 0, len(batch.Records))
+	for _, row := range batch.Records {
+		var record map[string]any
+		if json.Unmarshal(row.Data, &record) == nil && record != nil {
+			items = append(items, transcriptItems(record)...)
+		}
+	}
+	return items, batch, nil
+}
+
+func (s *server) readContextSnapshot(ctx context.Context, path string, limit int) ([]map[string]any, tailfile.Position, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, tailfile.Position{}, err
+	}
+	defer file.Close()
+	snapshot, err := s.transcriptIngestion.Snapshot(file)
+	if err != nil {
+		return nil, tailfile.Position{}, err
+	}
+	data, err := snapshot.ReadTail(maxContextTranscriptLines, maxContextTranscriptBytes)
+	if err != nil {
+		return nil, tailfile.Position{}, err
+	}
+	offset := snapshot.Size()
+	if data != "" && !strings.HasSuffix(data, "\n") {
+		boundary := strings.LastIndexByte(data, '\n') + 1
+		offset -= int64(len(data) - boundary)
+		data = data[:boundary]
+	}
+	position, err := snapshot.Checkpoint(ctx, offset)
+	if err != nil {
+		return nil, tailfile.Position{}, err
+	}
+	return contextItemsFromData(data, limit), position, nil
 }
 
 func readContextItems(path string, limit int) ([]map[string]any, error) {
@@ -1857,6 +1863,10 @@ func readContextItemsWithLimits(path string, limit, lines int, byteLimit int64) 
 	if err != nil {
 		return nil, err
 	}
+	return contextItemsFromData(data, limit), nil
+}
+
+func contextItemsFromData(data string, limit int) []map[string]any {
 	all := make([]map[string]any, 0, limit)
 	for _, line := range strings.Split(data, "\n") {
 		var record map[string]any
@@ -1868,7 +1878,7 @@ func readContextItemsWithLimits(path string, limit, lines int, byteLimit int64) 
 	if len(all) > limit {
 		all = all[len(all)-limit:]
 	}
-	return all, nil
+	return all
 }
 
 // Reuse the conversation decoder; filesystem writes and observation times do

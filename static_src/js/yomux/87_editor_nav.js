@@ -1,82 +1,119 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Editor navigation history helpers split from 92_codemirror_editor.js.
 
-// — back/forward navigation history. The stack holds the layout ITEM ids of visited tabs (any
-// kind: file editors/previews, terminals, Finder, Prefs, …), so Back returns to the previous tab worked
-// on — not just files. recordEditorNav pushes a user-initiated activation; back/forward re-activate the
-// item (re-opening a since-closed file from its path-encoded id). Bounded so the history can't grow
-// without limit — the oldest entries drop past the cap.
-const NAV_STACK_LIMIT = 50;
+// Recency belongs to tab instances for this page lifetime; traversal only moves the cursor.
 function recordEditorNav(item) {
-  if (editorNav.navigating || !item) return;
-  if (editorNav.stack[editorNav.index] === item) return;   // dedupe consecutive same-tab activations
-  editorNav.stack = editorNav.stack.slice(0, editorNav.index + 1);   // a new activation after Back drops the forward tail
+  if (!item || editorNav.navigating) return;
+  editorNav.pendingFocus = null;
+  editorNav.visitGeneration += 1;
+  editorNav.stack = editorNav.stack.filter(entry => entry !== item);
   editorNav.stack.push(item);
-  collapseEditorNavPingPong();
-  if (editorNav.stack.length > NAV_STACK_LIMIT) {
-    editorNav.stack = editorNav.stack.slice(editorNav.stack.length - NAV_STACK_LIMIT);
-  }
   editorNav.index = editorNav.stack.length - 1;
   updateEditorNavButtons();
 }
 
-function collapseEditorNavPingPong() {
-  while (editorNav.stack.length >= 4) {
-    const end = editorNav.stack.length;
-    const first = editorNav.stack[end - 4];
-    const second = editorNav.stack[end - 3];
-    if (first !== editorNav.stack[end - 2] || second !== editorNav.stack[end - 1]) return;
-    editorNav.stack.splice(end - 2, 2);
+function replaceEditorNavItems(replacements) {
+  const previousFocus = focusedPanelItem || editorNav.focusedItem;
+  const replacementFocus = replacements.get(previousFocus);
+  if (replacementFocus && panelNodes.get(previousFocus)?.contains(document.activeElement)) {
+    editorNav.pendingFocus = {item: replacementFocus, generation: nextTabSwitchHighlightGeneration()};
+  }
+  const current = editorNav.stack[editorNav.index];
+  editorNav.stack = [...new Set(editorNav.stack.map(item => replacements.get(item) || item))];
+  editorNav.index = editorNav.stack.indexOf(replacements.get(current) || current);
+  editorNav.focusedItem = replacements.get(editorNav.focusedItem) || editorNav.focusedItem;
+  editorNav.liveItems = new Set([...editorNav.liveItems].map(item => replacements.get(item) || item));
+  if (replacements.has(focusedPanelItem)) setFocusedPanelItem(replacements.get(focusedPanelItem));
+  updateEditorNavButtons();
+}
+
+// Reconcile at layout commit: pure removal helpers are also used to move tabs.
+function reconcileEditorNav(previousFocus = focusedPanelItem || editorNav.focusedItem, removedItems = [], slots = layoutSlots) {
+  const items = paneItems(slots);
+  // Normal Tabber keeps open tabs registered while laying out only the selected item.
+  const removed = new Set(removedItems);
+  const registeredItems = tabberIsAdvanced() ? items : [...items, ...layoutItems];
+  const live = new Set(registeredItems.filter(item => !removed.has(item)));
+  const current = editorNav.stack[editorNav.index];
+  const removedEntries = [...editorNav.liveItems].some(item => !live.has(item));
+  editorNav.liveItems = live;
+  const preserveContentFocus = removedEntries && (panelNodes.get(previousFocus)?.contains(document.activeElement)
+    || document.activeElement?.closest?.('[data-pane-tab-close], .session-context-menu'));
+  editorNav.stack = editorNav.stack.filter(item => live.has(item));
+  editorNav.index = editorNav.stack.indexOf(current);
+  const removedFocus = previousFocus && !live.has(previousFocus);
+  const target = removedFocus
+    ? editorNav.stack[editorNav.stack.length - 1] || items[0]
+    : previousFocus || activePaneItems(slots)[0] || items[0];
+  if (!editorNav.stack.length && target) {
+    editorNav.stack.push(target);
+    editorNav.index = 0;
+  }
+  if (removedFocus && target) {
+    editorNav.index = editorNav.stack.indexOf(target);
+    const side = slotForItem(target, slots);
+    if (side) slots[side].active = target;
+  }
+  if (target && (removedFocus || preserveContentFocus)) {
+    editorNav.pendingFocus = {item: target, generation: nextTabSwitchHighlightGeneration()};
+  }
+  editorNav.focusedItem = target || null;
+  updateEditorNavButtons();
+  return removedFocus ? target : null;
+}
+
+function focusEditorNavItem(item) {
+  if (!item || !itemInLayout(item) || !itemIsActivePaneTab(item)) return;
+  setFocusedPanelItem(item);
+  focusPanel(item, {focusContent: true});
+}
+
+function scheduleEditorNavContentFocus(item) {
+  const generation = tabSwitchHighlightGeneration;
+  const visitGeneration = editorNav.visitGeneration;
+  const focus = () => {
+    const active = document.activeElement;
+    const panel = panelNodes.get(item);
+    if (generation === tabSwitchHighlightGeneration && visitGeneration === editorNav.visitGeneration
+        && editorNav.focusedItem === item && (active === document.body || panel?.contains(active))) focusEditorNavItem(item);
+  };
+  scheduleTabSwitchPhaseTwo(generation, focus);
+}
+
+function finishEditorNavFocus() {
+  const pending = editorNav.pendingFocus;
+  editorNav.pendingFocus = null;
+  if (pending && pending.generation === tabSwitchHighlightGeneration) {
+    focusEditorNavItem(pending.item);
+    scheduleEditorNavContentFocus(pending.item);
   }
 }
 
-// Re-activate a history item: focus its tab if still open; if it's a closed file editor/preview, re-open
-// it from the path encoded in its id. Returns false when the item is gone and can't be restored (a
-// closed terminal/Finder/etc.) so the caller can skip it.
-async function activateNavItem(item) {
+function activateNavItem(item) {
+  if (!tabberIsAdvanced() && isLayoutItem(item) && !itemInLayout(item)) {
+    storeTabberNormalSelections([item], {syncLayout: false});
+    applyTabberNormalSelectionLayout(item, {userInitiated: false});
+  }
   const side = slotForItem(item);
-  if (side) {
-    activatePaneTab(side, item);   // userInitiated defaults falsey → does not re-record
-    return true;
-  }
-  if (gitDiffItemPath(item)) {
-    return Boolean(openGitDiffTab(gitDiffItemPath(item), {item, userInitiated: false}));
-  }
-  if (isFileEditorItem(item)) {
-    const path = fileItemPath(item);
-    if (path) {
-      const identity = historicalFileEditorIdentity(item);
-      if (identity) {
-        await openHistoricalFileInEditor(path, identity.fromRef, identity.toRef, {item, userInitiated: false});
-        return true;
-      }
-      await openFileInEditor(path, basenameOf(path), {item});
-      return true;
-    }
-  }
-  return false;
+  if (!side) return false;
+  nextTabSwitchHighlightGeneration();
+  activatePaneTab(side, item);
+  focusEditorNavItem(item);
+  scheduleEditorNavContentFocus(item);
+  return true;
 }
 
 async function editorNavGo(delta) {
-  // Walk in `delta` direction, skipping entries that can't be re-activated (closed non-file tabs), so a
-  // stale entry never dead-ends the history. The first activatable entry becomes the new position.
-  let idx = editorNav.index + delta;
-  while (idx >= 0 && idx < editorNav.stack.length) {
-    const item = editorNav.stack[idx];
-    editorNav.navigating = true;   // re-activation must NOT record a new entry
-    let activated = false;
-    try {
-      activated = await activateNavItem(item);
-    } finally {
-      editorNav.navigating = false;
-    }
-    if (activated) {
-      editorNav.index = idx;
-      updateEditorNavButtons();
-      return;
-    }
-    idx += delta;
+  reconcileEditorNav();
+  const index = editorNav.index + delta;
+  if (index < 0 || index >= editorNav.stack.length) return;
+  // Activation is synchronous. Never suppress a newer click across an await.
+  const item = editorNav.stack[index];
+  editorNav.navigating = true;
+  try {
+    if (activateNavItem(item)) editorNav.index = index;
+  } finally {
+    editorNav.navigating = false;
   }
   updateEditorNavButtons();
 }

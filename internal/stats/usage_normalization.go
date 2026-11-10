@@ -276,23 +276,8 @@ func mapNumber(values map[string]any, key string) *float64 {
 	if !ok {
 		return nil
 	}
-	var number float64
-	switch typed := value.(type) {
-	case float64:
-		number = typed
-	case float32:
-		number = float64(typed)
-	case int:
-		number = float64(typed)
-	case int64:
-		number = float64(typed)
-	case json.Number:
-		parsed, err := typed.Float64()
-		if err != nil {
-			return invalidNumberPointer()
-		}
-		number = parsed
-	default:
+	number, valid := currentNumber(value)
+	if !valid {
 		return invalidNumberPointer()
 	}
 	return &number

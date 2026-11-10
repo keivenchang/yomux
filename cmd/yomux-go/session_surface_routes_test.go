@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -186,14 +187,15 @@ func TestReadContextItemsUsesBoundedTailForSparseLargeTranscript(t *testing.T) {
 	}
 }
 
-func TestReadTranscriptItemsSinceReadsOnlyAppendedRecords(t *testing.T) {
+func TestTranscriptIngestionReadsOnlyAppendedRecords(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "transcript.jsonl")
 	initial := `{"payload":{"type":"agent_message","message":"initial"}}
 `
 	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	initialInfo, err := os.Stat(path)
+	server := &server{}
+	position, err := server.checkpointTranscript(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,17 +203,23 @@ func TestReadTranscriptItemsSinceReadsOnlyAppendedRecords(t *testing.T) {
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	items, nextOffset, err := readTranscriptItemsSince(path, initialInfo.Size())
-	if err != nil || nextOffset <= initialInfo.Size() || len(items) != 1 || items[0]["text"] != "appended" {
+	items, batch, err := server.readTranscriptItems(context.Background(), path, position)
+	nextOffset := batch.After.Offset
+	if err != nil || nextOffset <= position.Offset || len(items) != 1 || items[0]["text"] != "appended" {
 		t.Fatalf("appended transcript items = %#v, offset=%d, err=%v", items, nextOffset, err)
 	}
 }
 
-func TestReadTranscriptItemsSinceBuffersSplitJSONLRecords(t *testing.T) {
+func TestTranscriptIngestionBuffersSplitJSONLRecords(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "transcript.jsonl")
 	initial := []byte(`{"payload":{"type":"agent_message","message":"initial"}}
 `)
 	if err := os.WriteFile(path, initial, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := &server{}
+	position, err := server.checkpointTranscript(context.Background(), path)
+	if err != nil {
 		t.Fatal(err)
 	}
 	offset := int64(len(initial))
@@ -219,18 +227,18 @@ func TestReadTranscriptItemsSinceBuffersSplitJSONLRecords(t *testing.T) {
 	if err := os.WriteFile(path, append(initial, partial...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	items, nextOffset, pending, err := readTranscriptItemsSinceWithPending(path, offset, nil)
-	if err != nil || len(items) != 0 || nextOffset != offset || string(pending) != string(partial) {
-		t.Fatalf("partial transcript read = items=%#v offset=%d pending=%q err=%v", items, nextOffset, pending, err)
+	items, batch, err := server.readTranscriptItems(context.Background(), path, position)
+	if err != nil || len(items) != 0 || batch.After.Offset != offset || batch.Complete {
+		t.Fatalf("partial transcript read = items=%#v batch=%#v err=%v", items, batch, err)
 	}
 	completion := []byte(`ended"}}
 `)
 	if err := os.WriteFile(path, append(append(initial, partial...), completion...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	items, nextOffset, pending, err = readTranscriptItemsSinceWithPending(path, nextOffset, pending)
-	if err != nil || len(items) != 1 || items[0]["text"] != "appended" || nextOffset != int64(len(initial)+len(partial)+len(completion)) || len(pending) != 0 {
-		t.Fatalf("completed split transcript read = items=%#v offset=%d pending=%q err=%v", items, nextOffset, pending, err)
+	items, batch, err = server.readTranscriptItems(context.Background(), path, batch.After)
+	if err != nil || len(items) != 1 || items[0]["text"] != "appended" || batch.After.Offset != int64(len(initial)+len(partial)+len(completion)) || !batch.Complete {
+		t.Fatalf("completed split transcript read = items=%#v batch=%#v err=%v", items, batch, err)
 	}
 }
 
@@ -596,5 +604,156 @@ func createSessionSurfaceOpenCodeDB(t *testing.T, path string) {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestContextStreamDeliversAppendAndGenerationResets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	line := func(text string) string {
+		return `{"payload":{"type":"agent_message","message":"` + text + `"}}` + "\n"
+	}
+	if err := os.WriteFile(path, []byte(line("initial")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := &server{}
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		service.streamContextTranscript(w, r, "fixture", path, map[string]any{"kind": "codex"}, 40)
+	}))
+	defer httpServer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	type frame struct {
+		event   string
+		payload map[string]any
+	}
+	frames := make(chan frame, 8)
+	go func() {
+		defer close(frames)
+		scanner := bufio.NewScanner(response.Body)
+		var current frame
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "event: ") {
+				current.event = strings.TrimPrefix(line, "event: ")
+			}
+			if strings.HasPrefix(line, "data: ") {
+				_ = json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &current.payload)
+			}
+			if line == "" && current.event != "" {
+				select {
+				case frames <- current:
+				case <-ctx.Done():
+					return
+				}
+				current = frame{}
+			}
+		}
+	}()
+	next := func(wantEvent, wantText string) {
+		t.Helper()
+		select {
+		case got, ok := <-frames:
+			encoded, _ := json.Marshal(got.payload)
+			if !ok || got.event != wantEvent || !strings.Contains(string(encoded), wantText) {
+				t.Fatalf("stream frame=%s %s want %s containing %s", got.event, encoded, wantEvent, wantText)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("no %s frame containing %s", wantEvent, wantText)
+		}
+	}
+	appendText := func(text string) {
+		t.Helper()
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, writeErr := file.WriteString(text)
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			t.Fatalf("append=%v close=%v", writeErr, closeErr)
+		}
+	}
+	next("reset", "initial")
+	appendText(`{"payload":{"type":"agent_message","message":"append`)
+	select {
+	case got := <-frames:
+		t.Fatalf("unfinished record was published: %+v", got)
+	case <-time.After(350 * time.Millisecond):
+	}
+	appendText("ed\"}}\n")
+	next("items", "appended")
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(line("changed")+line("appended")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	next("reset", "changed")
+	if err := os.WriteFile(path+".new", []byte(line("replacement")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".new", path); err != nil {
+		t.Fatal(err)
+	}
+	next("reset", "replacement")
+}
+
+func TestTranscriptReadBoundsCancellationAndSharedPages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := &server{}
+	position, err := service.checkpointTranscript(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := `{"payload":{"type":"agent_message","message":"record"}}` + "\n"
+	if err := os.WriteFile(path, []byte(strings.Repeat(line, maxContextTranscriptLines+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	items, batch, err := service.readTranscriptItems(context.Background(), path, position)
+	if err != nil || len(items) != maxContextTranscriptLines || batch.Complete {
+		t.Fatalf("first bounded batch items=%d complete=%v err=%v", len(items), batch.Complete, err)
+	}
+	bytesBefore, hitsBefore := service.transcriptIngestion.Metrics()
+	replayed, replay, err := service.readTranscriptItems(context.Background(), path, position)
+	bytesAfter, hitsAfter := service.transcriptIngestion.Metrics()
+	if err != nil || len(replayed) != len(items) || replay.After.Offset != batch.After.Offset || bytesAfter != bytesBefore || hitsAfter <= hitsBefore {
+		t.Fatalf("independent reader cache reuse items=%d bytes=%d/%d hits=%d/%d err=%v", len(replayed), bytesBefore, bytesAfter, hitsBefore, hitsAfter, err)
+	}
+	items, last, err := service.readTranscriptItems(context.Background(), path, batch.After)
+	if err != nil || len(items) != 1 || !last.Complete {
+		t.Fatalf("bounded continuation items=%d complete=%v err=%v", len(items), last.Complete, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := service.readTranscriptItems(ctx, path, position); err == nil {
+		t.Fatal("cancelled reader admitted work")
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(9 << 20); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	file.Close()
+	if _, _, err := service.readTranscriptItems(context.Background(), path, position); err == nil || !strings.Contains(err.Error(), "record exceeds") {
+		t.Fatalf("oversized record not reported: %v", err)
 	}
 }

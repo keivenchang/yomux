@@ -9,6 +9,8 @@ Native YO!agent owns conversations, skills, jobs, session watches, and reviewed 
 - User skills: `~/.config/yomux/skills.d/*.yaml`.
 - User context: `~/.config/yomux/context.d/*.md`.
 
+User skill files also accept `.yml`, including uppercase extensions. File APIs preserve the exact filename and extension; a bare name resolves only when exactly one matching file exists. Use an explicit filename when multiple extensions share a name. Context files likewise preserve `.md` extension case.
+
 User skills replace built-ins with the same name. Set `enabled: false` to disable a skill. Skills describe workflows and allowed YO!agent tools; they do not run shell commands.
 
 ## Safety and behavior

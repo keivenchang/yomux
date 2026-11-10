@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import math
 from numbers import Real
 from typing import Any, TypeVar
 
@@ -65,6 +66,8 @@ def sample_counter_delta(
         raise TypeError(f"{label} first sample is not numeric: {before!r}")
     if isinstance(after, bool) or not isinstance(after, Real):
         raise TypeError(f"{label} second sample is not numeric: {after!r}")
+    if not math.isfinite(before) or not math.isfinite(after):
+        raise ValueError(f"{label} samples must be finite")
     return CounterDelta(label=label, before=before, after=after)
 
 

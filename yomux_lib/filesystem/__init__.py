@@ -115,7 +115,6 @@ _search_limit = search._search_limit
 _search_token_rank = search._search_token_rank
 
 _BLAME_PR_RE = git_ops._BLAME_PR_RE
-_BLAME_SHA_RE = git_ops._BLAME_SHA_RE
 _blame_cache = git_ops._blame_cache
 _diff_ref_resolution_error = git_ops._diff_ref_resolution_error
 _diff_refs = git_ops.diff_refs

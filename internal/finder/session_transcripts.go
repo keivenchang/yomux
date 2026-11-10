@@ -571,9 +571,9 @@ func collectSessionFileAttributions(ctx context.Context, agents []SessionFileAge
 	// bounded archive once, parse each selected rollout once, and project its commands against the
 	// session CWDs that can supply their missing working directory.
 	if len(roots) > 0 && ctx.Err() == nil {
-		home, err := os.UserHomeDir()
+		archiveRoot, err := HistoricalAttributionRoot()
 		if err == nil {
-			historical := collectHistoricalCodexAttributions(ctx, filepath.Join(home, ".codex", "sessions"), sessionFileTranscriptCWDs(agents, roots), cutoff, seenTranscripts, func(path string) (io.ReadCloser, error) {
+			historical := collectHistoricalCodexAttributions(ctx, archiveRoot, sessionFileTranscriptCWDs(agents, roots), cutoff, seenTranscripts, func(path string) (io.ReadCloser, error) {
 				return os.Open(path)
 			})
 			for touchedPath, attribution := range historical {
@@ -937,4 +937,14 @@ func historicalCodexChangesForRoots(changes map[string]*sessionFileAttribution, 
 		}
 	}
 	return result
+}
+
+// HistoricalAttributionRoot preserves Differ's original home archive scope;
+// provider-specific stats roots do not silently change session history.
+func HistoricalAttributionRoot() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".codex", "sessions"), nil
 }

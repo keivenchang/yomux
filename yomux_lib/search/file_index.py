@@ -20,6 +20,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import stat
@@ -1344,7 +1345,7 @@ def persisted_index_roots_within(root: Path) -> list[Path]:
     roots: list[Path] = []
     for manifest_path in manifests:
         metadata = read_json_file(manifest_path, None)
-        if metadata is None:
+        if not isinstance(metadata, dict):
             continue
         try:
             candidate = Path(str(metadata.get("root") or "")).expanduser().resolve(strict=False)
@@ -1352,12 +1353,11 @@ def persisted_index_roots_within(root: Path) -> list[Path]:
             continue
         # An explicit unindex invalidates the child snapshot: do not offer a deleted root as a
         # persisted child a warming parent could serve exact files from.
-        if isinstance(metadata, dict) and _snapshot_is_tombstoned(candidate, metadata):
+        if _snapshot_is_tombstoned(candidate, metadata):
             continue
         current_identity = _current_root_identity(candidate)
         if (
-            not isinstance(metadata, dict)
-            or current_identity is None
+            current_identity is None
             or not _root_identity_matches(metadata, current_identity)
         ):
             continue
@@ -1421,18 +1421,17 @@ def _read_tombstone(root: Path) -> tuple[str, float] | object | None:
         text = _tombstone_path(root).read_text(encoding="utf-8")
     except OSError:
         return None
+    except UnicodeError:
+        return _TOMBSTONE_MALFORMED
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return None
-    if len(lines) >= 2:
-        try:
-            return lines[0], float(lines[1])
-        except ValueError:
-            return _TOMBSTONE_MALFORMED
+    identity, timestamp = (lines[0], lines[1]) if len(lines) >= 2 else ("", lines[0])
     try:
-        return "", float(lines[0])
+        deleted_at = float(timestamp)
     except ValueError:
         return _TOMBSTONE_MALFORMED
+    return (identity, deleted_at) if math.isfinite(deleted_at) else _TOMBSTONE_MALFORMED
 
 
 def _tombstone_time(root: Path) -> float:
@@ -2400,7 +2399,7 @@ def _coverage_from_live_sqlite(
     """
     try:
         conn = sqlite3.connect(
-            f"file:{_index_disk_path(root).as_posix()}?mode=ro",
+            _index_disk_path(root).resolve().as_uri() + "?mode=ro",
             uri=True,
             timeout=_COVERAGE_LIVE_READ_TIMEOUT_SECONDS,
         )
@@ -2494,11 +2493,16 @@ def _apply_sqlite_delta(conn: sqlite3.Connection, ri: RootIndex) -> None:
         conn.execute("DELETE FROM entries WHERE path = ?", (path,))
         journal_records.append((JOURNAL_OP_DELETE, path, name, relative_path, 0, 0))
     for subtree in sorted(ri.pending_subtree_deletes, key=lambda value: (len(value), value)):
+        # LIKE treats filename punctuation as wildcards and folds ASCII case.
+        # Both journal capture and deletion must use the literal directory prefix.
+        predicate = "path = ? OR substr(path, 1, ?) = ?"
+        prefix = f"{subtree.rstrip('/')}/"
+        parameters = (subtree, len(prefix), prefix)
         affected = conn.execute(
-            "SELECT path, name, relative_path FROM entries WHERE path = ? OR path LIKE ?",
-            (subtree, f"{subtree}/%"),
+            f"SELECT path, name, relative_path FROM entries WHERE {predicate}",
+            parameters,
         ).fetchall()
-        conn.execute("DELETE FROM entries WHERE path = ? OR path LIKE ?", (subtree, f"{subtree}/%"))
+        conn.execute(f"DELETE FROM entries WHERE {predicate}", parameters)
         for affected_path, affected_name, affected_rel in affected:
             journal_records.append((JOURNAL_OP_DELETE, str(affected_path), str(affected_name), str(affected_rel), 0, 0))
     if ri.pending_upserts:
@@ -2688,7 +2692,7 @@ def _load_disk(
     *,
     honor_tombstone: bool = True,
     expected_root_identity: tuple[int, int] | None = None,
-) -> tuple[list[IndexEntry], float, bool, str, tuple[int, int]] | None:
+) -> tuple[list[IndexEntry], float, bool, str, tuple[int, int], str] | None:
     expected_identity = expected_root_identity or _current_root_identity(root)
     if expected_identity is None:
         return None
@@ -2731,6 +2735,7 @@ def _load_disk(
         metadata.get("truncated") == "1",
         str(metadata.get("entries_signature") or ""),
         expected_identity,
+        _metadata_tombstone_identity(metadata),
     )
 
 
@@ -2829,7 +2834,7 @@ def _authoritative_store_metadata(root: Path) -> dict[str, Any] | None:
     no sqlite store is readable, so a manifest-only reader keeps its own verdict. SQLite is the one
     committed truth a stale derived manifest defers to."""
     try:
-        conn = sqlite3.connect(f"file:{_index_disk_path(root).as_posix()}?mode=ro", uri=True, timeout=30.0)
+        conn = sqlite3.connect(_index_disk_path(root).resolve().as_uri() + "?mode=ro", uri=True, timeout=30.0)
         try:
             metadata = dict(conn.execute("SELECT key, value FROM metadata"))
         finally:
@@ -3062,7 +3067,7 @@ def _open_sqlite_snapshot(
     if expected_identity is None:
         return None
     try:
-        conn = sqlite3.connect(f"file:{_index_disk_path(root).as_posix()}?mode=ro", uri=True, timeout=30.0)
+        conn = sqlite3.connect(_index_disk_path(root).resolve().as_uri() + "?mode=ro", uri=True, timeout=30.0)
         conn.execute("BEGIN")
         metadata = dict(conn.execute("SELECT key, value FROM metadata"))
         if not _sqlite_metadata_matches(
@@ -3935,17 +3940,9 @@ def _persisted_skip_signature(root: Path) -> str:
     return str(row[0]) if row and row[0] is not None else ""
 
 
-def _persisted_tombstone_identity(root: Path) -> str:
-    """The tombstone identity stamped into the persisted (authoritative sqlite) snapshot, ``""`` when
-    unstamped or unreadable. A build that ADOPTS a compatible persisted snapshot inherits this as its
-    in-memory published identity (P0-1), so a later marker change evicts it by the same rule that
-    would reject the snapshot on disk."""
-    return _metadata_tombstone_identity(_authoritative_store_metadata(root))
-
-
 def _adopt_disk_snapshot(
     ri: RootIndex,
-    disk: tuple[list[IndexEntry], float, bool, str, tuple[int, int]],
+    disk: tuple[list[IndexEntry], float, bool, str, tuple[int, int], str],
     expected_signature: str,
 ) -> None:
     """Adopt a compatible persisted snapshot into the in-memory index without re-walking.
@@ -3955,11 +3952,9 @@ def _adopt_disk_snapshot(
     build reads it instead of re-listing the tree. A second copy of this field set is exactly how
     a snapshot came to be reported ready while its fields disagreed.
     """
-    # P0-1: read the snapshot's stamped identity OUTSIDE `ri.lock` (it does sqlite I/O) so the adopted
-    # in-memory owner is judged by the same tombstone rule as the store it mirrors.
-    published_identity = _persisted_tombstone_identity(ri.root)
     with ri.lock:
-        ri.entries, ri.built_at, ri.truncated, ri.entries_signature, disk_root_identity = disk
+        # Rows and identity must come from the same transaction, even if a newer build has published.
+        ri.entries, ri.built_at, ri.truncated, ri.entries_signature, disk_root_identity, published_identity = disk
         ri.entry_by_path = {entry[0]: entry for entry in ri.entries}
         ri.last_full_build_at = ri.built_at
         ri.too_large = ri.truncated
@@ -4642,6 +4637,7 @@ def ensure_index(
                         ri.truncated,
                         ri.entries_signature,
                         ri.published_root_identity,
+                        ri.published_tombstone_identity,
                     ) = disk
                     ri.entry_by_path = {entry[0]: entry for entry in ri.entries}
                     ri.last_full_build_at = ri.built_at
@@ -4652,9 +4648,6 @@ def ensure_index(
                     ri.disk_entry_count = len(ri.entries)
                     ri.disk_metadata_ready = True
                     ri.signature = expected_signature
-                    # P0-1: seed the in-memory published identity from the persisted snapshot's stamp so
-                    # a later marker change evicts this owner by the same rule it would be rejected on disk.
-                    ri.published_tombstone_identity = _persisted_tombstone_identity(root)
                     persisted_metadata = _raw_snapshot_metadata(root, skip_dirs, exclude_signature, expected_root_identity=requested_root_identity)
                     ri.ready = persisted_metadata is not None and index_freshness(None, root, skip_dirs, exclude_signature, metadata=persisted_metadata).state == FRESHNESS_FRESH
             elif not build_authorized() and ri.persist_enabled:

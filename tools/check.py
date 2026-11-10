@@ -107,6 +107,7 @@ from yomux_lib.background_scheduler import pid_is_alive
 # above it would claim safety before the check that is meant to prove it.
 from yomux_lib.tmux.agent_tui import strip_ansi_sgr
 from yomux_lib.filesystem.io_ops import read_json_file
+from yomux_lib.version import YOMUX_VERSION
 from yomux_lib.infra import worktree_writer
 from tools.test_catalog import MOCK_TRANSCRIPT_FILES  # noqa: F401 - check-runner compatibility export
 from tools.test_catalog import NODE_LAYOUT_FILES
@@ -122,6 +123,7 @@ from tools.test_plan import lane_spec
 from tools.test_plan import validate_lane_specs
 from tools.tool_guard import TOOL_LOCK_OWNER_ENV
 from tools.tool_guard import tool_lock_owner_marker
+from tools.tool_guard import terminate_process_group
 from yomux_lib.infra.inotify_capacity import InotifyCapacityVerdict
 from yomux_lib.infra.inotify_capacity import inotify_capacity_verdict
 TOOL_GUARD_STATE_STALE_SECONDS = 30.0
@@ -492,7 +494,14 @@ def bazel_job_count(*, serial: bool = False, cpu_percent: int | None = None) -> 
     return str(max(1, total_budget - pytest_cpu_budget))
 
 
-def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dict[StepId, Step]:
+def whitespace_revision(repo_root: Path = REPO_ROOT) -> str:
+    context = bazel_execution_contract.repository_release_context(repo_root)
+    revision = context["revision"]
+    # A release gate must inspect the committed release as well as pending edits.
+    return revision + "^" if context["commit_subject"] == f"Release YOmux {YOMUX_VERSION}" else revision
+
+
+def step_catalog(*, serial: bool = False, cpu_percent: int | None = None, whitespace_base: str = "HEAD") -> dict[StepId, Step]:
     nonbrowser_workers, browser_workers, e2e_workers = pytest_worker_counts(serial=serial, cpu_percent=cpu_percent)
     bazel_jobs = bazel_job_count(serial=serial, cpu_percent=cpu_percent)
     bazel_memory = bazel_memory_limit_mb(serial=serial, cpu_percent=cpu_percent)
@@ -524,7 +533,7 @@ def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dic
         StepId.PYTEST_REAL_AGENT_URLS: Step("pytest real Codex and Claude URL menus", ["python3", "-m", "pytest", *pytest_files("real_agent_urls"), "-m", "real_agent_urls", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_BROWSER_BLOCK_EXTERNAL_DNS", "1"), ("YOMUX_URL_WIDTHS", "75"), ("YOMUX_URL_RANDOM", "0"), ("YOMUX_URL_NEGATIVE_CONTROL", "0"), (product_env_name('TEST_CPU_COUNT'), browser_single_cpu), (product_env_name('TEST_MEMORY_MB'), parallel_single_worker_memory))),
         StepId.PYTEST_BROWSER_GOLDEN: Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden"), "-m", "visual_golden", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), browser_single_cpu), (product_env_name('TEST_MEMORY_MB'), parallel_single_worker_memory))),
         StepId.PYTEST_E2E: Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e"), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", *[arg for nodeid in BAZEL_GO_BROWSER_TESTS for arg in ("--deselect", nodeid)], "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), e2e_cpu_limit), (product_env_name('TEST_MEMORY_MB'), e2e_memory))),
-        StepId.WHITESPACE: Step("git diff --check", ["git", "-c", f"safe.directory={REPO_ROOT}", "diff", "--check"]),
+        StepId.WHITESPACE: Step("git diff --check", ["git", "-c", f"safe.directory={REPO_ROOT}", "diff", "--check", whitespace_base, "--"]),
     }
 
     for step_id, phases in STEP_PHASES.items():
@@ -533,10 +542,10 @@ def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dic
     return catalog
 
 
-def lanes(*, serial: bool = False, cpu_percent: int | None = None) -> list[Lane]:
+def lanes(*, serial: bool = False, cpu_percent: int | None = None, whitespace_base: str = "HEAD") -> list[Lane]:
     # Commands are built once and referenced through typed IDs. Focused aliases,
     # prerequisites, and phase ownership therefore cannot drift into copies.
-    catalog = step_catalog(serial=serial, cpu_percent=cpu_percent)
+    catalog = step_catalog(serial=serial, cpu_percent=cpu_percent, whitespace_base=whitespace_base)
     validate_lane_specs(catalog)
     return [
         Lane(
@@ -651,52 +660,6 @@ def _process_output_text(value: str | bytes | None) -> str:
     return value
 
 
-def _terminate_lane_process_group(process: subprocess.Popen[str]) -> None:
-    """Stop and reap one lane step's private session without waiting indefinitely."""
-
-    # start_new_session=True makes the leader PID the process-group ID. Keep using that captured
-    # identity even when the leader has already exited but a descendant still owns the pipe.
-    process_group = process.pid
-    try:
-        os.killpg(process_group, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    except PermissionError:
-        # The process is ours, so still stop the leader if a platform refuses group signalling.
-        if process.poll() is None:
-            process.kill()
-    # The leader can exit while a descendant still owns stdout/stderr. Waiting only on the leader
-    # would return here and skip the forced group kill, leaving that descendant behind. Observe the
-    # private group itself for the grace window instead.
-    deadline = time.monotonic() + LANE_STEP_TERMINATE_GRACE_SECONDS
-    while time.monotonic() < deadline:
-        try:
-            os.killpg(process_group, 0)
-        except ProcessLookupError:
-            break
-        except PermissionError:
-            break
-        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-    try:
-        os.killpg(process_group, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except PermissionError:
-        if process.poll() is None:
-            process.kill()
-    try:
-        process.wait(timeout=LANE_STEP_TERMINATE_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        # SIGKILL cannot be ignored; this fallback keeps a broken platform implementation from
-        # turning the gate's timeout path back into an unbounded wait.
-        if process.poll() is None:
-            process.kill()
-        try:
-            process.wait(timeout=LANE_STEP_TERMINATE_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            pass
-
-
 def run_lane_step(step: Step, *, environment: dict[str, str], timeout_seconds: float | None = None) -> subprocess.CompletedProcess[str]:
     """Run one lane step with a private process group and a bounded timeout."""
 
@@ -717,7 +680,7 @@ def run_lane_step(step: Step, *, environment: dict[str, str], timeout_seconds: f
         timed_out = True
         initial_stdout = _process_output_text(error.output)
         initial_stderr = _process_output_text(error.stderr)
-        _terminate_lane_process_group(process)
+        terminate_process_group(process, LANE_STEP_TERMINATE_GRACE_SECONDS)
         try:
             stdout, stderr = process.communicate(timeout=LANE_STEP_TERMINATE_GRACE_SECONDS)
         except subprocess.TimeoutExpired as final_error:
@@ -2044,7 +2007,7 @@ def run_certification_phase(
         returncode = lane_result.steps[-1].returncode if lane_result.steps else None
         postflight = latency_calibration.certification_host_qualification(evidence_root=evidence_dir)
         junit_admission = certification_junit_admission(evidence_dir / CERTIFICATION_JUNIT_NAME)
-        outcomes = junit_admission["outcomes"] if junit_admission["admitted"] else certification_outcomes(evidence_dir / CERTIFICATION_JUNIT_NAME)
+        outcomes = junit_admission["outcomes"]
     verdict = certification_verdict(retirement=retirement, preflight=preflight, postflight=postflight, outcomes=outcomes, returncode=returncode, junit_admission=junit_admission)
     end_clean_state = working_tree_clean_state()
     exact_sha_admission = exact_sha_certification_admission(start_state=start_clean_state, end_state=end_clean_state)
@@ -2132,8 +2095,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    if args.serial or args.cpu_percent is not None:
-        available = lanes(serial=args.serial, cpu_percent=args.cpu_percent)
+    available = lanes(serial=args.serial, cpu_percent=args.cpu_percent, whitespace_base=whitespace_revision())
 
     if args.list_lanes:
         for lane in available:

@@ -608,3 +608,54 @@ func TestStatsRuntimeRecorderRejectsMissingDependencies(t *testing.T) {
 		t.Fatal("nil recorder unexpectedly started")
 	}
 }
+
+func TestStatsRuntimeRecorderOverflowWithEarlyTickRecovers(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "jitter.sqlite3")
+	writer, err := stats.OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	underlying := &runtimeRecorderFailCountWriter{delegate: writer, failuresRemaining: maxRuntimeRecorderPendingBatches + 1}
+	at := time.Unix(5000, 0)
+	cpu := 1.0
+	recorder := newStatsRuntimeRecorder(underlying, func(time.Time) []stats.ServiceLoadSample {
+		return []stats.ServiceLoadSample{{SourceID: "runtime", Running: true, CPUPercent: &cpu}}
+	}, func() time.Time { return at }, time.Second, "jitter", 1)
+	for index := 0; index < maxRuntimeRecorderPendingBatches+4; index++ {
+		recorder.RunOnce(ctx)
+		at = at.Add(950 * time.Millisecond)
+	}
+	if recorder.appendSuccess.Load() == 0 || len(recorder.pendingBatches) > 0 {
+		t.Fatalf("recording did not recover: %#v", recorder.diagnostics())
+	}
+
+	reader, err := stats.OpenReadOnly(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	gaps, err := reader.ReadUnavailableSpans(ctx, 5000, 5020, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	epochs, err := reader.ReadCoverageEpochs(ctx, 5000, 5020, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gaps) != 1 || gaps[0].StartedAt != 5007.6 || gaps[0].EndedAt != 5008.6 {
+		t.Fatalf("jitter gap=%+v", gaps)
+	}
+	for _, epoch := range epochs {
+		for _, gap := range gaps {
+			if epoch.Family == gap.Family && epoch.SourceID == gap.SourceID && epoch.StartedAt < gap.EndedAt && (epoch.EndedAt == nil || *epoch.EndedAt > gap.StartedAt) {
+				t.Fatalf("coverage overlaps drop: epoch=%+v gap=%+v", epoch, gap)
+			}
+		}
+	}
+	state := recorder.health.Snapshot()["service_load"]
+	if state.ConsecutiveFailures != 0 || state.FirstError == nil || state.LatestError == nil || state.QueueDepth != 0 || state.Dropped == 0 {
+		t.Fatalf("recovery lost failure evidence: %+v", state)
+	}
+}

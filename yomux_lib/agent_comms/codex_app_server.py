@@ -7,11 +7,12 @@ from __future__ import annotations
 import json
 import os
 import re
-import selectors
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from dataclasses import field
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,10 @@ from ..infra.common import resolve_yomux_roots
 from ..runtime_env import healed_runtime_path
 from .json_rpc import json_rpc_notification
 from .json_rpc import json_rpc_request
+from .process_stream import process_pipe_output
+from .process_stream import ProcessPipeOutput
+from .process_stream import retire_process
+from .process_stream import close_process_pipes
 from .stream_events import ASSISTANT_DELTA
 from .stream_events import normalize_codex_app_server_message
 
@@ -121,31 +126,95 @@ def codex_app_server_turn_text(turn: Any) -> str:
     return "\n".join(part.strip() for part in parts if part.strip()).strip()
 
 
-class CodexAppServerProtocol:
-    def write_message(self, process: subprocess.Popen[str], message: dict[str, Any]) -> None:
-        if process.stdin is None:
-            raise OSError("codex app-server stdin is closed")
-        process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
-        process.stdin.flush()
+@dataclass
+class _CodexPipeState:
+    deadline: float
+    stderr: str = ""
+    input: deque[bytes] = field(default_factory=deque)
+    stdout: deque[str] = field(default_factory=deque)
+    lock: Any = field(default_factory=threading.RLock)
+    retiring: bool = False
+    submitted: int = 0
+    completed: int = 0
+    output: ProcessPipeOutput = field(init=False, repr=False)
 
-    def readline(self, process: subprocess.Popen[str], deadline: float) -> str:
+
+class CodexAppServerProtocol:
+    def _pipe_state(self, process: subprocess.Popen[str], deadline: float) -> _CodexPipeState | None:
         if process.stdout is None:
             raise OSError("codex app-server stdout is closed")
-        timeout = max(0.0, deadline - time.monotonic())
-        fileno: int | None = None
         try:
-            fileno = process.stdout.fileno()
+            process.stdout.fileno()
         except (OSError, ValueError):
-            fileno = None
-        if fileno is not None:
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout, selectors.EVENT_READ)
-                if not selector.select(timeout):
-                    raise subprocess.TimeoutExpired(["codex", "app-server"], timeout)
-        line = process.stdout.readline()
-        if not line:
-            raise OSError("codex app-server exited without a JSON-RPC message")
-        return line
+            return None
+        state = getattr(process, "_yomux_rpc_pipe_state", None)
+        if state is None:
+            state = _CodexPipeState(deadline)
+            state.output = process_pipe_output(process, lambda: state.deadline, input_queue=state.input)
+            process._yomux_rpc_pipe_state = state
+        state.deadline = deadline
+        return state
+
+    def _finish_pipes(self, process: subprocess.Popen[str], state: _CodexPipeState | None) -> None:
+        if state is not None:
+            state.output.close()
+            if getattr(process, "_yomux_rpc_pipe_state", None) is state:
+                del process._yomux_rpc_pipe_state
+        close_process_pipes(process)
+
+    def _next_output(self, process: subprocess.Popen[str], state: _CodexPipeState) -> tuple[str, str]:
+        with state.lock:
+            try:
+                output = next(state.output)
+                if output[0] == "stdin":
+                    state.completed += 1
+                return output
+            except StopIteration as error:
+                raise OSError("codex app-server exited without a JSON-RPC message") from error
+            except TimeoutError as error:
+                raise subprocess.TimeoutExpired(["codex", "app-server"], 0) from error
+            finally:
+                if state.retiring:
+                    self._finish_pipes(process, state)
+
+    def write_message(self, process: subprocess.Popen[str], message: dict[str, Any], *, deadline: float | None = None) -> None:
+        if process.stdin is None:
+            raise OSError("codex app-server stdin is closed")
+        encoded = json.dumps(message, separators=(",", ":")) + "\n"
+        state = self._pipe_state(process, deadline if deadline is not None else time.monotonic() + CODEX_APP_SERVER_TIMEOUT_SECONDS)
+        if state is None:
+            process.stdin.write(encoded)
+            process.stdin.flush()
+            return
+        state.submitted += 1
+        submitted = state.submitted
+        state.input.append(encoded.encode(process.stdin.encoding or "utf-8", errors=process.stdin.errors or "strict"))
+        while True:
+            name, line = self._next_output(process, state)
+            if name == "stdin" and state.completed >= submitted:
+                return
+            if name == "stdin":
+                continue
+            if name == "stdout":
+                state.stdout.append(line)
+            else:
+                state.stderr = (state.stderr + line)[-65536:]
+
+    def readline(self, process: subprocess.Popen[str], deadline: float) -> str:
+        state = self._pipe_state(process, deadline)
+        if state is None:
+            line = process.stdout.readline()
+            if not line:
+                raise OSError("codex app-server exited without a JSON-RPC message")
+            return line
+        if state.stdout:
+            return state.stdout.popleft()
+        while True:
+            name, line = self._next_output(process, state)
+            if name == "stdout":
+                return line
+            if name == "stderr":
+                state.stderr = (state.stderr + line)[-65536:]
 
     def read_message(self, process: subprocess.Popen[str], deadline: float) -> dict[str, Any]:
         line = self.readline(process, deadline)
@@ -168,14 +237,21 @@ class CodexAppServerProtocol:
             notifications.append(message)
 
     def terminate_process(self, process: subprocess.Popen[str]) -> None:
-        if process.poll() is not None:
-            return
-        process.terminate()
         try:
-            process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=1)
+            retire_process(process)
+        finally:
+            state = getattr(process, "_yomux_rpc_pipe_state", None)
+            if state is None:
+                self._finish_pipes(process, None)
+            else:
+                state.retiring = True
+                # An interrupt may run on another thread while next() owns the selector.
+                # That reader must close its own iterator and pipes after it unwinds.
+                if state.lock.acquire(blocking=False):
+                    try:
+                        self._finish_pipes(process, state)
+                    finally:
+                        state.lock.release()
 
     def wait_turn_complete(
         self,
@@ -292,9 +368,9 @@ class CodexAppServerSession:
         )
         self.started_ts = time.time()
         initialize_id = self._request_id("initialize")
-        self.protocol.write_message(self.process, json_rpc_request(initialize_id, "initialize", codex_app_server_initialize_params()))
+        self.protocol.write_message(self.process, json_rpc_request(initialize_id, "initialize", codex_app_server_initialize_params()), deadline=deadline)
         self.protocol.read_response(self.process, initialize_id, deadline, notifications)
-        self.protocol.write_message(self.process, json_rpc_notification("initialized"))
+        self.protocol.write_message(self.process, json_rpc_notification("initialized"), deadline=deadline)
         return {"process_started": True, "process_reused": False}
 
     def ensure_started(self, target: dict[str, Any] | None = None, *, timeout: float = CODEX_APP_SERVER_TIMEOUT_SECONDS) -> tuple[str, dict[str, Any]]:
@@ -329,7 +405,7 @@ class CodexAppServerSession:
                 thread_id = self._request_id("thread")
                 try:
                     params = {"threadId": requested_thread, **codex_app_server_thread_params(self.target)}
-                    self.protocol.write_message(self.process, json_rpc_request(thread_id, "thread/resume", params))
+                    self.protocol.write_message(self.process, json_rpc_request(thread_id, "thread/resume", params), deadline=deadline)
                     thread_response = self.protocol.read_response(self.process, thread_id, deadline, notifications)
                     status["thread_resumed"] = True
                 except OSError as exc:
@@ -337,7 +413,7 @@ class CodexAppServerSession:
                     requested_thread = ""
             if not requested_thread:
                 thread_id = self._request_id("thread")
-                self.protocol.write_message(self.process, json_rpc_request(thread_id, "thread/start", codex_app_server_thread_params(self.target)))
+                self.protocol.write_message(self.process, json_rpc_request(thread_id, "thread/start", codex_app_server_thread_params(self.target)), deadline=deadline)
                 thread_response = self.protocol.read_response(self.process, thread_id, deadline, notifications)
                 status["thread_started"] = True
             thread = thread_response.get("thread") if isinstance(thread_response.get("thread"), dict) else {}
@@ -387,7 +463,7 @@ class CodexAppServerSession:
                             on_event(event)
 
                     status["turn_start_request_ms"] = round((time.monotonic() - started) * 1000, 3)
-                    self.protocol.write_message(self.process, json_rpc_request(turn_id, "turn/start", codex_app_server_turn_params(thread_id, text, self.target)))
+                    self.protocol.write_message(self.process, json_rpc_request(turn_id, "turn/start", codex_app_server_turn_params(thread_id, text, self.target)), deadline=deadline)
                     self.protocol.read_response(self.process, turn_id, deadline, notifications)
                     status["turn_start_ack_ms"] = round((time.monotonic() - started) * 1000, 3)
                     turn_started = True

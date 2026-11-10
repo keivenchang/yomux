@@ -45,6 +45,7 @@ import (
 	"github.com/keivenchang/yomux/internal/finder"
 	"github.com/keivenchang/yomux/internal/productenv"
 	"github.com/keivenchang/yomux/internal/stats"
+	"github.com/keivenchang/yomux/internal/tailfile"
 	"github.com/keivenchang/yomux/internal/tmuxcmd"
 	"github.com/keivenchang/yomux/internal/work"
 	"github.com/keivenchang/yomux/internal/yoagent"
@@ -59,6 +60,7 @@ func goRuntimeLabel() string {
 }
 
 type server struct {
+	producerContext        context.Context
 	runtimeMemory          runtimeMemoryState
 	cpuCaptureMu           sync.Mutex
 	cpuCapture             finder.CPUCapture
@@ -120,6 +122,7 @@ type server struct {
 	refillRun                           func(context.Context, time.Time, func(string)) (stats.AgentHistoryRefillResult, error)
 	statsWriter                         *stats.Writer
 	statsService                        *stats.StatsService
+	transcriptIngestion                 tailfile.Ingestion
 	statsLifecycle                      *stats.Lifecycle
 	statsRuntimeRecorder                *statsRuntimeRecorder
 	syntheticHostInputs                 bool
@@ -493,6 +496,8 @@ func (s *server) registerFilesystemRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/fs/fast/list", s.protected(http.HandlerFunc(s.fsFastList)))
 	mux.Handle("/api/fs/list", s.protected(http.HandlerFunc(s.fsList)))
 	mux.Handle("/api/fs/read", s.protected(http.HandlerFunc(s.fsRead)))
+	mux.Handle("/api/fs/chmod", s.protected(http.HandlerFunc(s.fsChmod), "admin"))
+	mux.Handle("/api/fs/directory-size", s.protected(http.HandlerFunc(s.fsDirectorySize)))
 	mux.Handle("/api/fs/info", s.protected(http.HandlerFunc(s.fsInfo)))
 	mux.Handle("/api/fs/diff", s.protected(http.HandlerFunc(s.fsDiff)))
 	mux.Handle("/api/fs/git-history", s.protected(http.HandlerFunc(s.fsGitHistory)))
@@ -508,6 +513,7 @@ func (s *server) registerFilesystemRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/fs/delete", s.protected(http.HandlerFunc(s.fsDelete)))
 	mux.Handle("/api/fs/unindex", s.protected(http.HandlerFunc(s.fsUnindex)))
 	mux.Handle("/api/fs/rename", s.protected(http.HandlerFunc(s.fsRename)))
+	mux.Handle("/api/fs/move", s.protected(http.HandlerFunc(s.fsMove)))
 	mux.Handle("/api/fs/mkdir", s.protected(http.HandlerFunc(s.fsMkdir)))
 	mux.Handle("/api/fs/batch", s.protected(http.HandlerFunc(s.fsBatch)))
 	mux.Handle("/api/upload", s.protected(http.HandlerFunc(s.upload)))
@@ -791,6 +797,8 @@ func main() {
 	// Settings use the native schema and persistence owner shared by request and startup paths.
 	s.capabilities.Set("core.settings.v1", capabilities.Entry{Available: true})
 	s.updates.readPref = s.updateNotifyPreference
+	s.updates.prepare = s.prepareSelfUpdate
+	s.updates.publish = s.publishUpdateStatus
 	s.capabilities.Set("core.updates.v1", capabilities.Entry{Available: true})
 	finderService, finderErr := finder.NewWithLimits(rootPath, func(kind string, payload map[string]any) error {
 		_, err := s.events.publish(kind, payload)
@@ -1030,9 +1038,11 @@ func main() {
 	signal.Notify(shutdownSignal, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(shutdownSignal)
 	shutdownContext, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	go s.runUpdateChecker(shutdownContext)
+	s.recoverSelfUpdateJob()
 	defer stopSignals()
 	s.serverCancel = stopSignals
+	s.producerContext = shutdownContext
+	s.startBackgroundWork(func() { s.runUpdateChecker(shutdownContext) })
 	if s.chat != nil {
 		s.capabilities.Set("pane.chat.v1", capabilities.Entry{Available: true})
 	}
@@ -1169,6 +1179,45 @@ func main() {
 	s.agentStatusClassifier = func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
 		return stats.ClassifyAgentStatus(ctx, request, statusSources)
 	}
+
+	ingestion := &s.transcriptIngestion
+	ingestion.Start(shutdownContext)
+	directoryDiscovery := &stats.SharedTranscriptDiscovery{}
+	var attributionIndex *finder.AttributionIndex
+	var attributionErr error
+	if directory := s.sessionFilesCacheDirectory(); directory != "" {
+		attributionIndex, attributionErr = finder.OpenAttributionIndex(filepath.Join(directory, "attribution"), ingestion)
+	} else {
+		attributionErr = errors.New("instance state directory unavailable")
+	}
+	if attributionErr != nil {
+		slog.Error("Differ attribution index unavailable", "error", attributionErr)
+		s.finder.SetAttributionUnavailable(attributionErr)
+	}
+	if attributionIndex != nil {
+		defer attributionIndex.Close()
+		s.finder.SetAttributionIndex(attributionIndex)
+		s.startBackgroundWork(func() {
+			attributionIndex.Run(shutdownContext, func(ctx context.Context) ([]finder.AttributionSource, error) {
+				archiveRoot, rootErr := finder.HistoricalAttributionRoot()
+				if rootErr != nil {
+					return nil, rootErr
+				}
+				paths, err := directoryDiscovery.Paths(ctx, archiveRoot)
+				sources := make([]finder.AttributionSource, 0, len(paths))
+				for _, path := range paths {
+					if !strings.HasPrefix(filepath.Base(path), "rollout-") {
+						continue
+					}
+					sources = append(sources, finder.AttributionSource{Path: path, Kind: "codex", Historical: true})
+				}
+				if stats.TranscriptDiscoveryPending(err) {
+					err = finder.ErrAttributionDiscoveryPending
+				}
+				return sources, err
+			})
+		})
+	}
 	if !collectorsDisabled {
 		agentInventorySources := stats.CurrentPlatformAgentInventorySources()
 		if productenv.Value("STATS_SYNTHETIC_INVENTORY") == "1" {
@@ -1199,7 +1248,10 @@ func main() {
 				return acknowledged, err
 			},
 			AttentionCommitted: s.attentionSettlementsCommitted,
-			Committed:          statsService.InvalidateAgentStatus,
+			Committed: func() {
+				statsService.InvalidateAgentStatus()
+				s.publishAgentStatusRefresh()
+			},
 		})
 		if _, statErr := os.Stat(s.statsPath); statErr == nil {
 			lifecycles, restoreErr := stats.ReadRecentAgentStatusLifecycles(shutdownContext, s.statsPath, time.Now())
@@ -1219,6 +1271,12 @@ func main() {
 		s.agentStatusCollector = statusCollector
 		defer statusCollector.Stop()
 		tokenCollector := stats.NewAgentTokenCollector(statsWriter, nil, stats.AgentTokenCollectorConfig{
+			Ingestion: ingestion, DirectoryDiscovery: directoryDiscovery,
+			TranscriptSourceDiscovered: func(source stats.TranscriptSource) {
+				if attributionIndex != nil {
+					attributionIndex.Enqueue(finder.AttributionSource{Path: source.Path, Kind: source.Provider}, source.LiveCandidate)
+				}
+			},
 			Inventory: agentInventory, OpenCodeInventory: openCodeInventory,
 			ClaudeTranscriptRoot: claudeTranscriptRoot, CodexTranscriptRoot: codexTranscriptRoot,
 			OpenCodeDatabase: opencodeDatabase, CursorPath: filepath.Join(*configDir, "opencode-token-cursors.json"),
@@ -1274,6 +1332,9 @@ func main() {
 			}
 		}()
 	}
+	if !s.startBackgroundWork(func() { s.publishStatsCollectorHealth(shutdownContext) }) {
+		slog.Error("collector health publisher was not admitted")
+	}
 	if s.yoagent != nil && !s.startBackgroundWork(func() { s.runNativeYOAgentJobs(shutdownContext) }) {
 		slog.Error("native YO!agent job loop was not admitted")
 	}
@@ -1282,7 +1343,6 @@ func main() {
 		scheme = "http"
 	}
 	slog.Info("YOmux Go backend", "version", version, "backend", "go", "addr", addr, "scheme", scheme)
-	s.recoverSelfUpdateJob()
 	_, _ = s.events.publish("update_available", map[string]any{"available": false, "version": version, "bundle_revision": "go:" + version, "instance_id": s.instanceID})
 	serveErr := make(chan error, 1)
 	go func() {
@@ -1892,7 +1952,7 @@ func (s *server) fsGitHistoryStatsStream(w http.ResponseWriter, r *http.Request)
 	}
 	if scheduleErr != nil || (len(batchSizes) == 0 && (err != nil || count < 1 || count > finder.MaxGitHistoryOffset())) {
 		message := "count must be a positive integer"
-		if r.URL.Query().Get("batch_sizes") != "" {
+		if scheduleErr != nil {
 			message = scheduleErr.Error()
 		}
 		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalidQuery", Path: path, Message: message})
@@ -2285,16 +2345,25 @@ func (s *server) fsWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Path          string `json:"path"`
-		Content       string `json:"content"`
-		ExpectedMtime *int64 `json:"expected_mtime"`
+		Path           string  `json:"path"`
+		Content        string  `json:"content"`
+		ExpectedMtime  *int64  `json:"expected_mtime"`
+		ExpectedFileID *string `json:"expected_file_id"`
+		CreateOnly     bool    `json:"create_only"`
 	}
-	if err := decodeJSONBody(r.Body, finder.MaxWriteBytes+4096, &body); err != nil || body.Path == "" {
+	if err := decodeJSONBody(r.Body, finder.MaxWriteBytes+4096, &body); err != nil || body.Path == "" || (body.ExpectedFileID != nil && *body.ExpectedFileID == "") {
 		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalid", Message: "invalid write request"})
 		return
 	}
+	expectedFileID := ""
+	if body.ExpectedFileID != nil {
+		expectedFileID = *body.ExpectedFileID
+	}
 	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "write", body.Path, func(ctx context.Context) (map[string]any, *finder.Error) {
-		return s.finder.Write(ctx, body.Path, body.Content, body.ExpectedMtime)
+		if body.CreateOnly {
+			return s.finder.CreateFile(ctx, body.Path, body.Content)
+		}
+		return s.finder.Write(ctx, body.Path, body.Content, body.ExpectedMtime, expectedFileID)
 	})
 }
 
@@ -2355,6 +2424,24 @@ func (s *server) fsRename(w http.ResponseWriter, r *http.Request) {
 	}
 	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "rename", body.Path, func(ctx context.Context) (map[string]any, *finder.Error) {
 		return s.finder.Rename(ctx, body.Path, body.NewName)
+	})
+}
+
+func (s *server) fsMove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Paths       []string `json:"paths"`
+		Destination string   `json:"destination"`
+	}
+	if err := decodeJSONBody(r.Body, 64*1024, &body); err != nil || len(body.Paths) == 0 || len(body.Paths) > finder.MaxBatchRequests || body.Destination == "" {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalid", Message: "invalid move request"})
+		return
+	}
+	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "move", body.Destination, func(ctx context.Context) (map[string]any, *finder.Error) {
+		return s.finder.Move(ctx, body.Paths, body.Destination)
 	})
 }
 
@@ -3007,7 +3094,7 @@ func (s *server) clientEvents(w http.ResponseWriter, r *http.Request) {
 				if s.finder != nil {
 					// Keep reconnect admission serialized with lease release. Otherwise a
 					// new stream can renew this client between the count reaching zero
-					// and this old stream removing that renewed lease.
+					// and this old stream releasing that renewed producer demand.
 					s.finder.ReleaseWatchClient(clientID)
 				}
 			} else {
@@ -3030,7 +3117,7 @@ func (s *server) clientEvents(w http.ResponseWriter, r *http.Request) {
 	globalOperationStream := clientID != "" && operationID == ""
 	writeDemandedOperationTerminals := func() {
 		for _, id := range demandedIDs {
-			if record := s.operationRecord(id); operationIsTerminal(record) && !record.Acknowledged && !record.DeliveryAcknowledged {
+			if record := s.operationRecord(id); operationIsTerminal(record) && operationVisibleToRequest(r, record) && !record.Acknowledged && !record.DeliveryAcknowledged {
 				if event := record.TerminalEvent; event != nil {
 					writeSSE("operation_terminal", operationTerminalWire(event))
 				}
@@ -3071,6 +3158,9 @@ func (s *server) clientEvents(w http.ResponseWriter, r *http.Request) {
 				operation, _ := event.Payload["operation"].(map[string]any)
 				id, _ := operation["id"].(string)
 				if !globalOperationStream && !demanded[id] {
+					continue
+				}
+				if !operationVisibleToRequest(r, s.operationRecord(id)) {
 					continue
 				}
 				writeSSE("operation_terminal", operationTerminalWire(event.Payload))
@@ -3226,6 +3316,11 @@ func (s *server) operation(w http.ResponseWriter, r *http.Request) {
 	record := s.operationRecord(id)
 	if record == nil {
 		jsonResponse(w, http.StatusNotFound, operationNotFoundPayload(id))
+		return
+	}
+	if !operationVisibleToRequest(r, record) {
+		user, _ := r.Context().Value(authContextKey{}).(authUser)
+		s.rejectForbidden(w, user, operationRequiredRole(record))
 		return
 	}
 	if operationIsTerminal(record) {
@@ -3684,6 +3779,10 @@ func currentDarwinGoProcess(pid int) (procEntry, bool) {
 const maxGoThreads = 256
 
 func (s *server) readGoThreadMetrics(now time.Time, pid int, tasks []os.DirEntry) []goThreadMetric {
+	s.processMetricsMu.Lock()
+	defer s.processMetricsMu.Unlock()
+	previous := s.threadCPU
+	s.threadCPU = make(map[string]childCPUState)
 	threads := make([]goThreadMetric, 0, min(len(tasks), maxGoThreads))
 	for _, task := range tasks {
 		if len(threads) >= maxGoThreads || !task.IsDir() {
@@ -3702,11 +3801,11 @@ func (s *server) readGoThreadMetrics(now time.Time, pid int, tasks []os.DirEntry
 			continue
 		}
 		metric := goThreadMetric{
-			TID: tid, Name: row.Binary, State: linuxChildProcessState(string(data)),
+			TID: tid, Name: row.Binary, State: linuxChildProcessState(string(data)), Identity: row.Identity,
 			CPUReasonCode: "thread_cpu_first_sample",
 			CPUReason:     "The operating system needs a second thread sample to calculate CPU",
 		}
-		if percent := s.threadCPUPercent(now, row.Identity, row.CPUSeconds); percent != nil {
+		if percent := sampleCPUPercent(now, row.Identity, row.CPUSeconds, previous, s.threadCPU); percent != nil {
 			metric.CPUPercent = percent
 			metric.CPUReasonCode = ""
 			metric.CPUReason = ""
@@ -3742,6 +3841,10 @@ func (s *server) readGoChildProcessMetrics(now time.Time) []goChildProcessMetric
 	if err != nil {
 		return nil
 	}
+	s.processMetricsMu.Lock()
+	defer s.processMetricsMu.Unlock()
+	previous := s.childCPU
+	s.childCPU = make(map[string]childCPUState)
 	byParent := make(map[int][]procEntry)
 	for _, entry := range entries {
 		if entry.PID > 0 && entry.PPID > 0 && entry.PID != os.Getpid() {
@@ -3771,11 +3874,12 @@ func (s *server) readGoChildProcessMetrics(now time.Time) []goChildProcessMetric
 		}
 		if runtime.GOOS == "darwin" {
 			if row, ok := currentDarwinGoProcess(entry.PID); ok {
+				metric.Identity = row.Identity
 				metric.State = "running"
 				rss := row.RSSBytes
 				metric.RSSBytes = &rss
 				metric.RSSReasonCode, metric.RSSReason = "", ""
-				metric.CPUPercent = s.childCPUPercent(now, row.Identity, row.CPUSeconds)
+				metric.CPUPercent = sampleCPUPercent(now, row.Identity, row.CPUSeconds, previous, s.childCPU)
 				if metric.CPUPercent != nil {
 					metric.CPUReasonCode, metric.CPUReason = "", ""
 				}
@@ -3786,11 +3890,12 @@ func (s *server) readGoChildProcessMetrics(now time.Time) []goChildProcessMetric
 				metric.State = linuxChildProcessState(string(data))
 				row, ok := stats.ParseLinuxProcessStat(string(data), entry.Executable, uint64(os.Getpagesize()), 100)
 				if ok {
+					metric.Identity = row.Identity
 					rss := row.RSSBytes
 					metric.RSSBytes = &rss
 					metric.RSSReasonCode = ""
 					metric.RSSReason = ""
-					metric.CPUPercent = s.childCPUPercent(now, row.Identity, row.CPUSeconds)
+					metric.CPUPercent = sampleCPUPercent(now, row.Identity, row.CPUSeconds, previous, s.childCPU)
 					if metric.CPUPercent != nil {
 						metric.CPUReasonCode = ""
 						metric.CPUReason = ""
@@ -3929,34 +4034,11 @@ type childCPUState struct {
 	CPUSeconds float64
 }
 
-func (s *server) childCPUPercent(now time.Time, identity string, cpuSeconds float64) *float64 {
-	// Reuse the process-metrics mutex for this small bounded map. It is sampled
-	// only from the status path and avoids a second mutable sampler owner.
-	s.processMetricsMu.Lock()
-	defer s.processMetricsMu.Unlock()
-	if s.childCPU == nil {
-		s.childCPU = make(map[string]childCPUState)
-	}
-	previous, ok := s.childCPU[identity]
-	s.childCPU[identity] = childCPUState{At: now, Identity: identity, CPUSeconds: cpuSeconds}
-	if !ok || !now.After(previous.At) || previous.Identity != identity || cpuSeconds < previous.CPUSeconds {
-		return nil
-	}
-	percent := (cpuSeconds - previous.CPUSeconds) / now.Sub(previous.At).Seconds() * 100
-	if math.IsNaN(percent) || math.IsInf(percent, 0) || percent < 0 {
-		return nil
-	}
-	return &percent
-}
-
-func (s *server) threadCPUPercent(now time.Time, identity string, cpuSeconds float64) *float64 {
-	s.processMetricsMu.Lock()
-	defer s.processMetricsMu.Unlock()
-	if s.threadCPU == nil {
-		s.threadCPU = make(map[string]childCPUState)
-	}
-	previous, ok := s.threadCPU[identity]
-	s.threadCPU[identity] = childCPUState{At: now, Identity: identity, CPUSeconds: cpuSeconds}
+// sampleCPUPercent shares the rate calculation while each collector replaces its
+// census under processMetricsMu, retiring samples for departed identities.
+func sampleCPUPercent(now time.Time, identity string, cpuSeconds float64, previousSamples, currentSamples map[string]childCPUState) *float64 {
+	previous, ok := previousSamples[identity]
+	currentSamples[identity] = childCPUState{At: now, Identity: identity, CPUSeconds: cpuSeconds}
 	if !ok || !now.After(previous.At) || previous.Identity != identity || cpuSeconds < previous.CPUSeconds {
 		return nil
 	}
@@ -4771,7 +4853,7 @@ func (s *server) activityTouch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item := strings.TrimSpace(body.Item)
-	validPrefix := strings.HasPrefix(item, "file:") || strings.HasPrefix(item, "gitdiff:")
+	validPrefix := strings.HasPrefix(item, "file:") || strings.HasPrefix(item, "filecopy:") || strings.HasPrefix(item, "filediff:") || strings.HasPrefix(item, "filehistory:") || strings.HasPrefix(item, "gitdiff:")
 	if !validPrefix || len(item) <= strings.IndexByte(item, ':')+1 || len(item) > 4096 || strings.IndexFunc(item, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid activity item"})
 		return

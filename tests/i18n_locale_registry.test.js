@@ -114,6 +114,7 @@ function testChromeOwnerBehavior() {
 
   const badge = new ChromeNode();
   badge.dataset.updateTarget = '2.0.0';
+  badge.dataset.updateBuildState = 'ready';
   const badgeContext = {
     document: {querySelector() { return badge; }},
     selfUpdateAvailableTarget: '',

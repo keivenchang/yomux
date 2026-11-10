@@ -19,6 +19,7 @@ import yaml
 from ..atomic_file import atomic_write_text
 from ..common import CONFIG_DIR
 from ..infra.shared_config_lock import read_shared_document
+from ..infra.shared_config_lock import shared_config_file_signature
 from ..infra.shared_config_lock import SharedConfigRevisionConflict
 from ..infra.shared_config_lock import write_shared_document
 from ..locales import message_descriptor
@@ -142,7 +143,7 @@ class YoloRuleset:
 _RULES_LOCK = threading.RLock()
 _RULES_CACHE: dict[str, Any] = {
     "path": None,
-    "mtime_ns": None,
+    "signature": None,
     "ruleset": None,
     "error": "",
 }
@@ -193,6 +194,8 @@ def expand_rule_path(path: str | None = None) -> Path:
 
 def yolo_settings() -> dict[str, Any]:
     payload = settings_payload()
+    if payload.get("error"):
+        raise ValueError(f"YOLO settings unavailable: {payload['error']}")
     yolo = payload.get("settings", {}).get("yolo", {})
     if not isinstance(yolo, dict):
         yolo = {}
@@ -536,9 +539,9 @@ def validate_rules(raw: Any, path: Path = YOLO_RULES_PATH, source: str = "file")
         risk = item.get("risk", "")
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"{context}.name must be a non-empty string")
-        if match_type not in RULE_MATCH_TYPES:
+        if not isinstance(match_type, str) or match_type not in RULE_MATCH_TYPES:
             raise ValueError(f"{context}.type must be one of: {', '.join(sorted(RULE_MATCH_TYPES))}")
-        if action not in RULE_ACTIONS:
+        if not isinstance(action, str) or action not in RULE_ACTIONS:
             raise ValueError(f"{context}.action must be one of: {', '.join(sorted(RULE_ACTIONS))}")
         if risk is not None and not isinstance(risk, str):
             raise ValueError(f"{context}.risk must be a string")
@@ -605,16 +608,12 @@ def print_rule_error(error: str) -> None:
 
 def cached_rules(force: bool = False) -> tuple[YoloRuleset | None, str]:
     path = active_rule_path()
-    try:
-        stat = path.stat()
-        mtime_ns = stat.st_mtime_ns
-    except OSError:
-        mtime_ns = 0
+    signature = shared_config_file_signature(path)
     with _RULES_LOCK:
         if (
             not force
             and _RULES_CACHE.get("path") == path
-            and _RULES_CACHE.get("mtime_ns") == mtime_ns
+            and _RULES_CACHE.get("signature") == signature
         ):
             cached_error = _RULES_CACHE.get("error")
             return _RULES_CACHE.get("ruleset"), cached_error if isinstance(cached_error, str) else ""
@@ -627,7 +626,7 @@ def cached_rules(force: bool = False) -> tuple[YoloRuleset | None, str]:
             print_rule_error(error)
         _RULES_CACHE.update({
             "path": path,
-            "mtime_ns": mtime_ns,
+            "signature": signature,
             "ruleset": ruleset,
             "error": error,
         })

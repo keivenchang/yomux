@@ -1,12 +1,52 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+import ast
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 
 import pytest
 
 from tools.go_binary import find_go_backend_binary
 from tools.go_binary import go_backend_binary_candidates
+from tools.go_binary import go_test_server_binary
+from tools.instance_isolation import synthetic_test_environment
+from tools.product_environment import product_env_names
+
+
+@pytest.mark.parametrize("prefix", ["YOMUX", "YOLOMUX"])
+def test_go_fixture_binary_uses_shared_namespace_owner(tmp_path, monkeypatch, prefix):
+    for name in product_env_names("GO_BINARY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(prefix + "_GO_BINARY", " " + sys.executable + " ")
+    monkeypatch.setattr("tools.go_binary.subprocess.check_output", lambda *_args, **_kwargs: pytest.fail("configured binary was ignored"))
+    assert go_test_server_binary(tmp_path) == Path(sys.executable)
+
+
+def test_go_discovery_imports_with_only_declared_test_tool_inputs(tmp_path, monkeypatch):
+    monkeypatch.setenv("YOMUX_GO_BINARY", sys.executable)
+    source_root = Path(__file__).resolve().parents[1]
+    declarations = ast.parse((source_root / "BUILD.bazel").read_text(encoding="utf-8"))
+    group = next(
+        node for node in ast.walk(declarations)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "filegroup"
+        and any(keyword.arg == "name" and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value == "go_test_tool_inputs" for keyword in node.keywords)
+    )
+    inputs = next(keyword.value for keyword in group.keywords if keyword.arg == "srcs")
+    for entry in inputs.elts:
+        relative = Path(entry.value)
+        destination = tmp_path / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_root / relative, destination)
+    result = subprocess.run(
+        [sys.executable, "-I", str(tmp_path / "tools/go_binary.py"), str(tmp_path)],
+        cwd=tmp_path, env=synthetic_test_environment(), capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
 
 
 @pytest.mark.parametrize("relative", [

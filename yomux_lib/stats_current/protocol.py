@@ -11,6 +11,7 @@ from typing import Literal, NotRequired, TypedDict, cast
 
 from yomux_lib.observability.failure_severity import CALLER_OUTCOME_OWNER_FIELD
 
+from ..infra.numeric import is_finite_number
 from . import identity
 from . import resolution as resolution_policy
 
@@ -162,7 +163,7 @@ def _generation(value: object, name: str, *, minimum: int = 0) -> int:
 
 
 def _number(value: object, name: str) -> int | float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+    if not is_finite_number(value) or value < 0:
         raise ProtocolValidationError(f"{name} must be a non-negative finite number")
     return value
 
@@ -794,14 +795,9 @@ def _no_data(
     source_ends: dict[tuple[str, str], int | float] = {}
     for index, item in enumerate(value):
         span = _fields(item, f"no_data[{index}]", NO_DATA_FIELDS)
-        family, source_id, reason = span["family"], span["source_id"], span["reason"]
-        if any(not isinstance(value, str) or not value for value in (family, source_id, reason)):
-            raise ProtocolValidationError("no_data family, source_id, and reason must be non-empty strings")
-        if len(source_id.encode("utf-8")) > MAX_SOURCE_ID_BYTES:
-            raise ProtocolValidationError("no_data.source_id is too long")
-        start, end = _number(span["start"], "no_data.start"), _number(span["end"], "no_data.end")
-        if not isinstance(span["epoch"], str) or not span["epoch"]:
-            raise ProtocolValidationError("no_data.epoch must be a non-empty string")
+        _, family, source_id, _, start, end = no_data_identity(span)
+        if not isinstance(span["reason"], str) or not span["reason"]:
+            raise ProtocolValidationError("no_data.reason must be a non-empty string")
         cadence = _number(span["source_cadence_seconds"], "no_data.source_cadence_seconds")
         if cadence <= 0:
             raise ProtocolValidationError("no_data.source_cadence_seconds must be positive")

@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Resolve fixture tools before fixtures replace PATH with command doubles."""
+"""Shared fixture tool resolution, environments, and ordered cleanup."""
 
+from collections.abc import Callable, Sequence
 import os
 from pathlib import Path
 import shutil
@@ -58,3 +59,18 @@ def clear_fixture_settings(monkeypatch, *settings):
     for setting in settings:
         for name in product_env_names(setting):
             monkeypatch.delenv(name, raising=False)
+
+
+def run_fixture_cleanup_phases(label: str, phases: Sequence[tuple[str, Callable[[], None]]]) -> None:
+    """Attempt ordered cleanup boundaries and preserve their original failures."""
+
+    errors: list[BaseException] = []
+    for _phase_name, callback in phases:
+        try:
+            callback()
+        except BaseException as error:
+            errors.append(error)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup(f"{label} teardown failed", errors)

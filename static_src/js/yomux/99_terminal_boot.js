@@ -1498,7 +1498,6 @@ function refreshInfoGroupingControls() {
 }
 
 function setInfoGrouping(value) {
-  const previous = infoGrouping.join(',');
   const next = writeInfoGrouping(value);
   refreshInfoGroupingControls();
   renderInfoPanel();
@@ -1506,7 +1505,6 @@ function setInfoGrouping(value) {
 }
 
 function setInfoSort(value, options = {}) {
-  const previous = `${infoSort.key}:${infoSort.dir}`;
   writeInfoSort(value);
   refreshInfoGroupingControls();
   renderInfoPanel();
@@ -1518,7 +1516,6 @@ function setInfoSortMode(value, options = {}) {
 }
 
 function setInfoSearch(value, options = {}) {
-  const previous = infoSearch;
   infoSearch = normalizeInfoSearch(value);
   if (options.refreshControls === true) refreshInfoGroupingControls();
   if (options.render !== false) renderInfoPanel();
@@ -1718,6 +1715,8 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         prTitle: prDisplayLabel || prCompactLabel || t('info.missing.pr'),
         prNumber: Number.isFinite(prNumber) ? prNumber : null,
         prUrl: String(row?.prUrl || ''),
+        prValues: Array.isArray(row?.prValues) ? row.prValues.slice() : [],
+        prLookupState: String(row?.prLookupState || ''),
         prClass: String(row?.prClass || ''),
         prLifecycleText: String(row?.prLifecycleText || ''),
         prLifecycleClass: String(row?.prLifecycleClass || ''),
@@ -2317,11 +2316,6 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   });
 }
 
-function infoAgentAttentionHtml(record) {
-  if (!infoRecordHasAi(record) || typeof agentWindowIsAttentionState !== 'function' || !agentWindowIsAttentionState(record.aiState)) return '';
-  return '';
-}
-
 function infoRecordAiWindowButtonHtml(record, options = {}) {
   if (!infoRecordHasAi(record) || typeof tmuxWindowButtonHtml !== 'function') return '';
   const label = String(record?.aiLabel || '').trim();
@@ -2371,10 +2365,9 @@ function infoRecordAiValueHtml(record, options = {}) {
   if (!infoRecordHasAi(record)) return '';
   const buttonHtml = infoRecordAiWindowButtonHtml(record, options);
   if (!buttonHtml) return '';
-  const status = infoAgentAttentionHtml(record);
   const pid = infoRecordAiPidHtml(record);
   const recency = infoRecordAiRecencyHtml(record);
-  return `<span class="info-tree-ai-value tmux-window-bar info-tree-ai-window-token" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${buttonHtml}${status}${pid}${recency}</span>`;
+  return `<span class="info-tree-ai-value tmux-window-bar info-tree-ai-window-token" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${buttonHtml}${pid}${recency}</span>`;
 }
 
 function infoRecordUpdatedMetaHtml(record) {
@@ -2992,6 +2985,7 @@ function mergedInfoTabAgents(...groups) {
         tmux_pane_target: String(item?.tmux_pane_target || ''),
         current: item?.current === true,
         window_active: item?.window_active === true,
+        pid: tmuxWindowProcessPid(item),
         working_stopped_ts: Number.isFinite(Number(item?.working_stopped_ts)) ? Number(item.working_stopped_ts) : 0,
         idle_since: Number.isFinite(Number(item?.idle_since)) ? Number(item.idle_since) : 0,
         last_active_ts: Number.isFinite(Number(item?.last_active_ts)) ? Number(item.last_active_ts) : 0,
@@ -3800,6 +3794,10 @@ async function uploadEditorFiles(editorTarget, fileList) {
     statusErr(localizedHtml('status.readOnlyUploadFiles'));
     return;
   }
+  if (!fileEditorStateWritable(fileEditorPanelState(editorTarget?.panel) || fileState.get(editorTarget?.path))) {
+    statusErr(esc(t('common.readOnly')));
+    return;
+  }
   const files = Array.from(fileList || []);
   if (!files.length) return;
   const totalBytes = files.reduce((total, file) => total + (Number(file?.size) || 0), 0);
@@ -3869,6 +3867,7 @@ function pasteUploadReferences(files) {
 }
 
 function insertEditorPasteUploadReferences(editorTarget, files) {
+  if (!fileEditorStateWritable(fileEditorPanelState(editorTarget?.panel) || fileState.get(editorTarget?.path))) return false;
   const references = markdownImageUploadReferences(files);
   if (!references.length) return false;
   const proseMirrorView = editorTarget?.surface === 'view-editor' ? editorTarget.proseMirrorView : null;
@@ -4685,7 +4684,7 @@ function activateTab(session, name, options = {}) {
     refreshTerminal(session, {visibleOnly: true});
     // The pending fit owns geometry checks and blank-screen recovery after activation.
     if (options.userInitiated) focusTerminalFromUserAction(session, 0, options);
-    else focusTerminalWhenAutoFocus(session, 25);
+    else if (options.focusContent !== true) focusTerminalWhenAutoFocus(session, 25);
   } else {
     clearFocusedTerminal(session);
   }
@@ -5933,9 +5932,13 @@ function stopTmuxSessionStreamScope(scopes, session, expectedSource = null) {
 
 function stopAllTmuxSessionStreamScopes(scopes, reason = 'stopped') {
   let stopped = 0;
-  for (const scope of [...scopes.values()]) {
-    if (scope.dispose(reason)) stopped += 1;
+  const cleanup = createLifecycleScope();
+  for (const scope of [...scopes.values()].reverse()) {
+    cleanup.replace(scope, scope, value => {
+      if (value.dispose(reason)) stopped += 1;
+    });
   }
+  cleanup.dispose(reason);
   return stopped;
 }
 
@@ -6092,7 +6095,9 @@ function renderUpdateBadgeChrome() {
   badge.setAttribute('aria-label', t('update.badgeAria'));
   badge.title = badge.hidden
     ? t('update.badgeTitle')
-    : t('update.badgeAvailable', {target: target ? ` (${target})` : ''});
+    : (badge.dataset.updateBuildState === 'ready'
+      ? t('update.badgeAvailable', {target: target ? ` (${target})` : ''})
+      : `${t('update.availableBody', {target: target ? ` (${target})` : ''})} ${updateBuildStatusText(badge.dataset.updateBuildState, badge.dataset.updateBuildError)}`);
 }
 
 function markSelfUpdateReloadPending(target = '') {
@@ -6949,12 +6954,22 @@ function relocalizeTranscriptPanelStatus(session) {
 }
 
 async function refreshTranscriptPreview(session, preview, options = {}) {
+  const lifecycleToken = tmuxSessionLifecycleToken(session);
+  const guard = preview._transcriptContextLoadGuard ||= makeGenerationGuard();
+  const latestRequest = guard.begin();
+  const url = transcriptContextApiUrl('/api/context-items', session, transcriptPreviewMessages, options);
+  const requestIsCurrent = () => latestRequest()
+    && tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)
+    && document.getElementById(transcriptDomId(session)) === preview
+    && transcriptContextApiUrl('/api/context-items', session, transcriptPreviewMessages, options) === url;
   try {
-    const payload = await apiFetchJson(transcriptContextApiUrl('/api/context-items', session, transcriptPreviewMessages, options));
-    if (!applyContextItemsPayloadFromPush(payload, options)) {
+    const payload = await apiFetchJson(url);
+    if (!requestIsCurrent()) return;
+    if (!applyContextItemsPayloadFromPush(payload, {...options, session, preview})) {
       preview.textContent = JSON.stringify(payload, null, 2);
     }
   } catch (error) {
+    if (!requestIsCurrent()) return;
     if (isApiPendingResponse(error)) {
       if (error.operationId && apiOperationState.terminal.has(error.operationId)) return;
       clearTranscriptContextLoadError(preview);
@@ -7081,6 +7096,7 @@ function stopTranscriptStream(session, expectedSource = null) {
 }
 
 function renderTranscriptItems(container, path, items, options = {}) {
+  container._transcriptContextLoadGuard?.invalidate();
   const shouldScrollBottom = options.scrollBottom === true;
   const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 32;
   const oldTop = container.scrollTop;
@@ -7107,7 +7123,7 @@ function appendTranscriptItems(container, items) {
   if (!items.length) return;
   const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 32;
   container.insertAdjacentHTML('beforeend', items.map(item => transcriptItemHtml(item)).join(''));
-  const rendered = Array.from(container.querySelectorAll('.transcript-item:not(.system)'));
+  const rendered = Array.from(container.querySelectorAll('.transcript-item'));
   const extra = rendered.length - transcriptPreviewMessages;
   for (const item of rendered.slice(0, Math.max(0, extra))) item.remove();
   if (wasNearBottom) {

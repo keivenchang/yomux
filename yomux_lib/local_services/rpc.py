@@ -682,7 +682,7 @@ def _validate_length(value: Any, maximum: int, field: str) -> int:
 
 def _decode_envelope(value: dict[str, Any]) -> tuple[LocalRpcEnvelope, int]:
     version = value.get("version")
-    if version != LOCAL_RPC_VERSION:
+    if isinstance(version, bool) or not isinstance(version, int) or version != LOCAL_RPC_VERSION:
         raise LocalRpcError("unsupported RPC version")
     payload = value.get("payload")
     fields = ("service", "method", "request_id", "trace_id", "priority")
@@ -695,7 +695,7 @@ def _decode_envelope(value: dict[str, Any]) -> tuple[LocalRpcEnvelope, int]:
     durations: dict[str, float] = {}
     for field in ("accept_to_read_ms", "read_complete_ms", "service_duration_ms"):
         duration = value.get(field, 0.0)
-        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration < 0 or duration > 60_000:
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not 0 <= duration <= 60_000:
             raise LocalRpcError(f"invalid {field}")
         durations[field] = float(duration)
     queue_wait_ms = 0.0
@@ -703,7 +703,7 @@ def _decode_envelope(value: dict[str, Any]) -> tuple[LocalRpcEnvelope, int]:
     capacity_saturated = capacity_rejected = False
     if "capacity_limit" in value:
         queue_wait_ms = value.get("queue_wait_ms", 0.0)
-        if isinstance(queue_wait_ms, bool) or not isinstance(queue_wait_ms, (int, float)) or queue_wait_ms < 0 or queue_wait_ms > 60_000:
+        if isinstance(queue_wait_ms, bool) or not isinstance(queue_wait_ms, (int, float)) or not 0 <= queue_wait_ms <= 60_000:
             raise LocalRpcError("invalid queue_wait_ms")
         queue_depth = _validate_length(value.get("queue_depth", 0), 2**31 - 1, "queue_depth")
         capacity_limit = _validate_length(value["capacity_limit"], 2**31 - 1, "capacity_limit")

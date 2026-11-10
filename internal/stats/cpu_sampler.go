@@ -333,15 +333,6 @@ func percentage(delta, total uint64) float64 {
 	return value
 }
 
-func hasBinaries(snapshot CPUSnapshot, binaries []string) bool {
-	for _, binary := range binaries {
-		if _, _, ok := binaryCounters(snapshot, binary); !ok {
-			return false
-		}
-	}
-	return true
-}
-
 func processPair(current, previous CPUSnapshot, key string) (CPUProcessCounters, CPUProcessCounters, bool) {
 	a, aok := current.Processes[key]
 	b, bok := previous.Processes[key]

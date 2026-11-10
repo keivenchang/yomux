@@ -37,8 +37,9 @@ from process_identity import ensure_mock_process_identity
 ensure_mock_process_identity("claude")
 
 from yomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer
+from yomux_lib.agent_comms.process_stream import process_pipe_output
 import common as mock_agent_common
-from text_client_common import (
+from tools.mockers.text_client_common import (
     CLAUDE_CONFIG_KEYS,
     CLAUDE_OUTPUT_TERMS,
     CLIENT_PERMISSION_DEFAULTS,
@@ -175,6 +176,7 @@ class ClaudeTextClient(TextClientBase):
         self.init_slash_commands: list[str] = []
         self.stream_normalizer = ClaudeStreamJsonNormalizer()
         self.last_normalized_events: list[dict[str, Any]] = []
+        self.stream_stderr_parts: list[str] = []
 
     def session_file_path(self) -> str:
         if not self.session_id:
@@ -314,25 +316,32 @@ class ClaudeTextClient(TextClientBase):
         self.current_process = process
         try:
             self.read_stream(process)
-            stderr_text = process.stderr.read() if process.stderr is not None else ""
+            stderr_text = "".join(self.stream_stderr_parts)
             return_code = process.wait(timeout=1)
             self.finish_metrics("complete", self.args.show_metrics)
         except TimeoutError as exc:
             self.interrupt_turn()
-            stderr_text = process.stderr.read() if process.stderr is not None else ""
+            stderr_text = "".join(self.stream_stderr_parts)
             return_code = process.poll()
             self.finish_metrics("timeout", self.args.show_metrics)
             self.print_aux_stderr(str(exc))
         except KeyboardInterrupt:
             self.interrupt_turn()
-            stderr_text = process.stderr.read() if process.stderr is not None else ""
+            stderr_text = "".join(self.stream_stderr_parts)
             return_code = process.poll()
             self.finish_metrics("interrupted", self.args.show_metrics)
             self.finish_prefixed_output()
             self.finish_answer_output()
             self.print_aux_stderr("interrupted current turn; returned to prompt")
         finally:
-            self.current_process = None
+            try:
+                if process.poll() is None:
+                    self.interrupt_turn()
+            finally:
+                for stream in (process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
+                self.current_process = None
         if stderr_text.strip():
             self.write_prefixed_stdout(TOOL_OUTPUT_PREFIX, stderr_text if stderr_text.endswith("\n") else stderr_text + "\n")
         if return_code not in {0, None}:
@@ -342,7 +351,10 @@ class ClaudeTextClient(TextClientBase):
         process = self.current_process
         if process is None or process.poll() is not None:
             return
-        os.killpg(process.pid, signal.SIGINT)
+        try:
+            os.killpg(process.pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
@@ -357,22 +369,25 @@ class ClaudeTextClient(TextClientBase):
         if process.stdout is None:
             raise RuntimeError("claude stdout is not available")
         deadline = time.monotonic() + self.args.timeout
-        for line in process.stdout:
-            if time.monotonic() > deadline:
-                raise TimeoutError("timed out waiting for claude")
-            if self.args.raw_json:
-                self.print_aux_stderr(line.rstrip("\n"))
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError as exc:
-                self.write_prefixed_line(TOOL_OUTPUT_PREFIX, f"invalid JSON from claude: {exc}")
-                continue
-            if isinstance(message, dict):
-                self.handle_message(message)
-                deadline = time.monotonic() + self.args.timeout
+        self.stream_stderr_parts = []
+        with process_pipe_output(process, lambda: deadline) as output:
+            for name, line in output:
+                if name == "stderr":
+                    self.stream_stderr_parts.append(line)
+                    continue
+                if self.args.raw_json:
+                    self.print_aux_stderr(line.rstrip("\n"))
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    self.write_prefixed_line(TOOL_OUTPUT_PREFIX, f"invalid JSON from claude: {exc}")
+                    continue
+                if isinstance(message, dict):
+                    self.handle_message(message)
+                    deadline = time.monotonic() + self.args.timeout
         process.wait(timeout=1)
 
     def handle_message(self, message: dict[str, Any]) -> None:

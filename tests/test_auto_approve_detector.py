@@ -1,4 +1,5 @@
 import argparse
+import errno
 import importlib.util
 import json
 import os
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import types
 
 import pytest
+import yaml
 
 from tests.helpers.prompt_corpus import PromptCorpus
 from tests.helpers.prompt_corpus import PromptCorpusPreset
@@ -17,12 +19,93 @@ from tools import auto_approve_tmux
 from yomux_lib import approvals
 from yomux_lib import prompt_detector
 from yomux_lib.auto_approve_worker import AutoApproveWorker
+from yomux_lib.approval import auto_approve_worker
 from yomux_lib.common import AgentInfo
 from yomux_lib.common import SessionInfo
 
 
 PROMPT_CORPUS_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus"
 PROMPT_CORPUS = PromptCorpus(PROMPT_CORPUS_DIR, PromptCorpusPreset.AUTO_APPROVE)
+
+
+@pytest.mark.parametrize('body', ['$(rm -rf /tmp/approval-fixture)', '`rm -rf /tmp/approval-fixture`'])
+def test_codex_heredoc_policy_receives_the_complete_visible_body(body):
+    capture = (
+        'Would you like to run the following command?\n'
+        '$ cat <<EOF\n' + body + '\nEOF\n'
+        '› 1. Yes, proceed\n  2. No\nPress enter to confirm'
+    )
+    command = auto_approve_tmux.extract_command(capture)
+    assert command == 'cat <<EOF ' + body + ' EOF'
+    rules = auto_approve_tmux.yolo_rules.validate_rules(auto_approve_tmux.yolo_rules.default_rule_data())
+    assert auto_approve_tmux.yolo_rules.evaluate_ruleset(command, rules)['action'] == 'block'
+
+
+def test_codex_heredoc_without_a_visible_boundary_requires_manual_approval():
+    capture = 'Would you like to run the following command?\n$ cat <<EOF\n$(rm -rf /tmp/approval-fixture)'
+    command = auto_approve_tmux.extract_command(capture)
+    assert command is None
+    assert auto_approve_tmux.standalone_bash_decision(command)['action'] == 'ask'
+
+
+def test_worker_failed_thread_start_releases_process_lock(monkeypatch, tmp_path):
+    monkeypatch.setattr(auto_approve_worker, 'AUTO_APPROVE_LOCK_DIR', tmp_path)
+    worker = AutoApproveWorker('fixture-target')
+
+    def fail_start():
+        raise RuntimeError('thread startup injected')
+
+    monkeypatch.setattr(worker.thread, 'start', fail_start)
+    replacement = auto_approve_worker.AutoApproveProcessLock('fixture-target')
+    try:
+        with pytest.raises(RuntimeError, match='thread startup injected'):
+            worker.start()
+        assert worker.process_lock.handle is None
+        assert replacement.acquire()[0]
+    finally:
+        replacement.release()
+        worker.process_lock.release()
+
+
+def test_worker_record_failure_closes_the_locked_descriptor(monkeypatch, tmp_path):
+    monkeypatch.setattr(auto_approve_worker, 'AUTO_APPROVE_LOCK_DIR', tmp_path)
+    process_lock = auto_approve_worker.AutoApproveProcessLock('fixture-target')
+    descriptors = []
+
+    def fail_fsync(descriptor):
+        descriptors.append(descriptor)
+        raise OSError('record fsync injected')
+
+    monkeypatch.setattr(auto_approve_worker.os, 'fsync', fail_fsync)
+    try:
+        with pytest.raises(OSError, match='record fsync injected'):
+            process_lock.acquire()
+        assert process_lock.handle is None
+        with pytest.raises(OSError) as closed:
+            os.fstat(descriptors[0])
+        assert closed.value.errno == errno.EBADF
+    finally:
+        process_lock.release()
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                if error.errno != errno.EBADF:
+                    raise
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_cli_self_test_uses_repository_tests_and_propagates_exit(monkeypatch, exit_code):
+    root = Path(__file__).resolve().parents[1]
+
+    def run(command, **kwargs):
+        assert command[-2:] == [str(root / "tests/test_auto_approve_detector.py"), str(root / "tests/test_yolo_rules.py")]
+        assert all(Path(path).is_file() for path in command[-2:])
+        assert kwargs["cwd"] == root
+        return SimpleNamespace(returncode=exit_code)
+
+    monkeypatch.setattr(auto_approve_tmux.subprocess, "run", run)
+    assert auto_approve_tmux._self_test() is (exit_code == 0)
 
 
 def load_prompt_corpus():
@@ -769,6 +852,26 @@ def test_capture_prompt_fixture_harness_contract(monkeypatch, tmp_path):
         ("capture-codex:", ("Would you like to run the following command?",), 12, False, "/tmp/yolomux-capture.sock"),
     ]
     assert tmux_calls == [("/tmp/yolomux-capture.sock", ["send-keys", "-t", "capture-codex:", "sleep 10", "Enter"], 10)]
+
+
+def test_capture_prompt_fixture_redacts_all_emitted_metadata_without_truncating_capture():
+    harness = load_capture_harness_module()
+    metadata = {
+        "send_lines": ["echo token=fixture-credential-value"],
+        "launch_command": "runner --header 'Authorization: Bearer fixture-bearer-value'",
+        "cursor": {"current_command": "password=fixture-password-value", "x": 4},
+        "raw_capture": "visible row\n" * 500,
+        "width": 120,
+        "command": "echo Authorization: Bearer fixture-only",
+        "cookie_command": "echo Cookie: session=fixture-cookie",
+        "api_key": "fixture-structured-secret",
+    }
+    emitted = harness.dump_fixture_yaml(metadata)
+    assert all(secret not in emitted for secret in ("fixture-credential-value", "fixture-bearer-value", "fixture-password-value", "fixture-only", "fixture-cookie", "fixture-structured-secret"))
+    retained = yaml.safe_load(emitted)
+    assert retained["raw_capture"] == metadata["raw_capture"]
+    assert retained["cursor"]["x"] == 4 and retained["width"] == 120
+    assert all(isinstance(retained[key], str) for key in ("command", "cookie_command", "api_key"))
 
 
 @pytest.mark.parametrize("configured,cli", [(False, False), (True, False), (False, True), (True, True)])

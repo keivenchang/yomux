@@ -10,11 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
+	"syscall"
 )
 
 const gitIndexMaxBytes = 64 * 1024 * 1024
@@ -36,6 +37,9 @@ type gitRenamePlan struct {
 	indexDigest   [sha256.Size]byte
 	flags         map[string][]string
 	indexUpdated  bool
+	indexOriginal []byte
+	indexMode     os.FileMode
+	lock          *os.File
 }
 
 func gitIndexFailure(format string, args ...any) error {
@@ -50,33 +54,74 @@ func gitPath(root, value string) string {
 	return filepath.Join(root, value)
 }
 
-func snapshotGitIndex(root string) (string, descriptorIdentity, [sha256.Size]byte, error) {
-	var digest [sha256.Size]byte
-	command := exec.Command("git", "-C", root, "rev-parse", "--git-path", "index")
-	command.Env = gitCommandEnvironment()
-	output, err := command.Output()
+func readGitIndex(path string) ([]byte, descriptorIdentity, os.FileMode, error) {
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return "", descriptorIdentity{}, digest, gitIndexFailure("Git index path is unavailable")
-	}
-	indexPath := gitPath(root, string(output))
-	info, err := os.Lstat(indexPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return "", descriptorIdentity{}, digest, nil
-	}
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > gitIndexMaxBytes {
-		return "", descriptorIdentity{}, digest, gitIndexFailure("Git index is not a bounded regular file")
-	}
-	file, err := os.Open(indexPath)
-	if err != nil {
-		return "", descriptorIdentity{}, digest, gitIndexFailure("Git index cannot be opened: %v", err)
+		return nil, descriptorIdentity{}, 0, err
 	}
 	defer file.Close()
-	hasher := sha256.New()
-	if _, err := io.CopyN(hasher, file, info.Size()); err != nil && !errors.Is(err, io.EOF) {
-		return "", descriptorIdentity{}, digest, gitIndexFailure("Git index cannot be read: %v", err)
+	before, err := file.Stat()
+	if err != nil {
+		return nil, descriptorIdentity{}, 0, err
 	}
-	copy(digest[:], hasher.Sum(nil))
-	return indexPath, identityFor(info), digest, nil
+	if !before.Mode().IsRegular() || before.Size() > gitIndexMaxBytes {
+		return nil, descriptorIdentity{}, 0, gitIndexFailure("Git index is not a bounded regular file")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, gitIndexMaxBytes+1))
+	if err != nil {
+		return nil, descriptorIdentity{}, 0, err
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return nil, descriptorIdentity{}, 0, err
+	}
+	named, err := os.Lstat(path)
+	if err != nil {
+		return nil, descriptorIdentity{}, 0, err
+	}
+	if len(data) > gitIndexMaxBytes || !os.SameFile(before, after) || !os.SameFile(after, named) || before.Size() != after.Size() || before.ModTime() != after.ModTime() {
+		return nil, descriptorIdentity{}, 0, gitIndexFailure("Git index changed during snapshot")
+	}
+	return data, identityFor(after), after.Mode(), nil
+}
+
+func (plan *gitRenamePlan) acquireIndexLock() error {
+	lock, err := os.OpenFile(plan.indexPath+".lock", os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return errors.Join(gitIndexFailure("Git index cannot be locked"), err)
+	}
+	plan.lock = lock
+	return nil
+}
+
+func gitIndexLockOwned(lock *os.File) (bool, error) {
+	opened, err := lock.Stat()
+	if err != nil {
+		return false, err
+	}
+	named, err := os.Lstat(lock.Name())
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(opened, named), nil
+}
+
+func (plan *gitRenamePlan) close() {
+	if plan == nil || plan.lock == nil {
+		return
+	}
+	lock := plan.lock
+	plan.lock = nil
+	if owned, err := gitIndexLockOwned(lock); err != nil && !os.IsNotExist(err) {
+		slog.Error("inspect Git rename lock before release", "error", err)
+	} else if owned {
+		if err := os.Remove(lock.Name()); err != nil {
+			slog.Error("release Git rename lock", "error", err)
+		}
+	}
+	if err := lock.Close(); err != nil {
+		slog.Error("close Git rename lock", "error", err)
+	}
 }
 
 func gitIndexFlags(ctx context.Context, root, oldRelative string) (map[string][]string, error) {
@@ -89,7 +134,7 @@ func gitIndexFlags(ctx context.Context, root, oldRelative string) (map[string][]
 		{option: "-t", match: 'S'},
 		{option: "-f", match: 'h'},
 	} {
-		command := exec.CommandContext(ctx, "git", "-C", root, "ls-files", spec.option, "-z", "--", oldRelative)
+		command := exec.CommandContext(ctx, "git", "--literal-pathspecs", "-C", root, "ls-files", spec.option, "-z", "--", oldRelative)
 		command.Env = gitCommandEnvironment()
 		output, err := command.Output()
 		if err != nil {
@@ -109,24 +154,61 @@ func gitIndexFlags(ctx context.Context, root, oldRelative string) (map[string][]
 	return flags, nil
 }
 
-// prepareGitRename records whether the source is tracked before the namespace move. Untracked
-// paths deliberately remain outside Git's index, matching the Python mutation owner.
-func prepareGitRename(ctx context.Context, oldPath string) (*gitRenamePlan, error) {
-	command := exec.CommandContext(ctx, "git", "-C", filepath.Dir(oldPath), "rev-parse", "--show-toplevel")
+func gitRenameRoot(ctx context.Context, directory string) (string, error) {
+	command := exec.CommandContext(ctx, "git", "-C", directory, "rev-parse", "--show-toplevel")
 	command.Env = gitCommandEnvironment()
 	output, err := command.Output()
 	if err != nil {
-		return nil, nil
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 128 {
+			return "", nil
+		}
+		return "", err
 	}
-	root := strings.TrimSpace(string(output))
+	return strings.TrimSpace(string(output)), nil
+}
+
+// A deleted working-tree destination may still contain unique staged content.
+// Never replace that index entry, including descendants of a moved directory.
+func checkGitRenameDestination(ctx context.Context, target *mutationParent) *Error {
+	root, err := gitRenameRoot(ctx, target.resolvedParent)
+	if err != nil {
+		return filesystemError(target.requested, err)
+	}
 	if root == "" {
-		return nil, nil
+		return nil
 	}
+	relative, err := filepath.Rel(root, filepath.Join(target.resolvedParent, target.name))
+	if err != nil {
+		return filesystemError(target.requested, err)
+	}
+	command := exec.CommandContext(ctx, "git", "--literal-pathspecs", "-C", root, "ls-files", "--stage", "-z", "--", relative)
+	command.Env = gitCommandEnvironment()
+	output, err := command.Output()
+	if err != nil {
+		return gitIndexChanged(target.requested, err)
+	}
+	if len(output) > 0 {
+		return targetExists(target.requested)
+	}
+	return nil
+}
+
+// Tracked moves retain index.lock through namespace publication. Untracked
+// paths stay outside the index; readers and writers share this transaction owner.
+func prepareGitRename(ctx context.Context, oldPath string) (*gitRenamePlan, error) {
+	root, err := gitRenameRoot(ctx, filepath.Dir(oldPath))
+	if err != nil || root == "" {
+		return nil, err
+	}
+
 	oldRelative, err := filepath.Rel(root, oldPath)
 	if err != nil || oldRelative == "." || strings.HasPrefix(oldRelative, ".."+string(filepath.Separator)) {
 		return nil, nil
 	}
-	command = exec.CommandContext(ctx, "git", "-C", root, "ls-files", "--error-unmatch", "--", oldRelative)
+	command := exec.CommandContext(ctx, "git", "--literal-pathspecs", "-C", root, "ls-files", "--error-unmatch", "--", oldRelative)
 	command.Env = gitCommandEnvironment()
 	if err := command.Run(); err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 1 {
@@ -134,9 +216,31 @@ func prepareGitRename(ctx context.Context, oldPath string) (*gitRenamePlan, erro
 		}
 		return nil, fmt.Errorf("git tracked-path check: %w", err)
 	}
-	command = exec.CommandContext(ctx, "git", "-C", root, "ls-files", "--stage", "-z", "--", oldRelative)
+	indexCommand := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--git-path", "index")
+	indexCommand.Env = gitCommandEnvironment()
+	indexOutput, err := indexCommand.Output()
+	if err != nil {
+		return nil, gitIndexFailure("Git index path is unavailable")
+	}
+	plan := &gitRenamePlan{root: root, oldPath: oldRelative, indexPath: gitPath(root, string(indexOutput))}
+	if err := plan.acquireIndexLock(); err != nil {
+		return nil, err
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			plan.close()
+		}
+	}()
+	original, identity, mode, err := readGitIndex(plan.indexPath)
+	if err != nil {
+		return nil, errors.Join(gitIndexFailure("Git index snapshot failed"), err)
+	}
+	plan.indexOriginal, plan.indexIdentity, plan.indexMode = original, identity, mode
+	plan.indexDigest = sha256.Sum256(original)
+	command = exec.CommandContext(ctx, "git", "--literal-pathspecs", "-C", root, "ls-files", "--stage", "-z", "--", oldRelative)
 	command.Env = gitCommandEnvironment()
-	output, err = command.Output()
+	output, err := command.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git index rename snapshot: %w", err)
 	}
@@ -168,46 +272,65 @@ func prepareGitRename(ctx context.Context, oldPath string) (*gitRenamePlan, erro
 	if len(rows) == 0 {
 		return nil, nil
 	}
-	indexPath, indexIdentity, indexDigest, snapshotErr := snapshotGitIndex(root)
-	if snapshotErr != nil {
-		return nil, snapshotErr
-	}
-	if indexPath == "" {
-		return nil, gitIndexFailure("tracked Git index disappeared")
-	}
-	lockPath := filepath.Join(filepath.Dir(indexPath), "index.lock")
-	if _, lockErr := os.Lstat(lockPath); lockErr == nil {
-		return nil, gitIndexFailure("Git index is already locked")
-	} else if !os.IsNotExist(lockErr) {
-		return nil, gitIndexFailure("Git index lock cannot be inspected: %v", lockErr)
-	}
 	flags, flagsErr := gitIndexFlags(ctx, root, oldRelative)
 	if flagsErr != nil {
 		return nil, flagsErr
 	}
-	return &gitRenamePlan{root: root, oldPath: oldRelative, rows: rows, indexPath: indexPath, indexIdentity: indexIdentity, indexDigest: indexDigest, flags: flags}, nil
+	if !gitIndexMatchesSnapshot(plan) {
+		return nil, gitIndexFailure("Git index changed during preparation")
+	}
+	plan.rows, plan.flags = rows, flags
+	keep = true
+	return plan, nil
 }
 
 func gitIndexMatchesSnapshot(plan *gitRenamePlan) bool {
-	if plan == nil || plan.indexPath == "" {
-		return false
+	data, identity, _, err := readGitIndex(plan.indexPath)
+	return err == nil && sameDescriptorIdentity(identity, plan.indexIdentity) && sha256.Sum256(data) == plan.indexDigest
+}
+
+// Git writers share index.lock. Build every row/flag update privately before the
+// sole rename, so a failed flag update cannot publish a partially rewritten index.
+func (plan *gitRenamePlan) commitIndex(data []byte) error {
+	if plan.lock == nil {
+		return gitIndexFailure("Git index lock is not owned")
 	}
-	info, err := os.Lstat(plan.indexPath)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !sameDescriptorIdentity(identityFor(info), plan.indexIdentity) || info.Size() > gitIndexMaxBytes {
-		return false
+	if !gitIndexMatchesSnapshot(plan) {
+		return gitIndexFailure("Git index changed before publication")
 	}
-	file, err := os.Open(plan.indexPath)
+	opened, err := plan.lock.Stat()
 	if err != nil {
-		return false
+		return err
 	}
-	defer file.Close()
-	hasher := sha256.New()
-	if _, err := io.CopyN(hasher, file, info.Size()); err != nil && !errors.Is(err, io.EOF) {
-		return false
+	if owned, err := gitIndexLockOwned(plan.lock); err != nil || !owned {
+		return errors.Join(gitIndexFailure("Git index lock identity changed"), err)
 	}
-	var digest [sha256.Size]byte
-	copy(digest[:], hasher.Sum(nil))
-	return digest == plan.indexDigest
+	if err := plan.lock.Chmod(plan.indexMode.Perm()); err != nil {
+		return err
+	}
+	if _, err := plan.lock.Write(data); err != nil {
+		return err
+	}
+	if err := plan.lock.Sync(); err != nil {
+		return err
+	}
+	if !gitIndexMatchesSnapshot(plan) {
+		return gitIndexFailure("Git index changed before publication")
+	}
+	// Hashing the existing index and syncing the candidate may yield to another
+	// process. Recheck the named lock after that work, at the namespace boundary.
+	if owned, err := gitIndexLockOwned(plan.lock); err != nil || !owned {
+		return errors.Join(gitIndexFailure("Git index lock identity changed"), err)
+	}
+	if err := os.Rename(plan.lock.Name(), plan.indexPath); err != nil {
+		return err
+	}
+	plan.indexIdentity = identityFor(opened)
+	plan.indexDigest = sha256.Sum256(data)
+	plan.indexUpdated = true
+	lock := plan.lock
+	plan.lock = nil
+	return lock.Close()
 }
 
 func (plan *gitRenamePlan) publish(ctx context.Context, newPath string) error {
@@ -217,6 +340,23 @@ func (plan *gitRenamePlan) publish(ctx context.Context, newPath string) error {
 	if !gitIndexMatchesSnapshot(plan) {
 		return gitIndexFailure("Git index changed before publication")
 	}
+	candidate, err := os.CreateTemp(filepath.Dir(plan.indexPath), ".yomux-index-")
+	if err != nil {
+		return err
+	}
+	candidatePath := candidate.Name()
+	defer func() {
+		for _, path := range []string{candidatePath, candidatePath + ".lock"} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				slog.Error("remove private Git rename candidate", "error", err)
+			}
+		}
+	}()
+	_, writeErr := candidate.Write(plan.indexOriginal)
+	if err := errors.Join(writeErr, candidate.Close()); err != nil {
+		return err
+	}
+	environment := append(gitCommandEnvironment(), "GIT_INDEX_FILE="+candidatePath)
 	indexInput := bytes.NewBuffer(nil)
 	for _, row := range plan.rows {
 		fields := strings.Fields(row.metadata)
@@ -225,12 +365,11 @@ func (plan *gitRenamePlan) publish(ctx context.Context, newPath string) error {
 		_, _ = fmt.Fprintf(indexInput, "%s\t%s%c", row.metadata, newPath+row.newPath[len(plan.oldPath):], 0)
 	}
 	command := exec.CommandContext(ctx, "git", "-C", plan.root, "update-index", "-z", "--index-info")
-	command.Env = gitCommandEnvironment()
+	command.Env = environment
 	command.Stdin = indexInput
 	if output, err := command.CombinedOutput(); err != nil {
-		return gitIndexFailure("Git index rename failed: %s", strings.TrimSpace(string(output)))
+		return errors.Join(gitIndexFailure("Git index rename failed: %s", strings.TrimSpace(string(output))), err)
 	}
-	plan.indexUpdated = true
 	for option, paths := range plan.flags {
 		if len(paths) == 0 {
 			continue
@@ -250,56 +389,38 @@ func (plan *gitRenamePlan) publish(ctx context.Context, newPath string) error {
 			}
 		}
 		flagCommand := exec.CommandContext(ctx, "git", "-C", plan.root, "update-index", updateOption, "-z", "--stdin")
-		flagCommand.Env = gitCommandEnvironment()
+		flagCommand.Env = environment
 		flagCommand.Stdin = input
 		if output, err := flagCommand.CombinedOutput(); err != nil {
-			return gitIndexFailure("Git index flag publication failed: %s", strings.TrimSpace(string(output)))
+			return errors.Join(gitIndexFailure("Git index flag publication failed: %s", strings.TrimSpace(string(output))), err)
 		}
 	}
+	data, _, _, err := readGitIndex(candidatePath)
+	if err != nil {
+		return err
+	}
+	if err := plan.commitIndex(data); err != nil {
+		return err
+	}
+	plan.indexUpdated = true
 	return nil
 }
 
-func (plan *gitRenamePlan) rollback(ctx context.Context, newPath string) error {
+func (plan *gitRenamePlan) rollback(ctx context.Context, _ string) error {
 	if plan == nil || !plan.indexUpdated {
 		return nil
 	}
-	rollbackContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	indexInput := bytes.NewBuffer(nil)
-	for _, row := range plan.rows {
-		fields := strings.Fields(row.metadata)
-		if len(fields) < 2 {
-			return gitIndexFailure("Git index rename snapshot is malformed")
-		}
-		zeros := strings.Repeat("0", len(fields[1]))
-		_, _ = fmt.Fprintf(indexInput, "0 %s 0\t%s%c", zeros, newPath+row.newPath[len(plan.oldPath):], 0)
-		_, _ = fmt.Fprintf(indexInput, "%s\t%s%c", row.metadata, row.oldPath, 0)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	command := exec.CommandContext(rollbackContext, "git", "-C", plan.root, "update-index", "-z", "--index-info")
-	command.Env = gitCommandEnvironment()
-	command.Stdin = indexInput
-	if output, err := command.CombinedOutput(); err != nil {
-		return gitIndexFailure("Git index rename rollback failed: %s", strings.TrimSpace(string(output)))
+	if err := plan.acquireIndexLock(); err != nil {
+		return err
 	}
-	for option, paths := range plan.flags {
-		if len(paths) == 0 {
-			continue
-		}
-		updateOption := map[string]string{"-v": "--assume-unchanged", "-t": "--skip-worktree", "-f": "--fsmonitor-valid"}[option]
-		if updateOption == "" {
-			return gitIndexFailure("Git index flag rollback option is unsupported")
-		}
-		input := bytes.NewBuffer(nil)
-		for _, oldPath := range paths {
-			_, _ = input.WriteString(oldPath)
-			_ = input.WriteByte(0)
-		}
-		flagCommand := exec.CommandContext(rollbackContext, "git", "-C", plan.root, "update-index", updateOption, "-z", "--stdin")
-		flagCommand.Env = gitCommandEnvironment()
-		flagCommand.Stdin = input
-		if output, err := flagCommand.CombinedOutput(); err != nil {
-			return gitIndexFailure("Git index flag rollback failed: %s", strings.TrimSpace(string(output)))
-		}
+	defer plan.close()
+	// Refuse to replace a later external writer's index, even when filesystem
+	// rollback is required after the completed publication.
+	if err := plan.commitIndex(plan.indexOriginal); err != nil {
+		return err
 	}
 	plan.indexUpdated = false
 	return nil

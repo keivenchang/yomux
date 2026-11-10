@@ -11,6 +11,7 @@ from typing import Callable
 from typing import Iterable
 from typing import Mapping
 
+from ..infra.numeric import is_finite_number
 from .families import FAMILY_BY_NAME
 from .families import validate_payload
 from .storage import CoverageEpoch
@@ -328,9 +329,6 @@ def _text(value: object, name: str) -> str:
 
 
 def _number(value: object, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_finite_number(value) or value < 0:
         raise ValueError(f"{name} must be a finite non-negative number")
-    normalized = float(value)
-    if not math.isfinite(normalized) or normalized < 0:
-        raise ValueError(f"{name} must be a finite non-negative number")
-    return normalized
+    return float(value)

@@ -76,15 +76,11 @@ func BuildSnapshotWithPricing(ctx context.Context, database *Database, request S
 	if err := ctx.Err(); err != nil {
 		return StatsSnapshot{}, err
 	}
-	readDatabase := database
-	if database.sqlDB != nil {
-		transaction, err := database.sqlDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-		if err != nil {
-			return StatsSnapshot{}, fmt.Errorf("begin snapshot read: %w", err)
-		}
-		defer transaction.Rollback()
-		readDatabase = &Database{Header: database.Header, reader: transactionReader{tx: transaction}, readMetricsOwner: &database.reads}
+	readDatabase, closeSnapshot, err := database.beginReadSnapshot(ctx)
+	if err != nil {
+		return StatsSnapshot{}, err
 	}
+	defer closeSnapshot()
 
 	generation, err := readDatabase.snapshotGeneration(ctx)
 	if err != nil {

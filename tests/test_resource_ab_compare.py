@@ -179,6 +179,19 @@ def test_a_compaction_with_no_burst_above_background_is_reported_not_guessed():
     assert "no burst" in result["vacuums"][0]["reason"]
 
 
+def test_vacuum_cost_uses_nearest_burst_instead_of_larger_unrelated_checkpoint():
+    samples, total = [], 0
+    for index in range(600):
+        rate = 10_000_000 if 300 <= index < 306 else 50_000_000 if 500 <= index < 506 else 1_000
+        total += rate
+        samples.append(_sample(float(index), write=total))
+    result = ab.vacuum_write_bytes(samples, [_service_vacuum(303.0)], ab.Window("w", 0.0, 600.0))
+    entry = result["vacuums"][0]
+    assert entry["burst_start_pt"] == "T299.0"
+    assert entry["burst_end_pt"] == "T305.0"
+    assert entry["write_bytes"] == 60_000_000
+
+
 def test_arms_at_different_phases_of_their_compaction_cycle_are_refused():
     """Requirement (1), restated: nothing settles, so two phases measure two different points.
 
@@ -341,6 +354,47 @@ def _cycle(rate, commits_rate, *, count=60, start=0.0, step=10.0):
     return samples
 
 
+@pytest.mark.parametrize("candidate_start", [2200.0, 2700.0])
+def test_comparison_qualifies_changes_using_compaction_history_outside_the_windows(candidate_start):
+    history = tuple(_service_vacuum(instant) for instant in (0.0, 1000.0, 2000.0))
+    baseline = ab.Lane("baseline", tuple(_cycle(100.0, 1.0, start=1200.0)), (), history, ())
+    candidate = ab.Lane("candidate", tuple(_cycle(200.0, 2.0, start=candidate_start)), (), history, ())
+    result = ab.compare_lanes(baseline, ab.Window("baseline", 1200.0, 1790.0),
+                              candidate, ab.Window("candidate", candidate_start, candidate_start + 590.0), 60.0)
+    aligned = candidate_start == 2200.0
+    assert result["vacuum_alignment"]["aligned"] is aligned
+    assert bool(result["significant_metrics"]) is aligned
+    assert result["vacuum_alignment"]["baseline_phase"] == pytest.approx(0.2)
+
+
+def test_comparison_with_unknown_compaction_phase_cannot_certify_a_change():
+    baseline = ab.Lane("baseline", tuple(_cycle(100.0, 1.0)), (), (), ())
+    candidate = ab.Lane("candidate", tuple(_cycle(200.0, 2.0)), (), (), ())
+    window = ab.Window("w", 0.0, 590.0)
+    result = ab.compare_lanes(baseline, window, candidate, window, 60.0)
+    assert result["vacuum_alignment"]["aligned"] is False
+    assert result["significant_metrics"] == []
+    assert all(row["significant"] is False for row in result["comparisons"])
+
+
+def test_self_test_still_rejects_statistical_false_positive_without_compaction_history(monkeypatch):
+    samples, committed = [], 0
+    rates = [100, 101, 100, 101, 104, 105, 104, 105]
+    for index in range(7200):
+        samples.append(_sample(float(index), write=index * 100, commits=committed))
+        committed += rates[index // 900]
+    lane = ab.Lane("same condition", tuple(samples), (), (), ())
+    window = ab.Window("w", 0.0, 7200.0)
+    assert ab.stationarity(samples, window)["verdict"]["commits"]["verdict"] == "stationary"
+    result = ab.self_test(lane, window, 60.0)
+    assert result["self_test"]["passed"] is False
+    assert "commits" in result["self_test"]["false_positives"]
+    monkeypatch.setattr(ab, "load_lane", lambda *_args: lane)
+    monkeypatch.setattr(sys, "argv", [ab.__file__, "--baseline-dir", "unused", "--baseline-start", "0",
+                                    "--baseline-end", "7200", "--self-test", "--block-seconds", "60"])
+    assert ab.main() == 1
+
+
 def test_the_three_cycle_counterexample_is_not_called_a_change():
     """`E3-RECOVERY-118`: cycles A and B agree within 2.2%; C sits 17.7-18% below on
     `block_write_bytes` while `wal_cum_commits` holds to 0.1%. That is cycle-to-cycle variation on
@@ -383,8 +437,9 @@ def test_a_metric_with_no_established_reproducibility_floor_refuses_rather_than_
 def test_a_difference_above_the_floor_is_still_detected():
     """The floor must not become a way to miss a real change. 100% is far above 25%."""
 
-    lane_a = ab.Lane("a", tuple(_cycle(700_000.0, 2.2)), (), (), ())
-    lane_b = ab.Lane("b", tuple(_cycle(1_400_000.0, 4.4)), (), (), ())
+    history = (_service_vacuum(-2000.0), _service_vacuum(-1000.0))
+    lane_a = ab.Lane("a", tuple(_cycle(700_000.0, 2.2)), (), history, ())
+    lane_b = ab.Lane("b", tuple(_cycle(1_400_000.0, 4.4)), (), history, ())
     window = ab.Window("w", 0.0, 590.0)
     result = ab.compare_lanes(lane_a, window, lane_b, window, 60.0)
     rows = {row["metric"]: row for row in result["comparisons"]}

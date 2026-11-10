@@ -42,7 +42,7 @@ def _bounded_text(value: Any, maximum: int, *, empty: bool = True, token: bool =
     return isinstance(value, str) and len(value.encode("utf-16-le", errors="surrogatepass")) // 2 <= maximum and (empty or bool(value)) and not any(ord(character) < 32 or ord(character) == 127 for character in value) and (not token or all(character in _TOKEN_CHARACTERS for character in value))
 
 
-def _normal_blocker(blocker: Mapping[str, Any]) -> bool:
+def _normal_receipt(blocker: Mapping[str, Any], statuses: frozenset[str] = _RECEIPT_STATUSES) -> bool:
     event_id = blocker.get("eventId")
     return (
         set(blocker) == _BLOCKER_REQUIRED_FIELDS
@@ -57,25 +57,8 @@ def _normal_blocker(blocker: Mapping[str, Any]) -> bool:
         and _bounded_text(blocker.get("wallTime"), 64)
         and _bounded_text(blocker.get("deliveryOutcome"), 32, empty=False, token=True)
         and (blocker.get("httpStatus") is None or (_safe_integer(blocker.get("httpStatus")) and 100 <= blocker["httpStatus"] <= 599))
-        and blocker.get("status") in _BLOCKING_STATUSES
-    )
-
-
-def _normal_receipt(receipt: Mapping[str, Any]) -> bool:
-    return _normal_blocker(receipt) or (
-        set(receipt) == _BLOCKER_REQUIRED_FIELDS
-        and _identifier(receipt.get("epoch"), 128)
-        and receipt.get("epoch") != "*"
-        and _safe_integer(receipt.get("eventId"))
-        and receipt.get("key") == f"{receipt['epoch']}:{receipt['eventId']}"
-        and _bounded_text(receipt.get("requestId"), 128)
-        and _bounded_text(receipt.get("source"), 240, empty=False)
-        and _bounded_text(receipt.get("route"), 240, empty=False)
-        and _bounded_text(receipt.get("event"), 64, empty=False, token=True)
-        and _bounded_text(receipt.get("wallTime"), 64)
-        and _bounded_text(receipt.get("deliveryOutcome"), 32, empty=False, token=True)
-        and (receipt.get("httpStatus") is None or (_safe_integer(receipt.get("httpStatus")) and 100 <= receipt["httpStatus"] <= 599))
-        and receipt.get("status") == "accepted"
+        and isinstance(blocker.get("status"), str)
+        and blocker["status"] in statuses
     )
 
 
@@ -126,7 +109,7 @@ def _blocker_valid(blocker: Any) -> bool:
         return _storage_failure_blocker(blocker)
     if blocker.get("key") == _OVERFLOW_KEY:
         return _overflow_blocker(blocker)
-    return _normal_blocker(blocker)
+    return _normal_receipt(blocker, _BLOCKING_STATUSES)
 
 
 def validate_browser_receipt_barrier(value: Any) -> dict[str, Any]:
