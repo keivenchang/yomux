@@ -285,6 +285,14 @@ function gitDiffHistorySnapshotIsStale(error) {
     || String(error?.payload?.message_key || error?.payload?.user_message?.key || '') === 'fs.error.gitHistoryStale';
 }
 
+function gitDiffHistoryRepositoryChanged(error) {
+  return error?.code === 'git_repository_changed'
+    || error?.error_code === 'git_repository_changed'
+    || error?.payload?.error_code === 'git_repository_changed'
+    || String(error?.message_key || error?.user_message?.key
+      || error?.payload?.message_key || error?.payload?.user_message?.key || '') === 'fs.error.gitRepositoryChanged';
+}
+
 function gitDiffHistoryPayloadIsValid(payload) {
   return Boolean(payload && typeof payload === 'object'
     && typeof payload.path === 'string'
@@ -507,6 +515,13 @@ async function refreshGitDiffHistory(item, options = {}) {
     return true;
   } catch (error) {
     if (!isCurrent() || error?.name === 'AbortError') return false;
+    if (gitDiffHistoryRepositoryChanged(error) && options.namespaceRetry !== true) {
+      // A ref update can invalidate the frozen Git namespace mid-read. Retry once against the current snapshot.
+      state.nextCursor = '';
+      state.snapshotCursor = '';
+      state.error = null;
+      return refreshGitDiffHistory(item, {refresh: true, namespaceRetry: true});
+    }
     if (append && gitDiffHistorySnapshotIsStale(error)) {
       state.nextCursor = '';
       state.snapshotCursor = '';

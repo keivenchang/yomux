@@ -68,6 +68,7 @@ if str(REPO_ROOT) not in sys.path:
 sys.dont_write_bytecode = True
 
 from tools.product_environment import product_env, product_env_name
+from tools.browser_runtime import BrowserExecutables, BrowserUnavailable, admit_browser_environment, resolve_browser_executables
 from tools.instance_isolation import resolved_product_path
 from tools.instance_isolation import apply_yomux_environment_assignments
 from tools.instance_isolation import clear_yomux_environment_assignments
@@ -144,10 +145,12 @@ EXIT_NOT_CERTIFIABLE = 4
 # quiet host from a loaded one on this box. It runs last because it deliberately loads the host.
 CERTIFICATION_NODE_IDS = (
     "tests/test_browser_finder.py::test_finder_saved_restore_latency_certification",
+    "tests/test_browser_differ_history.py::test_differ_history_latency_certification",
     "tests/test_gate_tmux.py::test_go_activation_certification_meets_highlight_paint_and_echo_budgets",
     "tests/test_gate_interaction.py::test_i3a_certification_drag_preview_holds_the_fixed_ceiling",
     "tests/test_gate_interaction.py::test_i3b_certification_dockview_load_layout_holds_the_fixed_ceiling",
     "tests/test_gate_interaction.py::test_i3c_certification_terminal_navigation_ack_holds_the_fixed_ceiling",
+    "tests/test_gate_interaction.py::test_i3_calibration_probe_moves_under_independent_browser_pressure",
     "tests/test_check_runner.py::test_certification_host_qualifier_refuses_a_genuinely_loaded_host",
 )
 CERTIFICATION_JUNIT_NAME = "certification-junit.xml"
@@ -202,6 +205,8 @@ class BrowserCapabilityDiagnostic:
     component: str
     detail: str
     execution: tuple[dict[str, object], ...] = ()
+    # Native admission carries the exact pair into child lanes; container paths stay scoped there.
+    browser_tools: BrowserExecutables | None = None
 
     def refusal_text(self) -> str:
         return f"BROWSER PREFLIGHT FAILED [{self.component}]: {self.detail}"
@@ -579,41 +584,17 @@ def ambient_browser_capability_preflight() -> BrowserCapabilityDiagnostic:
     if importlib.util.find_spec("selenium") is None:
         return BrowserCapabilityDiagnostic(False, "dependency", "Python package 'selenium' is unavailable")
 
-    browser_candidates = (
-        shutil.which("chrome"),
-        shutil.which("google-chrome"),
-        shutil.which("chromium"),
-        shutil.which("chromium-browser"),
-        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
-    )
-    browser = next(
-        (Path(candidate) for candidate in browser_candidates if candidate is not None and Path(candidate).is_file()),
-        None,
-    )
-    if browser is None:
-        return BrowserCapabilityDiagnostic(False, "browser", "Chrome or Chromium executable is unavailable")
-
-    driver = shutil.which("chromedriver")
-    if driver is None:
-        selenium_cache = Path.home() / ".cache" / "selenium" / "chromedriver"
-        driver = next(
-            (str(path) for path in sorted(selenium_cache.glob("**/chromedriver"), reverse=True) if path.is_file() and os.access(path, os.X_OK)),
-            None,
-        )
-    if driver is None:
-        return BrowserCapabilityDiagnostic(
-            False,
-            "driver",
-            "chromedriver is unavailable on PATH and in the Selenium cache; no download was attempted",
-        )
-    return BrowserCapabilityDiagnostic(True, "ready", f"selenium, {browser}, and {driver}")
+    try:
+        tools = resolve_browser_executables()
+    except BrowserUnavailable as error:
+        return BrowserCapabilityDiagnostic(False, error.component, str(error))
+    return BrowserCapabilityDiagnostic(True, "ready", f"selenium, {tools.chrome}, and {tools.chromedriver}", browser_tools=tools)
 
 
-def browser_capability_preflight() -> BrowserCapabilityDiagnostic:
+def browser_capability_preflight(execution="auto") -> BrowserCapabilityDiagnostic:
     """Resolve prerequisites in the environment which will execute pytest."""
 
-    container_available, _reason = docker_image.container_available(REPO_ROOT)
+    container_available, _reason = docker_image.container_available(REPO_ROOT, execution=execution)
     if not container_available:
         return ambient_browser_capability_preflight()
 
@@ -1601,6 +1582,7 @@ def retire_owned_processes(
     pid: int | None = None,
     deadline_seconds: float = RETIREMENT_DEADLINE_SECONDS,
     expected_containers: bool = False,
+    observe_containers: bool = True,
     identity_fn: Callable[[int | None], str | None] = process_start_key,
     inherited_descendants: dict[int, str | None] | None = None,
 ) -> dict[str, object]:
@@ -1655,11 +1637,14 @@ def retire_owned_processes(
         return live
 
     survivors = proven_survivors()
-    container_probe = running_test_containers()
+    def observe_owned_containers():
+        return running_test_containers() if observe_containers else {"available": False, "containers": [], "reason": "native execution selected"}
+
+    container_probe = observe_owned_containers()
     while (survivors or container_probe["containers"] or unproved(container_probe)) and time.monotonic() - started < deadline_seconds:
         time.sleep(RETIREMENT_POLL_SECONDS)
         survivors = proven_survivors()
-        container_probe = running_test_containers()
+        container_probe = observe_owned_containers()
     joined_seconds = time.monotonic() - started
     docker_unobservable = unproved(container_probe)
     sync_started = time.monotonic()
@@ -1983,6 +1968,7 @@ def run_certification_phase(
     start_clean_state = working_tree_clean_state()
     retirement = retire_owned_processes(
         expected_containers=expected_containers,
+        observe_containers=expected_containers,
         inherited_descendants=inherited_descendants,
     )
     preflight = latency_calibration.certification_host_qualification(evidence_root=evidence_dir) if retirement["retired"] else None
@@ -2078,6 +2064,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--execution", choices=bazel_execution_contract.EXECUTION_MODES, default="auto",
                         help="execution backend; native is diagnostic, qualified-native requires a verified offline bundle")
     args = parser.parse_args(argv)
+    args.execution = bazel_execution_contract.resolve_execution(
+        args.execution, in_container=docker_image.running_inside_container())
     # Capture children inherited from the invoking login shell before this runner creates any work.
     # Some desktop helpers survive `bash` -> Python exec and retain the runner PID as their parent.
     inherited_descendants = {
@@ -2135,6 +2123,16 @@ def main(argv: list[str] | None = None) -> int:
     if not selected and not args.certification_only:
         print("no lanes selected", file=sys.stderr)
         return 2
+    if args.execution == "native" and any(lane.name == "pytest" for lane in selected):
+        fixtures = bazel_execution_contract.xterm_fixture_paths(bazel_execution_contract.diagnostic_xterm_package_root(args.execution))
+        if not all(path.is_file() for path in fixtures.values()):
+            print("CHECK REFUSED: native xterm package fixture is missing; prepare it with tools/native_bundle_acquire.py --prepare-xterm (see docs/DEVELOPMENT.md), or set YOMUX_XTERM_PACKAGE_ROOT", file=sys.stderr)
+            return EXIT_USAGE
+    if args.execution == "native" and any(lane.name == "bazel-go" for lane in selected):
+        missing = [name for name in bazel_execution_contract.NATIVE_AGENT_TOOLS if shutil.which(name) is None]
+        if missing:
+            print("CHECK REFUSED: native agent clients are missing from PATH: " + ", ".join(missing) + "; prepare tools/native_bundle_acquire.py --prepare-agents (see docs/DEVELOPMENT.md)", file=sys.stderr)
+            return EXIT_USAGE
 
     # Development correctness checks run under ambient load; timing certification is explicit.
     certify = args.certification_only or args.certify
@@ -2164,7 +2162,7 @@ def main(argv: list[str] | None = None) -> int:
     # `expected_containers` records whether the lanes will actually route into Docker: only then is
     # an unobservable client at retirement a refusal rather than a clear, because only then could an
     # owned container still be draining.
-    expected_containers = args.execution != "qualified-native" and docker_image.container_available(REPO_ROOT)[0]
+    expected_containers = args.execution == "docker" and docker_image.container_available(REPO_ROOT, execution=args.execution)[0]
 
     started = time.monotonic()
     usage_before = child_usage_snapshot()
@@ -2185,7 +2183,7 @@ def main(argv: list[str] | None = None) -> int:
                 if functional_diagnostics is not None:
                     print("Functional host diagnostics (not admission): " + json.dumps(functional_diagnostics, sort_keys=True), flush=True)
                 if selected_needs_browser(selected) and args.execution != "qualified-native":
-                    browser_capability = browser_capability_preflight()
+                    browser_capability = browser_capability_preflight(args.execution)
                     if not browser_capability.available:
                         print(browser_capability.refusal_text(), file=sys.stderr, flush=True)
                         elapsed = time.monotonic() - started
@@ -2195,6 +2193,16 @@ def main(argv: list[str] | None = None) -> int:
                         write_performance_report(report_path, payload)
                         print(f"Test runtime report: {report_path}", flush=True)
                         return EXIT_LANE_FAILED
+                    if browser_capability.browser_tools is not None:
+                        previous_browser_environment = {name:os.environ.get(name) for name in browser_capability.browser_tools.environment()}
+                        def restore_browser_environment():
+                            for name, value in previous_browser_environment.items():
+                                if value is None:
+                                    os.environ.pop(name, None)
+                                else:
+                                    os.environ[name] = value
+                        native_cleanup.callback(restore_browser_environment)
+                        admit_browser_environment(os.environ, browser_tools=browser_capability.browser_tools)
                 if args.execution == "qualified-native":
                     gate = native_cleanup.enter_context(bazel_execution_contract.bazel_native.NativeGateSession(
                         ["--jobs", bazel_job_count(serial=args.serial, cpu_percent=args.cpu_percent)], bazel_execution_contract))

@@ -17,6 +17,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/keivenchang/yomux/internal/finder"
 	"github.com/keivenchang/yomux/internal/stats"
 )
 
@@ -36,7 +37,9 @@ func (s *server) pageVersion(parent context.Context) pageVersion {
 	git := func(args ...string) (string, error) {
 		ctx, cancel := context.WithTimeout(parent, time.Second)
 		defer cancel()
-		output, _, err := nativeCommandOutput(exec.CommandContext(ctx, "git", append([]string{"-C", s.root}, args...)...), 1024*1024)
+		command := exec.CommandContext(ctx, "git", append([]string{"-C", s.root}, args...)...)
+		command.Env = finder.GitReadEnvironment()
+		output, _, err := nativeCommandOutput(command, 1024*1024)
 		if err != nil {
 			return "", fmt.Errorf("version metadata git %s: %w", args[0], err)
 		}

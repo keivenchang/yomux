@@ -168,6 +168,22 @@ def mac_agent_executables(payload):
     return sources
 
 
+def require_unfrozen_payload(payload):
+    if any((candidate.parent / "manifest.json").exists() for candidate in (payload, payload.resolve())):
+        raise ValueError("refusing to change a frozen native bundle")
+
+
+def prepare_agent_clients(payload, lock_helper, environment=None):
+    require_unfrozen_payload(payload)
+    clients = payload / "agents"
+    clients.mkdir(parents=True, exist_ok=True)
+    copy_source(ROOT / "docker/agent-clients/package.json", clients / "package.json", lock_helper)
+    copy_source(ROOT / "docker/agent-clients/package-lock.json", clients / "package-lock.json", lock_helper)
+    run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--omit=dev"], cwd=clients, environment=environment)
+    # Locked platform packages contain the binaries even with install scripts disabled.
+    return mac_agent_executables(payload)
+
+
 def wheel_documents(wheels, target):
     documents = []
     for wheel in wheels:
@@ -245,8 +261,7 @@ def extract_locked_archive(source, destination, lock_helper, *, strip_components
 
 
 def prepare_xterm_fixture(payload, stage, lock_helper):
-    if (payload.parent / "manifest.json").exists():
-        raise ValueError("refusing to change a frozen native bundle")
+    require_unfrozen_payload(payload)
     if lock_helper is None:
         raise ValueError("xterm package extraction requires a document lock helper")
     fixture = payload / "xterm"
@@ -280,9 +295,10 @@ def prepare_xterm_fixture(payload, stage, lock_helper):
         if not archive.exists():
             archive.write_bytes(content)
         extract_locked_archive(archive, fixture / path, lock_helper, strip_components=1)
+    expected_xterm = contract.xterm_asset_digests(ROOT)
     for name, path in contract.xterm_fixture_paths(fixture / "node_modules").items():
-        if not path.is_file() or contract._sha256_file(path) != contract._sha256_file(ROOT / "static/vendor" / name):
-            raise ValueError("upstream xterm package differs from tracked vendor asset: " + name)
+        if not path.is_file() or contract._sha256_file(path) != expected_xterm[name]:
+            raise ValueError("upstream xterm package differs from pinned vendor asset: " + name)
 
 
 def macho_output(arguments, source):
@@ -560,7 +576,7 @@ def prepare_mac(output, lock_helper):
     go_version, _checksum = docker_image._module_sdk(ROOT)
     if not subprocess.check_output([str(payload / "bin/go"), "version"], text=True).startswith("go version go" + go_version + " "):
         raise ValueError("preparing Go SDK differs from MODULE.bazel")
-    java_home = Path("/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home").resolve(strict=True)
+    java_home = contract.native_bazel_java_home().resolve(strict=True)
     copy_source(java_home, payload / "jdk", lock_helper)
     version = (ROOT / ".bazelversion").read_text().strip()
     bazel = stage / ("bazel-" + version + "-darwin-arm64")
@@ -620,14 +636,7 @@ def prepare_mac(output, lock_helper):
                wheel_documents(archives, target), lock_helper, environment=environment)
     shell_wrapper("mypy", payload, 'exec "$root/bin/python3" -m mypy "$@"')
     prepare_xterm_fixture(payload, stage, lock_helper)
-    clients = payload / "agents"
-    clients.mkdir(exist_ok=True)
-    copy_source(ROOT / "docker/agent-clients/package.json", clients / "package.json", lock_helper)
-    copy_source(ROOT / "docker/agent-clients/package-lock.json", clients / "package-lock.json", lock_helper)
-    run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--omit=dev"], cwd=clients, environment=environment)
-    # Ignoring install scripts leaves native-client launchers as placeholders.
-    # Their integrity-locked platform packages already contain the real binaries.
-    for name, source in mac_agent_executables(payload).items():
+    for name, source in prepare_agent_clients(payload, lock_helper, environment).items():
         executable(name, source, payload)
     chrome_cache = Path.home() / ".cache/selenium/chrome/mac-arm64"
     driver_cache = Path.home() / ".cache/selenium/chromedriver/mac-arm64"
@@ -655,7 +664,7 @@ def prepare_mac(output, lock_helper):
     relocate_macho(payload)
     repository_cache = payload / "bazel-repository-cache"
     repository_cache.mkdir(exist_ok=True)
-    run([payload / "bin/bazel", "--batch", "--bazelrc=/dev/null", "--output_user_root=" + str(stage / "bazel-output"), "fetch",
+    run([payload / "bin/bazel", "--server_javabase=" + str(payload / "jdk"), "--batch", "--bazelrc=/dev/null", "--output_user_root=" + str(stage / "bazel-output"), "fetch",
          "--repository_cache=" + str(repository_cache), "--registry=file://" + str(registry_root), "--lockfile_mode=off",
          "--repo_env=YOMUX_DIAGNOSTIC_PYTHON=" + str(payload / "bin/python3"),
          "--repo_env=GOMODCACHE=" + str(payload / "go-mod-cache"), "--repo_env=GO_REPOSITORY_USE_HOST_MODCACHE=1", "//:go_tests"], cwd=ROOT, environment=environment)
@@ -672,7 +681,12 @@ def main():
     parser.add_argument("--install-wheels", nargs=2, type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--prepare-xterm", nargs=2, type=Path, metavar=("PAYLOAD", "STAGE"),
                         help="prepare the locked upstream xterm package fixture without freezing a bundle")
+    parser.add_argument("--prepare-agents", type=Path, metavar="PAYLOAD",
+                        help="prepare locked macOS agent clients and print their executable paths")
     args = parser.parse_args()
+    if args.prepare_agents:
+        print(json.dumps({name: str(path) for name, path in prepare_agent_clients(args.prepare_agents, args.document_lock_helper).items()}, sort_keys=True))
+        return 0
     if args.prepare_xterm:
         prepare_xterm_fixture(*args.prepare_xterm, args.document_lock_helper)
         return 0

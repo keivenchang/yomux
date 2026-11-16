@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -6,7 +7,6 @@ from pathlib import Path
 import pytest
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import Select
 from tests.helpers.browser_scenarios import assert_terminal_wheel_observation, terminal_wheel_observation
 from tests.helpers.journey_phases import JourneySentinel, STATS_LOGS_PHASES, YOCHAT_PHASES
 from tests.helpers.terminal_navigation import assert_terminal_navigation_ack_semantics
@@ -17,6 +17,7 @@ from tests.helpers.agent_status_fixtures import working_agent_glyph_html as _wor
 from tests.subsystems import browser_harness_lifecycle
 
 from tests.browser_helpers import browser_layout as browser_layout_module
+from tests.browser_helpers.native_keyboard import native_logical_text
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 from tests.browser_helpers.browser_console import assert_only_expected_browser_network_error
@@ -26,6 +27,7 @@ from tests.browser_helpers.browser_console import read_browser_console_log
 from tests.gate_harness import assert_fixture_client_event_demand_claimed
 from tests.gate_harness import claim_fixture_client_event_demand
 from tools.static_build import build_asset
+from tools.browser_runtime import admit_browser_environment
 from yomux_lib.local_services import client as local_service_client_module
 from yomux_lib.server_logs import ServerLogRing
 
@@ -38,7 +40,29 @@ def test_browser_bundle_guard_passes_through_static_build_failure(monkeypatch): 
 def test_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatch): browser_harness_lifecycle.assert_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatch)
 
 
-def test_new_chrome_driver_uses_explicit_container_binaries(monkeypatch, tmp_path):
+@pytest.mark.parametrize('disabled_selected', [False, True])
+def test_select_transaction_emits_input_change_and_skips_disabled_options(browser, disabled_selected):
+    browser.get('about:blank')
+    browser.execute_script("""
+      document.body.innerHTML = '<select id="native-select"><option disabled value="placeholder">Placeholder</option>'
+        + '<optgroup disabled><option value="blocked">Blocked</option></optgroup>'
+        + '<option value="a">A</option><option value="b">B</option></select>';
+      const select = document.getElementById('native-select');
+      select.value = arguments[0] ? 'placeholder' : 'a';
+      window.__nativeSelectChanges = [];
+      for (const type of ['input', 'change']) {
+        select.addEventListener(type, event => window.__nativeSelectChanges.push({type, value: select.value}));
+      }
+    """, disabled_selected)
+    browser_layout_module.select_current_value(browser, '#native-select', 'b')
+    browser_layout_module.select_current_value(browser, '#native-select', 'a')
+    changes = browser.execute_script('return window.__nativeSelectChanges')
+    assert changes == [{'type': event, 'value': value}
+                       for value in ['b', 'a'] for event in ['input', 'change']], changes
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_new_chrome_driver_uses_explicit_container_binaries(monkeypatch, tmp_path, replacement):
     chrome_path = tmp_path / "chromium"
     driver_path = tmp_path / "chromedriver"
     chrome_path.write_text("", encoding="utf-8")
@@ -63,6 +87,14 @@ def test_new_chrome_driver_uses_explicit_container_binaries(monkeypatch, tmp_pat
     monkeypatch.setattr(browser_layout_module.webdriver, "Chrome", fake_chrome)
     monkeypatch.setattr(browser_layout_module, "register_browser_new_document_script", lambda *_args, **_kwargs: None)
     driver = browser_layout_module.new_chrome_driver()
+    if replacement:
+        assert admit_browser_environment(os.environ) is not None
+        monkeypatch.setenv('HOME', str(tmp_path / 'private-home'))
+        monkeypatch.setattr(browser_layout_module.WebDriverLease, 'from_driver', lambda _driver: object())
+        monkeypatch.setattr(browser_layout_module, 'retire_all', lambda _leases: {'proven_gone':True})
+        lease = browser_layout_module._BrowserDriverLease(driver)
+        lease.replace_after_invalid_session()
+        driver = lease._driver
 
     assert driver.current_window_handle == "window"
     assert captured["binary"] == str(chrome_path)
@@ -3755,7 +3787,7 @@ def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(b
       <span id="attention-label" class="status-indicator tabber-agent-status status-indicator--label agent-status-attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">&lt;15 sec ago</span>
     """, extra_css=f"""
       :root {{ --pulse-duration: 1.8s; --pulse-easing: ease-in-out; --bad: {ui_pin('paneRingAttention')}; --danger-text: {ui_pin('paneRingAttention')}; --text: #dbe2ef; --muted: #8590a6; }}
-      body {{ display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }}
+      body {{ display: grid; grid-template-columns: repeat(3, max-content); align-content: start; align-items: start; justify-items: start; gap: 64px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }}
     """),
     )
     metrics = browser.execute_script(
@@ -3874,12 +3906,18 @@ def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(b
       }));
     """
     dpr = browser.execute_script("return window.devicePixelRatio || 1") or 1
-    browser.execute_script(sample_rects, all_animation_ids, 1)
+    all_rects = browser.execute_script(sample_rects, all_animation_ids, 1)
     rest_rects = browser.execute_script(sample_rects, list(visual_ids), 1)
     rest_screenshot = browser_screenshot_rgb(browser)
+    viewport = {'width': rest_screenshot.width / dpr, 'height': rest_screenshot.height / dpr}
+    for dot_id, rect in all_rects.items():
+        assert rect['left'] >= 24 and rect['top'] >= 24, (dot_id, rect, viewport)
+        assert rect['right'] + 24 <= viewport['width'] and rect['bottom'] + 24 <= viewport['height'], (dot_id, rect, viewport)
     browser.execute_script(sample_rects, all_animation_ids, 0.5)
     peak_rects = browser.execute_script(sample_rects, list(visual_ids), 0.5)
     peak_screenshot = browser_screenshot_rgb(browser)
+    rest_screenshot.save(tmp_path / 'status-ball-rest.png')
+    peak_screenshot.save(tmp_path / 'status-ball-peak.png')
     visual_scores = {}
     for dot_id, tone in visual_ids.items():
         rest_score = _status_ball_tone_score(rest_screenshot, dpr, rest_rects[dot_id], peak_rects[dot_id], tone)
@@ -3889,7 +3927,24 @@ def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(b
         count_delta = 2 if dot_id == "working-dot" else 3
         assert peak_score["energy"] > rest_score["energy"] * energy_ratio, visual_scores
         if dot_id in ("working-dot", "cooldown-dot"):
-            assert peak_score["count"] == rest_score["count"], visual_scores
+            # Faint antialiased edge pixels can round into the background at rest. Opacity-only
+            # animation preserves the compositing equation, not the count of nonzero pixels.
+            opacity_ratio = float(metrics[dot_id]['rest']['opacity']) / float(metrics[dot_id]['peak']['opacity'])
+            left, top, right, bottom = rest_score['bounds']
+            channel_errors = {}
+            for y in range(top, bottom, rest_score['stride']):
+                for x in range(left, right, rest_score['stride']):
+                    rest_pixel = rest_screenshot.getpixel((x, y))
+                    peak_pixel = peak_screenshot.getpixel((x, y))
+                    for rest_channel, peak_channel in zip(rest_pixel[:3], peak_pixel[:3]):
+                        expected_channel = 17 + (peak_channel - 17) * opacity_ratio
+                        error = abs(rest_channel - expected_channel)
+                        bucket = round(error, 2)
+                        channel_errors[bucket] = channel_errors.get(bucket, 0) + 1
+            visual_scores[dot_id]['compositing'] = {'opacityRatio': opacity_ratio, 'channelErrors': channel_errors}
+            (tmp_path / 'status-ball-compositing.json').write_text(
+                json.dumps({'rects': all_rects, 'viewport': viewport, 'scores': visual_scores}, sort_keys=True), encoding='utf-8')
+            assert max(channel_errors) <= 2, visual_scores
         else:
             assert peak_score["count"] > rest_score["count"] + count_delta, visual_scores
     working_energy_delta = visual_scores["working-dot"]["peak"]["energy"] - visual_scores["working-dot"]["rest"]["energy"]
@@ -8397,6 +8452,26 @@ def test_hovered_toast_pauses_countdown(browser, tmp_path):
     assert result == {"held": True, "paused": True, "heldAfterPointerLeave": True, "removed": True}, result
 
 
+def test_update_failure_toast_shows_the_complete_build_reason(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    result = browser.execute_script(
+        """
+        const buildError = "Auto-update can't use this branch because it has a local commit. Run this instance from a clean 0.10.14 checkout to update.";
+        applyUpdateAvailable({
+          available: true,
+          notify: true,
+          target: '0.10.14',
+          build_state: 'failed',
+          build_error: buildError,
+        });
+        const toast = document.querySelector('.toast-update');
+        const lines = [...(toast?.querySelectorAll('.toast-line') || [])].map(line => line.textContent);
+        return {lines, buildError};
+        """
+    )
+    assert result["lines"][1].endswith(result["buildError"]), result
+
+
 def test_agent_attention_toast_renders_its_four_hour_countdown_bar(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path)
     result = browser.execute_script(
@@ -9074,11 +9149,24 @@ def test_tabber_modes_share_flat_rows_and_keep_header_toolbar_controls(browser, 
         "?sessions=__tabber__,1&layout=row@34(left,right)&tabs=left:__tabber__;right:1",
         sessions=["1"], settings={"general": {"default_tabber_mode": "normal"}},
         transcript_sessions={"1": {
+            "session_identity": "authored-session-1", "label": "authored-label",
+            "selected_pane": {"target": "1:0.0", "current_path": "/home/test/yolomux.dev", "pane_id": "%authored"},
             "panes": [{"window": "0", "window_name": "codex", "command": "codex", "window_active": True},
                 {"window": "1", "window_name": "bash", "command": "bash", "window_active": False}],
             "window_metadata": [{"window_index": 0, "description": "First conversation"},
                 {"window_index": 1, "description": "Second conversation"}],
         }})
+    metadata_rows = browser.execute_async_script("""
+      const done = arguments[0];
+      Promise.all(['/api/session-metadata', '/api/activity'].map(async path => {
+        const payload = await apiFetchJson(path), row = payload.sessions['1'];
+        return {identity: row.session_identity, label: row.label, selected: row.selected_pane?.pane_id,
+          descriptions: row.window_metadata?.map(window => window.description),
+          generationMatches: row.work_graph.generation === payload.metadata_identity.generation};
+      })).then(done).catch(error => done({error: String(error)}));
+    """)
+    assert metadata_rows == [{"identity": "authored-session-1", "label": "authored-label", "selected": "%authored",
+        "descriptions": ["First conversation", "Second conversation"], "generationMatches": True}] * 2
     browser.execute_script("""
       document.body.classList.toggle('theme-light', arguments[0] === 'light');
       document.body.classList.toggle('theme-dark', arguments[0] === 'dark');
@@ -9147,6 +9235,7 @@ def test_tabber_modes_share_flat_rows_and_keep_header_toolbar_controls(browser, 
             assert metrics["sortOptions"] == ["newest", "az", "za", "oldest"], metrics
             assert metrics["selectedSort"] == "newest", metrics
         assert len(metrics["rows"]) == 2, metrics
+        assert [row["description"] for row in metrics["rows"]] == ["First conversation", "Second conversation"], metrics
         for row in metrics["rows"]:
             assert row["display"] == "grid" and row["radius"] != "0px", metrics
             assert row["descriptionBelow"] and row["dateFits"], metrics
@@ -11826,6 +11915,8 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
             open: root?.classList.contains('open') || false,
             expanded: button?.getAttribute('aria-expanded') || '',
             visible: Boolean(popover && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '0') > 0.9 && rect.width > 20 && rect.height > 20),
+            geometry: rect?.toJSON(),
+            paint: style && {visibility: style.visibility, opacity: style.opacity, display: style.display},
             labels: Array.from(popover?.querySelectorAll(':scope > .app-menu-submenu-wrap > .app-menu-command') || []).map(node => node.textContent.replace(/\\s+/g, ' ').trim()),
             errors: jsDebugFailureEvents('error'),
             rejections: jsDebugFailureEvents('rejection'),
@@ -12639,9 +12730,10 @@ def test_preferences_cursor_swatches_follow_current_theme(browser, tmp_path):
           return Object.entries(expected).every(([name,color])=>paint(name)===color);
         """, mode)
 
-        WebDriverWait(browser, 5).until(lambda driver: driver.find_element(
-            By.CSS_SELECTOR, '.preferences-cursor-example.line'
-        ).is_displayed())
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("""
+          const sample = document.querySelector('.preferences-cursor-example.line');
+          return sample?.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}) === true;
+        """))
         examples = browser.execute_script("""
           const control=path=>document.querySelector(`[data-setting-path="appearance.${path}"]`);
           const styles=[...document.querySelectorAll('[data-setting-path="appearance.editor_cursor_style"]')];
@@ -12689,10 +12781,10 @@ def test_editor_color_scheme_follows_global_appearance_after_scheme_choice(brows
       },error=>done({error:String(error)}));
     """)
     browser.find_element(By.CSS_SELECTOR, '[data-preferences-search]').send_keys('c')
-    scheme_control = WebDriverWait(browser, 10).until(lambda driver: driver.find_element(
+    WebDriverWait(browser, 10).until(lambda driver: driver.find_element(
         By.CSS_SELECTOR, '[data-setting-path="appearance.editor_dark_color_scheme"]'
     ))
-    Select(scheme_control).select_by_value('dracula')
+    select_current_value(browser, '[data-setting-path="appearance.editor_dark_color_scheme"]', 'dracula')
     WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("""
       return initialSetting('appearance.editor_dark_color_scheme')==='dracula'
         && activeEditorScheme().id==='dracula' && fileEditorThemeMode==='inherit';
@@ -17633,3 +17725,82 @@ def test_tabber_native_date_choices_survive_url_reload_after_migration(browser, 
         browser.refresh()
         wait.until(lambda driver: driver.execute_script("return typeof fileExplorerTreeDateModeForView === 'function' && document.querySelector('#panel-__tabber__ [data-file-explorer-tree-dates]')"))
         assert browser.execute_script("return fileExplorerTreeDateModeForView('tabber')") == choice
+
+
+def test_tabber_description_native_input_waits_for_opening_selection(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path,
+        '?sessions=5&layout=left&tabs=left:5', sessions=['5'], available_agents=['term'])
+    wait_for_dockview(browser)
+    expected = 'Window one retained description'
+    prefix = 'Window one '
+    browser.execute_script('''
+      window.__descriptionOriginalFetch = apiFetchJson;
+      window.__descriptionRequests = [];
+      transcriptMetadataState.payload.sessions['5'].window_metadata = [
+        {window_index:1, window_id:'@51', description:'Existing description'}];
+      apiFetchJson = async (...args) => {
+        if (args[0] !== '/api/tabber-description') return window.__descriptionOriginalFetch(...args);
+        const body = JSON.parse(args[1].body);
+        window.__descriptionRequests.push(body);
+        return {window_id:body.window_id, description:body.description};
+      };
+    ''')
+
+    def open_with_held_selection():
+        count = browser.execute_script('''
+          const original = window.setTimeout;
+          window.__descriptionOpening = [];
+          window.setTimeout = (callback, delay, ...args) => {
+            if (delay === 0 && document.querySelector('.session-rename-input')) {
+              window.__descriptionOpening.push(() => callback(...args));
+              return 0;
+            }
+            return original(callback, delay, ...args);
+          };
+          try { showSessionRenameDialog('5', 1, '@51'); }
+          finally { window.setTimeout = original; }
+          return window.__descriptionOpening.length;
+        ''')
+        assert count == 1
+        return browser.find_element('css selector', '.session-rename-input')
+
+    def input_ready(driver, field):
+        return driver.execute_script(
+            'return arguments[0].isConnected && document.activeElement === arguments[0]', field)
+
+    try:
+        # The old visible-only precondition admits typing before opening select().
+        value = open_with_held_selection()
+        value.clear()
+        value.click()
+        native_logical_text(browser, prefix)
+        browser.execute_script('window.__descriptionOpening.shift()();')
+        native_logical_text(browser, expected[len(prefix):])
+        assert value.get_attribute('value') == expected[len(prefix):]
+        browser.execute_script('closeSessionRenameDialog();')
+
+        value = open_with_held_selection()
+        assert not input_ready(browser, value)
+        assert value.get_attribute('value') == 'Existing description'
+        browser.execute_script('window.__descriptionOpening.shift()();')
+        WebDriverWait(browser, 5).until(lambda driver: input_ready(driver, value))
+        value.clear()
+        value.click()
+        native_logical_text(browser, expected)
+        assert value.get_attribute('value') == expected
+        assert browser.execute_script(
+            'return arguments[0].selectionStart === arguments[1] && arguments[0].selectionEnd === arguments[1]',
+            value, len(expected))
+        browser.find_element('css selector', '.session-rename-submit').click()
+        WebDriverWait(browser, 5).until(lambda driver: not driver.find_elements('css selector', '.session-rename-dialog'))
+        assert browser.execute_script('return window.__descriptionRequests') == [
+            {'session':'5', 'window':'1', 'window_id':'@51', 'description':expected}]
+        assert browser.execute_script("return tabberWindowDescription('5', 1)") == expected
+    finally:
+        browser.execute_script('''
+          closeSessionRenameDialog();
+          apiFetchJson = window.__descriptionOriginalFetch;
+          delete window.__descriptionOriginalFetch;
+          delete window.__descriptionRequests;
+          delete window.__descriptionOpening;
+        ''')

@@ -20,6 +20,7 @@ import (
 
 	"github.com/keivenchang/yomux/internal/capabilities"
 	"github.com/keivenchang/yomux/internal/testsupport"
+	"github.com/keivenchang/yomux/internal/tmuxcmd"
 )
 
 func nativePageFixtureServer(t *testing.T) *server {
@@ -53,6 +54,22 @@ func nativePageBootstrap(t *testing.T, body []byte) map[string]any {
 		t.Fatal(err)
 	}
 	return value
+}
+
+func TestNativeHomeEmptyRosterArrays(t *testing.T) {
+	s := nativePageFixtureServer(t)
+	for _, sessions := range [][]string{nil, {}} {
+		body, err := s.renderNativeHome(httptest.NewRequest(http.MethodGet, "/", nil), authUser{username: "guest", role: "readonly"}, goTmuxTopology{sessions: sessions})
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := nativePageBootstrap(t, body)
+		for _, key := range []string{"sessions", "recentSessions"} {
+			if values, ok := payload[key].([]any); !ok || len(values) != 0 {
+				t.Errorf("%s = %#v for roster %#v; want empty JSON array", key, payload[key], sessions)
+			}
+		}
+	}
 }
 
 func TestNativePagesRenderWithoutPython(t *testing.T) {
@@ -277,6 +294,8 @@ func checkNativeSessionLaunchPath(t *testing.T, agent, terminal string, extra, f
 	if err != nil {
 		t.Fatal(err)
 	}
+	shellPath := testsupport.ToolPath(t, "sh")
+	entryHeader := testsupport.ShellScript(t, "")
 	s := nativePageFixtureServer(t)
 	t.Setenv("SHELL", "/bin/sh")
 	socket := filepath.Join(testsupport.ShortTempDir(t), "t.sock")
@@ -286,7 +305,6 @@ func checkNativeSessionLaunchPath(t *testing.T, agent, terminal string, extra, f
 		local = filepath.Join(os.Getenv("HOME"), "extra tools")
 		t.Setenv("YOMUX_EXTRA_PATH", local)
 	}
-	s.dangerouslyYolo = full
 	executable := agent
 	if agent == "term" {
 		executable = terminal
@@ -294,14 +312,16 @@ func checkNativeSessionLaunchPath(t *testing.T, agent, terminal string, extra, f
 	if err := os.MkdirAll(local, 0700); err != nil {
 		t.Fatal(err)
 	}
-	source := "#!/bin/sh\nexec native-session-child \"$@\"\n"
-	helper := "#!/bin/sh\n"
+	helper := "printf '%s|%s\\n' ready \"$*\" > " + shellQuote(marker) + "\nexec /bin/sleep 60\n"
+	bodyPath := filepath.Join(local, "native-session-body")
+	source := entryHeader + "exec native-session-child " + shellQuote(bodyPath) + " \"$@\"\n"
 	if extra {
-		source = "#!/usr/bin/env native-session-child\n"
-		helper += "shift\n"
+		source = "#!/usr/bin/env native-session-child\n" + helper
+	} else if err := os.WriteFile(bodyPath, []byte(helper), 0600); err != nil {
+		t.Fatal(err)
 	}
-	helper += "printf '%s|%s\\n' ready \"$*\" > " + shellQuote(marker) + "\nexec /bin/sleep 60\n"
-	if err := os.WriteFile(filepath.Join(local, "native-session-child"), []byte(helper), 0700); err != nil {
+	// PATH must reach the child interpreter without executing a second new script.
+	if err := os.Symlink(shellPath, filepath.Join(local, "native-session-child")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(local, executable), []byte(source), 0700); err != nil {
@@ -309,7 +329,7 @@ func checkNativeSessionLaunchPath(t *testing.T, agent, terminal string, extra, f
 	}
 	t.Setenv("YOMUX_TMUX_SOCKET", socket)
 	s.tmuxCommandContextFn = func(ctx context.Context, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, tmuxPath, append([]string{"-S", socket, "-f", "/dev/null"}, args...)...)
+		return tmuxcmd.CommandPath(ctx, tmuxPath, append([]string{"-S", socket, "-f", "/dev/null"}, args...)...)
 	}
 	if output, err := s.tmuxCommand("new-session", "-d", "-s", "hold", "/bin/sleep 60").CombinedOutput(); err != nil {
 		t.Fatalf("fixture tmux: %v %s", err, output)
@@ -324,15 +344,15 @@ func checkNativeSessionLaunchPath(t *testing.T, agent, terminal string, extra, f
 	})
 	t.Cleanup(s.shutdown)
 	response := httptest.NewRecorder()
-	s.createSession(response, httptest.NewRequest(http.MethodPost, "/api/create-session?agent="+agent+"&terminal="+terminal, nil))
+	query := "/api/create-session?agent=" + agent + "&terminal=" + terminal
+	if full {
+		query += "&dangerously_yolo=1"
+	}
+	s.createSession(response, httptest.NewRequest(http.MethodPost, query, nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("create: %d %s", response.Code, response.Body.String())
 	}
-	timer := time.NewTimer(2 * time.Second)
-	defer timer.Stop()
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
+	waitFixtureCondition(t, "discovered agent entrypoint", 2*time.Second, func() bool {
 		if data, err := os.ReadFile(marker); err == nil && strings.HasPrefix(string(data), "ready|") && strings.HasSuffix(string(data), "\n") {
 			expected := "ready|"
 			if full {
@@ -347,17 +367,15 @@ func checkNativeSessionLaunchPath(t *testing.T, agent, terminal string, extra, f
 			if string(data) != expected {
 				t.Fatalf("launch arguments = %q, want %q", data, expected)
 			}
-			return
+			return true
 		}
-		select {
-		case <-ticker.C:
-		case <-timer.C:
-			pane, paneErr := s.tmuxCommand("capture-pane", "-p", "-t", "=1:").CombinedOutput()
-			shell, shellErr := s.tmuxCommand("show-options", "-g", "default-shell").CombinedOutput()
-			environment, environmentErr := s.tmuxCommand("show-environment", "-t", "=1:", "PATH").CombinedOutput()
-			t.Fatalf("discovered command never executed inside tmux: %s; pane=%s (%v), shell=%s (%v), environment=%s (%v)", response.Body.String(), pane, paneErr, shell, shellErr, environment, environmentErr)
-		}
-	}
+		return false
+	}, func() string {
+		pane, paneErr := s.tmuxCommand("capture-pane", "-p", "-t", "=1:").CombinedOutput()
+		process, processErr := s.tmuxCommand("display-message", "-p", "-t", "=1:", "#{pane_pid}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}").CombinedOutput()
+		environment, environmentErr := s.tmuxCommand("show-environment", "-t", "=1:", "PATH").CombinedOutput()
+		return fmt.Sprintf("response=%s pane=%s (%v), process=%s (%v), environment=%s (%v)", response.Body.String(), pane, paneErr, process, processErr, environment, environmentErr)
+	})
 }
 
 func TestNativeAuthProbeRejectsOversizedDiagnosticOutput(t *testing.T) {

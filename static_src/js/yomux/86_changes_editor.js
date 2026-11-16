@@ -217,6 +217,14 @@ function fileEditorToolbarHtml(item) {
                   ariaLabel: t('editor.popoutPreview'),
                   hidden: true,
                 }),
+                toolbarButtonHtml({
+                  className: 'file-editor-popout-editor-panel',
+                  action: 'editor-popout-editor',
+                  html: '<span class="file-editor-icon file-editor-icon-popout-preview" aria-hidden="true"></span>',
+                  title: t('editor.popoutEditor'),
+                  ariaLabel: t('editor.popoutEditor'),
+                  hidden: true,
+                }),
               ].join(''),
             },
             {
@@ -310,6 +318,7 @@ function relocalizeFileEditorPanel(panel, item) {
   setFileEditorLocalizedLabel(panel, '.file-editor-mode-control-panel', 'editor.mode.aria', {title: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-preview-font-panel', 'common.previewFontSize', {title: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-popout-preview-panel', 'editor.popoutPreview');
+  setFileEditorLocalizedLabel(panel, '.file-editor-popout-editor-panel', 'editor.popoutEditor');
   setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'editor.reloadFromDisk');
   setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'common.reload', {text: true, title: false, aria: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-upload-panel', 'pref.section.uploads');
@@ -426,6 +435,10 @@ function createFileEditorPanel(item) {
         setFileEditorViewMode(path, 'edit', item);
         renderFileEditorPanel(panel, item);
       }
+    },
+    'editor-popout-editor': () => {
+      if (fileEditorPanelState(panel)?.historical === true) return;
+      openLivePanePopout(item);
     },
     'editor-theme': () => cycleEditorThemeMode({includeVanilla: fileEditorPanelState(panel)?.kind === 'text'}),
   }, {skipDisabled: false});

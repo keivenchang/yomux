@@ -46,8 +46,8 @@ function settingPatch(path, value) {
   return root;
 }
 
-function codexModelDefaultEffort(model) {
-  const metadata = typeof settingChoiceMetadata === 'function' ? settingChoiceMetadata('yoagent.codex_model') : {};
+function codexModelDefaultEffort(model, modelPath = 'yoagent.codex_model') {
+  const metadata = typeof settingChoiceMetadata === 'function' ? settingChoiceMetadata(modelPath) : {};
   const entry = metadata[String(model || '')] || {};
   const effort = String(entry.default_effort || '').trim();
   return effort || '';
@@ -84,9 +84,10 @@ function settingPatchForPath(path, value) {
       ui_font_size: size,
     };
   }
-  if (path === 'yoagent.codex_model') {
-    const defaultEffort = codexModelDefaultEffort(value);
-    if (defaultEffort) patch.yoagent = {...(patch.yoagent || {}), codex_effort: defaultEffort};
+  if (path === 'yoagent.codex_model' || path === 'tabber.codex_model') {
+    const section = path.split('.')[0];
+    const defaultEffort = codexModelDefaultEffort(value, path);
+    if (defaultEffort) patch[section] = {...(patch[section] || {}), codex_effort: defaultEffort};
   }
   return patch;
 }

@@ -1,6 +1,7 @@
 package testsupport
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,9 +43,8 @@ func resolveRunfile(name string) (string, error) {
 	return files.Rlocation(name)
 }
 
-// RepoRoot resolves a declared physical tree. Python imports require a directory;
-// Bazel materializes precisely that consumer's inputs instead of inferring siblings
-// from the physical location of an arbitrary runfile marker.
+// RepoRoot resolves the consumer's declared tree. Bazel may expose its files as
+// symlinks, even when the declared output artifact contains regular files.
 func RepoRoot(t testing.TB) string {
 	t.Helper()
 	if inBazel() {
@@ -76,6 +76,57 @@ func RepoPath(t testing.TB, relative string) string {
 		t.Fatalf("repository data path %q is unavailable: %v", relative, err)
 	}
 	return path
+}
+
+// MaterializeRepoRoot gives strict runtime readers private regular files for the
+// selected declared inputs. Selecting subtrees also avoids copying the checkout
+// when the same fixture runs outside Bazel.
+func MaterializeRepoRoot(t testing.TB, relatives ...string) string {
+	t.Helper()
+	if len(relatives) == 0 {
+		t.Fatal("materialized repository fixture requires explicit inputs")
+	}
+	root := t.TempDir()
+	for _, relative := range relatives {
+		source := RepoPath(t, relative)
+		if err := materializeRuntimeTree(source, filepath.Join(root, relative)); err != nil {
+			t.Fatalf("materialize declared repository input %q: %v", relative, err)
+		}
+	}
+	return root
+}
+
+func materializeRuntimeTree(source, destination string) error {
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destination, relative)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		// Runfile aliases name declared leaf artifacts. Do not follow directory
+		// aliases into undeclared trees or copy special files that could block.
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("runtime input %q is not a regular file", path)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(target, content, 0o600|info.Mode().Perm()&0o111)
+	})
 }
 
 // ExternalBinary is mandatory for the dedicated parity targets. A missing input

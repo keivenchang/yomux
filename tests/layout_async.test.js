@@ -53,6 +53,41 @@ test('Differ retains committed deletion rows while Finder suppresses disk tombst
   }
 });
 
+test('filesystem removal retains Differ and Git history trees including directory wrappers', () => {
+  for (const removed of ['/repo/deleted.py', '/repo/dir']) {
+    const document = new TestElement('surface-root');
+    const surfaces = ['file-explorer-tree-panel', 'file-explorer-changes-panel', 'git-diff-file-tree'].map(className => {
+      const surface = new TestElement();
+      surface.className = className;
+      document.appendChild(surface);
+      for (const path of ['/repo/deleted.py', '/repo/dir', '/repo/dir/nested.py', '/repo/keep.py']) {
+        const row = new TestElement();
+        row.className = 'file-tree-row';
+        row.dataset.path = path;
+        // Finder may share the open-change action; that does not make it a historical tree.
+        row.dataset.openChangeFile = path;
+        surface.appendChild(row);
+      }
+      const wrapper = new TestElement();
+      wrapper.className = 'file-tree-children';
+      wrapper.dataset.parent = '/repo/dir';
+      surface.appendChild(wrapper);
+      return surface;
+    });
+    const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+    const context = vm.createContext({document, normalizeDirectoryPath: value => value,
+      pathIsInsideDirectory: (path, root) => path.startsWith(`${root}/`)});
+    vm.runInContext(source.slice(source.indexOf('function fileTreeRowIsDiffer('), source.indexOf('const fileTreeMetadataRefreshState'))
+      + source.slice(source.indexOf('function removeFileTreePathsImmediately('), source.indexOf('function fileExplorerFsResourceHasValue(')), context);
+    context.removeFileTreePathsImmediately([removed]);
+    const finderPaths = [...surfaces[0].children].map(node => node.dataset.path || node.dataset.parent);
+    assert.deepEqual(finderPaths, removed.endsWith('.py')
+      ? ['/repo/dir', '/repo/dir/nested.py', '/repo/keep.py', '/repo/dir']
+      : ['/repo/deleted.py', '/repo/keep.py']);
+    for (const surface of surfaces.slice(1)) assert.equal(surface.children.length, 5, surface.className);
+  }
+});
+
 function installSessionFilesPreparedRows(context) {
   for (const [path, names] of [
     ['40_file_explorer_files.js', ['sessionFileAbsolutePath', 'indexSessionFileIntoPathMap', 'indexSessionFilesByPath']],
@@ -2211,7 +2246,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       pathIsInsideDirectory: (path, root) => path.startsWith(`${root}/`),
       document: {querySelectorAll: selector => tree.querySelectorAll(selector)},
     });
-    vm.runInContext(source.slice(source.indexOf('function removeFileTreePathsImmediately('), source.indexOf('function fileExplorerFsResourceHasValue(')), context);
+    vm.runInContext(source.slice(source.indexOf('function fileTreeRowIsDiffer('), source.indexOf('const fileTreeMetadataRefreshState'))
+      + source.slice(source.indexOf('function removeFileTreePathsImmediately('), source.indexOf('function fileExplorerFsResourceHasValue(')), context);
     let removedNext = false;
     const rendering = api.renderTreeChildrenForTest(tree, '/repo', [{name: 'c', kind: 'file'}], 0, [], {
       yieldToInput: true, afterSlice() {
@@ -2298,7 +2334,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       document: {querySelectorAll: selector => container.querySelectorAll(selector)},
     };
     vm.createContext(context);
-    vm.runInContext(source.slice(source.indexOf('function removeFileTreePathsImmediately('), source.indexOf('\nfunction fileExplorerFsResourceHasValue(')), context);
+    vm.runInContext(source.slice(source.indexOf('function fileTreeRowIsDiffer('), source.indexOf('const fileTreeMetadataRefreshState'))
+      + source.slice(source.indexOf('function removeFileTreePathsImmediately('), source.indexOf('\nfunction fileExplorerFsResourceHasValue(')), context);
     let wrapper = null;
     const rendering = api.renderTreeChildrenForTest(container, '/repo', [{name: 'dir', kind: 'dir'}, {name: 'survivor', kind: 'file'}], 0, [['/repo/dir', entries]], {autoExpand: true, yieldToInput: true, afterSlice() {
       if (!wrapper) {
@@ -3196,11 +3233,15 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
   });
 
   await testAsync('API transport retirement is request-scoped and keeps live failures blocking', async () => assert.deepStrictEqual(canonical(await apiTransportRetirementScenario()), {retired: {error: 'Failed to fetch', outcome: 'retired', reason: 'page_beforeunload', failures: 0, backendFailures: 0, consoleErrors: 0}, lateRetired: {error: 'Failed to fetch', outcome: 'retired', reason: 'page_beforeunload', failures: 0, backendFailures: 0, consoleErrors: 0}, resumedLive: {error: 'Failed to fetch', outcome: 'failed', failures: 1, backendFailures: 1, consoleErrors: 0}, raced: {error: 'Failed to fetch', outcome: 'retired', failures: 0}, live: {error: 'Failed to fetch', type: 'api', endpoint: '/api/auto-approve', outcome: 'failed', backendFailures: 1}}));
-  await testAsync('a host-scoped terminal close still posts /api/event and checks /api/tmux-session-exists', async () => {
+  await testAsync('a host-scoped terminal close posts the event batch and checks /api/tmux-session-exists', async () => {
     const api = loadYomux('', ['1']);
     const requests = [];
     api.setFetchForTest((url, options = {}) => {
-      requests.push({url: String(url), method: String(options.method || 'GET')});
+      requests.push({url: String(url), method: String(options.method || 'GET'), body: options.body});
+      if (new URL(String(url), 'http://fixture').pathname === '/api/events') {
+        return Promise.resolve(jsonResponse({ok: true, events: JSON.parse(options.body).events,
+          rejected_rows: [], event_log_refresh_required: false}));
+      }
       return Promise.resolve(jsonResponse({exists: true}));
     });
     api.setShowToastForTest(() => {});
@@ -3213,7 +3254,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     // consult the tmux roster -- proving the fix gates on scope, not disables the feature.
     socket.onclose?.({target: socket, code: 1006, wasClean: false});
     await flushAsyncWork();
-    assert.equal(requests.some(request => request.url.includes('/api/event') && request.method === 'POST'), true, 'a host viewer posts terminal_disconnected to /api/event');
+    const eventRequests = requests.filter(request => new URL(request.url, 'http://fixture').pathname === '/api/events' && request.method === 'POST');
+    assert.equal(eventRequests.length, 1, 'a host viewer posts terminal_disconnected through the batch route');
+    assert.deepStrictEqual(JSON.parse(eventRequests[0].body), {events: [{session: '1', type: 'terminal_disconnected', message: 'terminal disconnected from 1', details: {}}]});
     assert.equal(requests.some(request => request.url.includes('/api/tmux-session-exists')), true, 'a host viewer consults the tmux roster to decide reconnect vs prune');
   });
 
@@ -9373,6 +9416,40 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.ok(demand.channels.includes('transcripts'), `Tabber receives transcript metadata updates: ${JSON.stringify(demand)}`);
   });
 
+  for (const subview of ['terminal', 'transcript', 'summary', 'events']) {
+    test(`terminal ${subview} subview demands shared metadata for Info Bar and window controls`, () => {
+      const api = loadYomux('?sessions=1&layout=left&tabs=left:1', ['1']);
+      api.activateTerminalDetailTabForTest('1', subview);
+      const demand = api.clientEventDemandDescriptorForTest();
+      assert.deepStrictEqual(canonical(demand.active_panes), ['1']);
+      assert.ok(demand.channels.includes('transcripts'), JSON.stringify(demand));
+      api.setDocumentVisibilityForTest('hidden');
+      assert.equal(api.clientEventDemandDescriptorForTest().channels.includes('transcripts'), false);
+    });
+  }
+
+  for (const windowView of [false, true]) {
+    test(`inactive ${windowView ? 'window-view' : 'source'} terminal tab demands metadata only while committed to the layout`, () => {
+      const api = loadYomux('?sessions=1&layout=left&tabs=left:1', ['1']);
+      api.setTabberModeForTest('advanced');
+      const item = windowView ? '__yomux_view_metadata_test' : '1';
+      if (windowView) assert.equal(api.storeTabberViewSessionForTest(item, {sourceSession:'1', windowIndex:1}), item);
+      const editor = api.registerFileEditorLayoutItemForTest('/repo/metadata-demand.js');
+      const slots = api.emptyLayoutSlots();
+      slots[api.layoutTreeKey] = api.leafNode('left');
+      slots.left = api.paneStateWithTabs([item, editor], editor);
+      api.setLayoutSlotsForTest(slots);
+      const inactiveDemand = api.clientEventDemandDescriptorForTest();
+      assert.deepStrictEqual(canonical(inactiveDemand.active_panes), [editor]);
+      assert.ok(inactiveDemand.channels.includes('transcripts'), JSON.stringify(inactiveDemand));
+      slots.left = api.paneStateWithTabs([editor], editor);
+      api.setLayoutSlotsForTest(slots);
+      const removedDemand = api.clientEventDemandDescriptorForTest();
+      assert.equal(removedDemand.channels.includes('transcripts'), false, 'retained terminal/view objects outside the committed layout are not consumers');
+      assert.ok(removedDemand.channels.includes('files'), 'the active editor retains its independent files demand');
+    });
+  }
+
   await testAsync('open event logs demand and refresh only through their SSE invalidation', async () => {
     const api = loadYomux('', ['1']);
     const requests = [];
@@ -9589,6 +9666,123 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     await failed;
     assert.equal(api.transcriptMetadataStateForTest().error.stage, 'fetch', 'the current fetch failure remains classified');
     assert.ok(api.vmConsoleErrorsForTest().some(message => message.includes('session metadata fetch failed')), 'the expected transport diagnostic is captured by this test instead of printed in a green run');
+  });
+
+  await testAsync('late activity preserves published metadata while adopting fresh activity and roster', async () => {
+    for (const loading of [true, false]) {
+      const api = loadYomux('', ['1']);
+      const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+      const info = (generation, marker) => ({
+        session_identity: 'session-A', panes: [{pane_id: `%${generation}`}],
+        work_graph: {generation, marker},
+      });
+      await api.applySessionMetadataPayloadForTest({metadata_identity: {epoch: 'server-a', generation: 1},
+        topology_generation: 1, session_order: ['1'], sessions: {'1': info(1, 'original')}}, quiet);
+      const delayed = deferredFetch();
+      const requests = [];
+      api.setFetchForTest(url => { requests.push(String(url)); return delayed.promise; });
+      const activity = api.fetchTabberActivityForTest({visible: true});
+      await api.applySessionMetadataPayloadForTest({metadata_identity: {epoch: 'server-a', generation: 2},
+        topology_generation: 1, session_order: ['1'], sessions: {'1': info(2, 'published-push')}}, quiet);
+      delayed.resolve(jsonResponse({metadata_identity: {epoch: 'server-a', generation: loading ? 0 : 1},
+        topology_generation: 2, session_order: ['1', 'extra'],
+        activity: {'1': {active_recency_ts: 999}}, agents: [],
+        sessions: {'1': loading ? {...info(0, 'placeholder'), metadata_loading: true, panes: [], work_graph: {generation: 0, loading: true}} : info(1, 'old-complete'),
+          extra: {session_identity: 'session-extra', panes: [], work_graph: {generation: 0, loading: true}}},
+      }));
+      assert.equal(await activity, true, 'a newer activity response remains useful despite its older metadata snapshot');
+      const state = api.transcriptMetadataStateForTest();
+      assert.equal(state.generation, 2);
+      assert.equal(state.payload.sessions['1'].work_graph.marker, 'published-push', `loading=${loading}`);
+      assert.equal(state.payload.sessions['1'].panes[0].pane_id, '%2');
+      assert.notEqual(state.payload.sessions['1'].metadata_loading, true);
+      assert.equal(state.payload.metadata_identity.generation, 2, 'the retained model keeps its published provenance');
+      assert.deepStrictEqual(canonical(api.sessionsForTest()), ['1', 'extra'], 'fresh roster updates survive the metadata fence');
+      assert.equal(api.tabberActivityPayloadForTest().activity['1'].active_recency_ts, 999);
+      assert.equal(requests.length, 1, 'the repair must not turn an accepted response into a refetch loop');
+    }
+  });
+
+  await testAsync('newer activity fences a delayed direct metadata response and retains mixed row coverage', async () => {
+    const api = loadYomux('', ['1']);
+    const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+    const row = (generation, marker, loading = false) => ({session_identity: marker.startsWith('extra') ? 'extra-A' : 'session-A',
+      panes: loading ? [] : [{pane_id: `%${generation}`}], work_graph: {generation, marker, ...(loading ? {loading: true} : {})}});
+    const metadata = (generation, sessions, order = ['1']) => ({metadata_identity: {epoch: 'server-a', generation},
+      topology_generation: order.length, session_order: order, sessions});
+    await api.applySessionMetadataPayloadForTest(metadata(0, {'1': row(0, 'original')}), quiet);
+    const delayed = deferredFetch();
+    api.setFetchForTest(() => delayed.promise);
+    const pending = api.refreshSessionMetadataForTest(quiet);
+    assert.equal(api.applyTabberActivityPayloadForTest({...metadata(2, {'1': row(2, 'published-activity')}), activity: {}}), true);
+    delayed.resolve(jsonResponse(metadata(1, {'1': row(1, 'old-direct')})));
+    await pending;
+    let state = api.transcriptMetadataStateForTest();
+    assert.equal(state.generation, 2, 'accepted metadata-bearing activity advances the shared build clock');
+    assert.equal(state.payload.metadata_identity.generation, 2);
+    assert.equal(api.applyTabberActivityPayloadForTest({...metadata(1, {'1': row(1, 'old-activity')}), activity: {}}), true);
+    assert.equal(api.transcriptMetadataStateForTest().payload.sessions['1'].work_graph.marker, 'published-activity');
+
+    assert.equal(api.applyTabberActivityPayloadForTest({...metadata(0, {'1': row(0, 'old-placeholder', true), extra: row(0, 'extra-placeholder', true)}, ['1', 'extra']), activity: {}}), true);
+    state = api.transcriptMetadataStateForTest();
+    assert.equal(state.payload.metadata_identity.generation, 2);
+    assert.equal(state.payload.sessions.extra.work_graph.loading, true);
+    assert.equal(api.applyTabberActivityPayloadForTest({...metadata(1, {'1': row(1, 'old-again'), extra: row(1, 'extra-complete')}, ['1', 'extra']), activity: {}}), true);
+    state = api.transcriptMetadataStateForTest();
+    assert.equal(state.payload.sessions['1'].work_graph.marker, 'published-activity');
+    assert.equal(state.payload.sessions.extra.work_graph.marker, 'extra-complete', 'a composite root header is not per-row generation coverage');
+    assert.equal(state.payload.sessions.extra.work_graph.loading, undefined);
+
+    for (const sessions of [undefined, {}, {'1': null}]) {
+      assert.equal(api.applyTabberActivityPayloadForTest({metadata_identity: {epoch: 'server-a', generation: 99}, topology_generation: 2, session_order: ['1', 'extra'], activity: {}, ...(sessions === undefined ? {} : {sessions})}), true, 'current roster activity with no valid metadata rows still applies');
+      assert.equal(api.transcriptMetadataStateForTest().generation, 2, 'activity-only or malformed rows cannot advance metadata coverage');
+      assert.equal(api.transcriptMetadataStateForTest().payload.metadata_identity.generation, 2);
+    }
+  });
+
+  await testAsync('activity metadata never inherits obsolete loading flags or another incarnation', async () => {
+    for (const incarnation of ['session-A', 'session-recreated']) {
+      const api = loadYomux('', ['1']);
+      const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+      await api.applySessionMetadataPayloadForTest({metadata_identity: {epoch: 'server-a', generation: 1},
+        topology_generation: 1, session_order: ['1'], sessions: {'1': {
+          session_identity: 'session-A', metadata_loading: true, prior_only: 'must not leak', panes: [],
+          work_graph: {generation: 0, loading: true},
+        }}}, quiet);
+      assert.equal(api.applyTabberActivityPayloadForTest({metadata_identity: {epoch: 'server-a', generation: 2},
+        topology_generation: 2, session_order: ['1'], activity: {}, sessions: {'1': {
+          session_identity: incarnation, panes: [{pane_id: '%new'}], work_graph: {generation: 2, marker: 'complete'},
+        }}}), true);
+      const info = api.transcriptMetadataStateForTest().payload.sessions['1'];
+      assert.equal(info.session_identity, incarnation);
+      assert.equal(info.metadata_loading, undefined, 'a complete raw incoming row must not inherit a prior loading flag');
+      assert.equal(info.prior_only, undefined, 'incoming session metadata is not a field patch against another snapshot');
+      assert.equal(info.panes[0].pane_id, '%new');
+    }
+  });
+
+  await testAsync('activity metadata generations stay inside their request and server epoch', async () => {
+    const api = loadYomux('', ['1']);
+    const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+    const metadata = (epoch, generation, marker) => ({metadata_identity: {epoch, generation}, topology_generation: 1,
+      session_order: ['1'], sessions: {'1': {session_identity: 'same-tmux-incarnation', panes: [{pane_id: '%1'}], work_graph: {generation, marker}}}});
+    await api.applySessionMetadataPayloadForTest(metadata('server-a', 90, 'server-a-published'), quiet);
+    const old = deferredFetch();
+    api.setFetchForTest(() => old.promise);
+    const pendingOld = api.fetchTabberActivityForTest({visible: true});
+    await api.applySessionMetadataPayloadForTest(metadata('server-b', 1, 'server-b-published'), quiet);
+    old.resolve(jsonResponse({...metadata('server-a', 91, 'late-server-a'), activity: {'1': {active_recency_ts: 100}}}));
+    assert.equal(await pendingOld, false, 'an old server request cannot roll the replacement epoch back');
+    let state = api.transcriptMetadataStateForTest();
+    assert.equal(state.epoch, 'server-b');
+    assert.equal(state.payload.sessions['1'].work_graph.marker, 'server-b-published');
+
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({...metadata('server-c', 0, 'server-c-first'), activity: {'1': {active_recency_ts: 300}}})));
+    assert.equal(await api.fetchTabberActivityForTest({visible: true}), true, 'a current request can discover a replacement server before its event stream');
+    state = api.transcriptMetadataStateForTest();
+    assert.equal(state.epoch, 'server-c');
+    assert.equal(state.payload.sessions['1'].work_graph.marker, 'server-c-first', 'a new epoch does not inherit a higher old graph generation');
+    assert.equal(api.tabberActivityPayloadForTest().activity['1'].active_recency_ts, 300);
   });
 
   await testAsync('lightweight metadata preserves only the same session incarnation', async () => {
@@ -12281,6 +12475,90 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         assert.equal(await opening, false, `${mode}/${tabberMode}: explicit input retires the stale root owner`);
         if (mode === 'fixed') assert.equal(api.fileExplorerRootForTest(), '/home/test', 'Fixed reveal preserves the root');
       }
+    }
+  });
+
+  await testAsync('Finder nested expansion settles every surface after a parent publication replaces one render', async () => {
+    for (const replacedIndex of [0, 1]) {
+      const frames = [];
+      let clock = 0;
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+        performance: {now: () => ++clock},
+        requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+      });
+      const directory = '/repo/a/b';
+      const entries = [{name: 'leaf.txt', kind: 'file'}];
+      const containers = [new TestElement('first-parent'), new TestElement('second-parent')];
+      for (const container of containers) {
+        container.className = 'file-explorer-tree-panel';
+        api.renderTreeChildrenForTest(container, '/repo/a', [{name: 'b', kind: 'dir'}], 0, [], {view: 'finder'});
+      }
+      api.setDocumentQuerySelectorAllForTest(selector => selector === '.file-explorer-tree-panel' ? containers : []);
+      const rows = containers.map(container => container.querySelector(`.file-tree-row[data-path="${directory}"]`));
+      api.setFileExplorerDirListingForTest(directory, entries);
+      const refresh = deferredFetch();
+      api.setFetchForTest(() => refresh.promise);
+      let replaced = false;
+      const expansion = api.expandDirectoryRowForTest(rows[0], directory, {
+        user: true,
+        afterSlice() {
+          if (replaced || !containers[replacedIndex].querySelector(`[data-path="${directory}/leaf.txt"]`)) return;
+          replaced = true;
+          api.renderTreeChildrenForTest(containers[replacedIndex], '/repo/a', [{name: 'b', kind: 'dir'}], 0, [], {view: 'finder'});
+        },
+      });
+      try {
+        await completeRenderFrames(expansion, frames);
+        assert.equal(replaced, true, 'a parent cache publication replaces one child renderer during its input yield');
+        for (const container of containers) {
+          assert.ok(container.querySelector(`[data-path="${directory}/leaf.txt"]`), `${container.id} receives the settled child listing`);
+          const row = container.querySelector(`[data-path="${directory}"]`);
+          assert.equal(row.getAttribute('aria-expanded'), 'true');
+          assert.equal(row.classList.contains('loading-children'), false);
+        }
+        assert.equal(api.fileExplorerPendingExpansionOwnerForTest(directory), null);
+      } finally {
+        refresh.resolve(jsonResponse({path: directory, entries}));
+        await flushAsyncWork();
+        for (const frame of frames.splice(0)) frame();
+      }
+    }
+  });
+
+  await testAsync('Finder expansion cancellation retires only its owned children across surfaces', async () => {
+    for (const cancelledIndex of [0, 1]) {
+      const frames = [];
+      let clock = 0;
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+        performance: {now: () => ++clock},
+        requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+      });
+      const directory = '/repo/a/b';
+      const entries = [{name: 'leaf.txt', kind: 'file'}];
+      const containers = [new TestElement('first-parent'), new TestElement('second-parent')];
+      for (const container of containers) {
+        container.className = 'file-explorer-tree-panel';
+        api.renderTreeChildrenForTest(container, '/repo/a', [{name: 'b', kind: 'dir'}], 0, [], {view: 'finder'});
+      }
+      api.setDocumentQuerySelectorAllForTest(selector => selector === '.file-explorer-tree-panel' ? containers : []);
+      const rows = containers.map(container => container.querySelector(`[data-path="${directory}"]`));
+      api.setFileExplorerDirListingForTest(directory, entries);
+      let current = true;
+      const expansion = api.expandDirectoryRowForTest(rows[0], directory, {
+        isCurrent: () => current,
+        afterSlice() {
+          if (containers[cancelledIndex].querySelector(`[data-path="${directory}/leaf.txt"]`)) current = false;
+        },
+      });
+      await completeRenderFrames(expansion, frames);
+      assert.equal(current, false, 'cancellation lands after a surface has begun publishing children');
+      for (const container of containers) {
+        assert.equal(container.querySelector(`[data-path="${directory}/leaf.txt"]`), null);
+        const row = container.querySelector(`[data-path="${directory}"]`);
+        assert.equal(row.getAttribute('aria-expanded'), 'false');
+        assert.equal(row.classList.contains('loading-children'), false);
+      }
+      assert.equal(api.fileExplorerPendingExpansionOwnerForTest(directory), null);
     }
   });
 

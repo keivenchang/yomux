@@ -85,6 +85,7 @@ from tools.product_environment import product_env
 from tools.product_environment import product_env_name
 from tools.product_environment import require_product_env
 from tools.product_environment import environment_value
+from tools.tmux_paths import short_temp_directory
 from tests.gate_helpers import sample_counter_delta
 from tools.test_plan import CHECK_LANE_ENV
 from tools.test_plan import PYTEST_LANE_NAMES
@@ -369,11 +370,9 @@ def gate_runtime_paths(
     # fixture redirects TMPDIR into its disposable product root; otherwise tearing down one gate
     # deletes pytest's cached base and every later tmp_path fixture fails during setup.
     tmp_path_factory.getbasetemp()
-    # ``YOMUX_TEST_ROOT`` is already a per-run, identity-fenced root. Keep
-    # the per-test discriminator short so the deepest rooted control socket
-    # remains bindable under Linux's fixed sockaddr_un path limit.
-    root = Path(require_product_env("TEST_ROOT")) / f"g-{uuid.uuid4().hex[:4]}"
-    root.mkdir(mode=0o700)
+    # The run root can exceed the product control-socket budget on macOS.
+    # Share the admitted short-path allocator; this fixture still retires every writer and root.
+    root = Path(short_temp_directory("g-"))
     # Each fixture owns a fresh admission window. Keep it closed after teardown
     # until monkeypatch restores the prior module state.
     monkeypatch.setattr(workdir_module, "_agent_auth_refresh_admission_closed", False)
@@ -433,6 +432,7 @@ def gate_runtime_paths(
         GATE_TMUX_SOCKET_ENV_VAR: tmux_socket_path,
     }
     patch_isolated_product_environment(monkeypatch, {name: str(path) for name, path in per_test_env.items()})
+    common.resolve_yomux_roots()
     monkeypatch.setenv("TMPDIR", str(tmp_dir))
     previous_tempdir = tempfile.tempdir
     tempfile.tempdir = None

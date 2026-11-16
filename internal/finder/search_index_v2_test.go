@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func makeV1Index(t *testing.T, path, root string, count int) []discoveredIndexPath {
@@ -474,7 +476,7 @@ func TestSearchIndexV2UnresponsiveStartupRespectsSettingsDeadline(t *testing.T) 
 	t.Setenv("YOMUX_TEST_INDEX_WORKER", "1")
 	originalRunner := execCommand
 	execCommand = func(_ string, args ...string) *exec.Cmd {
-		return exec.Command(os.Args[0], append([]string{"-test.run=^TestSearchIndexV2WorkerHelperProcess$", "--", "--unresponsive-index-worker"}, args...)...)
+		return testsupport.GoHelperProcessCommand(t, append([]string{"-test.run=^TestSearchIndexV2WorkerHelperProcess$", "--", "--unresponsive-index-worker"}, args...)...)
 	}
 	defer func() { execCommand = originalRunner }()
 	client := NewSearchIndexWorkerClient(t.TempDir())
@@ -505,7 +507,7 @@ func TestSearchIndexV2BlockedPolicyWritesRespectSettingsDeadline(t *testing.T) {
 	for _, phase := range []string{"initial", "request"} {
 		t.Run(phase, func(t *testing.T) {
 			execCommand = func(_ string, args ...string) *exec.Cmd {
-				return exec.Command(os.Args[0], append([]string{"-test.run=^TestSearchIndexV2WorkerHelperProcess$", "--", "--blocked-policy-worker=" + phase}, args...)...)
+				return testsupport.GoHelperProcessCommand(t, append([]string{"-test.run=^TestSearchIndexV2WorkerHelperProcess$", "--", "--blocked-policy-worker=" + phase}, args...)...)
 			}
 			client := NewSearchIndexWorkerClient(t.TempDir())
 			defer client.Close()
@@ -587,7 +589,7 @@ func TestSearchIndexV2WorkerRestartAndPersistenceTogglePreserveDisk(t *testing.T
 	t.Setenv("YOMUX_TEST_INDEX_WORKER", "1")
 	originalRunner := execCommand
 	execCommand = func(_ string, args ...string) *exec.Cmd {
-		return exec.Command(os.Args[0], append([]string{"-test.run=^TestSearchIndexV2WorkerHelperProcess$", "--"}, args...)...)
+		return testsupport.GoHelperProcessCommand(t, append([]string{"-test.run=^TestSearchIndexV2WorkerHelperProcess$", "--"}, args...)...)
 	}
 	defer func() { execCommand = originalRunner }()
 	root := t.TempDir()
@@ -752,7 +754,7 @@ func TestSearchIndexV2CrashedNewerSchemaIsReadWithoutMutation(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "index.sqlite3")
 	command := exec.Command(os.Args[0], "-test.run=^TestSearchIndexV2CrashedNewerSchemaIsReadWithoutMutation$")
-	command.Env = append(withSearchIndexWorkerCPUCap(os.Environ()), "YOMUX_TEST_CRASHED_SCHEMA="+path)
+	command.Env = testsupport.GoHelperProcessEnvironment(append(withSearchIndexWorkerCPUCap(os.Environ()), "YOMUX_TEST_CRASHED_SCHEMA="+path))
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("crash fixture: %s %v", output, err)
 	}
@@ -1008,7 +1010,7 @@ func TestSearchIndexV2MigrationKilledAtEachPublicationPhase(t *testing.T) {
 			root := t.TempDir()
 			makeV1Index(t, path, root, 20)
 			command := exec.Command(os.Args[0], "-test.run=^TestSearchIndexV2MigrationKilledAtEachPublicationPhase$")
-			command.Env = append(withSearchIndexWorkerCPUCap(os.Environ()), "YOMUX_TEST_MIGRATION_CRASH_PHASE="+phase, "YOMUX_TEST_MIGRATION_CRASH_DB="+path)
+			command.Env = testsupport.GoHelperProcessEnvironment(append(withSearchIndexWorkerCPUCap(os.Environ()), "YOMUX_TEST_MIGRATION_CRASH_PHASE="+phase, "YOMUX_TEST_MIGRATION_CRASH_DB="+path))
 			if err := command.Run(); err == nil {
 				t.Fatal("publication phase did not interrupt process")
 			}
@@ -1263,7 +1265,7 @@ func TestSearchIndexClientCloseJoinsNotificationCallback(t *testing.T) {
 	t.Cleanup(func() { execCommand = previous })
 	t.Setenv("YOMUX_TEST_INDEX_WORKER", "1")
 	execCommand = func(_ string, args ...string) *exec.Cmd {
-		return exec.Command(os.Args[0], append([]string{"-test.run=^TestSearchIndexV2WorkerHelperProcess$", "--", "--notification-index-worker"}, args...)...)
+		return testsupport.GoHelperProcessCommand(t, append([]string{"-test.run=^TestSearchIndexV2WorkerHelperProcess$", "--", "--notification-index-worker"}, args...)...)
 	}
 	client := NewSearchIndexWorkerClient(t.TempDir())
 	started, release, callbackDone := make(chan struct{}), make(chan struct{}), make(chan struct{})

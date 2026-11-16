@@ -889,6 +889,8 @@ type tmuxMetadataState struct {
 	tmuxRosterMu          sync.RWMutex
 	tmuxRosterFetchMu     sync.Mutex
 	tabberDescriptionMu   sync.Mutex
+	tabberDescriptionJobs sync.Map
+	tabberDescriptionRun  nativeAgentRunner
 	tmuxRoster            []string
 	tmuxRosterIdentities  map[string]string
 	tmuxRosterKnown       bool

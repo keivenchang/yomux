@@ -4,9 +4,10 @@
 import pytest
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import Select, WebDriverWait
+from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
+from tests.browser_helpers.browser_layout import select_current_value
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
 
 
@@ -28,7 +29,19 @@ def test_native_preferences_search_matches_translated_terms_and_rejects_unmatche
         wait.until(lambda driver: driver.execute_script('return preferencesSearchText===arguments[0]', query))
 
     search('language')
-    Select(browser.find_element(By.CSS_SELECTOR, 'select[data-setting-path="general.language"]')).select_by_value('zh-Hant')
+    browser.execute_script("""
+      const save=saveSettingsPatch, locale=applyLocale;
+      saveSettingsPatch=(...args)=>(window.__prefsSave=save(...args));
+      applyLocale=(...args)=>(window.__prefsLocale=locale(...args));
+    """)
+    select_current_value(browser, 'select[data-setting-path="general.language"]', 'zh-Hant')
+    # Both the save response and its locale application can replace the search input.
+    result = browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      Promise.resolve(window.__prefsSave).then(()=>window.__prefsLocale)
+        .then(()=>done('settled'),error=>done(String(error)));
+    """)
+    assert result == 'settled', result
     # The optimistic locale renders before the saved settings revision can replace its DOM.
     wait.until(lambda driver: driver.execute_script("""
       return i18nActiveLocaleId()==='zh-Hant' && initialSetting('general.language','system')==='zh-Hant';

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
-from tests.helpers.fixture_tools import fixture_executable
+from tests.helpers.fixture_tools import fixture_executable, fixture_python_environment
 import os
 from pathlib import Path
 import subprocess
@@ -15,6 +15,20 @@ from tools.system_status_latency_probe import config_dir_from_process
 
 ROOT = Path(__file__).resolve().parents[1]
 SHARED = Path.home() / 'dev/ai-config/agents/skills/yomux-dev-start/scripts/environment.sh'
+
+
+def test_python_fixture_environment_preserves_dependencies_without_auth(monkeypatch, tmp_path):
+    monkeypatch.setenv('PYTHONUSERBASE', str(tmp_path / 'dependencies'))
+    monkeypatch.setenv('PYTHONNOUSERSITE', '1')
+    monkeypatch.setenv('OPENAI_API_KEY', 'fixture-only')
+    monkeypatch.setenv('YOMUX_TEST_AUTH_BYPASS', '1')
+    environment = fixture_python_environment({'HOME': str(tmp_path), 'PATH': '/usr/bin'})
+    assert environment['PYTHONUSERBASE'] == str(tmp_path / 'dependencies')
+    assert environment['PYTHONNOUSERSITE'] == '1'
+    assert environment['HOME'] == str(tmp_path)
+    assert environment['PATH'] == '/usr/bin'
+    assert 'OPENAI_API_KEY' not in environment
+    assert 'YOMUX_TEST_AUTH_BYPASS' not in environment
 
 
 @pytest.mark.parametrize('values,expected,warns', [

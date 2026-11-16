@@ -4,21 +4,24 @@
 
 import json
 import subprocess
+import time
 from urllib.parse import quote
 
 import pytest
 import yaml
-from selenium.common.exceptions import ElementClickInterceptedException
+from selenium.common.exceptions import ElementClickInterceptedException, TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import Select, WebDriverWait
+from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
-from tests.browser_helpers.browser_layout import BROWSER_WAIT_HELPER_SOURCE, browser_screenshot_rgb
+from tests.browser_helpers.browser_layout import BROWSER_WAIT_HELPER_SOURCE, browser_screenshot_rgb, select_current_value
 from tests.browser_helpers.browser_console import assert_only_expected_browser_network_error
 from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
 from tests.browser_helpers.native_pointer import click_visible_selector
+from tests.browser_helpers.native_file_actions import rename_finder_file_with_native_input
+from tests.browser_helpers.native_keyboard import native_document_start, native_editor_modifier, native_logical_key
 from tests.gate_harness import _retire_fixture_background_producers
 from tests.gate_harness import wait_for_fixture_api_quiescence
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
@@ -93,8 +96,7 @@ def _type_relocation_text(browser, item, text, surface='text-editor'):
     except ElementClickInterceptedException as error:
         error.add_note(browser.execute_script("return JSON.stringify([...document.querySelectorAll('.toast')].map(node => ({text:node.textContent,html:node.outerHTML})));"))
         raise
-    modifier = Keys.COMMAND if browser.capabilities['platformName'].lower() in {'mac', 'macos', 'darwin'} else Keys.CONTROL
-    editor.send_keys(modifier, 'a')
+    native_logical_key(browser, 'a', [native_editor_modifier(browser)])
     for index, character in enumerate(text, 1):
         editor.send_keys(character)
         actual = browser.execute_script("""
@@ -174,11 +176,11 @@ def test_finder_delete_preserves_native_unsaved_edits(browser, isolated_dev_serv
     assert 'error' not in outcome, outcome
     assert outcome['before'] == 'unsaved edit while pending', outcome
     assert outcome['document'] == outcome['before'], outcome
-    assert outcome['dirty'] and outcome['inLayout'] and outcome['sameOwner'], outcome
+    assert outcome['inLayout'] and outcome['sameOwner'], outcome
     assert outcome['missing'] is succeeds, outcome
     expected_content = outcome['before'] + ('\n' if succeeds else '')
     WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
-        'return fileState.get(arguments[0])?.content===arguments[1]', str(path), expected_content))
+        'const state=fileState.get(arguments[0]);return state?.dirty && state.content===arguments[1]', str(path), expected_content))
     assert path.exists() is not succeeds
     if succeeds:
         _assert_expected_relocation_absence(browser, server, request, path)
@@ -216,9 +218,8 @@ def test_delayed_watch_snapshot_keeps_identity_from_native_save(browser, isolate
       })().then(done,error=>done({error:String(error.stack||error)}));
     """, str(path))
     assert 'error' not in held and held['snapshot']['file_id'] == held['id'], held
-    modifier = Keys.COMMAND if browser.capabilities['platformName'].lower() in {'mac', 'macos', 'darwin'} else Keys.CONTROL
     _type_relocation_text(browser, item, 'first')
-    ActionChains(browser).key_down(modifier).send_keys('s').key_up(modifier).perform()
+    native_logical_key(browser, 's', [native_editor_modifier(browser)])
     WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
         "const s=fileState.get(arguments[0]);return !s.dirty&&s.original.trim()==='first'&&s.fileId!==arguments[1]",
         str(path), held['id']))
@@ -230,7 +231,7 @@ def test_delayed_watch_snapshot_keeps_identity_from_native_save(browser, isolate
     """, str(path))
     assert released == saved_id, {'saved': saved_id, 'after_snapshot': released}
     _type_relocation_text(browser, item, 'second')
-    ActionChains(browser).key_down(modifier).send_keys('s').key_up(modifier).perform()
+    native_logical_key(browser, 's', [native_editor_modifier(browser)])
     WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
         "const s=fileState.get(arguments[0]);return !s.dirty&&s.original.trim()==='second'", str(path)))
     assert browser.execute_script('return window.__watchSaveWrites[1].expected_file_id') == saved_id
@@ -454,9 +455,18 @@ def test_external_rename_historical_and_live_close_release_registration(browser,
     for item in [history, 'file:' + str(destination)]:
         selector = browser.execute_script(
             'return \'[data-pane-tab="\'+CSS.escape(arguments[0])+\'"] [data-pane-tab-close]\'', item)
-        button = WebDriverWait(browser, 10).until(lambda driver: next(
-            (node for node in driver.find_elements(By.CSS_SELECTOR, selector) if node.is_displayed()), None))
-        button.click()
+        # Model a chrome replacement during pointer approach while preserving the tab's real
+        # delegated dismissal handler. A retained WebElement must become stale in this fixture.
+        browser.execute_script("""
+          const selector=arguments[0];window.__historicalCloseProbe={moved:false,replaced:false};
+          window.addEventListener('pointermove',()=>{
+            const retained=document.querySelector(selector);
+            retained?.replaceWith(retained.cloneNode(true));
+            window.__historicalCloseProbe={moved:true,replaced:Boolean(retained&&!retained.isConnected)};
+          },{capture:true,once:true});
+        """, selector)
+        click_visible_selector(browser, selector)
+        assert browser.execute_script('return window.__historicalCloseProbe') == {'moved': True, 'replaced': True}
     result = browser.execute_async_script("""
       const path=arguments[0],done=arguments[arguments.length-1];
       (async()=>{
@@ -948,8 +958,7 @@ def _click_editor_preference(browser, path, value):
 
 
 def _set_editor_cursor_blink_delay(browser, delay):
-    control = browser.find_element(By.CSS_SELECTOR, '[data-setting-path="editor.cursor_blink_delay_ms"]')
-    Select(control).select_by_value(str(delay))
+    select_current_value(browser, '[data-setting-path="editor.cursor_blink_delay_ms"]', delay)
     WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return initialSetting('editor.cursor_blink_delay_ms')===arguments[0] && document.body.classList.contains('editor-cursor-static')===(arguments[0]===0)", delay))
 
 
@@ -987,6 +996,44 @@ def _open_cursor_editors(browser, isolated_dev_server_factory, request, theme, m
     return setup
 
 
+def _place_cursor_on_first_character(browser, item, surface):
+    deadline = time.monotonic() + 5
+    last = {}
+
+    def selection_converged(driver, expected):
+        last.update(driver.execute_script("""
+          const panel=panelNodes.get(arguments[0]),pm=arguments[1]==='pm',view=pm?panel._pmView:panel._cmView;
+          const selection=window.getSelection(),inside=selection?.focusNode && selection?.anchorNode
+            && view.dom.contains(selection.focusNode) && view.dom.contains(selection.anchorNode);
+          return {position:pm?view.state.selection.head:view.state.selection.main.head,
+            anchor:pm?view.state.selection.anchor:view.state.selection.main.anchor,
+            domPosition:inside?view.posAtDOM(selection.focusNode,selection.focusOffset):null,
+            domAnchor:inside?view.posAtDOM(selection.anchorNode,selection.anchorOffset):null,
+            focused:pm?view.hasFocus():view.hasFocus,
+            length:pm?view.state.doc.content.size:view.state.doc.length,
+            text:pm?view.state.doc.textContent:view.state.doc.toString()};
+        """, item, surface))
+        return last['focused'] and last['position'] == last['domPosition'] and last['anchor'] == last['domAnchor'] \
+            and (expected is None or last['position'] == expected)
+
+    def wait_for_selection(phase, expected=None):
+        try:
+            WebDriverWait(browser, max(0, deadline - time.monotonic())).until(
+                lambda driver: selection_converged(driver, expected), message=f'Native selection {phase}: {surface}')
+        except TimeoutException as error:
+            error.add_note(json.dumps(last, sort_keys=True))
+            raise
+
+    # Native clicks and navigation publish DOM selection before the editor's selectionchange
+    # observer runs. Each next key must consume the completed preceding selection transaction.
+    wait_for_selection('after click')
+    native_document_start(browser)
+    wait_for_selection('after document start', 1 if surface == 'pm' else 0)
+    native_logical_key(browser, 'ArrowRight')
+    wait_for_selection('after arrow right', 2 if surface == 'pm' else 1)
+    assert last['position'] < last['length'], last
+
+
 @pytest.mark.parametrize('theme', ['dark', 'light'])
 def test_editor_cursor_blink_delay_and_static_apply_live(browser, isolated_dev_server_factory, request, theme):
     item = _open_cursor_editors(browser, isolated_dev_server_factory, request, theme, 'split')
@@ -1004,8 +1051,7 @@ def test_editor_cursor_blink_delay_and_static_apply_live(browser, isolated_dev_s
     for surface in ['cm', 'pm']:
         editor = browser.execute_script("return arguments[0]==='pm'?window.__blinkPM.dom:window.__blinkCM.contentDOM", surface)
         editor.click()
-        editor.send_keys(Keys.CONTROL, Keys.HOME, Keys.NULL)
-        editor.send_keys(Keys.ARROW_RIGHT)
+        _place_cursor_on_first_character(browser, item, surface)
         phases = browser.execute_async_script("""
           const [surface,done]=arguments,started=performance.now(),seen=new Set();
           const node=surface==='pm'?window.__blinkPM.dom:window.__blinkCM.dom.querySelector('.cm-cursorLayer');
@@ -1145,8 +1191,7 @@ def test_editor_cursor_styles_paint_blocks_and_lines(browser, isolated_dev_serve
         for surface in ['pm', 'cm'] if mode == 'split' else ['pm']:
             editor = browser.execute_script("const panel=panelNodes.get(arguments[0]);return arguments[1]==='pm'?panel._pmView.dom:panel._cmView.contentDOM", setup, surface)
             editor.click()
-            editor.send_keys(Keys.CONTROL, Keys.HOME, Keys.NULL)
-            editor.send_keys(Keys.ARROW_RIGHT)
+            _place_cursor_on_first_character(browser, setup, surface)
             if surface == 'pm':
                 wait_for_vieweditor_selection()
             metrics = browser.execute_script("""
@@ -1292,6 +1337,27 @@ def test_vieweditor_cursor_color_updates_live_without_recreating_editor(browser,
 
 
 @pytest.mark.browser
+def test_finder_native_rename_preserves_input_during_metadata_refresh(browser, isolated_dev_server_factory, request):
+    server = isolated_dev_server_factory('finder-native-rename')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    path = server.paths.home_dir / 'note.txt'
+    content = 'preserve these bytes\n'
+    path.write_text(content, encoding='utf-8')
+    _open_relocation_editor(browser, server, path)
+    browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      openFileExplorerPane().then(()=>done(true), error=>done({error:String(error)}));
+    """)
+    rename_finder_file_with_native_input(browser, str(path), 'renamed.txt')
+    renamed = path.with_name('renamed.txt')
+    WebDriverWait(browser, 2).until(lambda driver: renamed.exists() and driver.execute_script(
+        "return Boolean(document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"'+CSS.escape(arguments[0])+'\"]'))", str(renamed)))
+    assert not path.exists()
+    assert renamed.read_text(encoding='utf-8') == content
+    browser.get('about:blank')
+
+
+@pytest.mark.browser
 @pytest.mark.parametrize('copied', [False, True], ids=['primary', 'copied'])
 def test_deleted_differ_row_preserves_pending_native_editor_buffer(browser, isolated_dev_server_factory, request, copied):
     server = isolated_dev_server_factory('deleted-differ-buffer')
@@ -1329,7 +1395,10 @@ def test_deleted_differ_row_preserves_pending_native_editor_buffer(browser, isol
         await fetchSessionFiles({destination:'differ',session,force:true,freshGit:true,silent:true});
         await window.__yomuxTestWaitFor(()=>[...document.querySelectorAll('[data-open-change-file]')]
           .some(row=>row.dataset.openChangeFile===path&&row.dataset.openChangeStatus==='D'),{timeoutMs:15000});
-        return true;
+        // A delayed filesystem absence receipt must not retire a valid historical Differ row.
+        await refreshFileExplorerFromPush({removed_paths:[path]}, {fromWatchDiff:true});
+        return Boolean([...document.querySelectorAll('[data-open-change-file]')]
+          .some(row=>row.dataset.openChangeFile===path&&row.dataset.openChangeStatus==='D'));
       })().then(done,error=>done({error:String(error.stack||error),payload:fileExplorerSessionFilesState.payload,
         visible:fileExplorerSessionFilesPaneIsVisible(),sessions,selected:fileExplorerChangesSelectedSession,
         streamRepos:fileExplorerSessionFilesState.streamRepos?.size,streamSession:fileExplorerSessionFilesState.streamSession,
@@ -1341,8 +1410,19 @@ def test_deleted_differ_row_preserves_pending_native_editor_buffer(browser, isol
     assert ready is True, json.dumps(ready, ensure_ascii=False)
     text = 'pending native buffer'
     _type_relocation_text(browser, item, text)
-    assert browser.execute_script('return Boolean(panelNodes.get(arguments[0])._cmSerializeTimer)', item)
-    row = browser.execute_script("return [...document.querySelectorAll('[data-open-change-file]')].find(row=>row.dataset.openChangeFile===arguments[0])", str(path))
+    row_state = browser.execute_script("""
+      const [path,item]=arguments,panel=panelNodes.get(differItemId),groups=panel?.querySelector('.changes-groups');
+      return {row:[...document.querySelectorAll('[data-open-change-file]')].find(row=>row.dataset.openChangeFile===path)||null,
+        pendingTimer:Boolean(panelNodes.get(item)._cmSerializeTimer),selected:fileExplorerChangesSelectedSession,
+        visible:fileExplorerSessionFilesPaneIsVisible(),payload:fileExplorerSessionFilesState.payload,
+        streamSession:fileExplorerSessionFilesState.streamSession,
+        rendering:groups?{connected:groups.isConnected,rows:groups.querySelectorAll('[data-open-change-file]').length,
+          owner:fileTreeRenderOwners.get(groups)}:null,
+        rows:[...document.querySelectorAll('[data-open-change-file]')].map(row=>({...row.dataset}))};
+    """, str(path), item)
+    assert row_state['pendingTimer'], json.dumps(row_state, default=str)
+    row = row_state['row']
+    assert row is not None, json.dumps(row_state, default=str)
     row.click()
     activated = browser.execute_async_script("""
       const [path,item,done]=arguments;

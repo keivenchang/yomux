@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -576,6 +577,79 @@ func TestStatsObservationsAcceptsAuthenticatedBrowserBatch(t *testing.T) {
 	if err != nil || len(observations) != 1 || observations[0].Family != "browser" || observations[0].SourceID == "browser-a" {
 		t.Fatalf("stored observations=%+v err=%v", observations, err)
 	}
+}
+
+func TestStatsObservationsStorageFailureRetainsExactRetry(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	config := t.TempDir()
+	if err := os.WriteFile(filepath.Join(config, "auth-cookie-secret"), []byte(strings.Repeat("a", 64)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := stats.OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := &server{config: config, statsWriter: writer}
+	body := fmt.Sprintf(`{"protocol_version":%d,"schema_generation":%d,"client_id":"browser-a","observations":[{"event_id":"e","family":"browser","source_id":"browser-a","observed_at":1,"epoch_id":"epoch","payload":{"kind":"heartbeat","latency_ms":3}}]}`, statsWriterProtocol, statsSchemaGeneration)
+	request := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		record := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/stats-observations", strings.NewReader(body)).WithContext(context.WithValue(ctx, authContextKey{}, authUser{username: "alice"}))
+		s.statsObservations(record, req)
+		return record
+	}
+	assertRows := func(want int, generation int64) {
+		t.Helper()
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM observations").Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != want || int64(writer.SourceGeneration()) != generation {
+			t.Fatalf("stored rows=%d generation=%d, want %d/%d", count, writer.SourceGeneration(), want, generation)
+		}
+	}
+	if _, err := db.Exec("CREATE TRIGGER fail_browser_observation BEFORE INSERT ON observations WHEN NEW.family='browser' BEGIN SELECT RAISE(ABORT,'fixture storage failure'); END"); err != nil {
+		t.Fatal(err)
+	}
+	if got := request(`{"observations":`); got.Code != http.StatusBadRequest || !bytes.Contains(got.Body.Bytes(), []byte(`"retryable":false`)) {
+		t.Fatalf("malformed request=%d %s", got.Code, got.Body.String())
+	}
+	initialGeneration := int64(writer.SourceGeneration())
+	got := request(body)
+	if got.Code != http.StatusServiceUnavailable || !bytes.Contains(got.Body.Bytes(), []byte(`"code":"service_unavailable"`)) || !bytes.Contains(got.Body.Bytes(), []byte(`"retryable":true`)) {
+		t.Fatalf("valid observation storage failure=%d %s", got.Code, got.Body.String())
+	}
+	if strings.Contains(got.Body.String(), "fixture storage failure") {
+		t.Fatalf("storage cause crossed the redacted error boundary: %s", got.Body.String())
+	}
+	assertRows(0, initialGeneration)
+	if _, err := db.Exec("DROP TRIGGER fail_browser_observation"); err != nil {
+		t.Fatal(err)
+	}
+	if got := request(body); got.Code != http.StatusOK || !bytes.Contains(got.Body.Bytes(), []byte(`"disposition":"accepted","event_id":"e"`)) {
+		t.Fatalf("identical retry=%d %s", got.Code, got.Body.String())
+	}
+	committedGeneration := int64(writer.SourceGeneration())
+	assertRows(1, committedGeneration)
+	if committedGeneration <= initialGeneration {
+		t.Fatal("accepted retry did not advance the source generation")
+	}
+	if got := request(body); got.Code != http.StatusOK || !bytes.Contains(got.Body.Bytes(), []byte(`"disposition":"duplicate","event_id":"e"`)) {
+		t.Fatalf("identical replay=%d %s", got.Code, got.Body.String())
+	}
+	assertRows(1, committedGeneration)
+	conflict := strings.Replace(body, `"latency_ms":3`, `"latency_ms":4`, 1)
+	if got := request(conflict); got.Code != http.StatusBadRequest || !bytes.Contains(got.Body.Bytes(), []byte(`"retryable":false`)) || !bytes.Contains(got.Body.Bytes(), []byte(stats.ErrObservationIdentityConflict.Error())) {
+		t.Fatalf("immutable identity conflict=%d %s", got.Code, got.Body.String())
+	}
+	assertRows(1, committedGeneration)
 }
 
 func TestStatsObservationsRejectsStaleFenceOversizedAndDuplicateRequests(t *testing.T) {

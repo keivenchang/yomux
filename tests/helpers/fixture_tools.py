@@ -28,6 +28,13 @@ def fixture_environment(request, overrides, *, native=False):
     return environment
 
 
+def fixture_python_environment(overrides):
+    """Keep admitted Python dependencies without inheriting operator credentials."""
+    environment = {name: os.environ[name] for name in ("PATH", "LANG", "PYTHONUSERBASE", "PYTHONNOUSERSITE") if name in os.environ}
+    environment.update(overrides)
+    return environment
+
+
 def fixture_executable(name):
     if name == "python3":
         return sys.executable

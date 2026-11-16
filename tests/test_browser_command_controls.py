@@ -65,6 +65,16 @@ def test_repeated_blocked_status_renders_keep_their_opacity_animation(browser, t
         assert 'agent-status-opacity-pulse' in row['animation'] and row['range'] > 0.15, metrics
 
 
+def _open_theme_menu_state(browser):
+    return browser.execute_script("""
+      const menu=document.querySelector('.app-menu[data-app-menu="view"]');
+      return {open:menu.classList.contains('open'),rows:['light','dark'].map(mode=>{
+        const button=[...menu.querySelectorAll('.app-menu-command')].find(node=>node.querySelector('.app-menu-label')?.textContent===t('common.theme.'+mode));
+        return {mode,checked:button?.getAttribute('aria-checked')};
+      })};
+    """)
+
+
 def test_open_theme_menu_updates_checked_rows_after_each_choice(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("return typeof setGlobalThemeMode==='function' && document.querySelector('.app-menu[data-app-menu=\"view\"]')"))
@@ -75,17 +85,33 @@ def test_open_theme_menu_updates_checked_rows_after_each_choice(browser, tmp_pat
             .find(button=>button.querySelector('.app-menu-label')?.textContent===t('common.theme.'+arguments[0]));
         """, mode)
         assert command is not None
-        command.click()
-        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return normalizeGlobalThemeMode()===arguments[0]", mode))
-        metrics = browser.execute_script("""
-          const menu=document.querySelector('.app-menu[data-app-menu="view"]');
-          return {open:menu.classList.contains('open'), rows:['light','dark'].map(mode=>{
-            const button=[...menu.querySelectorAll('.app-menu-command')].find(node=>node.querySelector('.app-menu-label')?.textContent===t('common.theme.'+mode));
-            return {mode,checked:button?.getAttribute('aria-checked')};
-          })};
+        browser.execute_script("""
+          window.__themeOriginalSave=saveSettingsPatch;
+          window.__themeSaveRelease=null;
+          window.__themeSaveSettled=false;
+          window.__themeSaveCalls=0;
+          saveSettingsPatch=(...args)=>new Promise((resolve,reject)=>{
+            window.__themeSaveCalls++;
+            window.__themeSaveRelease=()=>{
+              window.__themeSaveRelease=null;
+              window.__themeOriginalSave(...args).then(value=>{window.__themeSaveSettled=true;resolve(value);},reject);
+            };
+          });
         """)
-        assert metrics['open'], metrics
-        assert [row['mode'] for row in metrics['rows'] if row['checked'] == 'true'] == [mode], metrics
+        try:
+            command.click()
+            WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+                "return normalizeGlobalThemeMode()===arguments[0] && typeof window.__themeSaveRelease==='function'", mode))
+            for phase in ['optimistic', 'persisted']:
+                if phase == 'persisted':
+                    browser.execute_script("window.__themeSaveRelease()")
+                    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return window.__themeSaveSettled"))
+                metrics = _open_theme_menu_state(browser)
+                assert browser.execute_script('return window.__themeSaveCalls') == 1
+                assert metrics['open'], (phase, metrics)
+                assert [row['mode'] for row in metrics['rows'] if row['checked'] == 'true'] == [mode], (phase, metrics)
+        finally:
+            browser.execute_script("window.__themeSaveRelease?.();saveSettingsPatch=window.__themeOriginalSave;delete window.__themeSaveRelease;delete window.__themeOriginalSave")
 
 
 def test_visible_event_frame_keeps_disjoint_patches_and_scoped_signals(browser, tmp_path):
@@ -375,12 +401,13 @@ def test_command_notice_uses_timed_notification_card(browser, tmp_path, failure,
         const route = COMMAND_ROUTES[failure.watchFailure ? 'watch-roots-sync' : 'finder-file-create'];
         toastDurationMs = 400;
         window.fetch = (url, options) => String(url) === route.path
+          && options?.body === JSON.stringify({path:'/tmp/example.md'})
           ? (failure.localDeadline ? Promise.reject(apiFetchDeadlineError(15000))
             : Promise.resolve(new Response(JSON.stringify(failure), {status:409})))
           : originalFetch(url, options);
         try {
           await dispatchCommand(route, {payload:{path:'/tmp/example.md'},
-            internalOptions:{quietStatuses:[409]}}).catch(() => {});
+            internalOptions:{recordDebug:true,quietStatuses:failure.watchFailure ? [] : [409]}}).catch(() => {});
           const toast = document.querySelector('.attention-alerts .toast');
           const priorLightTheme = document.body.classList.contains('theme-light');
           const toastPaint = () => {
@@ -687,7 +714,10 @@ def test_notification_identity_matches_the_visible_summary(browser, tmp_path):
         return results;
       })().then(done,error=>done({error:String(error.stack||error)}));
     """)
-    assert metrics == [{"same": True, "timer": True, "count": 1}] * 2, metrics
+    assert metrics == [
+        {"same": False, "timer": True, "count": 1},
+        {"same": True, "timer": True, "count": 1},
+    ], metrics
 
 
 def test_kept_repeated_notice_bounds_producer_and_lifecycle_aliases(browser, tmp_path):
@@ -698,7 +728,7 @@ def test_kept_repeated_notice_bounds_producer_and_lifecycle_aliases(browser, tmp
         await window.__yomuxTestWaitFor(()=>typeof emitNotification==='function',{timeoutMs:5000});
         let first;
         for (let index=0;index<256;index+=1) {
-          const card=emitNotification('commandNotice',{lines:'x'.repeat(200)+index,
+          const card=emitNotification('commandNotice',{lines:'x'.repeat(200)+'same',
             coalesceKey:`producer:${index}`,lifecycleKeys:[`lifecycle:${index}`]}).inApp;
           if (!first) { first=card; first.querySelector('[data-toast-keep]').click(); }
         }
@@ -973,8 +1003,10 @@ def test_upgrade_queued_push_and_http_reads_keep_their_publication_order(browser
               const target = `99.0.${results.length}`;
               let release = null, confirmations = 0;
               window.confirm = () => { confirmations += 1; return false; };
-              window.fetch = input => {
-                if (new URL(String(input), location.href).pathname !== '/api/update-status') throw new Error('Unexpected update activation');
+              window.fetch = (input, options) => {
+                const path = new URL(String(input), location.href).pathname;
+                if (path === '/api/self-update') throw new Error('Unexpected update activation');
+                if (path !== '/api/update-status') return originalFetch.call(window, input, options);
                 return new Promise(resolve => { release = () => resolve(new Response(JSON.stringify({available: true, target, build_state: 'ready'}),
                   {headers: {'Content-Type': 'application/json'}})); });
               };

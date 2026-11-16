@@ -1098,6 +1098,11 @@ func TestGoYoloCapacityCycleRetriesOnlyTheVisibleGuardedNotice(t *testing.T) {
 
 	cycle := func() {
 		t.Helper()
+		// Each cycle models a fresh metadata observation from the live poller.
+		s.metadataMu.Lock()
+		s.metadataBuiltAt = time.Now()
+		s.metadataPayload["sessions"].(map[string]any)["codex-session"].(map[string]any)["agents"].([]map[string]any)[0]["status_observed_at"] = float64(time.Now().UnixNano()) / 1e9
+		s.metadataMu.Unlock()
 		if err := s.goYoloCapacityCycle(context.Background(), "codex-session"); err != nil {
 			t.Fatal(err)
 		}

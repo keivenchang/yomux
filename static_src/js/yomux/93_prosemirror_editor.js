@@ -86,6 +86,15 @@ function prosemirrorCodeBlockDom(node) {
   ];
 }
 
+function prosemirrorTexMathNodeView(node) {
+  const dom = document.createElement(node.isBlock ? 'div' : 'span');
+  dom.setAttribute('data-tex-source', node.attrs.source);
+  const math = markdownTexMathAt(node.attrs.source);
+  if (math) renderTexMathSource(dom, math);
+  else dom.textContent = node.attrs.source;
+  return {dom, ignoreMutation: () => true};
+}
+
 function prosemirrorMarkdownSchema(api) {
   let nodes = api.addListNodes(api.defaultMarkdownParser.schema.spec.nodes, 'paragraph block*', 'block');
   nodes = nodes.update('code_block', {
@@ -94,6 +103,7 @@ function prosemirrorMarkdownSchema(api) {
   });
   nodes = nodes.update('list_item', {
     ...nodes.get('list_item'),
+    content: '(paragraph | tex_math_block) block*',
     attrs: {
       taskLine: {default: 0},
       taskChecked: {default: null},
@@ -168,6 +178,21 @@ function prosemirrorMarkdownSchema(api) {
     attrs: {source: {default: ''}},
     toDOM(node) { return ['span', {'data-markdown-literal': 'inline'}, node.attrs.source]; },
   });
+  nodes = nodes.addBefore('blockquote', 'tex_math_block', {
+    group: 'block',
+    atom: true,
+    attrs: {source: {default: ''}},
+    toDOM(node) { return ['div', {'data-tex-source': node.attrs.source}, node.attrs.source]; },
+    parseDOM: [{tag: 'div[data-tex-source]', getAttrs: dom => ({source: dom.getAttribute('data-tex-source')})}],
+  });
+  nodes = nodes.addBefore('hard_break', 'tex_math', {
+    inline: true,
+    group: 'inline',
+    atom: true,
+    attrs: {source: {default: ''}},
+    toDOM(node) { return ['span', {'data-tex-source': node.attrs.source}, node.attrs.source]; },
+    parseDOM: [{tag: 'span[data-tex-source]', getAttrs: dom => ({source: dom.getAttribute('data-tex-source')})}],
+  });
   nodes = nodes.addBefore('hard_break', 'soft_break', {
     inline: true,
     group: 'inline',
@@ -203,10 +228,36 @@ function prosemirrorMarkdownParser(api, schema) {
   const parser = api.defaultMarkdownParser;
   const tokenizer = new api.MarkdownIt({html: true, breaks: false});
   tokenizer.enable('strikethrough');
+  tokenizer.inline.ruler.before('escape', 'tex_math', (state, silent) => {
+    const math = markdownTexMathAt(state.src, state.pos);
+    if (!math) return false;
+    if (!silent) {
+      const token = state.push('tex_math', '', 0);
+      token.meta = {source: math.raw};
+    }
+    state.pos += math.raw.length;
+    return true;
+  });
+  tokenizer.block.ruler.before('blockquote', 'tex_math_block', (state, startLine, endLine, silent) => {
+    const start = state.bMarks[startLine] + state.tShift[startLine];
+    if (!/^(?:\$\$|\\\[)/.test(state.src.slice(start, start + 2))) return false;
+    const source = state.getLines(startLine, endLine, state.blkIndent, false).trimStart();
+    const math = markdownTexMathAt(source);
+    if (!math?.display) return false;
+    const end = math.raw.length;
+    const lineEnd = source.indexOf('\n', end);
+    if (source.slice(end, lineEnd < 0 ? source.length : lineEnd).trim()) return false;
+    if (silent) return true;
+    const nextLine = startLine + math.raw.split('\n').length;
+    const token = state.push('tex_math_block', '', 0);
+    token.block = true;
+    token.map = [startLine, nextLine];
+    token.meta = {source: math.raw};
+    state.line = nextLine;
+    return true;
+  }, {alt: ['paragraph', 'reference', 'blockquote', 'list']});
   const markdownItParse = tokenizer.parse.bind(tokenizer);
   tokenizer.parse = (source, environment) => {
-    const unsupportedHtml = prosemirrorUnsupportedHtmlSource(source);
-    if (unsupportedHtml) throw new Error(`unsupported HTML tag ${unsupportedHtml}`);
     environment = environment || {};
     const htmlElement = html => {
       const template = document.createElement('template');
@@ -276,6 +327,10 @@ function prosemirrorMarkdownParser(api, schema) {
           token.meta = {source: String(token.content || '').replace(/\n$/, '')};
           normalized.push(token);
           continue;
+        }
+        if (token.type === 'html_inline' || token.type === 'html_block') {
+          const unsupportedHtml = prosemirrorUnsupportedHtmlSource(html);
+          if (unsupportedHtml) throw new Error(`unsupported HTML tag ${unsupportedHtml}`);
         }
         if (token.type === 'html_inline') {
           const open = html.match(/^<(u|strong|em|s|mark|kbd|sup)(?:\s[^>]*)?>$/i)?.[1]?.toLowerCase();
@@ -362,14 +417,14 @@ function prosemirrorMarkdownParser(api, schema) {
         continue;
       }
       const spacing = spacingFrames[spacingFrames.length - 1];
-      const topLevelBlock = token.level === spacingFrames.length - 1 && (token.nesting === 1 || ['code_block', 'fence', 'hr', 'markdown_comment_block', 'markdown_literal_block'].includes(token.type));
+      const topLevelBlock = token.level === spacingFrames.length - 1 && (token.nesting === 1 || ['code_block', 'fence', 'hr', 'markdown_comment_block', 'markdown_literal_block', 'tex_math_block'].includes(token.type));
       const blockStart = topLevelBlock && Array.isArray(token.map) ? token.map[0] : null;
       if (blockStart !== null && spacing.end !== null) {
         let visibleGapLines = 0;
         for (let line = spacing.end; line < blockStart; line += 1) {
           if (!ignoredCommentLines.has(line)) visibleGapLines += 1;
         }
-        const emptyParagraphs = ['hr', 'markdown_comment_block', 'markdown_literal_block'].includes(token.type)
+        const emptyParagraphs = ['hr', 'markdown_comment_block', 'markdown_literal_block', 'tex_math_block'].includes(token.type)
           || ['hr', 'markdown_comment_block'].includes(spacing.type)
           ? 0
           : Math.max(0, visibleGapLines - 1);
@@ -400,7 +455,7 @@ function prosemirrorMarkdownParser(api, schema) {
       );
     }
     environment.yomuxTopLevelSourceLines = spacedTokens
-      .filter(token => token.level === 0 && (token.nesting === 1 || ['code_block', 'fence', 'hr', 'markdown_comment_block', 'markdown_literal_block'].includes(token.type)))
+      .filter(token => token.level === 0 && (token.nesting === 1 || ['code_block', 'fence', 'hr', 'markdown_comment_block', 'markdown_literal_block', 'tex_math_block'].includes(token.type)))
       .map(token => Array.isArray(token.map) ? Number(token.map[0]) + 1 : null);
     environment.yomuxIgnoredCommentRanges = ignoredCommentRanges;
     return spacedTokens;
@@ -416,6 +471,8 @@ function prosemirrorMarkdownParser(api, schema) {
       }),
     },
     list_item: {block: 'list_item', getAttrs: token => token.meta || {}},
+    tex_math: {node: 'tex_math', getAttrs: token => token.meta},
+    tex_math_block: {node: 'tex_math_block', getAttrs: token => token.meta},
     softbreak: {node: 'soft_break'},
     html_break: {node: 'hard_break'},
     html_image: {node: 'image', getAttrs: token => token.meta},
@@ -508,6 +565,8 @@ function prosemirrorMarkdownSerializer(api) {
       state.write(node.attrs.source || '<!---->');
       state.closeBlock(node);
     },
+    tex_math(state, node) { state.text(node.attrs.source, false); },
+    tex_math_block(state, node) { state.text(node.attrs.source, false); state.closeBlock(node); },
     markdown_comment_inline(state, node) { state.write(node.attrs.source || '<!---->'); },
     markdown_literal_block(state, node) { state.write(node.attrs.source || ''); state.closeBlock(node); },
     markdown_literal_inline(state, node) { state.write(node.attrs.source || ''); },
@@ -556,7 +615,7 @@ function prosemirrorMarkdownSerializer(api) {
     highlight: {open: '<mark>', close: '</mark>', mixable: true},
     kbd: {open: '<kbd>', close: '</kbd>', mixable: true},
     superscript: {open: '<sup>', close: '</sup>', mixable: true},
-  });
+  }, {escapeExtraCharacters: /\$/g});
 }
 
 function prosemirrorDetailsNodeView(node) {
@@ -803,7 +862,19 @@ function prosemirrorSourceLinePlugin(api, panel) {
 }
 
 function normalizeProseMirrorEndBreakSource(text) {
-  return String(text || '').replace(/\\\n(?=\S)/g, '\n');
+  const source = String(text || '');
+  let output = '', from = 0;
+  for (let index = 0; index < source.length; index++) {
+    if (source[index] === '\\') {
+      if (!['(', '['].includes(source[index + 1])) { index++; continue; }
+    } else if (source[index] !== '$') continue;
+    const math = markdownTexMathAt(source, index);
+    if (!math) continue;
+    output += source.slice(from, index).replace(/\\\n(?=\S)/g, '\n') + math.raw;
+    index += math.raw.length - 1;
+    from = index + 1;
+  }
+  return output + source.slice(from).replace(/\\\n(?=\S)/g, '\n');
 }
 
 function normalizeLegacyBreakMarkup(text) {
@@ -1459,6 +1530,8 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
       // Mermaid fences render as isolated images; ViewEdit never exposes the diagram source as a
       // contentDOM, so changing it remains a TextEdit operation.
       code_block: node => prosemirrorCodeBlockNodeView(node, panel, path),
+      tex_math: prosemirrorTexMathNodeView,
+      tex_math_block: prosemirrorTexMathNodeView,
       details: prosemirrorDetailsNodeView,
       image: node => prosemirrorImageNodeView(node, panel, path),
       list_item: prosemirrorTaskListItemNodeView,

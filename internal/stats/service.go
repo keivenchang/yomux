@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/maphash"
+	"log/slog"
 	"math"
 	"sort"
 	"sync"
@@ -581,7 +582,12 @@ func (s *StatsService) refreshAgentStatus(ctx context.Context, force bool, now t
 	}
 	readCtx, cancel := context.WithTimeout(ctx, AgentStatusCollectionBudget)
 	defer cancel()
+	started := time.Now()
 	value, err := s.agentStatus(readCtx)
+	if err != nil {
+		slog.Warn("agent status projection refresh failed", "error_type", fmt.Sprintf("%T", err), "error", err,
+			"context_error", readCtx.Err(), "duration_ms", float64(time.Since(started).Microseconds())/1000)
+	}
 	s.agentStatusMu.Lock()
 	s.agentStatusReady = true
 	s.agentStatusValue = value

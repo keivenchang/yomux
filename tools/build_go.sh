@@ -15,4 +15,5 @@ if [ -n "$sdk_version" ]; then
   bazel_args+=("--@rules_go//go/toolchain:sdk_version=$sdk_version")
 fi
 bazel_args+=("$@" //cmd/yomux-go:yomux-go //tools/staticgen:staticgen)
-exec bazel "${bazel_args[@]}"
+bazel "${bazel_args[@]}"
+"$repo_root/bazel-bin/cmd/yomux-go/yomux-go_/yomux-go" --operator setup-assets --root "$repo_root"

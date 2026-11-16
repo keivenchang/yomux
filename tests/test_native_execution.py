@@ -22,6 +22,7 @@ import uuid
 
 import pytest
 
+from tools import bazel_execution_contract
 from tools import native_bundle_acquire
 from tools import native_bundle_prepare
 from tools.bazel_execution_contract import native_flags, validate_native_probe
@@ -46,6 +47,61 @@ from tools.product_environment import product_env
 from tools import tmux_paths
 from tools.instance_isolation import rooted_socket_candidates
 from tools.tmux_paths import SHORT_TMPDIR_ENV, short_temp_base, create_native_fixture_root, cleanup_native_fixture_roots
+
+
+@pytest.fixture
+def declared_bazel_jdk(tmp_path):
+    def create(version="25.0.1", name="jdk"):
+        home = tmp_path / name
+        (home / "bin").mkdir(parents=True)
+        (home / "bin/java").write_bytes(b"synthetic JVM; never executed\n")
+        (home / "bin/java").chmod(0o700)
+        (home / "release").write_text(f'JAVA_VERSION="{version}"\n', encoding="utf-8")
+        return home
+    return create
+
+
+@pytest.mark.parametrize("version", ["25", "25.0.1", "26-ea"])
+def test_native_bazel_jvm_explicit_admission_preserves_path(declared_bazel_jdk, version):
+    home = declared_bazel_jdk(version, "JDK home with spaces")
+    assert bazel_execution_contract.native_bazel_startup_flags({"JAVA_HOME": str(home)}, system="Darwin") == ["--server_javabase=" + str(home)]
+
+
+@pytest.mark.parametrize("version", ["21.0.10", "24.0.2", "unknown", ""])
+def test_native_bazel_jvm_refuses_old_or_unobservable_release(declared_bazel_jdk, version):
+    home = declared_bazel_jdk(version)
+    with pytest.raises(ValueError, match="requires JDK 25"):
+        bazel_execution_contract.native_bazel_startup_flags({"JAVA_HOME": str(home)}, system="Darwin")
+
+
+@pytest.mark.parametrize("configured", ["", "relative", "/missing/jdk"])
+def test_native_bazel_jvm_invalid_explicit_home_never_falls_back(monkeypatch, declared_bazel_jdk, configured):
+    fallback = declared_bazel_jdk()
+    monkeypatch.setattr(bazel_execution_contract, "DARWIN_BAZEL_JAVA_HOMES", (fallback,))
+    with pytest.raises(ValueError, match="requires JDK 25"):
+        bazel_execution_contract.native_bazel_startup_flags({"JAVA_HOME": configured}, system="Darwin")
+
+
+def test_native_bazel_jvm_default_and_linux_policy(monkeypatch, declared_bazel_jdk, tmp_path):
+    home = declared_bazel_jdk()
+    monkeypatch.setattr(bazel_execution_contract, "DARWIN_BAZEL_JAVA_HOMES", (tmp_path / "absent", home))
+    assert bazel_execution_contract.native_bazel_startup_flags({}, system="Darwin") == ["--server_javabase=" + str(home)]
+    assert bazel_execution_contract.native_bazel_startup_flags({"JAVA_HOME": "/invalid"}, system="Linux") == []
+    monkeypatch.setattr(bazel_execution_contract, "DARWIN_BAZEL_JAVA_HOMES", ())
+    with pytest.raises(ValueError, match="install openjdk@25"):
+        bazel_execution_contract.native_bazel_startup_flags({}, system="Darwin")
+
+
+def test_native_bazel_jvm_cli_emits_startup_flag(monkeypatch, declared_bazel_jdk, capsys):
+    home = declared_bazel_jdk()
+    monkeypatch.setattr(bazel_execution_contract.platform, "system", lambda: "Darwin")
+    monkeypatch.setenv("JAVA_HOME", str(home))
+    monkeypatch.setattr(sys, "argv", ["contract", "--native-bazel-startup-flags"])
+    assert bazel_execution_contract.main() == 0
+    assert capsys.readouterr().out.strip() == "--server_javabase=" + str(home)
+    monkeypatch.setenv("JAVA_HOME", "/missing/jdk")
+    assert bazel_execution_contract.main() == 78
+    assert "NATIVE BAZEL JVM ADMISSION FAILED" in capsys.readouterr().err
 
 
 def test_diagnostic_module_closure_prepares_private_locked_seed(monkeypatch, tmp_path):
@@ -157,6 +213,57 @@ def test_source_copy_preserves_executable_and_precreated_document_parents(tmp_pa
     native_bundle_acquire.copy_action(source, destination)
     assert os.access(destination / "script", os.X_OK)
     assert subprocess.run([str(destination / "script")]).returncode == 0
+
+
+def test_agent_preparation_reuses_locked_packages_and_disables_install_scripts(monkeypatch, tmp_path):
+    copies, commands = [], []
+    lock_helper = tmp_path / "document-lock"
+    environment = {"PATH": "/fixture/tools"}
+    expected = {"opencode": tmp_path / "agents/node_modules/opencode-darwin-arm64/bin/opencode"}
+    monkeypatch.setattr(native_bundle_acquire, "copy_source", lambda *args: copies.append(args))
+    monkeypatch.setattr(native_bundle_acquire, "run", lambda command, **kwargs: commands.append((command, kwargs)))
+    monkeypatch.setattr(native_bundle_acquire, "mac_agent_executables", lambda payload: expected)
+    assert native_bundle_acquire.prepare_agent_clients(tmp_path, lock_helper, environment) == expected
+    assert [(source.name, destination.name, helper) for source, destination, helper in copies] == [
+        ("package.json", "package.json", lock_helper), ("package-lock.json", "package-lock.json", lock_helper)]
+    assert commands == [(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--omit=dev"],
+                         {"cwd": tmp_path / "agents", "environment": environment})]
+
+
+@pytest.mark.parametrize('prepare', ['agents', 'xterm'])
+@pytest.mark.parametrize('path_kind', ['direct', 'payload-alias', 'parent-alias', 'lexically-frozen-alias'])
+@pytest.mark.parametrize('payload_exists', [False, True])
+def test_dependency_preparation_refuses_frozen_payload_before_mutation(monkeypatch, tmp_path, prepare, path_kind, payload_exists):
+    frozen = tmp_path / 'frozen'
+    frozen.mkdir()
+    (frozen / 'manifest.json').write_bytes(b'{}')
+    target = frozen / 'payload'
+    payload = target
+    if path_kind == 'payload-alias':
+        payload = tmp_path / 'payload-alias'
+        payload.symlink_to(target, target_is_directory=True)
+    elif path_kind == 'parent-alias':
+        alias = tmp_path / 'parent-alias'
+        alias.symlink_to(frozen, target_is_directory=True)
+        payload = alias / 'payload'
+    elif path_kind == 'lexically-frozen-alias':
+        target = tmp_path / 'unfrozen-target'
+        payload.symlink_to(target, target_is_directory=True)
+    if payload_exists:
+        target.mkdir()
+        (target / 'sentinel').write_bytes(b'frozen contents')
+    monkeypatch.setattr(native_bundle_acquire, 'copy_source', lambda *_args: pytest.fail('frozen source copy'))
+    monkeypatch.setattr(native_bundle_acquire, 'run', lambda *_args, **_kwargs: pytest.fail('frozen command'))
+    with pytest.raises(ValueError, match='refusing to change a frozen native bundle'):
+        if prepare == 'agents':
+            native_bundle_acquire.prepare_agent_clients(payload, tmp_path / 'lock-helper')
+        else:
+            native_bundle_acquire.prepare_xterm_fixture(payload, tmp_path / 'stage', tmp_path / 'lock-helper')
+    assert target.exists() == payload_exists
+    if payload_exists:
+        assert sorted(path.name for path in target.iterdir()) == ['sentinel']
+        assert (target / 'sentinel').read_bytes() == b'frozen contents'
+    assert not (tmp_path / 'stage').exists()
 
 
 def test_layout_copy_accepts_precreated_parent_and_rebases_virtual_symlink(tmp_path):
@@ -1024,6 +1131,10 @@ def test_entrypoint_private_writer_does_not_require_git_metadata(tmp_path):
     workspace.mkdir()
     root = Path(__file__).resolve().parents[1]
     declared = tmp_path / "declared-inputs"
+    operator_home = tmp_path / "operator-home"
+    operator_home.mkdir()
+    sentinel = operator_home / "private"
+    sentinel.write_bytes(b"operator-private")
     for name in ("yomux_lib", "tools"):
         shutil.copytree(root / name, declared / name, ignore=shutil.ignore_patterns("__pycache__"))
     command = (
@@ -1034,7 +1145,19 @@ def test_entrypoint_private_writer_does_not_require_git_metadata(tmp_path):
         + "assert lease.slot_dir.is_relative_to(Path(os.environ['HOME']).parent); "
         + "lease.release(); print('PRIVATE_DECLARED_WRITER')"
     )
-    result = subprocess.run([sys.executable, str(root / "tools/bazel_native_entrypoint.py"), "/usr/bin/python3", "-I", "-B", "-c", command],
+    command += (
+        ";\ntry: Path(" + repr(str(sentinel)) + ").read_bytes()"
+        "\nexcept PermissionError: pass\nelse: raise AssertionError('operator home was readable')"
+    )
+    bootstrap = (
+        "import sys;sys.path.insert(0," + repr(str(root)) + ");"
+        "from tools import bazel_native_entrypoint as entry;"
+        "policy=entry.action_write_policy;"
+        "entry.action_write_policy=lambda root,env: policy(root,env,operator_home=" + repr(str(operator_home)) + ");"
+        "sys.argv=['entry',sys.executable,'-I','-B','-c'," + repr(command) + "];"
+        "sys.exit(entry.main())"
+    )
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", bootstrap],
         env=dict(os.environ, TEST_TMPDIR=str(tmp_path), YOMUX_NATIVE_SHORT_TMPDIR=str(tmp_path)),
         cwd=workspace, text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr
@@ -1057,6 +1180,23 @@ def test_qualified_pytest_preserves_subdirectory_context(monkeypatch, pytestconf
     descriptor = json.loads(captured[0][-1].removeprefix("--test_arg="))
     assert descriptor["args"][-1] == "test_native_execution.py"
     assert bazel_native_step.working_directory(root, descriptor) == root / "tests"
+
+
+@pytest.mark.parametrize("system,override,expected", [
+    ("Darwin", None, None), ("Linux", None, 3),
+    ("Darwin", "1", 3), ("Linux", "0", None),
+])
+def test_direct_pytest_platform_default_and_explicit_override(monkeypatch, pytestconfig, system, override, expected):
+    root = Path(__file__).resolve().parents[1]
+    plugin = pytestconfig.pluginmanager.get_plugin(str(root / "conftest.py"))
+    for name in ("YOMUX_BAZEL_EXECUTION", "YOLOMUX_BAZEL_EXECUTION", "YOMUX_CHECK_CONTAINER", "YOLOMUX_CHECK_CONTAINER"):
+        monkeypatch.delenv(name, raising=False)
+    if override is not None:
+        monkeypatch.setenv("YOMUX_CHECK_CONTAINER", override)
+    monkeypatch.setattr(plugin.docker_image, "container_available", lambda *_args: (False, "fixture unreachable"))
+    monkeypatch.setattr(plugin.docker_image, "running_inside_container", lambda: False)
+    monkeypatch.setattr(platform, "system", lambda: system)
+    assert plugin.pytest_cmdline_main(SimpleNamespace()) == expected
 
 
 @pytest.mark.parametrize("relative", ["..", "/tmp", "../outside"])
@@ -1091,7 +1231,8 @@ def test_missing_go_seed_dependency_refuses_admission_before_cached_results(monk
     cache.mkdir(mode=0o700)
     events = []
     context = {"revision": "a" * 40}
-    contract = SimpleNamespace(validate_native_probe=lambda *args: None, execution_event=lambda **event: events.append(event))
+    contract = SimpleNamespace(validate_native_probe=lambda *args: None, execution_event=lambda **event: events.append(event),
+                               native_bazel_startup_flags=bazel_execution_contract.native_bazel_startup_flags)
     request = {"root": str(tmp_path), "workspace": str(source), "cache": str(cache),
                "flags": ["--test_env=YOMUX_TEST_REVISION=" + "a" * 40,
                          "--test_env=YOMUX_TEST_RELEASE_CONTEXT=" + json.dumps(context)],

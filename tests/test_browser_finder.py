@@ -19,7 +19,10 @@ from tests.latency_calibration import certification_phase_fixture, write_latency
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
+from tests.browser_helpers.native_file_actions import rename_finder_file_with_native_input
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
+from tools.bazel_go_browser_e2e import git_stats_done_hold_source
+from tools.bazel_go_browser_e2e import resource_request_observer_source
 
 _BOOTSTRAP_SCRIPT_RE = re.compile(r'<script id="yomux-bootstrap"[^>]*>(.*?)</script>', re.DOTALL)
 
@@ -697,7 +700,29 @@ def _finder_saved_restore_workload(browser, tmp_path, restore_scope, *, certify=
         input.id = 'finder-saved-restore-input';
         input.style.cssText = 'position:fixed;left:10px;top:0;z-index:99999';
         document.body.append(input); input.focus();
-        const state = {startSteps:fileTreeRenderStepCount, trees:restorationTrees, surfaces, input, originalFetch, settled:false, events:[], paints:[], longTasks:[], fetchCalls:[]};
+        const originalSchedule = scheduleAfterFileExplorerFirstPaint;
+        const state = {startSteps:fileTreeRenderStepCount, trees:restorationTrees, surfaces, input, originalFetch, originalSchedule, settled:false, events:[], paints:[], longTasks:[], fetchCalls:[], inputHandoff:false, resumeAfterInput:null, continuations:[]};
+        if (restoreScope === 'visible-publication') {
+          // Keep the first partial publication available until native input arrives;
+          // a WebDriver poll must not have to catch a transient render slice.
+          scheduleAfterFileExplorerFirstPaint = (callback, options) => {
+            const rows = trees[0].querySelectorAll(`.file-tree-row[data-path^="${bulk}/"]`).length;
+            if (state.resumeAfterInput || (!state.inputHandoff && rows > 0 && rows < entries.length)) {
+              state.partialRows = rows;
+              state.inputHandoff = true;
+              state.continuations.push({callback, options});
+              state.resumeAfterInput = () => {
+                state.resumeAfterInput = null;
+                scheduleAfterFileExplorerFirstPaint = originalSchedule;
+                for (const continuation of state.continuations.splice(0)) {
+                  originalSchedule(continuation.callback, continuation.options);
+                }
+              };
+              return;
+            }
+            return originalSchedule(callback, options);
+          };
+        }
         state.longTaskObserver = new PerformanceObserver(list => state.longTasks.push(...list.getEntries().map(entry => entry.duration)));
         state.longTaskObserver.observe({type:'longtask'});
         input.addEventListener('keydown', event => {
@@ -706,6 +731,7 @@ def _finder_saved_restore_workload(browser, tmp_path, restore_scope, *, certify=
           state.events.push(sample);
           const started = performance.now();
           requestAnimationFrame(() => state.paints.push(performance.now() - started));
+          if (event.isTrusted) state.resumeAfterInput?.();
         });
         fetchDirectory = (path, options = {}) => {
           state.fetchCalls.push(path);
@@ -727,9 +753,15 @@ def _finder_saved_restore_workload(browser, tmp_path, restore_scope, *, certify=
     )
     try:
         if restore_scope == 'visible-publication':
-            WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
-                "const state=window.__finderSavedRestore; return state.partialRows > 0 && state.partialRows < 4000 && !state.settled;"
-            ))
+            try:
+                WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+                    "const state=window.__finderSavedRestore; return state.inputHandoff && state.resumeAfterInput && state.partialRows > 0 && state.partialRows < 4000 && !state.settled;"
+                ))
+            except TimeoutException as error:
+                state = browser.execute_script(
+                    "const state=window.__finderSavedRestore; return {partialRows:state.partialRows,settled:state.settled,error:state.error,fetchCalls:state.fetchCalls,rows:state.trees.map(tree=>tree.querySelectorAll('.file-tree-row[data-path^=\"/home/test/bulk/\"]').length)};"
+                )
+                raise AssertionError(state) from error
         input_element = browser.find_element(By.ID, 'finder-saved-restore-input')
         native_text = 'responsiveresponsiveresponsive'
         for character in native_text:
@@ -761,7 +793,7 @@ def _finder_saved_restore_workload(browser, tmp_path, restore_scope, *, certify=
         assert '/home/test/bulk' not in final['pending'] and final['loading'] == [] and final['expanded'], final
     finally:
         browser.execute_script(
-            "const state = window.__finderSavedRestore; if (state) {fetchDirectory=state.originalFetch; state.observer.disconnect(); state.longTaskObserver.disconnect(); state.input.remove(); delete window.__finderSavedRestore;}"
+            "const state = window.__finderSavedRestore; if (state) {fetchDirectory=state.originalFetch; scheduleAfterFileExplorerFirstPaint=state.originalSchedule; state.resumeAfterInput?.(); state.observer.disconnect(); state.longTaskObserver.disconnect(); state.input.remove(); delete window.__finderSavedRestore;}"
         )
 
 
@@ -1766,12 +1798,20 @@ def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
           const sizingForMenu = () => {
             const contextMenu = document.querySelector('.file-context-menu');
             const contextItem = contextMenu.querySelector('button');
+            const contextLine = contextItem.querySelector('.context-menu-line');
+            const contextIcon = contextItem.querySelector('.context-menu-icon');
+            const contextLabel = contextItem.querySelector('.context-menu-label');
             const appItem = [...document.querySelectorAll('.app-menu-command')].find(item => !item.querySelector('.app-menu-detail'));
             const contextStyle = getComputedStyle(contextItem);
             const appStyle = getComputedStyle(appItem);
             return {
               rowHeight: contextItem.getBoundingClientRect().height,
               appRowHeight: appItem.getBoundingClientRect().height,
+              fontSize: parseFloat(contextStyle.fontSize),
+              iconColumnWidth: parseFloat(getComputedStyle(contextLine).gridTemplateColumns),
+              iconWidth: contextIcon.querySelector('.file-context-menu-icon-svg').getBoundingClientRect().width,
+              labelFits: contextLabel.scrollWidth <= contextLabel.clientWidth + 1,
+              labelWhiteSpace: getComputedStyle(contextLabel).whiteSpace,
               padding: contextStyle.padding,
               appPadding: appStyle.padding,
               font: contextStyle.font,
@@ -1837,6 +1877,9 @@ def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
         assert sizing["padding"] == sizing["appPadding"], sizing
         assert sizing["font"] == sizing["appFont"], sizing
         assert sizing["menuPadding"] == sizing["appMenuPadding"], sizing
+        assert sizing["iconColumnWidth"] / sizing["fontSize"] < 3, sizing
+        assert sizing["iconWidth"] / sizing["fontSize"] < 2, sizing
+        assert sizing["labelFits"] is True and sizing["labelWhiteSpace"] == "normal", sizing
     original_size = browser.get_window_size()
     try:
         browser.set_window_size(390, 844)
@@ -1866,6 +1909,14 @@ def test_finder_copy_path_uses_the_visible_pending_root_input(browser, tmp_path)
         """
         const done = arguments[0];
         const copied = [];
+        const pathWrites = [];
+        const originalSetPath = setFileExplorerPathElementValue;
+        setFileExplorerPathElementValue = (node, path) => {
+          if (node?.classList.contains('file-explorer-path-inline')) {
+            pathWrites.push({before: node.value, path, stack: new Error().stack});
+          }
+          return originalSetPath(node, path);
+        };
         Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async text => copied.push(text)}});
         const input = Array.from(document.querySelectorAll('.file-explorer-path-inline')).find(node => node.getClientRects().length > 0);
         input.value = '/home/test/pending-root';
@@ -1894,6 +1945,7 @@ def test_finder_copy_path_uses_the_visible_pending_root_input(browser, tmp_path)
           await waitFor(() => Boolean(document.querySelector('#status .err')));
           done({
             copied,
+            pathWrites,
             before,
             first,
             repeat,
@@ -1902,13 +1954,13 @@ def test_finder_copy_path_uses_the_visible_pending_root_input(browser, tmp_path)
             errors: jsDebugFailureEvents('error'),
             rejections: jsDebugFailureEvents('rejection'),
           });
-        })().catch(error => done({error: String(error?.stack || error), copied, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}));
+        })().catch(error => done({error: String(error?.stack || error), copied, pathWrites, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')})).finally(() => {setFileExplorerPathElementValue = originalSetPath;});
         """
     )
     assert not metrics.get("error"), metrics
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
-    assert metrics["copied"] == ["/home/test/pending-root", "/home/test/pending-root"]
+    assert metrics["copied"] == ["/home/test/pending-root", "/home/test/pending-root"], metrics
     assert "copied" in metrics["first"]["aria"].lower(), metrics
     assert "copied" in metrics["first"]["title"].lower(), metrics
     assert metrics["first"]["active"] == "true", metrics
@@ -2124,51 +2176,30 @@ def test_finder_context_rename_uses_the_real_input_submit_path(browser, tmp_path
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/note.txt\"]')")
     )
-    metrics = browser.execute_async_script(
-        """
-        const done = arguments[0];
-        const originalFetch = window.fetch;
-        const requests = [];
-        window.fetch = async (input, options = {}) => {
-          const url = new URL(String(input), location.href);
-          if (url.pathname === '/api/fs/rename') {
-            const body = JSON.parse(options.body || '{}');
-            requests.push(body);
-            window.__fixtureFsEntries['/home/test'] = [{name: body.new_name, kind: 'file'}];
-            return new Response(JSON.stringify({path: `/home/test/${body.new_name}`, reindex_roots: []}), {headers: {'Content-Type': 'application/json'}});
-          }
-          return originalFetch(input, options);
-        };
-        const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/note.txt"]');
-        row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
-        const deadline = performance.now() + 2000;
-        const inspect = () => {
-          const rename = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => /^rename$/i.test(node.textContent.trim()));
-          if (!rename && performance.now() < deadline) return requestAnimationFrame(inspect);
-          if (!rename) return done({error: 'rename button missing', requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
-          rename.click();
-          requestAnimationFrame(() => {
-            const input = document.querySelector('#panel-__finder__ .file-tree-rename-input');
-            if (!input) return done({error: 'rename input missing', requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
-            input.value = 'renamed.txt';
-            input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
-            const waitForRename = () => {
-              if (requests.length && document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/renamed.txt"]')) {
-                window.fetch = originalFetch;
-                return done({requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
-              }
-              if (performance.now() >= deadline) return done({error: 'rename did not finish', requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
-              requestAnimationFrame(waitForRename);
-            };
-            requestAnimationFrame(waitForRename);
-          });
-        };
-        requestAnimationFrame(inspect);
-        """
-    )
-    assert not metrics.get("error"), metrics
-    assert metrics["requests"] == [{"path": "/home/test/note.txt", "new_name": "renamed.txt"}], metrics
-    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+    browser.execute_script("""
+      const originalFetch=window.fetch;
+      window.__renameRequests=[];
+      window.fetch=async(input,options={})=>{
+        const url=new URL(String(input),location.href);
+        if(url.pathname!=='/api/fs/rename') return originalFetch(input,options);
+        const body=JSON.parse(options.body||'{}');
+        window.__renameRequests.push(body);
+        window.__fixtureFsEntries['/home/test']=[{name:body.new_name,kind:'file'}];
+        return new Response(JSON.stringify({path:`/home/test/${body.new_name}`,reindex_roots:[]}),
+          {headers:{'Content-Type':'application/json'}});
+      };
+    """)
+    rename_finder_file_with_native_input(browser, '/home/test/note.txt', 'renamed.txt')
+    WebDriverWait(browser, 2).until(lambda driver: driver.execute_script("""
+      return window.__renameRequests.length && Boolean(document.querySelector(
+        '#panel-__finder__ .file-tree-row[data-path="/home/test/renamed.txt"]'));
+    """))
+    metrics = browser.execute_script("""
+      return {requests:window.__renameRequests,errors:jsDebugFailureEvents('error'),
+        rejections:jsDebugFailureEvents('rejection')};
+    """)
+    assert metrics['requests'] == [{'path':'/home/test/note.txt','new_name':'renamed.txt'}], metrics
+    assert metrics['errors'] == [] and metrics['rejections'] == [], metrics
 
 
 def test_finder_context_delete_invalidates_parent_and_removes_the_real_row(browser, tmp_path):
@@ -4017,6 +4048,177 @@ def test_git_diff_stats_chunk_patches_only_changed_rows_in_chromium(browser, tmp
     }, metrics
 
 
+def test_git_request_observer_records_real_network_when_resource_buffer_is_full(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, 'request-observer.html', '<!doctype html><title>Request observer</title>')
+    page = serve_repo_fixture_page('git-stats-response.data', 'event: done\ndata: {"count":1}\n\n')
+    url = fixture_page_url(page)
+    try:
+        result = browser.execute_async_script(
+            """
+            const url = arguments[0];
+            const done = arguments[arguments.length - 1];
+            window.__gitRequestObserver = (__RESOURCE_REQUEST_OBSERVER__)();
+            performance.clearResourceTimings();
+            performance.setResourceTimingBufferSize(0);
+            (async () => {
+              const response = await fetch(url, {cache: 'no-store'});
+              const reader = response.body.getReader();
+              const chunk = await reader.read();
+              await reader.cancel('consumer processed completion');
+              return {status: response.status, body: new TextDecoder().decode(chunk.value),
+                snapshotObserved: performance.getEntriesByType('resource').some(entry => entry.name === url)};
+            })().then(done, error => done({error: String(error?.stack || error)}));
+            """.replace('__RESOURCE_REQUEST_OBSERVER__', resource_request_observer_source()),
+            url,
+        )
+        assert 'error' not in result, result
+        assert result == {'status': 200, 'body': 'event: done\ndata: {"count":1}\n\n', 'snapshotObserved': False}
+        observed = WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+            "return window.__gitRequestObserver.entries().filter(entry => entry.name === arguments[0]).map(entry => ({name:entry.name,initiator:entry.initiatorType,end:entry.responseEnd}));", url,
+        ))
+        assert len(observed) == 1, observed
+        assert observed[0]['name'] == url and observed[0]['initiator'] == 'fetch' and observed[0]['end'] > 0, observed
+        assert browser.execute_script("return window.__gitRequestObserver.entries().some(entry => entry.name === arguments[0]);", url + '?never-requested') is False
+        assert browser.execute_script("return performance.getEntriesByType('resource').some(entry => entry.name === arguments[0]);", url) is False
+    finally:
+        browser.execute_script("window.__gitRequestObserver?.retire(); delete window.__gitRequestObserver; performance.setResourceTimingBufferSize(250);")
+
+
+def test_git_stats_hold_tracks_completed_response_after_superseded_candidate(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=one&layout=left&tabs=left:one', sessions=['one'])
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const sources = [];
+          const hold = (__GIT_STATS_DONE_HOLD__)(async () => {
+            const source = {cancelled:false, controller:null};
+            sources.push(source);
+            source.response = new Response(new ReadableStream({
+              start(controller) { source.controller = controller; },
+              cancel() { source.cancelled = true; },
+            }));
+            return source.response;
+          });
+          const encode = text => new TextEncoder().encode(text);
+          let first;
+          let second;
+          try {
+            const firstUrl = '/api/fs/git-history-stats-stream?offset=0&batch_sizes=1';
+            first = (await hold.fetch(firstUrl)).body.getReader();
+            sources[0].controller.enqueue(encode('event: chunk\\ndata: {"commits":[]}\\n\\n'));
+            await first.read();
+            await first.cancel('superseded viewport range');
+            const afterCancel = {...hold.state};
+            const secondUrl = '/api/fs/git-history-stats-stream?offset=2&batch_sizes=1,2';
+            second = (await hold.fetch(secondUrl)).body.getReader();
+            sources[1].controller.enqueue(encode('event: do'));
+            await second.read();
+            const afterHeaderPrefix = {...hold.state};
+            sources[1].controller.enqueue(encode('ne\\ndata: {"count":3}\\n'));
+            await second.read();
+            const beforeFrameEnd = {...hold.state};
+            sources[1].controller.enqueue(encode('\\n'));
+            await second.read();
+            const held = {...hold.state};
+            let eofObserved = false;
+            const pendingRead = second.read().then(value => { eofObserved = value.done; });
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const beforeCancelEof = eofObserved;
+            await second.cancel('consumer processed done');
+            await pendingRead;
+            await hold.retire();
+            return {afterCancel, afterHeaderPrefix, beforeFrameEnd, held, beforeCancelEof,
+              initialPath:new URL(held.firstRequestUrl).search, heldPath:new URL(held.heldRequestUrl).search, cancelled:sources.map(source => source.cancelled),
+              sourceLocks:sources.map(source => source.response.body.locked)};
+          } finally {
+            await first?.cancel();
+            await second?.cancel();
+            await hold.retire();
+          }
+        })().then(done, error => done({error:String(error?.stack || error)}));
+        """.replace('__GIT_STATS_DONE_HOLD__', git_stats_done_hold_source())
+    )
+    assert 'error' not in result, result
+    assert result['afterCancel']['intercepted'] is True, result
+    assert result['afterCancel']['doneHeldOpen'] is False, result
+    assert result['afterHeaderPrefix']['doneHeldOpen'] is False, result
+    assert result['beforeFrameEnd']['doneHeldOpen'] is False, result
+    assert result['held']['doneHeldOpen'] is True, result
+    assert result['initialPath'] == '?offset=0&batch_sizes=1', result
+    assert result['heldPath'] == '?offset=2&batch_sizes=1,2', result
+    assert result['beforeCancelEof'] is False, result
+    assert result['cancelled'] == [True, True] and result['sourceLocks'] == [False, False], result
+
+
+def test_git_stats_hold_retirement_excludes_late_response_headers(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=one&layout=left&tabs=left:one', sessions=['one'])
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          let releaseHeaders;
+          const headers = new Promise(resolve => { releaseHeaders = resolve; });
+          const hold = (__GIT_STATS_DONE_HOLD__)(() => headers);
+          const pending = hold.fetch('/api/fs/git-history-stats-stream?offset=0&batch_sizes=1');
+          await hold.retire();
+          const original = new Response('event: done\\ndata: {"count":1}\\n\\n');
+          releaseHeaders(original);
+          const response = await pending;
+          const text = await response.text();
+          return {sameResponse:response === original, text, state:hold.state, locked:original.body.locked};
+        })().then(done, error => done({error:String(error?.stack || error)}));
+        """.replace('__GIT_STATS_DONE_HOLD__', git_stats_done_hold_source())
+    )
+    assert 'error' not in result, result
+    assert result['sameResponse'] is True, result
+    assert result['text'] == 'event: done\ndata: {"count":1}\n\n', result
+    assert result['state']['intercepted'] is False and result['state']['doneHeldOpen'] is False, result
+    assert result['state']['firstRequestUrl'].endswith('?offset=0&batch_sizes=1'), result
+    assert result['state']['heldRequestUrl'] == '', result
+
+
+@pytest.mark.parametrize('initial_outcome', ['late-headers', 'aborted-headers'])
+def test_git_stats_hold_initial_request_precedes_response_order(browser, tmp_path, initial_outcome):
+    load_live_runtime_boot_fixture(browser, tmp_path, '?sessions=one&layout=left&tabs=left:one', sessions=['one'])
+    result = browser.execute_async_script(
+        """
+        const outcome = arguments[0];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          let resolveInitial;
+          let rejectInitial;
+          const initialHeaders = new Promise((resolve, reject) => {
+            resolveInitial = resolve; rejectInitial = reject;
+          });
+          const hold = (__GIT_STATS_DONE_HOLD__)(input => String(input).includes('offset=0&')
+            ? initialHeaders : Promise.resolve(new Response('event: done\\ndata: {"count":3}\\n\\n')));
+          const initial = hold.fetch('/api/fs/git-history-stats-stream?offset=0&batch_sizes=1')
+            .then(response => response.text(), error => ({name:error.name}));
+          let reader;
+          try {
+            const winner = await hold.fetch('/api/fs/git-history-stats-stream?offset=2&batch_sizes=1,2');
+            reader = winner.body.getReader();
+            await reader.read();
+            if (outcome === 'aborted-headers') rejectInitial(new DOMException('superseded initial request', 'AbortError'));
+            else resolveInitial(new Response('late initial response'));
+            const initialResult = await initial;
+            return {state:{...hold.state}, initialResult};
+          } finally {
+            await reader?.cancel();
+            await hold.retire();
+          }
+        })().then(done, error => done({error:String(error?.stack || error)}));
+        """.replace('__GIT_STATS_DONE_HOLD__', git_stats_done_hold_source()),
+        initial_outcome,
+    )
+    assert 'error' not in result, result
+    assert result['state']['firstRequestUrl'].endswith('?offset=0&batch_sizes=1'), result
+    assert result['state']['heldRequestUrl'].endswith('?offset=2&batch_sizes=1,2'), result
+    assert result['state']['doneHeldOpen'] is True, result
+    assert result['initialResult'] == ({'name': 'AbortError'} if initial_outcome == 'aborted-headers' else 'late initial response'), result
+
+
 def test_git_diff_stats_done_event_finishes_before_stream_eof_in_chromium(browser, tmp_path):
     repo = "/home/test/repo"
     head = "f" * 40
@@ -5213,7 +5415,7 @@ def test_sync_mode_active_file_reveal_keeps_manual_collapse(browser, tmp_path):
 
 def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, tmp_path):
     fs_entries = {
-        "/home/test/yolomux.dev3/tests/fixtures/preview-samples": [
+        "/home/test/yolomux.dev3/examples/preview": [
             {"name": "03-mixed.md", "kind": "file", "size": 128, "mtime_ns": 1781300000000000000},
         ],
     }
@@ -5222,10 +5424,10 @@ def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, t
         """
         const done = arguments[arguments.length - 1];
         const fetchStart = window.__bootFetches.length;
-        const path = '/home/test/yolomux.dev3/tests/fixtures/preview-samples/03-mixed.md';
+        const path = '/home/test/yolomux.dev3/examples/preview/03-mixed.md';
         fetchFileEntryStatus(path)
           .then(result => {
-            setFileExplorerFsResourceValue('list', '/home/test/yolomux.dev3/tests/fixtures/preview-samples', [
+            setFileExplorerFsResourceValue('list', '/home/test/yolomux.dev3/examples/preview', [
               {name: '03-mixed.md', kind: 'file', size: 129, mtime: 1781300001, mtime_ns: 1781300001000000000},
             ]);
             const newer = freshCachedFileEntryStatus(path);
@@ -6761,9 +6963,11 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
         const {frame} = window.__yomuxTestHelpers;
         (async () => {
           try {
+            switchFileExplorerFinderSession('5');
+            await fetchSessionFiles({destination: 'finder', session: '5', force: true});
             await openFileExplorerAt('/home/test/yolomux.dev1', {syncSelection: true});
             resetFileExplorerAppliedSyncPlan();
-            fileExplorerSessionFilesCache.delete(sessionFilesCacheKey('6'));
+            fileExplorerFinderSessionFilesCache.delete(sessionFilesCacheKey('6', 'finder'));
             await frame();
             const originalFetch = window.fetch;
             let heldFetch = false;
@@ -6778,7 +6982,7 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
               }
               return originalFetch(input, options);
             };
-            const changed = noteFileExplorerChangesSessionInteraction('6');
+            const changed = switchFileExplorerFinderSession('6');
             let attempts = 0;
             const wait = () => {
               attempts += 1;
@@ -6789,8 +6993,8 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
                   heldFetch,
                   root,
                   explicitSession: fileExplorerExplicitSyncSessionTarget(),
-                  payloadSession: fileExplorerSessionFilesState.payload?.session || '',
-                  loading: fileExplorerSessionFilesState.loading,
+                  payloadSession: fileExplorerFinderSessionFilesState.payload?.session || '',
+                  loading: fileExplorerFinderSessionFilesState.loading,
                   planRoot: fileExplorerSyncPlan('6').root,
                 };
                 window.fetch = originalFetch;
@@ -6807,8 +7011,8 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
                   heldFetch,
                   root,
                   explicitSession: fileExplorerExplicitSyncSessionTarget(),
-                  payloadSession: fileExplorerSessionFilesState.payload?.session || '',
-                  loading: fileExplorerSessionFilesState.loading,
+                  payloadSession: fileExplorerFinderSessionFilesState.payload?.session || '',
+                  loading: fileExplorerFinderSessionFilesState.loading,
                   planRoot: fileExplorerSyncPlan('6').root,
                 });
                 return;
@@ -6875,11 +7079,13 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
         const {frame} = window.__yomuxTestHelpers;
         (async () => {
           try {
+            switchFileExplorerFinderSession('5');
+            await fetchSessionFiles({destination: 'finder', session: '5', force: true});
             await openFileExplorerAt('/home/test/yolomux.dev1', {syncSelection: true});
             resetFileExplorerAppliedSyncPlan();
             await frame();
             const payload6 = {session: '6', loaded: true, errors: [], refs_by_repo: {}, repos: [{repo: '/home/test/yolomux.dev2'}], files: []};
-            fileExplorerSessionFilesCache.set(sessionFilesCacheKey('6'), {
+            fileExplorerFinderSessionFilesCache.set(sessionFilesCacheKey('6', 'finder'), {
               payload: payload6,
               signature: sessionFilesPayloadSignatureForPayload(payload6),
             });
@@ -6896,7 +7102,7 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
               }
               return originalFetch(input, options);
             };
-            const changed = noteFileExplorerChangesSessionInteraction('6');
+            const changed = switchFileExplorerFinderSession('6');
             let attempts = 0;
             const wait = () => {
               attempts += 1;
@@ -6907,8 +7113,8 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
                   heldFetch,
                   root,
                   explicitSession: fileExplorerExplicitSyncSessionTarget(),
-                  payloadSession: fileExplorerSessionFilesState.payload?.session || '',
-                  loading: fileExplorerSessionFilesState.loading,
+                  payloadSession: fileExplorerFinderSessionFilesState.payload?.session || '',
+                  loading: fileExplorerFinderSessionFilesState.loading,
                   planRoot: fileExplorerSyncPlan('6').root,
                 };
                 window.fetch = originalFetch;
@@ -6925,8 +7131,8 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
                   heldFetch,
                   root,
                   explicitSession: fileExplorerExplicitSyncSessionTarget(),
-                  payloadSession: fileExplorerSessionFilesState.payload?.session || '',
-                  loading: fileExplorerSessionFilesState.loading,
+                  payloadSession: fileExplorerFinderSessionFilesState.payload?.session || '',
+                  loading: fileExplorerFinderSessionFilesState.loading,
                   planRoot: fileExplorerSyncPlan('6').root,
                 });
                 return;

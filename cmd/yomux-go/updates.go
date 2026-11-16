@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/keivenchang/yomux/internal/productversion"
+	"github.com/keivenchang/yomux/internal/staticassets"
 	"gopkg.in/yaml.v3"
 )
 
@@ -656,18 +658,50 @@ func (s *server) prepareSelfUpdate(ctx context.Context, job selfUpdateJob) (resu
 			return nil, fmt.Errorf("prepared browser asset %s is missing", asset)
 		}
 	}
-	prepared := &preparedSelfUpdate{runtimeRoot: runtimeRoot, root: root, head: head, installation: installation, stage: stage, binary: preparedBinary, target: job.TargetSHA, hashes: make(map[string][32]byte)}
-	for _, path := range []string{preparedBinary, filepath.Join(stage, "static", "yomux.js"), filepath.Join(stage, "static", "yomux.css")} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		prepared.hashes[path] = sha256.Sum256(data)
+	hashes, err := preparedUpdateHashes(stage, preparedBinary)
+	if err != nil {
+		return nil, err
 	}
+	prepared := &preparedSelfUpdate{runtimeRoot: runtimeRoot, root: root, head: head, installation: installation, stage: stage, binary: preparedBinary, target: job.TargetSHA, hashes: hashes}
 	if err := validatePreparedUpdate(ctx, prepared); err != nil {
 		return nil, err
 	}
 	return prepared, nil
+}
+
+// Browser dependencies and generated catalogs are part of the prepared runtime,
+// just like the executable. Activation must neither acquire nor trust new bytes.
+func preparedUpdateHashes(stage, binary string) (map[string][32]byte, error) {
+	paths := []string{binary}
+	if err := filepath.WalkDir(filepath.Join(stage, "static"), func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("prepared runtime contains a non-regular asset: %s", path)
+		}
+		paths = append(paths, path)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	hashes := make(map[string][32]byte, len(paths))
+	for _, path := range paths {
+		input, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		digest := sha256.New()
+		_, readErr := io.Copy(digest, input)
+		if err := errors.Join(readErr, input.Close()); err != nil {
+			return nil, err
+		}
+		hashes[path] = [32]byte(digest.Sum(nil))
+	}
+	return hashes, nil
 }
 
 func validatePreparedUpdate(ctx context.Context, prepared *preparedSelfUpdate) error {
@@ -684,9 +718,12 @@ func validatePreparedUpdate(ctx context.Context, prepared *preparedSelfUpdate) e
 		(prepared.installation != nil && *prepared.installation != *currentInstallation) {
 		return errors.New("installation provenance changed during update preparation")
 	}
+	hashes, err := preparedUpdateHashes(prepared.stage, prepared.binary)
+	if err != nil || len(hashes) != len(prepared.hashes) {
+		return errors.Join(errors.New("prepared update artifacts changed; check for updates again"), err)
+	}
 	for path, expected := range prepared.hashes {
-		data, err := os.ReadFile(path)
-		if err != nil || sha256.Sum256(data) != expected {
+		if actual, exists := hashes[path]; !exists || actual != expected {
 			return errors.New("prepared update artifacts changed; check for updates again")
 		}
 	}
@@ -740,17 +777,33 @@ func (s *server) runSelfUpdate(job selfUpdateJob) {
 		installer := exec.Command("bash", filepath.Join(stage, "tools", "install.sh"), "--prefix", installation.Prefix, "--source-root", root)
 		installer.Dir = stage
 		installer.Env = environmentWithValue(os.Environ(), "YOMUX_GO_BINARY", preparedBinary)
+		installer.Env = environmentWithValue(installer.Env, "YOMUX_INSTALL_PREPARED", "1")
 		if output, err := installer.CombinedOutput(); err != nil {
 			fail(fmt.Errorf("activated commit but native installation failed: %w: %s", err, strings.TrimSpace(string(output))))
 			return
 		}
 		preparedBinary = filepath.Join(runtimeRoot, "yomux-go")
 	} else {
-		for _, asset := range []string{"yomux.js", "yomux.css"} {
-			if err := copyAtomic(filepath.Join(stage, "static", asset), filepath.Join(root, "static", asset), 0o644); err != nil {
-				fail(fmt.Errorf("activated commit but bundle install failed: %w", err))
+		outputs := make(map[string][]byte, len(prepared.hashes)-1)
+		for path, expected := range prepared.hashes {
+			if path == prepared.binary {
+				continue // The executable is activated through the managed launcher below.
+			}
+			relative, err := filepath.Rel(filepath.Join(stage, "static"), path)
+			if err != nil || !filepath.IsLocal(relative) {
+				fail(errors.New("prepared browser asset escapes its runtime tree"))
 				return
 			}
+			data, err := os.ReadFile(path)
+			if err != nil || sha256.Sum256(data) != expected {
+				fail(errors.Join(errors.New("prepared browser asset changed during activation"), err))
+				return
+			}
+			outputs[relative] = data
+		}
+		if _, err := staticassets.Publish(filepath.Join(root, "static"), outputs, false); err != nil {
+			fail(fmt.Errorf("activated commit but browser asset install failed: %w", err))
+			return
 		}
 	}
 	set("restarting", "Starting the selected instance through boot.sh", nil)
@@ -996,9 +1049,6 @@ func (s *server) selfUpdateBootArgs() []string {
 	}
 	if s.statsPath != "" {
 		args = append(args, "--stats", s.statsPath)
-	}
-	if !s.dangerouslyYolo {
-		args = append(args, "--no-dang")
 	}
 	if s.httpMode {
 		args = append(args, "--http")

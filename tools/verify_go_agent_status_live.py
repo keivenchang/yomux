@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import signal
 import socket
@@ -204,9 +205,6 @@ def main() -> int:
         make_opencode_database(root / "opencode.db", int(now * 1000))
         copy_live_jsonl(REPO / "tests/fixtures/current_model_usage/observed.claude.jsonl", home / "claude" / "projects" / "live.jsonl", now)
         write_synthetic_codex_token_usage_jsonl(home / "codex" / "sessions" / "live.jsonl", now)
-        opencode_interpreter = root / "opencode"
-        shutil.copy(Path(python).resolve(), opencode_interpreter)
-        opencode_interpreter.chmod(0o700)
         prefix = "yolo-live-" + root.name[-8:]
         sessions = {client: f"{prefix}-{client}" for client in CLIENTS}
         env = synthetic_test_environment()
@@ -238,10 +236,9 @@ def main() -> int:
         try:
             for client in CLIENTS:
                 script = REPO / "tools/mockers" / f"{client}.py"
+                command = f"exec -a {client} {shlex.join([python, str(script), '--mock'])}"
                 if client == "opencode":
-                    command = f"exec -a opencode {opencode_interpreter} {script} --mock --session ses-live"
-                else:
-                    command = f"exec -a {client} {python} {script} --mock"
+                    command += " --session ses-live"
                 run(tmux, "-S", str(socket_path), "new-session", "-d", "-s", sessions[client], "-x", "126", "-y", "35", "bash", "-lc", command, env=env)
                 started_sessions.append(sessions[client])
             for session in started_sessions:

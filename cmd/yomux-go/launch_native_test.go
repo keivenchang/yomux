@@ -4,8 +4,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -21,6 +24,203 @@ import (
 	"github.com/keivenchang/yomux/internal/productenv"
 	"github.com/keivenchang/yomux/internal/testsupport"
 )
+
+func TestNativeBrowserAssetsReady(t *testing.T) {
+	config := t.TempDir()
+	t.Setenv("YOMUX_CONFIG_DIR", config)
+	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: unrelated\n    password: unrelated\n    role: admin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	for _, address := range []string{"127.0.0.1:0", "[::1]:0"} {
+		for _, secure := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/tls=%t", address, secure), func(t *testing.T) {
+				listener, err := net.Listen("tcp", address)
+				if err != nil {
+					if strings.HasPrefix(address, "[") && (errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EADDRNOTAVAIL)) {
+						t.Skipf("IPv6 loopback unavailable: %v", err)
+					}
+					t.Fatal(err)
+				}
+				var mu sync.Mutex
+				status, wrongType, truncated := http.StatusOK, false, false
+				seen := []string{}
+				server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					mu.Lock()
+					defer mu.Unlock()
+					if r.Header.Get("Cookie") != "" {
+						t.Error("public asset probe sent authentication")
+					}
+					seen = append(seen, r.URL.Path)
+					contentType := "text/javascript; charset=utf-8"
+					if r.URL.Path == "/static/yomux.css" {
+						contentType = "text/css"
+					}
+					if wrongType {
+						contentType = "text/html"
+					}
+					w.Header().Set("Content-Type", contentType)
+					if truncated {
+						w.Header().Set("Content-Length", "100")
+					}
+					w.WriteHeader(status)
+				}))
+				if err := server.Listener.Close(); err != nil {
+					t.Fatal(err)
+				}
+				server.Listener = listener
+				if secure {
+					server.StartTLS()
+				} else {
+					server.Start()
+				}
+				defer server.Close()
+				host, portString, err := net.SplitHostPort(listener.Addr().String())
+				if err != nil {
+					t.Fatal(err)
+				}
+				port, err := strconv.Atoi(portString)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := nativeBrowserAssetsReady(host, port, !secure); err != nil {
+					t.Fatal(err)
+				}
+				mu.Lock()
+				gotPaths := strings.Join(seen, ",")
+				wrongType = true
+				mu.Unlock()
+				if gotPaths != "/static/yomux.js,/static/yomux.css" {
+					t.Fatalf("asset probes: %s", gotPaths)
+				}
+				if err := nativeBrowserAssetsReady(host, port, !secure); err == nil || !strings.Contains(err.Error(), "content type") {
+					t.Fatalf("accepted invalid content type: %v", err)
+				}
+				mu.Lock()
+				wrongType, status = false, http.StatusNotFound
+				mu.Unlock()
+				if err := nativeBrowserAssetsReady(host, port, !secure); err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+					t.Fatalf("accepted missing asset: %v", err)
+				}
+				mu.Lock()
+				status, truncated = http.StatusOK, true
+				mu.Unlock()
+				if err := nativeBrowserAssetsReady(host, port, !secure); err == nil || !strings.Contains(err.Error(), "transfer") {
+					t.Fatalf("accepted truncated asset: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestNativeAssetSetupAndBuildRespectExistingCheckoutWriter(t *testing.T) {
+	for _, action := range []string{"setup-assets", "build-assets", "startup-assets"} {
+		t.Run(action, func(t *testing.T) {
+			root := t.TempDir()
+			gitRun(t, root, "init", "--initial-branch=main")
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			write := func(name string, body []byte) {
+				t.Helper()
+				path := filepath.Join(root, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			body := []byte("prepared PDF viewer")
+			write("static/vendor/pdfjs/web/viewer.html", body)
+			write("assets/runtime/browser-assets.json", []byte(`{}`))
+			manifest, err := json.Marshal(map[string]any{"version": "fixture", "archive_sha256": strings.Repeat("a", 64), "files": map[string]string{"web/viewer.html": fmt.Sprintf("%x", sha256.Sum256(body))}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			write("assets/runtime/pdfjs-assets.json", manifest)
+			owner := []byte(`{"token":"other-active-checkout-writer"}`)
+			write(".git/yolomux/worktree-writer/owner.json", owner)
+			if err := runNativeOperator([]string{action, "--root", root}); err == nil || !strings.Contains(err.Error(), "writer") {
+				t.Fatalf("asset publication bypassed active checkout writer: %v", err)
+			}
+			for name, want := range map[string]string{".git/yolomux/worktree-writer/owner.json": string(owner), "static/vendor/pdfjs/web/viewer.html": string(body)} {
+				got, err := os.ReadFile(filepath.Join(root, name))
+				if err != nil || string(got) != want {
+					t.Fatalf("changed protected writer state %s: %q %v", name, got, err)
+				}
+			}
+		})
+	}
+}
+
+func TestNativeSourceStartupRebuildsOfflineAndRequiresExactCheckout(t *testing.T) {
+	root := t.TempDir()
+	gitRun(t, root, "init", "--initial-branch=main")
+	write := func(name, content string) {
+		t.Helper()
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dependency := "prepared dependency"
+	write("static/vendor/library.js", dependency)
+	write("static/vendor/pdfjs/viewer.html", "prepared viewer")
+	write("assets/runtime/browser-assets.json", fmt.Sprintf(`{"files":{"static/vendor/library.js":{"sha256":"%x","urls":["https://unreachable.invalid/library.js"]}}}`, sha256.Sum256([]byte(dependency))))
+	write("assets/runtime/pdfjs-assets.json", fmt.Sprintf(`{"version":"fixture","archive_sha256":"%s","files":{"viewer.html":"%x"}}`, strings.Repeat("a", 64), sha256.Sum256([]byte("prepared viewer"))))
+	write("assets/runtime/locale-registry.json", `[{"code":"en","plural_categories":["other"]}]`)
+	write("static_src/pseudo-locale.json", `{"token_pattern":"\\{[a-z]+\\}","accent_from":"a","accent_to":"b","placeholder_pattern":"\\{[a-z]+\\}","protected_token_pattern":"\\{[a-z]+\\}"}`)
+	write("static_src/locales/en.json", `{"hello":"Hello"}`)
+	write("static_src/build-manifest.json", `{"yomux.js":["static_src/app.js"],"yomux.css":["static_src/app.css"]}`)
+	write("static_src/app.js", "globalThis.startupFixture = 'source';")
+	write("static_src/app.css", "body { color: inherit; }")
+	for _, mode := range []string{"missing", "stale"} {
+		for _, name := range []string{"yomux.js", "yomux.css"} {
+			path := filepath.Join(root, "static", name)
+			if mode == "missing" {
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+			} else {
+				write("static/"+name, "stale")
+			}
+		}
+		if err := runNativeOperator([]string{"startup-assets", "--root", root}); err != nil {
+			t.Fatalf("%s source startup: %v", mode, err)
+		}
+		for name, want := range map[string]string{"yomux.js": "globalThis.startupFixture = 'source';", "yomux.css": "body { color: inherit; }"} {
+			body, err := os.ReadFile(filepath.Join(root, "static", name))
+			if err != nil || !strings.Contains(string(body), want) {
+				t.Fatalf("%s source output %s was not rebuilt: %q %v", mode, name, body, err)
+			}
+		}
+	}
+	if err := nativeStartupAssets(filepath.Join(root, "static_src")); err == nil {
+		t.Fatal("a checkout subdirectory authorized startup publication")
+	}
+	for _, mode := range []string{"corrupt", "missing"} {
+		path := filepath.Join(root, "static/vendor/library.js")
+		if mode == "corrupt" {
+			write("static/vendor/library.js", "corrupt")
+		} else if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := nativeStartupAssets(root); err == nil || !strings.Contains(err.Error(), "make build") {
+			t.Fatalf("%s dependency was not rejected offline: %v", mode, err)
+		}
+		if mode == "corrupt" {
+			body, err := os.ReadFile(path)
+			if err != nil || string(body) != "corrupt" {
+				t.Fatalf("startup repaired dependency: %q %v", body, err)
+			}
+		} else if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("startup downloaded missing dependency: %v", err)
+		}
+	}
+}
 
 func cleanNativeLaunchEnvironment(t *testing.T) {
 	t.Helper()
@@ -250,30 +450,30 @@ func TestNativeManagedDefaultsPreserveOperatorSelection(t *testing.T) {
 				}
 			}
 			t.Setenv(prefix+"DEFAULT_PORT", "7111")
-			port, host, dangerous := 7221, "127.0.0.1", false
-			if err := nativeManagedDefaults(map[string]bool{}, &port, &host, &dangerous); err != nil {
+			port, host := 7221, "127.0.0.1"
+			if err := nativeManagedDefaults(map[string]bool{}, &port, &host); err != nil {
 				t.Fatal(err)
 			}
-			if port != 7111 || host != "0.0.0.0" || !dangerous {
-				t.Fatalf("defaults: %d %s %t", port, host, dangerous)
+			if port != 7111 || host != "0.0.0.0" {
+				t.Fatalf("defaults: %d %s", port, host)
 			}
 			t.Setenv(prefix+"PORT", "7112")
 			t.Setenv(prefix+"HOST", "127.0.0.2")
-			if err := nativeManagedDefaults(map[string]bool{}, &port, &host, &dangerous); err != nil {
+			if err := nativeManagedDefaults(map[string]bool{}, &port, &host); err != nil {
 				t.Fatal(err)
 			}
 			if port != 7112 || host != "127.0.0.2" {
 				t.Fatalf("environment: %d %s", port, host)
 			}
-			port, host, dangerous = 7113, "localhost", false
-			if err := nativeManagedDefaults(map[string]bool{"port": true, "host": true, "dang": true}, &port, &host, &dangerous); err != nil {
+			port, host = 7113, "localhost"
+			if err := nativeManagedDefaults(map[string]bool{"port": true, "host": true}, &port, &host); err != nil {
 				t.Fatal(err)
 			}
-			if port != 7113 || host != "localhost" || dangerous {
+			if port != 7113 || host != "localhost" {
 				t.Fatal("explicit flags overridden")
 			}
 			t.Setenv(prefix+"PORT", "")
-			if err := nativeManagedDefaults(map[string]bool{}, &port, &host, &dangerous); err == nil {
+			if err := nativeManagedDefaults(map[string]bool{}, &port, &host); err == nil {
 				t.Fatal("empty port reactivated default")
 			}
 		})

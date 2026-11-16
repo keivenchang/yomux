@@ -62,12 +62,18 @@ def _retire_expected_auto_approve_failure(browser, message):
     )
 
 
-def _load_toggle_fixture(browser, tmp_path):
-    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+def _load_toggle_fixture(browser, tmp_path, **fixture_kwargs):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"], **fixture_kwargs)
     run_when_browser_ready(
         browser,
-        "const marker = document.querySelector('[data-yolo-session=\"1\"]'); return marker !== null && marker.hasAttribute('aria-pressed');",
-        globals_required={"toggleAutoApprove": "function"},
+        """
+        const marker = document.querySelector('[data-yolo-session="1"]');
+        const state = autoApproveStates.get('1');
+        return loadAutoStatuses.request === null && loadAutoStatuses.lastResult !== null && state !== undefined
+          && marker?.getAttribute('aria-pressed') === String(state.enabled === true)
+          && marker.classList.contains('active') === (state.enabled === true);
+        """,
+        globals_required={"toggleAutoApprove": "function", "loadAutoStatuses": "function"},
         dom_anchors=("[data-yolo-session=\"1\"]", "#status"),
     )
     browser.execute_script(
@@ -85,6 +91,34 @@ def _load_toggle_fixture(browser, tmp_path):
         };
         """
     )
+
+
+def test_toggle_fixture_waits_for_initial_state_before_claiming_ready(browser, tmp_path, monkeypatch):
+    original_wait = run_when_browser_ready
+    observations = []
+
+    def observe_initial_read(driver, predicate, **options):
+        WebDriverWait(driver, 5).until(lambda current: current.execute_script(
+            "return typeof window.__fixtureReleaseAutoApprove === 'function'"
+        ))
+        accepted = driver.execute_script(predicate)
+        observations.append(accepted)
+        driver.execute_script("window.__fixtureHoldAutoApprove = false; window.__fixtureReleaseAutoApprove();")
+        assert accepted is False, 'a painted button is insufficient while its initial state is still held'
+        return original_wait(driver, predicate, **options)
+
+    monkeypatch.setitem(globals(), 'run_when_browser_ready', observe_initial_read)
+    _load_toggle_fixture(browser, tmp_path, hold_auto_approve=True, auto_approve_payload={
+        'session_order': ['1'],
+        'sessions': {'1': {'target': '1', 'enabled': True, 'last_action': 'on'}},
+        'rules': {'rules': [], 'errors': []},
+    })
+    assert observations == [False]
+    assert browser.execute_script("""
+      const button = document.querySelector('[data-yolo-session="1"]');
+      return autoApproveStates.get('1')?.enabled === true
+        && button?.classList.contains('active') && button.getAttribute('aria-pressed') === 'true';
+    """)
 
 
 def _dockview_drag_preview(browser, *, x_ratio, y_ratio):
@@ -548,9 +582,11 @@ def test_i3_negative_control_unqualified_host_refuses_instead_of_passing():
     assert refusal.value.evidence["verdicts"][0]["passed"] is True, "the refusal must carry the raw verdict it declined to certify"
 
 
-def test_i3_calibration_probe_moves_under_independent_browser_pressure(browser, request):
+def test_i3_calibration_probe_moves_under_independent_browser_pressure(certification_phase_only, browser, request):
     """The probe reads higher under independent renderer pressure, measured identically on both sides.
 
+    Host qualification precedes the browser fixture in the exclusive certification phase. A parallel
+    development lane cannot establish a quiet renderer baseline for this physical sensitivity claim.
     Quiet and busy rounds are interleaved inside ONE warmed page context, so both sides see the same
     host conditions and the same renderer state. That removes the two asymmetries that used to decide
     this unit instead of the product:
@@ -894,6 +930,7 @@ def test_k7_overdue_mutation_keeps_its_control_disabled_without_abort_and_conver
         const done = arguments[arguments.length - 1];
         const button = document.querySelector('[data-yolo-session="1"]');
         const before = button.classList.contains('active');
+        const beforeState = {...autoApproveStates.get('1')};
         let settleRequest;
         let signal = null;
         const restoreFetch = window.__fixtureInterceptAutoApproveFetch((_url, options = {}) => (
@@ -941,6 +978,11 @@ def test_k7_overdue_mutation_keeps_its_control_disabled_without_abort_and_conver
               overdueRevoked: !overdueAfter,
               committed: button.classList.contains('active') !== before,
               rolledBack: button.classList.contains('active') === before,
+              before,
+              beforeState,
+              afterState: {...autoApproveStates.get('1')},
+              sameButton: document.querySelector('[data-yolo-session="1"]') === button,
+              currentActive: document.querySelector('[data-yolo-session="1"]')?.classList.contains('active'),
               errorVisible,
             });
           }));

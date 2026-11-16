@@ -59,6 +59,58 @@ OUTPUT_USER_ROOT_SLOTS = 8
 EXECUTION_MODES = ("auto", "docker", "native", "qualified-native")
 
 
+def resolve_execution(requested, *, system=None, in_container=False):
+    """Keep every test entry point on the same platform default."""
+    if requested not in EXECUTION_MODES:
+        raise ValueError(f"unknown execution mode: {requested}")
+    if requested != "auto":
+        return requested
+    return "native" if (system or platform.system()) == "Darwin" and not in_container else "docker"
+
+
+# JDK 24 removed monitor pinning; use the supported 25 LTS baseline for Bazel's cache workers.
+DARWIN_BAZEL_JAVA_MINIMUM = 25
+DARWIN_BAZEL_JAVA_GUIDANCE = "macOS native Bazel requires JDK 25 or newer; install openjdk@25 or set JAVA_HOME to an admitted JDK"
+DARWIN_BAZEL_JAVA_HOMES = (
+    Path("/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home"),
+    Path("/usr/local/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home"),
+)
+
+
+def validate_darwin_bazel_java_home(home):
+    """Admit installed or checksum-locked JDK metadata without executing bundle tools."""
+    home = Path(home)
+    guidance = DARWIN_BAZEL_JAVA_GUIDANCE
+    if not home.is_absolute() or any(character in str(home) for character in "\r\n"):
+        raise ValueError(guidance + ": JAVA_HOME must be an absolute single-line path")
+    java = home / "bin/java"
+    release = home / "release"
+    if not java.is_file() or not os.access(java, os.X_OK) or not release.is_file():
+        raise ValueError(guidance + ": missing executable bin/java or release metadata at " + str(home))
+    versions = re.findall(r'^JAVA_VERSION="([0-9]+)(?:[^"\r\n]*)"$', release.read_text(encoding="utf-8"), re.MULTILINE)
+    if len(versions) != 1 or int(versions[0]) < DARWIN_BAZEL_JAVA_MINIMUM:
+        raise ValueError(guidance + ": incompatible JAVA_VERSION at " + str(home))
+    return home
+
+
+def native_bazel_java_home(environ=None):
+    """Honor an explicit JAVA_HOME strictly, otherwise select the installed Homebrew LTS."""
+    values = os.environ if environ is None else environ
+    if "JAVA_HOME" in values:
+        return validate_darwin_bazel_java_home(values["JAVA_HOME"])
+    for home in DARWIN_BAZEL_JAVA_HOMES:
+        if home.is_dir():
+            return validate_darwin_bazel_java_home(home)
+    raise ValueError(DARWIN_BAZEL_JAVA_GUIDANCE)
+
+
+def native_bazel_startup_flags(environ=None, *, system=None):
+    if (system or platform.system()) != "Darwin":
+        return []
+    # Homebrew's Bazel launcher overwrites JAVA_HOME; only a startup flag selects the server JVM.
+    return ["--server_javabase=" + str(native_bazel_java_home(environ))]
+
+
 def repository_git_environment():
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     bundle = product_env("NATIVE_BUNDLE", "")
@@ -134,9 +186,10 @@ def repository_release_context(root=ROOT, *, declared=False):
 
 # Bundle verification precedes sandbox admission. The runtime toolchain declares
 # every locked leaf, including these executable entrypoints.
+NATIVE_AGENT_TOOLS = ("claude", "codex", "opencode")
 NATIVE_REQUIRED_TOOLS = frozenset({
-    "python3", "node", "git", "tmux", "chrome", "chromedriver", "claude",
-    "codex", "opencode", "buildifier", "bash", "cc", "bazel", "go",
+    "python3", "node", "git", "tmux", "chrome", "chromedriver", *NATIVE_AGENT_TOOLS,
+    "buildifier", "bash", "cc", "bazel", "go",
     "env", "mkdir", "cp", "mv", "rm", "readlink", "dirname", "mktemp", "chmod",
     "find", "tar", "sort", "comm", "cmp", "diff", "sed", "awk", "cat",
     "grep", "timeout", "ps", "kill", "ln", "uname", "id", "getconf",
@@ -167,6 +220,30 @@ NATIVE_XTERM_ASSETS = {
 
 def xterm_fixture_paths(package_root):
     return {name: Path(package_root) / relative for name, relative in NATIVE_XTERM_ASSETS.items()}
+
+
+def xterm_asset_digests(repo_root=ROOT):
+    """Verify fixtures against source pins without requiring installed browser files."""
+    manifest = json.loads((Path(repo_root) / "assets/runtime/browser-assets.json").read_bytes())
+    digests = {path: record["sha256"] for path, record in manifest.get("files", {}).items()}
+    for archive in manifest.get("archives", []):
+        for path, digest in archive["files"].items():
+            if path in digests and digests[path] != digest:
+                raise ValueError("conflicting browser asset checksums: " + path)
+            digests[path] = digest
+    expected = {name: digests["static/vendor/" + name] for name in NATIVE_XTERM_ASSETS}
+    if any(not isinstance(value, str) or re.fullmatch("[0-9a-f]{64}", value) is None for value in expected.values()):
+        raise ValueError("invalid pinned xterm asset checksum")
+    return expected
+
+
+def diagnostic_xterm_package_root(execution=None):
+    if execution is None:
+        execution = product_env("BAZEL_EXECUTION", "auto")
+        override = product_env("CHECK_CONTAINER")
+        execution = {"0": "native", "1": "docker"}.get(override, execution)
+    default = Path.home() / ".cache/yomux/native-fixtures/xterm/node_modules" if resolve_execution(execution) in {"native", "qualified-native"} else Path("/opt/xterm/node_modules")
+    return Path(product_env("XTERM_PACKAGE_ROOT", str(default)))
 
 
 def native_xterm_package_root(root, system):
@@ -297,11 +374,12 @@ def verify_native_bundle(root, manifest_path, expected_digest, *, system=None, m
         raise ValueError("native bundle directory inventory differs from its lock")
     for _result in native_input_results(partial(_verify_native_leaf, root), files.items()):
         pass
+    expected_xterm = xterm_asset_digests()
     for name, path in xterm_fixture_paths(native_xterm_package_root(root, system)).items():
         if path.relative_to(root).as_posix() not in files or not path.is_file():
             raise ValueError("required native xterm package fixture is missing: " + name)
-        if _sha256_file(path) != _sha256_file(ROOT / "static/vendor" / name):
-            raise ValueError("native xterm package fixture differs from tracked vendor asset: " + name)
+        if _sha256_file(path) != expected_xterm[name]:
+            raise ValueError("native xterm package fixture differs from pinned vendor asset: " + name)
     resolved_tools = {}
     for name, relative in executables.items():
         path = root / _bundle_path(relative)
@@ -330,6 +408,11 @@ def verify_native_bundle(root, manifest_path, expected_digest, *, system=None, m
         metadata = BytesParser().parsebytes((root / _bundle_path(relative)).read_bytes())
         if metadata["Name"] is None or canonical_package_name(metadata["Name"]) != canonical_package_name(name) or metadata["Version"] != version:
             raise ValueError("native Python package differs from its pin: " + name)
+    if system == "Darwin":
+        try:
+            validate_darwin_bazel_java_home(root / "jdk")
+        except ValueError as error:
+            raise ValueError(str(error) + "; rebuild the macOS bundle with tools/native_bundle_acquire.py before qualified-native reuse") from error
     return NativeBundle(root, expected_digest, system, machine, resolved_tools)
 
 
@@ -412,7 +495,7 @@ def native_identity(bundle, flags, source_root=None):
                      "tools/native_process_scope.py", "tests/browser_helpers/webdriver_lease.py",
                      "yomux_lib/infra/host_identity.py", "yomux_lib/infra/filesystem_preflight.py", "yomux_lib/infra/transient_paths.py",
                      "tools/instance_isolation.py", "tools/tmux_paths.py", "tools/product_environment.py", APPARMOR_TEMPLATE,
-                     "tools/bazel_test_entrypoint.sh", "tools/bazel_test_common.sh",
+                     "tools/bazel_test_entrypoint.sh", "tools/bazel_test_common.sh", "tools/browser_runtime.py",
                      "tools/bazel_rules.bzl", "tools/bazel_runtime_toolchain.bzl", "tools/bazel_generate.py", "tests/helpers/fixture_tools.py"]
     contract = {"schema": 1, "backend": "qualified-native", "bundle": bundle.manifest_digest,
                 "platform": (bundle.system, bundle.machine, platform.release()), "policy": flags,
@@ -479,6 +562,7 @@ def identity(image_id, root=ROOT, apparmor_digest=None):
         "tools/bazel_output_slot_entrypoint.sh",
         "tools/bazel_test_entrypoint.sh",
         "tools/bazel_test_common.sh",
+        "tools/browser_runtime.py",
         "tools/instance_isolation.py",
         "tools/product_environment.py",
         "tools/product_namespace.json",
@@ -701,11 +785,14 @@ def validate_options(arguments):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--resolve-execution", choices=EXECUTION_MODES)
+    parser.add_argument("--inside-test-container", choices=("0", "1"), default="0")
     parser.add_argument("--apparmor-profile", action="store_true")
     parser.add_argument("--install-apparmor", action="store_true")
     parser.add_argument("--identity", metavar="IMAGE_ID")
     parser.add_argument("--flags", action="store_true")
     parser.add_argument("--admit-runtime", action="store_true")
+    parser.add_argument("--native-bazel-startup-flags", action="store_true", help="emit macOS JDK 25+ Bazel startup flags; emit nothing on other platforms")
     parser.add_argument("--validate-options", action="store_true")
     parser.add_argument("--output-slots", action="store_true")
     parser.add_argument("--test-result-cache", choices=("yes", "no"))
@@ -719,6 +806,10 @@ def main():
     args = parser.parse_args()
     args.options = command_arguments(args.options)
     try:
+        if args.native_bazel_startup_flags:
+            print("\n".join(native_bazel_startup_flags()))
+        if args.resolve_execution:
+            print(resolve_execution(args.resolve_execution, in_container=args.inside_test_container == "1"))
         if args.test_result_cache is not None:
             print(test_result_cache_mode(args.test_result_cache == "yes"))
         if args.qualified_native:
@@ -753,6 +844,8 @@ def main():
             execution_event(effective="qualified-native", admission="failed", coverage_complete=False,
                             failure_phase="admission", detail=detail)
             print("QUALIFIED NATIVE EXECUTION REFUSED: " + detail, file=sys.stderr)
+        elif args.native_bazel_startup_flags:
+            print("NATIVE BAZEL JVM ADMISSION FAILED: " + detail, file=sys.stderr)
         elif args.verify_native_bundle:
             execution_event(effective="native-bundle", admission="failed", bundle_verified=False,
                             coverage_complete=False, failure_phase="bundle", detail=detail)

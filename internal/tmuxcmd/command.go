@@ -21,8 +21,13 @@ func Args(args ...string) []string {
 }
 
 func Command(ctx context.Context, args ...string) *exec.Cmd {
+	return CommandPath(ctx, "tmux", args...)
+}
+
+// CommandPath preserves the command environment when callers already resolved tmux.
+func CommandPath(ctx context.Context, executable string, args ...string) *exec.Cmd {
 	socket := strings.TrimSpace(productenv.Value("TMUX_SOCKET"))
-	command := exec.CommandContext(ctx, "tmux", args...)
+	command := exec.CommandContext(ctx, executable, args...)
 	// A direct Go entrypoint can be started from inside a nested/private tmux client,
 	// where tmux would otherwise ignore the machine-wide default server and follow the
 	// inherited TMUX socket. Operator launches use the global server unless an explicit

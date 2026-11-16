@@ -36,6 +36,33 @@ const {
 const {registerCrossSurfaceQuickOpenSuite} = require('./browser_helpers/cross_surface_quick_open_suite');
 
 async function runCrossSurfaceStateSuite() {
+  await testAsync('settings revision gaps recover through the existing settings application', async () => {
+    const api = loadYomux();
+    let reads = 0;
+    api.setApiFetchJsonForTest(async path => {
+      if (path !== '/api/settings') return {};
+      reads++;
+      return {mtime_ns: 200, settings: {appearance: {editor_cursor_style: 'block'}}};
+    });
+    api.applyClientEventReadyEnvelopeForTest({epoch: 'settings-recovery'});
+    api.repairClientEventResourcesForTest(['settings_changed'], {epoch: 'settings-recovery', resource_revisions: {settings_changed: 2}});
+    await flushAsyncWork();
+    assert.equal(reads, 1);
+    assert.equal(api.fileEditorCursorStyleForTest(), 'block');
+  });
+  test('pinned Tabber utility and terminal rows precede unpinned conversations', () => {
+    const api = loadYomux('', ['one', 'two']);
+    const utility = {name: 'Preferences', kind: 'file', mtime: 1, tabber: {type: 'tab', item: '__prefs__'}};
+    const pinned = {name: 'one', kind: 'file', mtime: 2, tabber: {type: 'normal', normalPaneItem: 'one', session: 'one'}};
+    const ordinary = {name: 'two', kind: 'file', mtime: 3, tabber: {type: 'normal', normalPaneItem: 'two', session: 'two'}};
+    api.setTabPinned('one', true);
+    api.setTabPinned('__prefs__', true);
+    assert.ok(api.tabberEntryCompareForTest(utility, ordinary) < 0);
+    assert.ok(api.tabberEntryCompareForTest(pinned, ordinary) < 0);
+    assert.ok(api.tabberEntryCompareForTest(pinned, utility) < 0, 'pinned group retains newest sorting');
+    api.setTabPinned('one', false);
+    assert.ok(api.tabberEntryCompareForTest(utility, pinned) < 0);
+  });
   test('deferred clipboard denial observes later payload failures', () => {
     const result = require('node:child_process').spawnSync(process.execPath, ['--unhandled-rejections=strict', '-e', `
       const assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm');
@@ -3042,7 +3069,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/\.meta-path\s*\{[\s\S]*color:\s*var\(--pane-meta-path\)/.test(preferencesCss), 'status path color is theme-tokenized');
     assert.ok(/function projectMetaPathHtml\(path\)[\s\S]*data-info-open-path/.test(fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8')), 'Info Bar paths use the shared Finder reveal action');
     assert.ok(/body\.theme-light\s*\{[\s\S]*--drop-outline:\s*var\(--drop-outline-light\)/.test(fs.readFileSync('static_src/css/yomux/00_tokens_base.css', 'utf8')), 'light editor panes switch drop-target outlines to readable blue through root theme tokens');
-    assert.ok(/\.file-editor-popout-preview-panel,[\s\S]*?\.file-editor-save-panel\s*\{[^}]*height:\s*20px/.test(preferencesCss), 'pop-out preview button shares the compact editor toolbar button sizing rule');
+    assert.ok(/\.file-editor-popout-preview-panel,[\s\S]*?\.file-editor-popout-editor-panel,[\s\S]*?\.file-editor-save-panel\s*\{[^}]*height:\s*20px/.test(preferencesCss), 'preview and editor pop-out buttons share compact editor toolbar sizing');
     assert.ok(/\.file-editor-panel-actions\s*\{[\s\S]*background:\s*color-mix\(in srgb, var\(--panel2\)/.test(preferencesCss), 'editor actions render as one compact gray toolbar');
     assert.ok(/\.file-editor-gutter-panel,\s*\n\.file-editor-wrap-panel,\s*\n\.file-editor-find-panel,\s*\n\.file-editor-diff-panel/.test(preferencesCss), 'diff button shares the compact editor toolbar sizing');
     assert.ok(preferencesCss.includes('--code-diff-add: #56d364'), 'dark diff add base is a brighter vivid green');
@@ -3961,8 +3988,11 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(shellLaunchRow.iconHtml.includes('app-menu-ui-icon-shell'), 'Shell uses the shared shell icon as a non-clickable row label');
     const normalServerApi = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {dangerouslyYolo: false});
     const normalServerFile = normalServerApi.appMenuTree().find(menu => menu.id === 'file');
-    assert.equal(normalServerFile.items.some(item => item.type === 'command-pair'), false, 'normal servers do not expose dangerous-auto-approve agent launch controls');
-    assert.ok(normalServerFile.items.some(item => item.type === 'command' && item.label === 'new Claude'), 'normal servers retain the ordinary Claude launch');
+    for (const agent of ['Claude', 'Codex']) {
+      const pair = normalServerFile.items.find(item => item.type === 'command-pair' && item.primary.label === `new ${agent}`);
+      assert.ok(pair, 'every server exposes both permission modes for each installed agent');
+      assert.equal(pair.secondary.label, `new ${agent} (dangerously auto approve)`);
+    }
     assert.equal(tabMenuLabels.includes('Active'), false);
     assert.equal(tabMenuLabels.includes('Inactive'), false);
     assert.equal(tabMenuLabels.includes('Minimized'), false);
@@ -5159,6 +5189,7 @@ async function runCrossSurfaceStateSuite() {
       assert.deepStrictEqual(row.limit ? actual.slice(0, row.limit) : actual, row.expected, row.name);
     }
     // YO!info, YO!agent, Finder, Search & Runs, and Preferences are standalone virtual tabs.
+    api.setClientSettingsPatchForTest({general: {enable_experimental_features: true}});
     const paletteItems = api.commandPaletteCommandItems();
     const expectedVirtualLabels = [api.infoItemId, api.yoagentItemId, api.fileExplorerItemId, api.searchHistoryItemId, api.prefsItemId].map(api.itemLabel);
     const paletteVirtualLabels = paletteItems.filter(item => item.group === 'Tabs' && expectedVirtualLabels.includes(item.label));
@@ -5547,11 +5578,9 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(Array.from(fileContextMenu.children).some(child => child.getAttribute('aria-label') === 'Pin Tab'), 'file editor tabs also get the Pin Tab context menu');
     const filePopoutButton = Array.from(fileContextMenu.children).find(child => child.getAttribute('aria-label') === 'Pop out');
     assert.ok(filePopoutButton, 'preview-capable file editor tabs expose Pop out in the shared tab context menu');
-    for (const listener of filePopoutButton.listeners.get('click') || []) {
-      listener({preventDefault() {}, stopPropagation() {}});
-    }
-    assert.deepStrictEqual(canonical(api.openedWindowsForTest().map(record => record.url)), ['/preview-popout?path=%2Fhome%2Ftest%2Fyolomux.dev%2FREADME.md'], 'file tab Pop out opens the same preview popout route as the header button');
-    assert.equal(api.openedWindowsForTest()[0].name, 'yomux-preview-%2Fhome%2Ftest%2Fyolomux.dev%2FREADME.md', 'preview popouts use the renamed window namespace');
+    const editorTabPopoutOwner = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
+    assert.ok(editorTabPopoutOwner.includes("if (renderer?.textBacked === true || renderer?.id === 'pdf') return openLivePanePopout(item);"), 'text and PDF tabs use the live editor popout lifecycle');
+    assert.ok(editorTabPopoutOwner.includes('return openFilePreviewPopout(path, document.getElementById(panelDomId(item)));'), 'other non-text files retain their preview snapshot popout');
     api.setPinnedTabsForTest([]);
     const sessionViews = api.tmuxSessionViewCommands('1');
     assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ["Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", 'Show/hide Info Bar', 'tmux status bar']);

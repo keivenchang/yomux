@@ -69,6 +69,17 @@ class FixtureServer:
                 env=env, pass_fds=(listener.fileno(),), stdout=self.log, stderr=subprocess.STDOUT,
             )
 
+    def freeze(self) -> None:
+        if self.frozen:
+            return
+        if self.process.poll() is not None:
+            raise AssertionError("fixture exited before freeze")
+        self.process.send_signal(signal.SIGSTOP)
+        self.frozen = True
+        stopped, status = os.waitpid(self.process.pid, os.WUNTRACED)
+        if stopped != self.process.pid or not os.WIFSTOPPED(status):
+            raise AssertionError("fixture did not stop before inspection")
+
     def stop(self, kill: bool = False) -> None:
         if self.process.poll() is None:
             self.process.send_signal(signal.SIGKILL if kill or self.frozen else signal.SIGTERM)
@@ -204,6 +215,29 @@ def resource_sample(pid: int, phase: str) -> dict:
     return sample
 
 
+def observe_snapshot_publication(status: int, payload: dict, latency: float, observed_at: float,
+                                 previous: dict | None, published: list[tuple[float, int]],
+                                 demand_started: float) -> tuple[dict, dict | None]:
+    # Pending/error responses do not describe a product generation. Keep the last
+    # actual publication, but keep advancing the same append freshness deadline.
+    sample = {"at": observed_at, "status": status, "latency": latency,
+              "tokens": payload.get("cost_report", {}).get("total_tokens", 0) if status == 200 else None}
+    if status != 200:
+        sample["payload"] = payload
+    if status not in (200, 202, 503):
+        raise AssertionError(f"snapshot failed: {status} {payload}")
+    latest = sample if status == 200 else previous
+    if latest is None:
+        if observed_at - demand_started > 15:
+            raise AssertionError(f"snapshot readiness exceeded three collector cadences: {sample}")
+    else:
+        required = max((number for at, number in published if observed_at - at >= 15), default=0)
+        if required and latest["tokens"] < (required + 1) * 3:
+            raise AssertionError(f"live publication exceeded 15s: required {required}, "
+                                 f"last publication {latest}, response {sample}")
+    return sample, latest
+
+
 def qualify(binary: Path) -> dict:
     with tempfile.TemporaryDirectory(prefix="yg-stats-") as temporary:
         root = Path(temporary)
@@ -241,6 +275,9 @@ def qualify(binary: Path) -> dict:
             first = FixtureServer(binary, root, config, env | {"YOMUX_STATS_DISABLE_COLLECTORS": "1"}, "owner")
             servers.append(first)
             first.healthy()
+            # The legitimate owner may still publish background events after
+            # health readiness. Retain its lease while quiescing those writes.
+            first.freeze()
             journal = config / "go-events.jsonl"
             before = journal.read_bytes() if journal.exists() else b""
             alias = root / "config-alias"
@@ -252,7 +289,11 @@ def qualify(binary: Path) -> dict:
                 raise AssertionError("duplicate config process was not rejected")
             after = journal.read_bytes() if journal.exists() else b""
             if before != after or second.database.exists():
-                raise AssertionError("rejected owner changed journals or created stats")
+                raise AssertionError(
+                    "rejected owner changed journals or created stats: "
+                    f"before_bytes={len(before)} before_sha256={hashlib.sha256(before).hexdigest()} "
+                    f"after_bytes={len(after)} after_sha256={hashlib.sha256(after).hexdigest()} "
+                    f"rejected_stats_exists={second.database.exists()}")
             first.stop()
             # A fatal startup must release ownership through process exit.
             bad_env = env | {"YOMUX_OPENCODE_DATABASE": ""}
@@ -279,7 +320,7 @@ def qualify(binary: Path) -> dict:
             before_restart = None
             demand_started = began
             demand_readiness = []
-            generation_ready = False
+            latest_snapshot = None
             appended = [threading.Event() for _ in range(181)]
             def append_live() -> None:
                 for item in range(1, 181):
@@ -303,11 +344,7 @@ def qualify(binary: Path) -> dict:
                 if number == 90:
                     # Freeze only our fixture so the measured uncommitted tail
                     # cannot be consumed between checkpoint inspection and kill.
-                    server.process.send_signal(signal.SIGSTOP)
-                    server.frozen = True
-                    stopped, status = os.waitpid(server.process.pid, os.WUNTRACED)
-                    if stopped != server.process.pid or not os.WIFSTOPPED(status):
-                        raise AssertionError("fixture did not stop before crash inspection")
+                    server.freeze()
                     before_restart = facts(server.database)
                     if not any(source.endswith("live.jsonl") and offset < live.stat().st_size for source, _, offset, _ in before_restart["checkpoints"]):
                         raise AssertionError("SIGKILL fixture did not contain an uncommitted live checkpoint tail")
@@ -323,28 +360,23 @@ def qualify(binary: Path) -> dict:
                     streams.append(stream)
                     restart_seconds = time.monotonic() - restarted_at
                     demand_started = restarted_at
-                    generation_ready = False
+                    latest_snapshot = None
                 if not stream.thread.is_alive():
                     raise AssertionError(f"SSE terminated before fixture shutdown: {stream.error}")
                 status, payload, latency = request(server.base, SNAPSHOT)
-                snapshots.append({"at": time.monotonic(), "status": status, "latency": latency,
-                                  "tokens": payload.get("cost_report", {}).get("total_tokens", 0)})
+                was_ready = latest_snapshot is not None
+                sample, latest_snapshot = observe_snapshot_publication(
+                    status, payload, latency, time.monotonic(), latest_snapshot, published, demand_started)
+                snapshots.append(sample)
+                if not was_ready and latest_snapshot is not None:
+                    demand_readiness.append(sample["at"] - demand_started)
                 stream_tokens = stream.tokens
                 written_tokens = live.read_bytes().count(b"\n") * 3
-                if snapshots[-1]["tokens"] > written_tokens or stream_tokens > written_tokens:
+                if (sample["tokens"] is not None and sample["tokens"] > written_tokens) or stream_tokens > written_tokens:
                     raise AssertionError("short-window publication included historical or duplicate tokens")
-                if status not in (200, 202, 503):
-                    raise AssertionError(f"snapshot failed: {status} {payload}")
                 # A new generation may be pending briefly. No live record older
                 # than three five-second collector cadences may remain unpublished.
                 required = max((n for at, n in published if time.monotonic() - at >= 15), default=0)
-                if status == 200 and not generation_ready:
-                    demand_readiness.append(time.monotonic() - demand_started)
-                    generation_ready = True
-                if not generation_ready and time.monotonic() - demand_started > 15:
-                    raise AssertionError("snapshot readiness exceeded three collector cadences")
-                if generation_ready and required and snapshots[-1]["tokens"] < (required + 1) * 3:
-                    raise AssertionError(f"live publication exceeded 15s: required {required}, snapshot {snapshots[-1]}")
                 if stream.ready and required and stream.tokens < (required + 1) * 3:
                     raise AssertionError(f"live SSE publication exceeded 15s: required {required}, tokens {stream.tokens}")
                 if not stream.ready and time.monotonic() - demand_started > 15:

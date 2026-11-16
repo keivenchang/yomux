@@ -224,5 +224,8 @@ func platformFilesystemRestriction(file *os.File) (string, error) {
 	return "", nil
 }
 
-func platformMetadataOpenFlags() int                      { return unix.O_EVTONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC }
+func platformMetadataOpenFlags() int {
+	// O_EVTONLY still waits for a FIFO peer unless the descriptor is nonblocking.
+	return unix.O_EVTONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC | unix.O_NONBLOCK
+}
 func platformChmod(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }

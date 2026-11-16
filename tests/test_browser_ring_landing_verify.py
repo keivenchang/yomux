@@ -24,11 +24,11 @@ from urllib.request import urlopen
 
 import pytest
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
 
 from tests.browser_helpers import browser_console
+from tests.browser_helpers.browser_layout import select_current_value
 from tests.e2e_browser_harness import E2EBrowserHarness
 from tests.e2e_browser_harness import browser  # noqa: F401
 from tests.gate_harness import GateAuthCredentials
@@ -768,7 +768,7 @@ def _set_range_from_slider(driver, target: int) -> None:
 
 def _set_resolution_from_select(driver, target: int) -> None:
     value = str(target)
-    element = WebDriverWait(driver, 5, poll_frequency=0.02).until(
+    WebDriverWait(driver, 5, poll_frequency=0.02).until(
         lambda _driver: driver.execute_script(
             """
             const target = arguments[0];
@@ -778,8 +778,7 @@ def _set_resolution_from_select(driver, target: int) -> None:
             value,
         )
     )
-    resolution = Select(element)
-    resolution.select_by_value(value)
+    select_current_value(driver, '.js-debug-panel [data-js-debug-resolution-override]', value)
 
 
 def _show_gpu_util(driver) -> None:

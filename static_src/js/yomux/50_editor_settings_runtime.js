@@ -12,7 +12,7 @@ function editorViewModeFor(path, item = null) {
   if (previewRendererForPath(path, state)?.previewOnly === true) return 'preview';
   if (state?.kind && state.kind !== 'text') return 'preview';
   if (editorViewModes.has(mode)) return mode;
-  return 'edit';
+  return defaultFileEditorViewModeForPath(path, state?.kind || 'text');
 }
 
 function fileEditorWrapForPath(path, state = null) {
@@ -37,6 +37,7 @@ function setFileEditorViewMode(path, mode, item = null) {
     refreshPaneTabLabel(item || fileEditorItemFor(path));
     if (itemInLayout(tabberItemId)) refreshTabberPanels();
   }
+  if (itemInLayout(item || fileEditorItemFor(path))) updateActiveSessionParam();
 }
 
 function updateEditorModeControl(control, path, state, item = null) {
@@ -51,7 +52,7 @@ function updateEditorModeControl(control, path, state, item = null) {
     button.hidden = (state?.kind !== 'text' && nextMode !== 'preview') || (state?.historical === true && nextMode === 'split');
     button.disabled = state?.historical === true && nextMode === 'edit';
     if (button.disabled) button.title = t('editor.historicalReadOnly');
-    const label = editorModeLabel(nextMode);
+    const label = nextMode === 'preview' && previewKindForPath(path, state) === 'tex' ? t('common.preview') : editorModeLabel(nextMode);
     const visibleLabel = button.disabled ? `${label} (${t('common.readOnly')})` : label;
     const active = nextMode === mode || (state?.kind !== 'text' && nextMode === 'preview');
     syncPressedButton(button, active, {labelOn: visibleLabel, labelOff: visibleLabel});
@@ -1347,6 +1348,7 @@ const SETTINGS_APPLY_DEPENDENCIES = Object.freeze({
   autosave: ['editor.autosave', 'editor.autosave_delay_seconds'],
   locale: ['general.language'],
   tabberMode: ['general.default_tabber_mode'],
+  tabberRows: ['general.enable_experimental_features'],
   chrome: [
     'general.enable_experimental_features',
     'appearance.theme', 'appearance.terminal_theme',
@@ -1384,7 +1386,11 @@ function applySettingsPayload(payload, options = {}) {
   // A deferred refresh or duplicate push may arrive after a settings write. A revision is a
   // complete snapshot, so an equal revision is already applied; `force` may repaint callers but
   // must never let an older/equal payload roll back the accepted settings values.
-  if (!options.initial && clientSettingsMtimeNs && (!nextMtime || nextMtime <= clientSettingsMtimeNs)) return false;
+  const metadataOnly = !options.initial && clientSettingsMtimeNs && (!nextMtime || nextMtime <= clientSettingsMtimeNs);
+  if (metadataOnly && (nextMtime !== clientSettingsMtimeNs || !payload.catalog || !payload.choices)) return false;
+  const metadataChanged = metadataOnly && (JSON.stringify(clientSettingsPayload.catalog) !== JSON.stringify(payload.catalog)
+    || JSON.stringify(clientSettingsPayload.choices) !== JSON.stringify(payload.choices));
+  if (metadataOnly) payload = {...clientSettingsPayload, ...payload, settings: clientSettings, defaults: clientSettingsDefaults};
   const previousSettings = clientSettings;
   const previousDefaults = clientSettingsDefaults;
   const nextDefaults = payload.defaults || previousDefaults;
@@ -1399,6 +1405,10 @@ function applySettingsPayload(payload, options = {}) {
   const previousDateTimeHourCycle = dateTimeHourCycle;
   const previousAgentStatusPulsePeriodMs = agentStatusPulsePeriodMs;
   clientSettingsPayload = payload;
+  if (metadataOnly) {
+    if (metadataChanged) renderPreferencesPanels();
+    return false;
+  }
   clientSettingsDefaults = nextDefaults;
   clientSettings = nextSettings;
   clientSettingsMtimeNs = nextMtime;
@@ -1445,7 +1455,7 @@ function applySettingsPayload(payload, options = {}) {
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
   terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
   dateTimeHourCycle = normalizeDateTimeHourCycle(initialSetting('appearance.date_time_hour_cycle'));
-  fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'block'));
+  fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'line'));
   fileEditorCursorColor = normalizeEditorCursorColor(initialSetting('appearance.editor_cursor_color', DEFAULT_CURSOR_COLOR));
   fileEditorThemeMode = readConfiguredEditorScheme();
   if (options.initial || options.applyEditorDefaults) {
@@ -1472,6 +1482,7 @@ function applySettingsPayload(payload, options = {}) {
     renderSessionButtons();
     renderPaneTabStrips();
   }
+  if (groupChanged.tabberRows) refreshTabberPanels();
   if (groupChanged.autosave) rescheduleAllFileAutosaves();
   if (groupChanged.previewControls) updateEditorPreviewFontControls();
   if (previousDateTimeHourCycle !== dateTimeHourCycle) {
@@ -1513,9 +1524,20 @@ function scheduleDeferredSettingsMetadataRefresh() {
   return null;
 }
 
+let settingsRefreshFlight = null;
+
 async function refreshSettings(options = {}) {
+  const epoch = clientEventTransportState.resourceEpoch;
+  if (!settingsRefreshFlight || settingsRefreshFlight.epoch !== epoch) {
+    const flight = {epoch, promise: null};
+    flight.promise = apiFetchJson('/api/settings', {cache: 'no-store'}).finally(() => {
+      if (settingsRefreshFlight === flight) settingsRefreshFlight = null;
+    });
+    settingsRefreshFlight = flight;
+  }
   try {
-    const payload = await apiFetchJson('/api/settings', {cache: 'no-store'});
+    const payload = await settingsRefreshFlight.promise;
+    if (clientEventTransportState.resourceEpoch !== epoch) return;
     const changed = applySettingsPayload(payload, {force: options.force === true});
     if (changed) refreshYoloRulesStatus({silent: true});
     if (changed && !options.silent) showLayoutStatus(t('status.settingsReloaded'));

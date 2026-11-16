@@ -5008,6 +5008,11 @@ function connectTerminalSocket(session, item) {
   item.closeHandled = false;
   socket.onopen = () => {
     if (!socketIsCurrent()) return;
+    // Socket close clears logical focus while the native textarea can remain focused.
+    if (terminalContainerOwnsNativeFocus(session, item.container)
+        && [focusedPanelItem, editorNav.focusedItem, editorNav.pendingFocus?.item].every(target => !target || target === session)) {
+      setFocusedTerminal(session);
+    }
     clearTerminalRemovalLatency('session', session);
     item.terminalOutputSeen = false;
     item.reconnectAttempt = 0;
@@ -5151,7 +5156,7 @@ function bindTerminalContainerForSession(session, term, container) {
   });
   scope.ownEvent('focusout', container, 'focusout', event => {
     recordTerminalMobileInputTrace(session, 'focusout', {target: viewportDiagnosticsFocusedElementText(event.target)});
-    clearFocusedTerminal(session);
+    clearFocusedTerminal(session, {blurredContainer: container});
   });
   scope.ownEvent('copy', container, 'copy', event => {
     copyTerminalSelectionToClipboardEvent(session, term, event, container);
@@ -5283,7 +5288,7 @@ function startTerminal(session) {
     setFocusedTerminal(session);
   });
   term.onBlur?.(() => {
-    clearFocusedTerminal(session);
+    clearFocusedTerminal(session, {blurredContainer: container});
   });
   // xterm can emit focus and mouse-tracking bytes from hover. Keep Differ commits on DOM
   // keydown/paste/beforeinput and pane pointerdown, not on the terminal transport stream.
@@ -7263,25 +7268,17 @@ function refreshEventLogsFromPush(payload = {}) {
 }
 
 function postEvent(session, type, message, details = {}) {
-  const lifecycleToken = session ? tmuxSessionLifecycleToken(session) : null;
-  if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return Promise.resolve(false);
-  return apiFetch('/api/event', {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({session, type, message, details}),
-  }).then(() => {
-    if (!lifecycleToken || tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) refreshOpenEventLogs();
-    return true;
-  }).catch(() => false);
+  const event = {session, type, message, details};
+  return postEventBatch([event]).then(acknowledged => acknowledged.has(event));
 }
 
 const eventPostBatchMax = 64;
 
 async function postEventBatch(events) {
+  const lifecycleTokens = new Map();
   const batch = events.filter(event => {
-    if (!event.session) return true;
-    const lifecycleToken = tmuxSessionLifecycleToken(event.session);
+    const lifecycleToken = event.session ? tmuxSessionLifecycleToken(event.session) : null;
+    lifecycleTokens.set(event, lifecycleToken);
     return !lifecycleToken || tmuxSessionLifecycleTokenIsCurrent(lifecycleToken);
   });
   const chunks = Array.from({length: Math.ceil(batch.length / eventPostBatchMax)}, (_, index) => batch.slice(index * eventPostBatchMax, (index + 1) * eventPostBatchMax));
@@ -7300,9 +7297,13 @@ async function postEventBatch(events) {
     }
   }));
   const accepted = new Set(results.flatMap(result => result?.events || []));
-  if (results.some(result => result?.refreshRequired)) {
-    const sessionIds = [...new Set([...accepted].map(event => String(event.session || '')).filter(Boolean))];
-    const refreshTarget = [...accepted].some(event => !String(event.session || '')) ? {} : {sessions: sessionIds};
+  const currentEvents = [...accepted].filter(event => {
+    const lifecycleToken = lifecycleTokens.get(event);
+    return !lifecycleToken || tmuxSessionLifecycleTokenIsCurrent(lifecycleToken);
+  });
+  if (currentEvents.length && results.some(result => result?.refreshRequired)) {
+    const sessionIds = [...new Set(currentEvents.map(event => String(event.session || '')).filter(Boolean))];
+    const refreshTarget = currentEvents.some(event => !String(event.session || '')) ? {} : {sessions: sessionIds};
     refreshEventLogsFromPush(refreshTarget).catch(error => console.warn('event batch fallback refresh failed', error));
   }
   return accepted;
@@ -7356,6 +7357,7 @@ async function updateLatency() {
 }
 
 function refreshAll({forceMetadata = true, settleTerminalResize = true} = {}) {
+  void refreshSettings({silent: true});
   resyncVisibleTerminalRemoteSizes(settleTerminalResize ? 'refresh' : '');
   refreshVisibleTerminalScreens('manual-refresh');
   refreshTranscripts(forceMetadata ? {force: true} : {});
@@ -7417,6 +7419,29 @@ function paintInitialAppShell() {
   initialAppShellPainted = true;
 }
 
+let runtimeCompatibilityChecked = false;
+
+async function checkRuntimeCompatibilityOnce() {
+  if (runtimeCompatibilityChecked) return;
+  runtimeCompatibilityChecked = true;
+  try {
+    const report = await apiFetchJson('/api/runtime/compatibility', {cache: 'no-store'});
+    if (report.probe_status !== 'measured' && report.probe_status !== 'not_applicable') {
+      console.warn('Runtime compatibility probe unavailable:', report.probe_status);
+    }
+    for (const warning of report.warnings) {
+      emitNotification('runtimeCompatibility', {
+        lines: t(warning.message_key, warning.message_params),
+        coalesceKey: `runtime-compatibility:${warning.code}`,
+        countdownMs: warning.timeout_ms,
+        className: 'attention-alert toast runtime-compatibility-warning',
+      });
+    }
+  } catch (error) {
+    console.warn('Runtime compatibility check failed:', error);
+  }
+}
+
 async function boot() {
   installNativeAppViewportOwner();
   installPreviewScrollOwnershipCapture();
@@ -7444,6 +7469,7 @@ async function boot() {
   syncInitialLayoutUrl();
   showLayoutStatus(t('status.yoloLoading'));
   loadNotificationDelivery();
+  if (!statsOnlyBootEnabled()) void checkRuntimeCompatibilityOnce();
   const initialAutoStatusesPromise = statsOnlyBootEnabled()
     ? Promise.resolve(false)
     : loadAutoStatuses().catch(error => {

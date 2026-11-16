@@ -101,6 +101,7 @@ def test_live_collector_verifier_uses_complete_native_fixture_builder(tmp_path, 
 @pytest.mark.parametrize("changed_input", ["embedded", "toolchain", "recipe"])
 def test_fixture_binary_cache_tracks_build_identity(tmp_path, monkeypatch, changed_input):
     monkeypatch.delenv("YOMUX_GO_BINARY", raising=False)
+    monkeypatch.delenv("YOLOMUX_GO_BINARY", raising=False)
     monkeypatch.setattr(go_binary.tempfile, "gettempdir", lambda: str(tmp_path / "cache"))
     (tmp_path / "version.yaml").write_text('version: "1.2.3"\n', encoding="utf-8")
     embedded = tmp_path / "cmd/yomux-go/pages/main.gohtml"

@@ -78,3 +78,9 @@ All original Plan and Done Criteria below remain in force, including the determi
 ## Completion
 
 Only the full consumer matrix can close this queue (reclassified p2.e2 on 2026-08-18; it is no longer a P0). Record the one shared parent, every migrated consumer, negative search, and live zero-leak evidence in the queue closeout or handoff, then remove this queue; never close or split off a subset while another absolute-path reopen remains.
+
+## Go revalidation - 2026-11-15
+
+- [x] Revalidate and repair the Go recursive-delete escalation consumer through the shared descriptor owner. `finder.Deletion` retains the authorized parent and directory generation from the bounded probe through bulk completion; replacement targets return `changed_on_disk`, and parent relocation cannot redirect deletion into a replacement parent. Both synchronous and queued callers use this owner. The held-bulk regression failed on the old Go code and passed after repair; final focused native race checks passed in `/mnt/sda/tmp/runtime-fixes-final-race.1_i9qolw/test.log`.
+
+This completes the named Go escalation repair only. The complete consumer matrix, browser behavior, platform coverage, canonical gate, and live zero-leak criteria above remain open; historical Python results do not establish those Go results.

@@ -14,6 +14,37 @@ from tools.go_binary import go_backend_binary_candidates
 from tools.go_binary import go_test_server_binary
 from tools.instance_isolation import synthetic_test_environment
 from tools.product_environment import product_env_names
+from tools import go_binary
+
+
+def test_native_fixture_resolves_host_cache_with_every_go_command_offline(tmp_path, monkeypatch):
+    for name in product_env_names("GO_BINARY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("GOMODCACHE", raising=False)
+    monkeypatch.setenv("GOPROXY", "https://network.invalid")
+    monkeypatch.setenv("GOTOOLCHAIN", "auto")
+    is_dir = Path.is_dir
+    monkeypatch.setattr(Path, "is_dir", lambda path: False if path == Path("/opt/yomux-go-mod-cache") else is_dir(path))
+    monkeypatch.setattr(go_binary.tempfile, "gettempdir", lambda: str(tmp_path / "cache"))
+    (tmp_path / "version.yaml").write_bytes(b'version: "1.2.3"\n')
+    calls = []
+
+    def output(command, *, env, **_kwargs):
+        calls.append(command)
+        assert env["GOPROXY"] == env["GOSUMDB"] == env["GOWORK"] == "off"
+        assert env["GOTOOLCHAIN"] == "local"
+        return str(tmp_path / "modules") if command == ["go", "env", "GOMODCACHE"] else "fixture toolchain"
+
+    def build(command, *, env, **_kwargs):
+        assert env["GOPROXY"] == "off" and env["GOTOOLCHAIN"] == "local"
+        assert env["GOMODCACHE"] == str(tmp_path / "modules")
+        Path(command[command.index("-o") + 1]).write_bytes(b"fixture")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(go_binary.subprocess, "check_output", output)
+    monkeypatch.setattr(go_binary.subprocess, "run", build)
+    assert go_test_server_binary(tmp_path).is_file()
+    assert calls[0] == ["go", "env", "GOMODCACHE"]
 
 
 @pytest.mark.parametrize("prefix", ["YOMUX", "YOLOMUX"])

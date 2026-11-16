@@ -1154,6 +1154,10 @@ function layoutUrlCleanDiffRefsByRepo(value) {
   return result;
 }
 
+function isPdfSidebarView(value) {
+  return Number.isInteger(value) && value >= 1 && value <= 4;
+}
+
 function layoutUrlEditorModesSnapshot() {
   const modes = [];
   const seen = new Set();
@@ -1169,6 +1173,9 @@ function layoutUrlEditorModesSnapshot() {
     const itemKey = cleanItem || fileEditorItemFor(cleanPath);
     const state = fileEditorStateForItem(cleanPath, itemKey);
     const viewState = fileEditorViewState.get(itemKey);
+    if (Number.isSafeInteger(viewState?.pdfPage) && viewState.pdfPage > 0) entry.pdfPage = viewState.pdfPage;
+    if (isPdfSidebarView(viewState?.pdfSidebarView)) entry.pdfSidebarView = viewState.pdfSidebarView;
+    if (typeof viewState?.pdfSidebarOpen === 'boolean') entry.pdfSidebarOpen = viewState.pdfSidebarOpen;
     if (viewState) {
       entry.viewState = {
         top: Math.max(0, Math.round(Number(viewState.scrollTop || 0))),
@@ -1229,6 +1236,14 @@ function applyLayoutUrlEditorModeEntry(entry = {}) {
   }
   const key = cleanItem || path;
   fileEditorViewModesForPath(path, true).set(key, mode);
+  const pdfState = {};
+  if (Number.isSafeInteger(entry.pdfPage) && entry.pdfPage > 0) pdfState.pdfPage = entry.pdfPage;
+  if (isPdfSidebarView(entry.pdfSidebarView)) pdfState.pdfSidebarView = entry.pdfSidebarView;
+  if (typeof entry.pdfSidebarOpen === 'boolean') pdfState.pdfSidebarOpen = entry.pdfSidebarOpen;
+  if (Object.keys(pdfState).length) {
+    const viewKey = cleanItem || fileEditorItemFor(path);
+    fileEditorViewState.set(viewKey, {...fileEditorViewState.get(viewKey), ...pdfState});
+  }
   const viewState = entry.viewState && typeof entry.viewState === 'object' ? entry.viewState : null;
   if (viewState) {
     layoutUrlRememberEditorViewState({path, item: cleanItem, anchor: viewState.anchor, head: viewState.head, line: viewState.line}, viewState.top, viewState.left);
@@ -1529,8 +1544,22 @@ function maybeAdoptLayoutStateDeepLink(params) {
   applyLayoutUrlStateSeed(state);
 }
 
+function restoreLayoutUrlTabHistory() {
+  const visibleItems = new Set(paneItems(layoutSlots));
+  const history = layoutUrlStringArray(layoutUrlState.pending?.tabHistory, 1000)
+    .map(resolveLayoutItem)
+    .filter(item => visibleItems.has(item));
+  restoreTabActivationHistory(history);
+}
+
 function layoutUrlStateSnapshot() {
   const state = {v: 1};
+  const visibleItems = new Set(paneItems(layoutSlots));
+  const tabHistory = [...tabActivationOrder.entries()]
+    .filter(([item]) => visibleItems.has(item))
+    .sort((a, b) => b[1] - a[1])
+    .map(([item]) => item);
+  if (tabHistory.length) state.tabHistory = tabHistory;
   if (paneItems(layoutSlots).some(isFileExplorerItem)) state.finder = layoutUrlFinderStateSnapshot();
   const editor = layoutUrlEditorStateSnapshot();
   if (editor.modes.length) state.editor = editor;
@@ -1844,7 +1873,8 @@ function orderPaneTabs(tabs) {
 
 function paneStateWithTabs(tabs, active = null, role = null) {
   const ordered = orderPaneTabs(tabs);
-  return {tabs: ordered, active: ordered.includes(active) ? active : ordered[0] || null, ...paneRoleStateFields(role)};
+  const selected = ordered.includes(active) ? active : mostRecentlyActivatedTab(ordered) || ordered[0] || null;
+  return {tabs: ordered, active: selected, ...paneRoleStateFields(role)};
 }
 
 function paneStateWithTabsForSlot(slot, tabs, active = null, slots = layoutSlots) {
@@ -1876,6 +1906,7 @@ function setTabPinned(item, pinned) {
     next[slot] = paneStateWithTabsForSlot(slot, paneTabs(slot, next), activeItemForSide(slot, next), next);
   }
   applyLayoutSlots(next, {focusSession: resolved, prune: false, forceFull: dockviewLayoutActive()});
+  refreshTabberPanels({reorder: true});
   const slot = slotForItem(resolved, layoutSlots);
   const pinnedInSlot = slot ? paneTabs(slot, layoutSlots).filter(tabIsPinned) : [];
   if (pinned && pinnedInSlot.length >= maxTabsPerPane()) {
@@ -1930,6 +1961,11 @@ function itemIsBackgroundPaneTab(item, slots = layoutSlots) {
 
 function allTabItems() {
   return [...virtualTabItems(), ...openFileEditorItems(), ...visibleSessions];
+}
+
+function experimentalPaneItemAvailable(item) {
+  return boolSetting('general.enable_experimental_features', false)
+    || !['chat', 'yoagent', 'info'].includes(tabTypeForItem(item)?.key);
 }
 
 function sortTabItems(items) {
@@ -4144,7 +4180,7 @@ function commandPaletteValidateFileTabPaths(items = commandPaletteAllTabItems())
 function commandPaletteVisibleTabItems() {
   const items = commandPaletteAllTabItems();
   commandPaletteValidateFileTabPaths(items);
-  return items.filter(item => {
+  return items.filter(experimentalPaneItemAvailable).filter(item => {
     const path = fileItemPath(item);
     return !path || !commandPaletteFilePathKnownMissing(path);
   });
@@ -6089,6 +6125,7 @@ const notificationEventDefinitions = Object.freeze({
   startupTip: Object.freeze({scope: 'global', system: false, priority: 'tip', coalesce: true}),
   notificationTest: Object.freeze({scope: 'global', system: true, priority: 'test', coalesce: true}),
   commandNotice: Object.freeze({scope: 'global', system: false, priority: 'operation', coalesce: true}),
+  runtimeCompatibility: Object.freeze({scope: 'global', system: false, priority: 'warning', coalesce: true}),
   // Uploads retain their stacked file-result renderer, but that renderer is still dispatched
   // through this policy row so its pane scope cannot become a second routing decision.
   uploadResult: Object.freeze({scope: 'pane', target: 'session', system: false, priority: 'operation', deliver: ({target, payload}) => deliverUploadResultNotification(target, payload.uploadPayload, payload.inserted === true)}),
@@ -6236,7 +6273,7 @@ function normalizeToastLine(item, options = {}) {
   const objectItem = typeof item === 'object' && item !== null;
   const text = objectItem ? item.text : item;
   return {
-    text: compactToastText(text),
+    text: normalizedToastText(text),
     countdownMs: objectItem ? (item.countdownMs ?? options.countdownMs) : options.countdownMs,
     render: objectItem && typeof item.render === 'function' ? item.render : null,
   };
@@ -6244,12 +6281,6 @@ function normalizeToastLine(item, options = {}) {
 
 function normalizedToastText(text) {
   return String(text || '').replace(/\s+/g, ' ').trim();
-}
-
-function compactToastText(text) {
-  const value = normalizedToastText(text);
-  if (value.length <= toastMaxLineChars) return value;
-  return `${value.slice(0, toastMaxLineChars - 3)}...`;
 }
 
 function summarizeToastLines(lines, options = {}) {
@@ -7331,6 +7362,7 @@ function cleanupRemovedDynamicLayoutItems(previousItems, nextItems) {
     dynamicVirtualLayoutItems.delete(item);
     paneViewState.delete(item);
     tabLastActivatedAt.delete(item);
+    tabActivationOrder.delete(item);
   }
   syncFileLayoutItems();
 }
@@ -7524,5 +7556,6 @@ function updateActiveSessionParam() {
 function syncInitialLayoutUrl() {
   migrateTabberRelativeDates();
   schedulePendingLayoutUrlStateApply();
+  restoreLayoutUrlTabHistory();
   updateActiveSessionParam();
 }

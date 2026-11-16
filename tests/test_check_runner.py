@@ -34,6 +34,9 @@ from tests.browser_helpers import webdriver_lease
 from tests.source_inventory import parsed_python_source
 from tests.source_inventory import python_source_paths
 from tools import static_build
+from tools import tabber_browser_journey
+from tools import bazel_execution_contract
+from tools.browser_runtime import BrowserUnavailable
 from tools import bazel_go_browser_e2e as fixture
 from tools import instance_isolation
 from tools.instance_isolation import synthetic_test_environment
@@ -59,6 +62,18 @@ def load_check_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture
+def declared_native_agent_tools(monkeypatch, tmp_path):
+    """Mocked gate lanes still require an explicitly admitted native tool PATH."""
+    tool_directory = tmp_path / "native-agent-tools"
+    tool_directory.mkdir()
+    for name in bazel_execution_contract.NATIVE_AGENT_TOOLS:
+        executable = tool_directory / name
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tool_directory) + os.pathsep + os.environ.get("PATH", ""))
 
 
 @pytest.mark.parametrize("state", ["unstaged", "staged", "release"])
@@ -616,32 +631,27 @@ def test_lane_registry_references_are_typed_total_and_fail_closed(monkeypatch):
 
 def test_browser_capability_preflight_names_missing_dependency_browser_and_driver(monkeypatch, tmp_path):
     check = load_check_module()
-    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (False, "host-only test"))
+    monkeypatch.setattr(check.docker_image, "container_available", lambda _root, **_kwargs: (False, "host-only test"))
     monkeypatch.setattr(check.importlib.util, "find_spec", lambda _name: None)
     assert check.browser_capability_preflight().component == "dependency"
 
     monkeypatch.setattr(check.importlib.util, "find_spec", lambda _name: object())
-    monkeypatch.setattr(check.Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(check.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(check.Path, "is_file", lambda _path: False)
+    def missing_browser():
+        raise BrowserUnavailable("browser", "browser unavailable")
+
+    monkeypatch.setattr(check, "resolve_browser_executables", missing_browser)
     assert check.browser_capability_preflight().component == "browser"
 
-    browser = tmp_path / "chrome"
-    browser.write_text("", encoding="utf-8")
-    monkeypatch.undo()
-    monkeypatch.setattr(check.importlib.util, "find_spec", lambda _name: object())
-    monkeypatch.setattr(check.Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(
-        check.shutil,
-        "which",
-        lambda name: str(browser) if name == "google-chrome" else None,
-    )
+    def missing_driver():
+        raise BrowserUnavailable("driver", "driver unavailable")
+
+    monkeypatch.setattr(check, "resolve_browser_executables", missing_driver)
     assert check.browser_capability_preflight().component == "driver"
 
 
 def test_browser_capability_preflight_runs_in_the_container_execution_environment(monkeypatch):
     check = load_check_module()
-    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (True, "docker"))
+    monkeypatch.setattr(check.docker_image, "container_available", lambda _root, **_kwargs: (True, "docker"))
     completed = subprocess.CompletedProcess(
         args=[],
         returncode=0,
@@ -657,7 +667,7 @@ def test_browser_capability_preflight_runs_in_the_container_execution_environmen
 
 def test_browser_capability_preflight_reports_container_probe_failure(monkeypatch):
     check = load_check_module()
-    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (True, "docker"))
+    monkeypatch.setattr(check.docker_image, "container_available", lambda _root, **_kwargs: (True, "docker"))
     completed = subprocess.CompletedProcess(args=[], returncode=2, stdout="", stderr="docker probe failed\n")
     monkeypatch.setattr(check.subprocess, "run", lambda *args, **kwargs: completed)
 
@@ -673,7 +683,7 @@ def test_requested_browser_lane_preflight_refuses_before_any_step(monkeypatch, c
     monkeypatch.setattr(
         check,
         "browser_capability_preflight",
-        lambda: check.BrowserCapabilityDiagnostic(False, "driver", "missing exact driver"),
+        lambda _execution: check.BrowserCapabilityDiagnostic(False, "driver", "missing exact driver"),
     )
     monkeypatch.setattr(check, "run_parallel", lambda _lanes: pytest.fail("lane must not start"))
     report = check.performance_report_path("")
@@ -1391,7 +1401,7 @@ def test_active_yomux_server_records_reads_the_root_compatibility_lease(monkeypa
     assert records == [{"pid": 101, "paths": {"root": str(product_root)}}]
 
 
-def test_explicit_certification_uses_guard_without_lowering_priority(monkeypatch, capsys):
+def test_explicit_certification_uses_guard_without_lowering_priority(monkeypatch, capsys, declared_native_agent_tools):
     check = load_check_module()
     events = []
 
@@ -1440,7 +1450,7 @@ def test_explicit_certification_uses_guard_without_lowering_priority(monkeypatch
     assert "CERTIFIED" in output
 
 
-def test_development_checks_run_under_pressure_without_latency_certification(monkeypatch, capsys):
+def test_development_checks_run_under_pressure_without_latency_certification(monkeypatch, capsys, declared_native_agent_tools):
     check = load_check_module()
     ran = []
 
@@ -1467,7 +1477,7 @@ def test_development_checks_run_under_pressure_without_latency_certification(mon
 
 
 @pytest.mark.parametrize("reason", ["dirty_start_checkout", "start_state_unobservable"])
-def test_default_check_gate_exits_nonzero_when_exact_sha_is_not_admitted(monkeypatch, capsys, reason):
+def test_default_check_gate_exits_nonzero_when_exact_sha_is_not_admitted(monkeypatch, capsys, reason, declared_native_agent_tools):
     check = load_check_module()
     monkeypatch.setattr(check, "active_yomux_server_records", lambda: [])
     monkeypatch.setattr(check, "run_parallel", lambda selected, **_kwargs: [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected])
@@ -1963,7 +1973,7 @@ def test_main_wires_lane_artifact_into_report_without_false_green(
 
     monkeypatch.setattr(check, "lanes", lambda **_kwargs: [lane])
     monkeypatch.setattr(check, "performance_report_path", lambda _value: report)
-    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (False, ""))
+    monkeypatch.setattr(check.docker_image, "container_available", lambda _root, **_kwargs: (False, ""))
 
     @contextmanager
     def writer(*_args, **_kwargs):
@@ -2000,7 +2010,7 @@ def test_main_report_named_artifacts_stays_json_beside_a_separate_artifact_direc
     )
     monkeypatch.setattr(check, "lanes", lambda **_kwargs: [lane])
     monkeypatch.setattr(check, "performance_report_path", lambda _value: report)
-    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (False, ""))
+    monkeypatch.setattr(check.docker_image, "container_available", lambda _root, **_kwargs: (False, ""))
 
     @contextmanager
     def writer(*_args, **_kwargs):
@@ -2044,7 +2054,7 @@ def test_main_reports_bounded_retention_write_failure_without_masking_child_fail
     )
     monkeypatch.setattr(check, "lanes", lambda **_kwargs: [lane])
     monkeypatch.setattr(check, "performance_report_path", lambda _value: report)
-    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (False, ""))
+    monkeypatch.setattr(check.docker_image, "container_available", lambda _root, **_kwargs: (False, ""))
     monkeypatch.setattr(
         check,
         "atomic_write_text",
@@ -2238,6 +2248,9 @@ def test_certification_step_runs_every_named_unit_serially_with_its_admission_en
     check = load_check_module()
     step = check.certification_step(Path("/tmp/yomux-certification-probe"))
 
+    assert "tests/test_browser_differ_history.py::test_differ_history_latency_certification" in check.CERTIFICATION_NODE_IDS
+    assert "tests/test_gate_interaction.py::test_i3_calibration_probe_moves_under_independent_browser_pressure" in check.CERTIFICATION_NODE_IDS
+
     for nodeid in check.CERTIFICATION_NODE_IDS:
         assert nodeid in step.args, (nodeid, step.args)
     # Serial by construction: the phase must never hand its units to an xdist pool.
@@ -2251,6 +2264,22 @@ def test_certification_step_runs_every_named_unit_serially_with_its_admission_en
     assert environment[check.CHECK_LANE_ENV] == ""
     for name in latency_calibration.CERTIFICATION_ENV_NAMES:
         assert environment[name] == "1", environment
+
+
+def test_differ_history_uses_one_workload_and_preserves_both_fixed_view_ceilings():
+    _source, tree = parsed_python_source(REPO_ROOT / "tests/test_browser_differ_history.py")
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    for name in ("test_differ_home_history_preparation_and_cached_refresh", "test_differ_history_latency_certification"):
+        assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_differ_history_workload"
+                   for node in ast.walk(functions[name])), name
+    calls = [node for node in ast.walk(functions["_certify_differ_history_view"])
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "assert_fixed_ceiling"]
+    assert len(calls) == 1
+    ceiling = next(keyword.value for keyword in calls[0].keywords if keyword.arg == "ceiling_ms")
+    assert isinstance(ceiling, ast.Constant) and ceiling.value == 250
+    labels = {node.args[1].value for node in ast.walk(functions["_differ_history_workload"])
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_certify_differ_history_view"}
+    assert labels == {"cold-view", "prepared-view"}
 
 
 def test_certification_node_ids_all_resolve_to_a_defined_test():
@@ -3457,6 +3486,7 @@ def test_running_test_containers_tracks_exact_run_owned_ids_by_token_label(monke
 
     # No token anywhere: image-ancestor discovery remains the fallback for a bare invocation.
     monkeypatch.delenv(check.CHECK_RUN_TOKEN_ENV, raising=False)
+    monkeypatch.delenv("YOLOMUX_CHECK_RUN_TOKEN", raising=False)
     check.running_test_containers()
     assert observed[-1] == ["docker", "ps", "--filter", f"ancestor={image}", "--format", "{{.ID}}\t{{.Status}}"], observed[-1]
 
@@ -4097,6 +4127,28 @@ def test_bazel_runtime_trees_are_consumer_scoped_and_frontend_is_generated():
         assert required_owner in browser_support, required_owner
     assert '"tests/**/*.py"' not in browser_support
     assert '"tools/**/*.py"' not in browser_support
+    # The shell enters this physical tree; outer sh_test data cannot satisfy its imports.
+    go_browser_inputs = text.split('name = "go_browser_runtime_inputs"', 1)[1].split("\n)\n\n", 1)[0]
+    integration_tools = text.split('name = "integration_python_tools"', 1)[1].split("\n)\n\n", 1)[0]
+    pending = list(re.findall(r'"(tools/[^"*]+\.py)"', integration_tools))
+    visited = set()
+    required_helpers = {"tests/browser_helpers/__init__.py"}
+    while pending:
+        relative = pending.pop()
+        if relative in visited:
+            continue
+        visited.add(relative)
+        for node in ast.walk(ast.parse((REPO_ROOT / relative).read_text(encoding="utf-8"))):
+            modules = [alias.name for alias in node.names] if isinstance(node, ast.Import) else []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                modules.append(node.module)
+            for module in modules:
+                if module.startswith("tests.browser_helpers."):
+                    imported = module.replace(".", "/") + ".py"
+                    required_helpers.add(imported)
+                    pending.append(imported)
+    for relative in sorted(required_helpers):
+        assert f'"{relative}"' in go_browser_inputs, relative
     agent_status_runner = (REPO_ROOT / "tools" / "bazel_agent_status_docker_e2e.sh").read_text()
     assert "tests/test_agent_status_docker.py" in agent_status_runner
     assert "tests/test_fake_llm_server.py" not in agent_status_runner
@@ -4843,6 +4895,27 @@ async function scenario(stale, applyAt) {
     assert outcomes["stuck"]["at"] == 500
 
 
+@pytest.mark.parametrize(("line", "anchor", "numbers", "matches"), [
+    ("95 ", "95", ["95"], True), ("95", "95", ["95"], True), ("95     ", "95", ["95"], True),
+    ("96 ", "95", ["96"], False), ("195", "95", ["195"], False), (" 95", "95", [], False),
+    ("95\t", "95", [], False), ("95\u00a0", "95", [], False), ("95 prompt", "95", [], False),
+])
+def test_native_tabber_history_ignores_only_trailing_ascii_cell_padding(line, anchor, numbers, matches):
+    script = tabber_browser_journey.NUMERIC_VISIBLE_HISTORY_SOURCE + r"""
+const [line, anchor] = JSON.parse(process.argv[1]);
+const term = {rows:1, buffer:{active:{viewportY:0,
+  getLine:() => ({translateToString:() => line})}}};
+const numbers = numericVisibleHistoryLines(term);
+console.log(JSON.stringify({numbers, matches:numbers.includes(anchor)}));
+"""
+    result = subprocess.run([fixture_executable("node"), "-e", script, json.dumps([line, anchor])],
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    observation = json.loads(result.stdout)
+    assert observation["matches"] is matches
+    assert observation["numbers"] == numbers
+
+
 def test_execution_report_preserves_admission_and_malformed_failures():
     check = load_check_module()
     events = check.execution_evidence('YOMUX_EXECUTION {"admission":"failed","failure_phase":"image-preparation"}\nYOMUX_EXECUTION broken\n')
@@ -4925,6 +4998,60 @@ def test_native_main_requires_scope_evidence_for_selected_lane(monkeypatch, tmp_
     assert result == (0 if matching else check.EXIT_NOT_CERTIFIABLE)
     text = capsys.readouterr().out
     assert ("CHECK PASSED" in text) is matching
+
+
+def test_macos_auto_routes_python_and_go_natively_without_docker_probe(monkeypatch, tmp_path):
+    check = load_check_module()
+    monkeypatch.setattr(check.shutil, "which", lambda name: "/fixture/bin/" + name)
+    package_root = tmp_path / "packages"
+    for path in check.bazel_execution_contract.xterm_fixture_paths(package_root).values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fixture")
+    monkeypatch.setenv("YOMUX_XTERM_PACKAGE_ROOT", str(package_root))
+    monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(check.docker_image, "running_inside_container", lambda: False)
+    monkeypatch.setattr(check.docker_image, "container_available", lambda *_args: pytest.fail("native gate probed Docker"))
+    monkeypatch.setattr(check, "measure_functional_host", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(check, "admit_inotify_capacity", lambda _selected: None)
+    monkeypatch.setattr(check, "active_yomux_server_records", lambda: [])
+    selected = []
+
+    def capture_lanes(lanes, **_kwargs):
+        selected.extend(lanes)
+        return [check.LaneResult(lane.name, lane.label, True, 0, '') for lane in lanes]
+
+    monkeypatch.setattr(check, "run_functional_lanes", capture_lanes)
+    assert check.main(["--lane", "pytest", "--lane", "bazel-go", "--no-tool-guard",
+                       "--performance-report", str(tmp_path / "report.json")]) == 0
+    python_steps = [step for lane in selected for step in lane.steps if step.args[:3] == ["python3", "-m", "pytest"]]
+    go_steps = [step for lane in selected for step in lane.steps if step.args[:1] == ["tools/run_bazel_tests.sh"]]
+    assert python_steps and go_steps
+    assert all(dict(step.env)["YOMUX_CHECK_CONTAINER"] == "0" for step in python_steps)
+    assert all(step.args[step.args.index("--execution") + 1] == "native" for step in go_steps)
+
+
+def test_native_gate_refuses_missing_fixture_before_starting_lanes(monkeypatch, tmp_path, capsys):
+    check = load_check_module()
+    monkeypatch.setenv("YOMUX_XTERM_PACKAGE_ROOT", str(tmp_path / "missing"))
+    monkeypatch.setattr(check, "run_functional_lanes", lambda *_args, **_kwargs: pytest.fail("missing fixture started lanes"))
+    assert check.main(["--execution", "native", "--lane", "pytest"]) == check.EXIT_USAGE
+    assert "native xterm package fixture is missing" in capsys.readouterr().err
+
+
+def test_native_gate_refuses_missing_agent_before_starting_lanes(monkeypatch, capsys):
+    check = load_check_module()
+    monkeypatch.setattr(check.shutil, "which", lambda name: None if name == "opencode" else "/fixture/bin/" + name)
+    monkeypatch.setattr(check, "run_functional_lanes", lambda *_args, **_kwargs: pytest.fail("missing client started lanes"))
+    assert check.main(["--execution", "native", "--lane", "bazel-go"]) == check.EXIT_USAGE
+    assert "native agent clients are missing from PATH: opencode" in capsys.readouterr().err
+
+
+def test_native_retirement_does_not_contact_docker(monkeypatch):
+    check = load_check_module()
+    monkeypatch.setattr(check, "descendant_processes", lambda _pid: [])
+    monkeypatch.setattr(check, "running_test_containers", lambda: pytest.fail("native retirement contacted Docker"))
+    monkeypatch.setattr(check.os, "sync", lambda: None)
+    assert check.retire_owned_processes(observe_containers=False)["retired"] is True
 
 
 def test_functional_evidence_is_owned_by_the_gate_and_partitioned_per_step(tmp_path):

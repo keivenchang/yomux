@@ -28,8 +28,8 @@ def test_preview_frame_shared_chrome_keeps_html_and_pdf_height_policies(browser,
     for key in ("display", "flex", "width", "border", "background", "colorScheme"):
         assert metrics["html"][key] == metrics["pdf"][key], metrics
     assert metrics["html"]["minHeight"] == "0px", metrics
-    assert metrics["pdf"]["minHeight"] == "420px", metrics
-    assert metrics["html"]["height"] != metrics["pdf"]["height"], metrics
+    assert metrics["pdf"]["minHeight"] == "0px", metrics
+    assert metrics["html"]["height"] == metrics["pdf"]["height"] == "600px", metrics
 
 def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
     css = app_css()
@@ -1043,6 +1043,15 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
           originals,
           reset() { for (const name of names) counts[name] = 0; },
           snapshot() { return {...counts}; },
+          async settledCounts(reset = false) {
+            await window.__yomuxTestWaitFor(() => !dockviewLayoutState.tabActivationPerf
+              && !dockviewLayoutState.deferredTabRefreshFrame && !dockviewLayoutState.deferredTabRefreshItems.size
+              && !dockviewLayoutState.deferredMetadataTabStripTimer && !dockviewLayoutState.syncQueued,
+              {timeoutMs:5000,description:'Dockview activation and deferred tab publication'});
+            const result = this.snapshot();
+            if (reset) this.reset();
+            return result;
+          },
           restore() { for (const name of names) window[name] = originals[name]; },
         };
         const panel = panelNodes.get(arguments[0]);
@@ -1059,7 +1068,11 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
     browser.execute_async_script(
         "const done = arguments[arguments.length - 1]; requestAnimationFrame(() => requestAnimationFrame(done));"
     )
-    browser.execute_script("window.__dockviewSwitchProbe.reset()")
+    reset_counts = browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      window.__dockviewSwitchProbe.settledCounts(true).then(done,error=>done({error:String(error.stack||error)}));
+    """)
+    assert 'error' not in reset_counts, reset_counts
 
     click_visible_selector(browser, f'[data-pane-tab="{items[1]}"]')
     WebDriverWait(browser, 5).until(
@@ -1074,7 +1087,10 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
     browser.execute_async_script(
         "const done = arguments[arguments.length - 1]; requestAnimationFrame(() => requestAnimationFrame(done));"
     )
-    first_switch = browser.execute_script("return window.__dockviewSwitchProbe.snapshot()")
+    first_switch = browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      window.__dockviewSwitchProbe.settledCounts().then(done,error=>done({error:String(error.stack||error)}));
+    """)
     assert first_switch == {
         "capturePaneViewState": 1,
         "renderPanels": 0,
@@ -1095,7 +1111,11 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
     browser.execute_async_script(
         "const done = arguments[arguments.length - 1]; requestAnimationFrame(() => requestAnimationFrame(done));"
     )
-    browser.execute_script("window.__dockviewSwitchProbe.reset()")
+    reset_counts = browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      window.__dockviewSwitchProbe.settledCounts(true).then(done,error=>done({error:String(error.stack||error)}));
+    """)
+    assert 'error' not in reset_counts, reset_counts
     click_visible_selector(browser, f'[data-pane-tab="{items[0]}"]')
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return activeItemForSide('left') === arguments[0]", items[0])
@@ -1103,9 +1123,13 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
     browser.execute_async_script(
         "const done = arguments[arguments.length - 1]; requestAnimationFrame(() => requestAnimationFrame(done));"
     )
+    final_switch = browser.execute_async_script("""
+      const done=arguments[arguments.length-1];
+      window.__dockviewSwitchProbe.settledCounts().then(done,error=>done({error:String(error.stack||error)}));
+    """)
     metrics = browser.execute_script(
         """
-        const switchCounts = window.__dockviewSwitchProbe.snapshot();
+        const switchCounts = arguments[1];
         window.__dockviewSwitchProbe.restore();
         delete window.__dockviewSwitchProbe;
         window.loadProseMirrorApi = window.__dockviewOriginalProseMirrorLoader;
@@ -1126,7 +1150,7 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
           restoredScrollTop: panelNodes.get(arguments[0][0])?.querySelector('.file-editor-preview-pane-panel')?.scrollTop || 0,
         };
         """,
-        items,
+        items, final_switch,
     )
     assert metrics["switchCounts"] == {
         "capturePaneViewState": 1,
@@ -1767,7 +1791,7 @@ def test_markdown_prosemirror_click_enter_and_delayed_source_sync(browser, tmp_p
             };
             resumedView.dispatch(resumedView.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(resumedView.state.doc, 1)));
             resumedView.dispatch(resumedView.state.tr.insertText('Y'));
-            resumedView.someProp('handleKeyDown', handler => handler(resumedView, new KeyboardEvent('keydown', {key: 's', ctrlKey: true})));
+            resumedView.someProp('handleKeyDown', handler => handler(resumedView, new KeyboardEvent('keydown', {key: 's', metaKey: isMacPlatform(), ctrlKey: !isMacPlatform()})));
             await waitFor(() => saveRequests.length === 1);
             const savedBeforeDebounce = saveRequests[0].content;
 
@@ -2041,7 +2065,7 @@ def test_markdown_prosemirror_typing_defers_autosave_until_after_pause(browser, 
             await new Promise(resolve => setTimeout(resolve, 2500));
             const settledSource = fileEditorPanelState(panel).content;
             const writesBeforeAutosave = writes.length;
-            view.someProp('handleKeyDown', handler => handler(view, new KeyboardEvent('keydown', {key: 's', ctrlKey: true})));
+            view.someProp('handleKeyDown', handler => handler(view, new KeyboardEvent('keydown', {key: 's', metaKey: isMacPlatform(), ctrlKey: !isMacPlatform()})));
             await window.__yomuxTestWaitFor(() => writes.length === 1);
             done({settledSource, writesBeforeAutosave, saved: writes[0]?.content || '', activityTouches, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           } catch (error) {
@@ -3110,7 +3134,7 @@ def test_markdown_relative_link_context_menu_opens_yomux_editor(browser, tmp_pat
             window.openFileInEditor = async (...args) => { openedFiles.push(args); return true; };
             window.open = (...args) => { openedUrls.push(args); return {}; };
             const originalMarked = window.marked;
-            window.marked = {parse: () => '<p><a href="docs/DEVELOPMENT.md">Development</a></p>'};
+            window.marked = {...window.marked, parse: () => '<p><a href="docs/DEVELOPMENT.md">Development</a></p>'};
             const previewPanel = document.createElement('div');
             previewPanel.className = 'file-editor-panel';
             previewPanel.dataset.filePath = path;
@@ -3126,7 +3150,7 @@ def test_markdown_relative_link_context_menu_opens_yomux_editor(browser, tmp_pat
             const previewMenu = document.querySelector('.markdown-preview-context-menu');
             const previewLabels = [...(previewMenu?.querySelectorAll('button') || [])].map(button => button.textContent.trim());
             previewMenu?.querySelector('button')?.click();
-            window.marked = {parse: () => '<p><a href="docs/DEVELOPMENT.md">Development</a></p>'};
+            window.marked = {...window.marked, parse: () => '<p><a href="docs/DEVELOPMENT.md">Development</a></p>'};
             renderMarkdownPreviewInto(preview, source, path, {context: 'local-link-menu-readonly', readOnly: true});
             if (preview._previewAsync) await preview._previewAsync;
             window.marked = originalMarked;
@@ -3135,7 +3159,7 @@ def test_markdown_relative_link_context_menu_opens_yomux_editor(browser, tmp_pat
             const readOnlyMenu = document.querySelector('.link-context-menu');
             const readOnlyLabels = [...(readOnlyMenu?.querySelectorAll('button') || [])].map(button => button.textContent.trim());
             readOnlyMenu?.querySelector('button')?.click();
-            window.marked = {parse: () => '<p><a href="https://example.com/docs">External</a></p>'};
+            window.marked = {...window.marked, parse: () => '<p><a href="https://example.com/docs">External</a></p>'};
             renderMarkdownPreviewInto(preview, '[External](https://example.com/docs)', path, {context: 'external-link-menu', readOnly: true});
             if (preview._previewAsync) await preview._previewAsync;
             const externalLink = preview.querySelector('a[href]');
@@ -3763,9 +3787,9 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
         assert expected in requested_media, metrics
     assert metrics["svg"]["hasInlineSvg"] is False, metrics
     assert metrics["pdf"]["previewPaneHidden"] is False, metrics
-    assert metrics["pdf"]["iframeSrc"].startswith("/api/fs/raw?path="), metrics
+    assert metrics["pdf"]["iframeSrc"].startswith("/static/vendor/pdfjs/web/viewer.html?file="), metrics
     assert "spec.pdf" in metrics["pdf"]["iframeSrc"], metrics
-    assert metrics["pdf"]["sandbox"] == "", metrics
+    assert metrics["pdf"]["sandbox"] is None, metrics
     assert "Open" in metrics["pdf"]["fallbackText"] and "Download" in metrics["pdf"]["fallbackText"], metrics
     assert metrics["pdf"]["editButtonHidden"] is True and metrics["pdf"]["splitButtonHidden"] is True, metrics
     assert metrics["pdf"]["previewButtonHidden"] is False, metrics
@@ -3800,6 +3824,8 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
         By.CSS_SELECTOR,
         '[data-file-path="/home/test/repo/assets/diagram.svg"] .file-editor-preview-zoom-viewport',
     )
+    # The format inventory mounts many panels; stage only this image for the native gesture.
+    browser.execute_script("document.getElementById('grid').replaceChildren(arguments[0].closest('.panel'))", image_viewport)
     pan_before = browser.execute_script(
         """const viewport = arguments[0];
         const shell = viewport.closest('.file-editor-preview-zoom-shell');
@@ -3810,6 +3836,8 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
           maxTop: viewport.scrollHeight - viewport.clientHeight};""",
         image_viewport,
     )
+    hit = browser.execute_script("const v=arguments[0],r=v.getBoundingClientRect(),n=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return {inside:v.contains(n),tag:n?.tagName,cls:n?.className,rect:r.toJSON()}", image_viewport)
+    assert hit['inside'], hit
     ActionChains(browser).move_to_element(image_viewport).click_and_hold().move_by_offset(-90, -70).release().perform()
     pan_after = browser.execute_script(
         """const viewport = arguments[0]; return {left: viewport.scrollLeft, top: viewport.scrollTop,
@@ -4224,7 +4252,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
     browser.set_window_size(1200, 900)
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     mermaid_uri = fixture_asset_url("static", "vendor", "mermaid.min.js")
-    mermaid_source = (REPO_ROOT / "tests" / "fixtures" / "preview-samples" / "14-mermaid.mmd").read_text(encoding="utf-8")
+    mermaid_source = (REPO_ROOT / "examples" / "preview" / "14-mermaid.mmd").read_text(encoding="utf-8")
     assert "flowchart TD" in mermaid_source
     assert "direction LR" in mermaid_source
     assert "subgraph MarkdownFlow" in mermaid_source
@@ -4273,7 +4301,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
             const probeNativeLabelTexts = Array.from(new DOMParser().parseFromString(probeSvgText, 'image/svg+xml').querySelectorAll('text'))
               .map(node => String(node.textContent || '').trim())
               .filter(Boolean);
-            const path = '/home/test/repo/tests/fixtures/preview-samples/14-mermaid.mmd';
+            const path = '/home/test/repo/examples/preview/14-mermaid.mmd';
             const item = fileEditorItemFor(path);
             setFileState(path, {kind: 'text', content: mermaidSource, original: mermaidSource, dirty: false, language: 'mermaid'});
             setFileEditorViewMode(path, 'preview', item);
@@ -5052,9 +5080,18 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
           try {
             const {frame} = window.__yomuxTestHelpers;
             const originalFetch = window.fetch.bind(window);
+            const originalFetchRawFileBlob = window.fetchRawFileBlob;
             const rawRequests = [];
+            const failedRawPaths = [];
             const fixturePng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
             const externalDataUrl = `data:image/png;base64,${btoa(String.fromCharCode(...fixturePng))}`;
+            window.fetchRawFileBlob = async (path, options = {}) => {
+              if (path === '/home/test/repo/docs/missing.png') {
+                failedRawPaths.push(path);
+                return {ok: false, status: 404, error: {message: 'not found'}};
+              }
+              return originalFetchRawFileBlob(path, options);
+            };
             window.fetch = async (input, options = {}) => {
               const url = new URL(String(input), window.location.href);
               if (url.pathname === '/api/fs/raw') {
@@ -5064,7 +5101,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
               return originalFetch(input, options);
             };
             const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
-            window.marked = {
+            window.marked = {...window.marked,
               parse(markdown) {
                 const parts = [];
                 for (const line of String(markdown || '').split('\\n')) {
@@ -5180,7 +5217,9 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             const externalImage = preview.querySelector('img[alt="external"]');
                 const externalCompletion = waitImage(externalImage);
             if (preview._previewAsync) await preview._previewAsync;
-            await Promise.all(Array.from(preview.querySelectorAll('img.markdown-preview-image')).map(waitImage));
+            await Promise.all(Array.from(preview.querySelectorAll('img.markdown-preview-image'))
+              .filter(image => image.alt !== 'missing')
+              .map(waitImage));
             await Promise.all(fixedImages.map(waitImage));
             await externalCompletion;
             const initialImages = {
@@ -5194,12 +5233,6 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
               fixedWide: imageSnapshot('fixed wide'),
               fixedTall: imageSnapshot('fixed tall'),
             };
-            const missing = preview.querySelector('img[alt="missing"]');
-            if (missing) missing.dispatchEvent(new Event('error'));
-            const missingImageError = {
-              className: missing?.className || '',
-              title: missing?.title || '',
-            };
             const brokenText = Array.from(preview.querySelectorAll('.markdown-image-error'))
               .find(node => String(node.textContent || '').includes('/home/test/repo/docs/missing.png'))?.textContent || '';
             await frame();
@@ -5208,8 +5241,8 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             const mermaidError = preview.querySelector('.mermaid-preview-error');
             done({
                   initialImages,
-                  missingImageError,
                   brokenText,
+                  failedRawPaths,
               mermaid: {
                 imageExists: Boolean(mermaidImage),
                 imageSrcPrefix: String(mermaidImage?.getAttribute('src') || '').slice(0, 5),
@@ -5272,11 +5305,11 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
         assert expected in metrics["rawRequests"], metrics
     assert metrics["initialImages"]["external"]["src"].startswith("data:image/png;base64,"), metrics
     assert metrics["initialImages"]["external"]["resolvedPath"] == "", metrics
-    # The legacy renderer removes unsafe image nodes and marks missing local media on its own Preview surface.
+    # The legacy renderer removes unsafe nodes and replaces a failed authenticated image fetch without a synthetic img error.
     assert metrics["initialImages"]["unsafe"]["exists"] is False, metrics
     assert metrics["initialImages"]["unsafe"]["hasSrc"] is False, metrics
-    assert "markdown-preview-image-error" in metrics["missingImageError"]["className"], metrics
-    assert "Image unavailable: /home/test/repo/docs/missing.png" in metrics["missingImageError"]["title"], metrics
+    assert metrics["initialImages"]["missing"]["exists"] is False, metrics
+    assert metrics["failedRawPaths"] == ["/home/test/repo/docs/missing.png"], metrics
     assert metrics["brokenText"].startswith("Image unavailable: /home/test/repo/docs/missing.png"), metrics
     assert metrics["brokenText"].endswith("Open · Download"), metrics
     assert metrics["mermaid"]["imageExists"] is True, metrics
@@ -5294,6 +5327,247 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     assert metrics["mermaid"]["config"]["flowchart"]["htmlLabels"] is False, metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
+
+
+def test_tex_vieweditor_native_typing_preserves_math(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    source = (Path(__file__).resolve().parents[1] / "examples/tex/math.md").read_text()
+    ready = browser.execute_async_script(
+        r"""
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            await Promise.all(['/static/vendor/katex/katex.min.js', '/static/vendor/katex/auto-render.min.js'].map(src => new Promise((resolve, reject) => {
+              const script = document.createElement('script'); script.src = src; script.onload = resolve; script.onerror = reject; document.head.append(script);
+            })));
+            const path = '/home/test/yolomux.dev/TEX-TYPING.md';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: arguments[0], original: arguments[0], dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.id = 'tex-typing-panel';
+            panel.classList.add('active-pane');
+            panel.style.cssText = 'position:fixed;inset:60px 20px 20px;display:flex;z-index:1000';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yomuxTestWaitFor(() => panel._pmView || panel._pmError);
+            if (panel._pmError) throw new Error(panel._pmError);
+            done({count: panel.querySelectorAll('.katex').length, errors: panel.querySelectorAll('.katex-error').length});
+          } catch (error) { done({error: String(error)}); }
+        })();
+        """, source,
+    )
+    assert ready == {"count": 7, "errors": 0}, ready
+    editor = browser.find_element("css selector", "#tex-typing-panel .ProseMirror")
+    editor.click()
+    for character in "hello":
+        editor.send_keys(character)
+        observed = browser.execute_script("const panel = document.getElementById('tex-typing-panel'); return {count: panel.querySelectorAll('.katex').length, errors: panel.querySelectorAll('.katex-error').length};")
+        assert observed == ready, observed
+    final = browser.execute_script(r"""
+      const panel = document.getElementById('tex-typing-panel');
+      const path = '/home/test/yolomux.dev/TEX-TYPING.md';
+      flushProseMirrorSource(panel, path);
+      const source = fileStateFor(path).content;
+      const math = [];
+      panel._pmView.state.doc.descendants(node => { if (node.type.name.startsWith('tex_math')) math.push(node.attrs.source); });
+      fileStateFor(path).dirty = false;
+      destroyProseMirrorPanel(panel);
+      panel.remove();
+      return {source, math};
+    """)
+    assert "hello" in final["source"], final
+    assert len(final["math"]) == 7, final
+    assert all(math in final["source"] for math in final["math"]), {"missing": [math for math in final["math"] if math not in final["source"]], "source": final["source"]}
+
+
+def test_tex_source_and_embedded_math_rendering(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const loadScript = src => new Promise((resolve, reject) => {
+              const script = document.createElement('script');
+              script.src = src;
+              script.onload = resolve;
+              script.onerror = () => reject(new Error(`Could not load ${src}`));
+              document.head.append(script);
+            });
+            await loadScript('/static/vendor/marked.min.js');
+            await loadScript('/static/vendor/katex/katex.min.js');
+            await loadScript('/static/vendor/katex/auto-render.min.js');
+            const mathStylesheet = document.createElement('link');
+            mathStylesheet.rel = 'stylesheet';
+            mathStylesheet.href = '/static/vendor/katex/katex.min.css';
+            mathStylesheet.dataset.katexStylesheet = '1';
+            document.head.append(mathStylesheet);
+
+            const markdown = document.createElement('div');
+            markdown.className = 'markdown-body';
+            document.getElementById('grid').append(markdown);
+            const source = [
+              'Inline math $x^2$ and $y + 1$.',
+              '',
+              'Bracketed inline \\\\(a_1 + b_1\\\\).',
+              '',
+              '$$\\\\int_0^1 x^2 \\\\, dx$$',
+              '',
+              '\\\\[\\\\sum_{n=1}^{4} n\\\\]',
+              '',
+              'Prices are $5 and $10.',
+              '',
+              'Literal `$notMath$`.',
+              '',
+              '```tex',
+              '$alsoNotMath$',
+              '\\\\(alsoLiteral\\\\)',
+              '```',
+            ].join('\\n');
+            renderMarkdownPreviewInto(markdown, source, '/repo/math.md');
+            await markdown._previewAsync;
+
+            const htmlContainer = document.createElement('div');
+            document.getElementById('grid').append(htmlContainer);
+            renderHtmlPreviewInto(htmlContainer, '/repo/math.html', '<!doctype html><html><head><title>Math</title></head><body><p>HTML math $a^2$ and \\\\[b + 1\\\\].</p><code>$literal$</code></body></html>');
+            const frame = htmlContainer.querySelector('iframe');
+            await new Promise(resolve => frame.addEventListener('load', resolve, {once: true}));
+            const frameDocument = frame.contentDocument;
+
+            const literalCases = [
+              ['attribute', '<span title="\\\\(literal\\\\)">label</span>'],
+              ['privateUse', 'Literal \\uE000 character and prices $5 and $10.'],
+              ['escaped', String.raw`\\\\(literal\\\\)`],
+              ['code', '`\\\\(code\\\\)` and \\uE000'],
+            ];
+            const literalResults = {};
+            for (const [name, source] of literalCases) {
+              const host = document.createElement('div');
+              renderMarkdownPreviewInto(host, source, '/repo/literal.md');
+              literalResults[name] = {text: host.textContent, title: host.querySelector('span')?.getAttribute('title'), math: host.querySelectorAll('.katex').length};
+            }
+
+            const mathCases = [
+              String.raw`$a*b*c$`,
+              String.raw`$\\{1,2\\}$`,
+              '$$\\n' + String.raw`\\begin{matrix} a & b \\\\ c & d \\end{matrix}` + '\\n$$',
+              String.raw`\\[\\frac{1}{2}\\]`,
+              '$$\\nx\\n> 0\\n\\ny\\n$$',
+              String.raw`$a<b>c$`,
+            ];
+            const mathResults = mathCases.map(source => {
+              const host = document.createElement('div');
+              renderMarkdownPreviewInto(host, source, '/repo/math.md');
+              return {count: host.querySelectorAll('.katex').length, errors: host.querySelectorAll('.katex-error').length, source: host.querySelector('annotation')?.textContent || ''};
+            });
+            const escapedHost = document.createElement('div');
+            renderMarkdownPreviewInto(escapedHost, String.raw`Literal \\$x\\$ stays literal.`, '/repo/math.md');
+
+            const pmApi = await loadProseMirrorApi();
+            const pmPath = '/home/test/yolomux.dev/TEX-AUDIT.md';
+            const pmItem = fileEditorItemFor(pmPath);
+            const pmSource = '# Math\\n\\n' + mathCases.join('\\n\\n') + '\\n\\nLiteral `$code$` and \\\\$literal\\\\$.\\n';
+            setFileState(pmPath, {kind: 'text', content: pmSource, original: pmSource, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(pmPath, 'preview', pmItem);
+            addFileEditorTabItem(pmPath, pmItem);
+            const pmPanel = createFileEditorPanel(pmItem);
+            pmPanel.classList.add('active-pane');
+            panelNodes.set(pmItem, pmPanel);
+            document.getElementById('grid').append(pmPanel);
+            renderFileEditorPanel(pmPanel, pmItem);
+            await window.__yomuxTestWaitFor(() => pmPanel._pmView || pmPanel._pmError);
+            if (pmPanel._pmError) throw new Error(pmPanel._pmError);
+            const pmView = pmPanel._pmView;
+            const pmBefore = pmView.dom.querySelectorAll('.katex').length;
+            pmView.dispatch(pmView.state.tr.insertText('Edited ', 1));
+            flushProseMirrorSource(pmPanel, pmPath);
+            const serialized = prosemirrorMarkdownSerializer(pmApi).serialize(pmView.state.doc);
+            const reopened = prosemirrorMarkdownParser(pmApi, pmPanel._pmSchema).parse(serialized);
+            const pmResult = {
+              before: pmBefore,
+              after: pmView.dom.querySelectorAll('.katex').length,
+              sourcesKept: mathCases.every(source => serialized.includes(source)),
+              reopenedEqual: reopened.eq(pmView.state.doc),
+              errors: pmView.dom.querySelectorAll('.katex-error').length,
+            };
+
+            fileStateFor(pmPath).dirty = false;
+            destroyProseMirrorPanel(pmPanel);
+            pmPanel.remove();
+
+            const api = await loadCodeMirrorBundleScript();
+            const texExtension = codeMirrorLanguageExtension(api, '/repo/equation.tex');
+            const texState = api.EditorState.create({doc: '\\\\section{Title}\\n\\\\begin{equation}x^2\\\\end{equation}', extensions: [texExtension]});
+            const texTree = api.ensureSyntaxTree(texState, texState.doc.length, 1000);
+            done({
+              katexAvailable: typeof window.katex?.render === 'function',
+              autoRenderAvailable: typeof window.renderMathInElement === 'function',
+              markdownMathCount: markdown.querySelectorAll('.katex').length,
+              markdownDisplayMathCount: markdown.querySelectorAll('.katex-display').length,
+              markdownLiteralInline: markdown.textContent.includes('$notMath$'),
+              markdownLiteralCode: markdown.textContent.includes('$alsoNotMath$'),
+              markdownLiteralTexCode: markdown.textContent.includes('\\\\(alsoLiteral\\\\)'),
+              markdownCurrencyText: markdown.textContent.includes('Prices are $5 and $10.'),
+              texPreviewKind: previewKindForPath('/repo/equation.tex', {kind: 'text'}),
+              texSyntaxLanguage: syntaxLanguageForPath('/repo/equation.tex'),
+              latexProjectFiles: Object.fromEntries(['.tex', '.ltx', '.dtx', '.cls', '.sty', '.ins', '.bbl', '.bib', '.bst'].map(extension => {
+                const path = `/repo/paper${extension}`;
+                return [extension, {previewKind: previewKindForPath(path, {kind: 'text'}), language: syntaxLanguageForPath(path)}];
+              })),
+              literalResults, mathResults, pmResult, escapedMath: escapedHost.querySelectorAll('.katex').length,
+              texSyntaxTree: texTree?.toString() || '',
+              htmlMathCount: frameDocument?.querySelectorAll('.katex').length || 0,
+              htmlLiteralCode: frameDocument?.querySelector('code')?.textContent || '',
+              htmlStylesheet: Boolean(frameDocument?.querySelector('link[data-katex-stylesheet]')),
+              htmlSandbox: frame.getAttribute('sandbox'),
+              htmlScriptsAllowed: frame.getAttribute('sandbox').split(/\\s+/).includes('allow-scripts'),
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || ''});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["katexAvailable"] is True, metrics
+    assert metrics["autoRenderAvailable"] is True, metrics
+    assert metrics["markdownMathCount"] == 5, metrics
+    assert metrics["markdownDisplayMathCount"] == 2, metrics
+    assert metrics["markdownLiteralInline"] is True, metrics
+    assert metrics["markdownLiteralCode"] is True, metrics
+    assert metrics["markdownLiteralTexCode"] is True, metrics
+    assert metrics["markdownCurrencyText"] is True, metrics
+    assert metrics["texPreviewKind"] == "tex", metrics
+    assert metrics["texSyntaxLanguage"] == "stex", metrics
+    assert metrics["latexProjectFiles"] == {
+        ".tex": {"previewKind": "tex", "language": "stex"},
+        ".ltx": {"previewKind": "tex", "language": "stex"},
+        ".dtx": {"previewKind": "text", "language": "stex"},
+        ".cls": {"previewKind": "text", "language": "stex"},
+        ".sty": {"previewKind": "text", "language": "stex"},
+        ".ins": {"previewKind": "text", "language": "stex"},
+        ".bbl": {"previewKind": "text", "language": "stex"},
+        ".bib": {"previewKind": "text", "language": "text"},
+        ".bst": {"previewKind": "text", "language": "text"},
+    }, metrics
+    assert metrics["literalResults"]["attribute"]["title"] == r"\(literal\)", metrics
+    assert metrics["literalResults"]["privateUse"]["text"].strip() == "Literal \uE000 character and prices $5 and $10.", metrics
+    assert metrics["literalResults"]["escaped"]["math"] == 0, metrics
+    assert metrics["literalResults"]["code"]["text"].strip() == "\\(code\\) and \uE000", metrics
+    assert all(result["count"] == 1 and result["errors"] == 0 for result in metrics["mathResults"]), metrics
+    assert metrics["mathResults"][0]["source"] == "a*b*c", metrics
+    assert metrics["mathResults"][1]["source"] == r"\{1,2\}", metrics
+    assert metrics["escapedMath"] == 0, metrics
+    assert metrics["pmResult"] == {"before": 6, "after": 6, "sourcesKept": True, "reopenedEqual": True, "errors": 0}, metrics
+    assert metrics["texSyntaxTree"], metrics
+    assert metrics["htmlMathCount"] == 2, metrics
+    assert metrics["htmlLiteralCode"] == "$literal$", metrics
+    assert metrics["htmlStylesheet"] is True, metrics
+    assert metrics["htmlSandbox"] == "allow-same-origin", metrics
+    assert metrics["htmlScriptsAllowed"] is False, metrics
 
 
 def test_preview_touch_claim_rejects_a_deferred_stale_scroll_restore_across_frames(browser, tmp_path, request):
@@ -5801,7 +6075,7 @@ def test_preview_popout_snapshot_waits_for_media_and_mermaid(browser, tmp_path):
               return originalFetch(input, options);
             };
             const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
-            window.marked = {
+            window.marked = {...window.marked,
               parse(markdown) {
                 const lines = String(markdown || '').split('\\n');
                 const parts = [];
@@ -6415,7 +6689,7 @@ def test_markdown_preview_html_callout_uses_dark_highlight_in_dark_mode(browser,
         highlightCss.textContent = 'pre code.hljs { display: block; overflow-x: auto; padding: 1em; }';
         document.head.append(highlightCss);
         window.hljs = {highlightElement(block) { block.classList.add('hljs'); }};
-        window.marked = {
+        window.marked = {...window.marked,
           parse() {
             return `
               <table id="normal"><tr><td id="normal-cell">Normal dark preview table</td></tr></table>
@@ -6721,7 +6995,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
                   });
                 };
                 const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
-            window.marked = {
+            window.marked = {...window.marked,
               parse(markdown) {
                 const lines = String(markdown || '').split('\\n');
                 const parts = [];
@@ -7433,7 +7707,7 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
           try {
             const {frame} = window.__yomuxTestHelpers;
             const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
-            window.marked = {
+            window.marked = {...window.marked,
               parse(markdown) {
                 const lines = String(markdown || '').split('\\n');
                 const parts = [];
@@ -7658,6 +7932,7 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
           <script>{app_bundle_before_boot_script()}</script>
           <script>
             window.marked = {{
+              Marked: class {{ parse(...args) {{ return window.marked.parse(...args); }} }},
               parse() {{
                 return '<h1>Heading</h1><p><strong>Bold</strong> and <a href="https://example.com">link</a></p><pre><code>const x = 1;</code></pre>';
               }}

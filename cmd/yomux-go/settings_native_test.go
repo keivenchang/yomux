@@ -355,7 +355,7 @@ func TestNativeSettingsPOSIXLockInteroperates(t *testing.T) {
 	}()
 	command := exec.Command(os.Args[0], "-test.run=^TestNativeSettingsPOSIXLockInteroperates$")
 	// The child receives no credentials or unrelated runtime ownership.
-	command.Env = []string{"YOMUX_SETTINGS_LOCK_CHILD=1", "YOMUX_SETTINGS_LOCK_PATH=" + path}
+	command.Env = testsupport.GoHelperProcessEnvironment([]string{"YOMUX_SETTINGS_LOCK_CHILD=1", "YOMUX_SETTINGS_LOCK_PATH=" + path})
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("peer lock probe: %v %s", err, output)
 	}
@@ -389,7 +389,7 @@ with locked_settings_file(path):
     _write_settings_file_unlocked(merge_settings(current, {"general": {"startup_tips": False}}), path)
 `, filepath.Join(s.config, "settings.yaml"))
 	command.Dir = s.root
-	command.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir(), "YOMUX_CONFIG_DIR=" + s.config, "YOMUX_AUTH_CONFIG_READ_ONLY=1", "PYTHONDONTWRITEBYTECODE=1"}
+	command.Env = testsupport.SyntheticEnvironment("HOME="+t.TempDir(), "TMPDIR="+t.TempDir(), "YOMUX_CONFIG_DIR="+s.config, "YOMUX_AUTH_CONFIG_READ_ONLY=1", "PYTHONDONTWRITEBYTECODE=1")
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	input, err := command.StdinPipe()

@@ -32,3 +32,19 @@ DOIT*.md
 core
 # Generated Bazel output directories.
 bazel-*/
+
+# PDF.js is checksum-pinned and fetched by make setup/build.
+/static/vendor/pdfjs/
+/static/vendor/.pdfjs-*/
+
+# Pinned browser dependencies and reproducible build outputs.
+/static/vendor/*.js
+/static/vendor/*.css
+/static/vendor/katex/*.js
+/static/vendor/katex/*.css
+/static/vendor/katex/fonts/
+/static/fonts/*.woff2
+/static/codemirror.js
+/static/prosemirror.js
+/static/emoji-data.js
+/static/locales/

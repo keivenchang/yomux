@@ -540,7 +540,7 @@ func (schema nativeSettingsSchema) catalog(current map[string]any) map[string]an
 				aliases = map[string]any{}
 			}
 			labels, metadata := map[string]any{}, map[string]any{}
-			if key == "codex_model" && (section == "yoagent" || section == "summary") {
+			if key == "codex_model" && (section == "yoagent" || section == "summary" || section == "tabber") {
 				for id, rawSpec := range settingsObject(schema["YOAGENT_CODEX_MODEL_CATALOG"]) {
 					spec := settingsObject(rawSpec)
 					labels[id] = spec["display_name"]

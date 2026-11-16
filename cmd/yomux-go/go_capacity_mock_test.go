@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -16,11 +17,15 @@ import (
 	"github.com/keivenchang/yomux/internal/productenv"
 	"github.com/keivenchang/yomux/internal/stats"
 	"github.com/keivenchang/yomux/internal/testsupport"
+	"github.com/keivenchang/yomux/internal/tmuxcmd"
 )
 
 // Drive the actual manual mock through the same classifier and guarded worker
 // cycle used by YO, with the real process identity of its fixture-owned PID.
 func TestGoYoloCapacityManualMock(t *testing.T) {
+	for _, name := range []string{"LANG", "LC_ALL", "LC_CTYPE"} {
+		t.Setenv(name, "")
+	}
 	for _, scenario := range []string{"", "pending", "2"} {
 		t.Run("scenario="+scenario, func(t *testing.T) {
 			root := testsupport.ShortTempDir(t)
@@ -43,6 +48,7 @@ func TestGoYoloCapacityManualMock(t *testing.T) {
 				t.Fatal(err)
 			}
 			capture := func() string { return runTmux("capture-pane", "-p", "-t", target) }
+			diagnostics := func() string { return "worker not started" }
 			waitScreen := func(predicate func(string) bool) string {
 				t.Helper()
 				deadline := time.NewTimer(5 * time.Second)
@@ -56,7 +62,7 @@ func TestGoYoloCapacityManualMock(t *testing.T) {
 					}
 					select {
 					case <-deadline.C:
-						t.Fatalf("mock did not reach expected screen: %q", screen)
+						t.Fatalf("mock did not reach expected screen: %q; %s", screen, diagnostics())
 					case <-ticker.C:
 					}
 				}
@@ -70,6 +76,11 @@ func TestGoYoloCapacityManualMock(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer store.close()
+			diagnostics = func() string {
+				store.mu.Lock()
+				defer store.mu.Unlock()
+				return fmt.Sprintf("attempts=%v action=%v error=%v failures=%v capacity=%v", store.attempts, store.lastAction, store.lastError, store.failures, store.capacityRecovery)
+			}
 			process, err := stats.CurrentPlatformAgentStatusProcess(context.Background(), pid)
 			if err != nil || !process.Alive || stats.ClassifyAgent(process.Command, process.Executable) != "codex" {
 				t.Fatalf("manual mock is not discoverable: process=%+v err=%v", process, err)
@@ -111,7 +122,10 @@ func TestGoYoloCapacityManualMock(t *testing.T) {
 					paintDeferrals++
 					return exec.CommandContext(ctx, "printf", "%s", frame)
 				}
-				return exec.CommandContext(ctx, "tmux", append([]string{"-S", socket}, args...)...)
+				return tmuxcmd.Command(ctx, tmuxcmd.Args(args...)[1:]...)
+			}
+			if current, err := srv.goYoloSessionIdentity(context.Background(), "capacity-mock"); err != nil || current != identity {
+				t.Fatalf("fixture hook changed tmux identity: before=%q after=%q err=%v", identity, current, err)
 			}
 			refreshMetadata := func() error {
 				now := time.Now()

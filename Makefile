@@ -19,11 +19,15 @@ dev: check-python ## Install Python developer tools and build native runtime
 	$(PYTHON) -m pip install -e ".[dev]"
 	$(MAKE) build
 
-xterm: ## Verify tracked xterm vendor assets against the pinned npm packages
-	npm ci --ignore-scripts --no-audit --no-fund
-	cmp static/vendor/xterm.js node_modules/@xterm/xterm/lib/xterm.js
-	cmp static/vendor/xterm.css node_modules/@xterm/xterm/css/xterm.css
-	cmp static/vendor/xterm-addon-unicode11.js node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js
+xterm: ## Verify prepared xterm vendor assets against the pinned npm packages
+	@set -eu; \
+	fixture=$$(mktemp -d "$${TMPDIR:-/tmp}/yomux-xterm.XXXXXX"); \
+	trap 'rm -rf -- "$$fixture"' EXIT HUP INT TERM; \
+	\cp -f package.json package-lock.json "$$fixture/"; \
+	npm ci --prefix "$$fixture" --ignore-scripts --no-audit --no-fund; \
+	cmp static/vendor/xterm.js "$$fixture/node_modules/@xterm/xterm/lib/xterm.js"; \
+	cmp static/vendor/xterm.css "$$fixture/node_modules/@xterm/xterm/css/xterm.css"; \
+	cmp static/vendor/xterm-addon-unicode11.js "$$fixture/node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js"
 
 build: ## Build the native server and publish browser assets
 	tools/build_go.sh

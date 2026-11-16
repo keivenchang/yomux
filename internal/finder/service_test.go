@@ -94,6 +94,29 @@ func TestGitCommitCountIndexLooksUpBothRenamePaths(t *testing.T) {
 	}
 }
 
+func TestFinderReadReportsLatexProjectFilesAsEditableText(t *testing.T) {
+	service, root := newTestService(t, nil)
+	for _, extension := range []string{".tex", ".ltx", ".dtx", ".cls", ".sty", ".ins", ".bbl", ".bib", ".bst"} {
+		t.Run(extension, func(t *testing.T) {
+			content := "\\section{Title}\n$x^2$\n"
+			if extension == ".bib" || extension == ".bst" {
+				content = "@article{sample, title={Title}}\n"
+			}
+			path := filepath.Join(root, "paper"+extension)
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			read, finderErr := service.Read(context.Background(), path)
+			if finderErr != nil {
+				t.Fatal(finderErr)
+			}
+			if read["is_text_extension"] != true || read["content"] != content {
+				t.Fatalf("read = (is_text_extension=%v, content=%q), want editable project source %q", read["is_text_extension"], read["content"], content)
+			}
+		})
+	}
+}
+
 type fakeNativeWatcher struct {
 	events chan nativeWatchEvent
 	status nativeWatchStatus
@@ -3833,7 +3856,13 @@ func TestRenameAndDeleteDoNotRequireReadingTheTarget(t *testing.T) {
 }
 
 func TestRecursiveDeleteReportsPartialProgressAfterRestoringQuarantine(t *testing.T) {
-	service, root := newTestService(t, nil)
+	published := make(chan map[string]any, 1)
+	service, root := newTestService(t, func(kind string, payload map[string]any) error {
+		if kind == "fs_changed" && payload["reason"] == "delete" {
+			published <- payload
+		}
+		return nil
+	})
 	subtree := filepath.Join(root, "partial")
 	if err := os.Mkdir(subtree, 0o700); err != nil {
 		t.Fatal(err)
@@ -3875,6 +3904,15 @@ func TestRecursiveDeleteReportsPartialProgressAfterRestoringQuarantine(t *testin
 	}
 	if _, err := os.Stat(large); err != nil {
 		t.Fatalf("unvisited large directory missing: %v", err)
+	}
+	select {
+	case change := <-published:
+		paths := change["paths"].([]string)
+		if len(paths) != 1 || paths[0] != subtree {
+			t.Fatalf("partial delete invalidated unrelated paths: %#v", change)
+		}
+	default:
+		t.Fatal("partial delete did not publish changed subtree for search and watch consumers")
 	}
 }
 
@@ -4541,7 +4579,7 @@ func TestDemandPreservesExplicitQueuedBuild(t *testing.T) {
 }
 func TestFailedSnapshotCleansOwnedStaging(t *testing.T) {
 	root := t.TempDir()
-	for i := 0; i < 12000; i++ {
+	for i := 0; i < 8; i++ {
 		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("%04d-%s.go", i, strings.Repeat("x", 160))), nil, 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -4556,14 +4594,20 @@ func TestFailedSnapshotCleansOwnedStaging(t *testing.T) {
 	}
 	defer store.db.Close()
 	engine := newSearchIndexEngine(store)
-	job := indexBuildJob{root: root, identity: fileID(info), maxFiles: 20000, maxBytes: DefaultIndexBytes}
+	job := indexBuildJob{root: root, identity: fileID(info), maxFiles: 20, maxBytes: DefaultIndexBytes}
 	if err := engine.build(job); err != nil {
 		t.Fatal(err)
 	}
-	job.maxBytes = 1024 * 1024
+	var priorGeneration, priorCount int
+	if err := store.db.QueryRow(`SELECT generation,count FROM roots WHERE root=?`, root).Scan(&priorGeneration, &priorCount); err != nil {
+		t.Fatal(err)
+	}
+	// Reject the real replacement after its SQLite staging file is created without
+	// building thousands of unrelated filesystem entries to exhaust a larger budget.
+	job.maxBytes = 1
 	failure := engine.build(job)
-	if failure == nil {
-		t.Fatal("fixture did not reject undersized replacement")
+	if failure == nil || !strings.Contains(failure.Error(), "smaller than the SQLite reserve") {
+		t.Fatalf("fixture did not reject the staged replacement: %v", failure)
 	}
 	usage, err := store.diskUsage()
 	if err != nil {
@@ -4571,6 +4615,13 @@ func TestFailedSnapshotCleansOwnedStaging(t *testing.T) {
 	}
 	if usage["staging_bytes"] != 0 {
 		t.Fatalf("owned staging leaked: %d bytes", usage["staging_bytes"])
+	}
+	var generation, count int
+	if err := store.db.QueryRow(`SELECT generation,count FROM roots WHERE root=?`, root).Scan(&generation, &count); err != nil {
+		t.Fatal(err)
+	}
+	if priorCount != 8 || generation != priorGeneration || count != priorCount {
+		t.Fatalf("failed replacement changed the retained snapshot: generation=%d count=%d, prior=%d/%d", generation, count, priorGeneration, priorCount)
 	}
 }
 func TestMultiwordFilenameQueryMatchesIndependentTokens(t *testing.T) {

@@ -661,13 +661,51 @@ async function runGitDiffHistorySuite() {
       }));
     });
     api.setGitDiffTabStateForTest(item, {snapshotCursor: 'old-cursor'});
-    assert.equal(await api.refreshGitDiffHistoryForTest(item), true);
+    assert.equal(await api.refreshGitDiffHistoryForTest(item), true, JSON.stringify(requests));
     assert.deepStrictEqual(requests, [
       '/api/fs/git-history?path=%2Frepo&limit=1&cursor=old-cursor&worktree=0',
       '/api/fs/git-history?path=%2Frepo&limit=1&worktree=0',
       '/api/fs/git-history?path=%2Frepo&worktree=only',
     ]);
     assert.equal(api.gitDiffTabStateForTest(item).snapshotCursor, 'fresh-cursor');
+  });
+
+  await testAsync('Git history retries once after the repository namespace changes', async () => {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const item = api.gitDiffItemFor('/repo');
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      if (requests.length === 1) {
+        return Promise.resolve(jsonResponse({
+          error: 'Git repository changed during the operation',
+          error_code: 'git_repository_changed', message_key: 'fs.error.gitRepositoryChanged',
+          user_message: {key: 'fs.error.gitRepositoryChanged', params: {}, fallback: 'Git repository changed during the operation'},
+        }, 409));
+      }
+      if (requests.length === 2) {
+        return Promise.resolve(jsonResponse({
+          path: '/repo', repo: '/repo', relative_path: '', repository_identity: 'repo-id',
+          head: 'f'.repeat(40), snapshot_cursor: 'fresh-cursor',
+          commits: [{sha: 'f'.repeat(40), subject: 'current'}], next_cursor: '', truncated: false,
+        }));
+      }
+      return Promise.resolve(jsonResponse({
+        path: '/repo', repository_identity: 'repo-id',
+        worktree_status: {available: true, dirty: false, entries: []},
+      }));
+    });
+    const state = api.setGitDiffTabStateForTest(item, {snapshotCursor: 'old-cursor'});
+    assert.equal(await api.refreshGitDiffHistoryForTest(item), true);
+    await flushAsyncWork();
+    assert.deepStrictEqual(requests, [
+      '/api/fs/git-history?path=%2Frepo&limit=1&cursor=old-cursor&worktree=0',
+      '/api/fs/git-history?path=%2Frepo&limit=1&worktree=0',
+      '/api/fs/git-history?path=%2Frepo&worktree=only',
+    ]);
+    assert.equal(state.error, null);
+    assert.equal(state.snapshotCursor, 'fresh-cursor');
+    assert.deepStrictEqual([...state.commits.map(commit => commit.subject)], ['current']);
   });
 
   await testAsync('Git history drops a saved cursor when its snapshot is stale', async () => {

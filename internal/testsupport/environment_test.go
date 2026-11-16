@@ -1,6 +1,7 @@
 package testsupport
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,6 +9,54 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestGoHelperProcessCommandSurvivesEnvironmentReplacement(t *testing.T) {
+	if len(os.Args) >= 3 && os.Args[len(os.Args)-2] == "--go-helper-arguments" {
+		fmt.Fprintf(os.Stdout, "%s\n%s\n", os.Getenv("GORACE"), os.Args[len(os.Args)-1])
+		os.Exit(0)
+	}
+	logDirectory := filepath.Join(t.TempDir(), "fixture  logs")
+	if err := os.MkdirAll(logDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	options := "exitcode=77 log_path='" + filepath.Join(logDirectory, "race") + "' atexit_sleep_ms=1000"
+	t.Setenv("GORACE", options)
+	argument := "fixture argument with spaces"
+	command := GoHelperProcessCommand(t, "-test.run=^TestGoHelperProcessCommandSurvivesEnvironmentReplacement$", "--", "--go-helper-arguments", argument)
+	// Model the production worker whitelist replacing the hook's environment.
+	command.Env = []string{"PATH=/fixture-without-tools"}
+	output, err := command.CombinedOutput()
+	want := options + " atexit_sleep_ms=0\n" + argument + "\n"
+	if err != nil || string(output) != want {
+		t.Fatalf("helper after environment replacement = %q, %v; want %q", output, err, want)
+	}
+}
+
+func TestGoHelperProcessEnvironmentPreservesRaceChecksAndPrivateInputs(t *testing.T) {
+	t.Setenv("AMBIENT_HELPER_SECRET", "must-not-inherit")
+	tests := []struct {
+		name  string
+		input []string
+		want  string
+	}{
+		{"default", []string{"PATH=/fixture"}, "atexit_sleep_ms=0"},
+		{"preserve-reporting", []string{"PATH=/fixture", "GORACE=halt_on_error=1 exitcode=77 log_path=/fixture/race atexit_sleep_ms=1000 strip_path_prefix=/fixture"}, "halt_on_error=1 exitcode=77 log_path=/fixture/race atexit_sleep_ms=1000 strip_path_prefix=/fixture atexit_sleep_ms=0"},
+		{"quoted-whitespace", []string{"PATH=/fixture", "GORACE=log_path='/private/fixture  logs/race'\t exitcode=77 atexit_sleep_ms=1000"}, "log_path='/private/fixture  logs/race'\t exitcode=77 atexit_sleep_ms=1000 atexit_sleep_ms=0"},
+		{"duplicate-exit-option", []string{"PATH=/fixture", "GORACE=atexit_sleep_ms=1000 exitcode=77 atexit_sleep_ms=20"}, "atexit_sleep_ms=1000 exitcode=77 atexit_sleep_ms=20 atexit_sleep_ms=0"},
+		{"duplicate-environment-key", []string{"PATH=/fixture", "GORACE=exitcode=12", "GORACE=exitcode=77"}, "exitcode=77 atexit_sleep_ms=0"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := GoHelperProcessEnvironment(test.input)
+			if len(got) != 2 || got[0] != "PATH=/fixture" || got[1] != "GORACE="+test.want {
+				t.Fatalf("helper environment = %#v, want private PATH and GORACE=%s", got, test.want)
+			}
+			if second := GoHelperProcessEnvironment(got); strings.Join(second, "\n") != strings.Join(got, "\n") {
+				t.Fatalf("helper environment is not idempotent: %#v", second)
+			}
+		})
+	}
+}
 
 func TestExecutableFixturesUseTheSelectedRuntimeShell(t *testing.T) {
 	shell := ToolPath(t, "sh")
@@ -261,8 +310,36 @@ func TestShortTempBaseRejectsNonPrivateOrRelativeRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("YOMUX_NATIVE_SHORT_TMPDIR", directory)
-	if got, err := ShortTempBase(); err != nil || got != directory {
+	physical, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ShortTempBase(); err != nil || got != physical {
 		t.Fatalf("private root = %q, %v", got, err)
+	}
+}
+
+func TestShortTempBaseResolvesAncestorAliasesButRejectsSymlinkLeaf(t *testing.T) {
+	parent := t.TempDir()
+	owned := filepath.Join(parent, "real", "owned")
+	if err := os.MkdirAll(owned, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(parent, "alias")
+	if err := os.Symlink(filepath.Join(parent, "real"), alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("YOMUX_NATIVE_SHORT_TMPDIR", filepath.Join(alias, "owned"))
+	physical, err := filepath.EvalSymlinks(owned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ShortTempBase(); err != nil || got != physical {
+		t.Fatalf("aliased root = %q, %v; want %q", got, err, physical)
+	}
+	t.Setenv("YOMUX_NATIVE_SHORT_TMPDIR", alias)
+	if _, err := ShortTempBase(); err == nil {
+		t.Fatal("accepted a symlink as the owned root")
 	}
 }
 

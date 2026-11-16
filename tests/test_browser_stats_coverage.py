@@ -100,8 +100,6 @@ def test_js_debug_client_work_counter_columns_align_in_visible_report(browser, t
 
 
 def test_stats_only_boot_keeps_stats_ready_without_unrelated_route_traffic(browser, tmp_path):
-    """Stats-only boot must not probe routes outside stats plus the live agent-activity surface."""
-
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,

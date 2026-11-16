@@ -843,6 +843,64 @@ function sanitizeMarkdownPreviewHtml(html) {
   return template.content;
 }
 
+function rewriteTexPreviewText(root, rewrite) {
+  const documentNode = root.ownerDocument || document;
+  const walker = documentNode.createTreeWalker(root, globalThis.NodeFilter?.SHOW_TEXT || 4);
+  let node;
+  while ((node = walker.nextNode())) node.nodeValue = rewrite(node.nodeValue);
+}
+
+// Both Markdown parsers consume math before interpreting escapes, emphasis, or line breaks.
+// Code and HTML tokens retain their parser-owned precedence and never enter this scanner.
+function markdownTexMathAt(source, start = 0) {
+  const opener = /^(\$\$|\\\[|\\\(|\$)/.exec(source.slice(start))?.[0];
+  if (!opener) return null;
+  const closer = ({'\\[': '\\]', '\\(': '\\)'})[opener] || opener;
+  const display = opener === '$$' || opener === '\\[';
+  const contentStart = start + opener.length;
+  if (!display && /\s/.test(source[contentStart] || '')) return null;
+  const newline = display ? -1 : source.indexOf('\n', contentStart);
+  const limit = newline < 0 ? source.length : newline;
+  for (let end = source.indexOf(closer, contentStart); end >= 0 && end < limit; end = source.indexOf(closer, end + closer.length)) {
+    let escapes = 0;
+    for (let index = end - 1; index >= contentStart && source[index] === '\\'; index--) escapes++;
+    if (escapes % 2) continue;
+    if (opener === '$' && (/\s/.test(source[end - 1]) || /\d/.test(source[end + 1] || ''))) continue;
+    const content = source.slice(contentStart, end);
+    if (!content || (!display && content.includes('\n'))) return null;
+    return {raw: source.slice(start, end + closer.length), content, display};
+  }
+  return null;
+}
+
+function renderTexMathSource(root, math) {
+  if (typeof globalThis.katex?.render !== 'function') {
+    root.textContent = math.raw;
+    return;
+  }
+  globalThis.katex.render(math.content, root, {displayMode: math.display, throwOnError: false, trust: false, strict: 'warn'});
+}
+
+function renderTexMathInElement(root, options = {}) {
+  if (!root || typeof globalThis.renderMathInElement !== 'function') return false;
+  let currencyToken = '\uE000YOMUXCURRENCY';
+  while (root.textContent.includes(currencyToken)) currencyToken += '\uE000';
+  rewriteTexPreviewText(root, text => text.replace(/\$(?=\d)([^$\n]{0,80})\$(?=\d)/g, match => match.replaceAll('$', currencyToken)));
+  globalThis.renderMathInElement(root, {
+    delimiters: options.delimiters || [
+      {left: '$$', right: '$$', display: true},
+      {left: '\\[', right: '\\]', display: true},
+      {left: '\\(', right: '\\)', display: false},
+      {left: '$', right: '$', display: false},
+    ],
+    throwOnError: false,
+    trust: false,
+    strict: 'warn',
+  });
+  rewriteTexPreviewText(root, text => text.replaceAll(currencyToken, '$'));
+  return true;
+}
+
 const MARKDOWN_HTML_LIGHT_BG_CLASS = 'markdown-html-light-bg';
 const MARKDOWN_PREVIEW_NAMED_BGCOLORS = {
   white: [255, 255, 255],
@@ -1142,26 +1200,76 @@ function markdownImageUnavailableMessage(path) {
   return t('preview.markdown.imageUnavailable', {path});
 }
 
+function captureMarkdownImageTitle(image) {
+  if (image._markdownImageTitleCaptured !== true) {
+    image._markdownImageTitle = image.getAttribute('title');
+    image._markdownImageTitleCaptured = true;
+  }
+  return image._markdownImageTitle;
+}
+
 function prosemirrorPreviewImageSource(image, path, options = {}) {
   if (!image || !path) return Promise.resolve(false);
   const target = markdownPreviewImageTarget(image.dataset.originalSrc || image.getAttribute('src') || '', path);
   if (!target || target.external) return Promise.resolve(false);
+  captureMarkdownImageTitle(image);
+  const onImageFailure = () => {
+    image.classList.add('prosemirror-image-error');
+    image.title = markdownImageUnavailableMessage(target.path);
+  };
   return installRawFileMediaSource(image, target.path, {
     isCurrent: options.isCurrent,
-    onFailure: error => {
-      image.classList.add('prosemirror-image-error');
-      image.title = markdownImageUnavailableMessage(target.path);
-    },
-    onDecodeFailure: error => {
-      image.classList.add('prosemirror-image-error');
-      image.title = markdownImageUnavailableMessage(target.path);
-    },
-  }).then(result => result.ok === true);
+    onFailure: onImageFailure,
+    onDecodeFailure: onImageFailure,
+  }).then(result => {
+    if (result.ok && options.isCurrent?.() !== false) {
+      image.classList.remove('prosemirror-image-error', 'markdown-preview-image-error');
+      if (image._markdownImageTitle === null) image.removeAttribute('title');
+      else image.setAttribute('title', image._markdownImageTitle);
+    }
+    return result.ok === true;
+  });
 }
 
-function markdownImageFallbackNode(path, label = '') {
+async function refreshOpenMarkdownImages(path) {
+  if (previewKindForPath(path) !== 'markdown') return;
+  const surfaces = [...fileEditorPanelsForPath(path)].map(root => ({root, isCurrent: () => true}));
+  const record = filePreviewPopouts.get(path);
+  const popout = record?.window;
+  if (popout && !popout.closed) {
+    const root = popout.document.body;
+    const generation = record.previewGeneration;
+    surfaces.push({root, isCurrent: () => !popout.closed && popout.document.body === root
+      && filePreviewPopoutGenerationMatches(path, popout, generation)});
+  }
+  await Promise.all(surfaces.map(async ({root, isCurrent: surfaceIsCurrent}) => {
+    for (const fallback of root.querySelectorAll('.markdown-image-error[data-resolved-path]')) {
+      const image = root.ownerDocument.createElement('img');
+      image.className = 'markdown-preview-image';
+      image.dataset.originalSrc = fallback.dataset.resolvedPath;
+      for (const attribute of ['title', 'alt']) {
+        if (attribute in fallback.dataset) image.setAttribute(attribute, fallback.dataset[attribute]);
+      }
+      fallback.replaceWith(image);
+    }
+    await Promise.all([...root.querySelectorAll('img.markdown-preview-image')].map(async image => {
+      cancelPreviewDeferredWorkAfterUserScroll(image, 'markdown-image-failure');
+      const generation = {};
+      image._markdownReloadGeneration = generation;
+      const isCurrent = () => surfaceIsCurrent() && root.contains(image) && image._markdownReloadGeneration === generation;
+      await prosemirrorPreviewImageSource(image, path, {isCurrent});
+    }));
+  }));
+}
+
+function markdownImageFallbackNode(path, label, image) {
   const node = document.createElement('span');
   node.className = 'markdown-image-error';
+  node.dataset.resolvedPath = path;
+  const title = captureMarkdownImageTitle(image);
+  if (title !== null) node.dataset.title = title;
+  const alt = image.getAttribute('alt');
+  if (alt !== null) node.dataset.alt = alt;
   const text = document.createElement('span');
   text.textContent = label || markdownImageUnavailableMessage(path);
   node.appendChild(text);
@@ -1179,12 +1287,24 @@ function scheduleMarkdownImageFallbackAfterUserScroll(previewContainer, img, cre
   return completion;
 }
 
+function showMarkdownPreviewImageFailure(previewContainer, img, path, message, isCurrent) {
+  if (isCurrent?.() === false) return;
+  const failureMessage = message || markdownImageUnavailableMessage(path);
+  captureMarkdownImageTitle(img);
+  img.classList.add('markdown-preview-image-error');
+  img.title = failureMessage;
+  void scheduleMarkdownImageFallbackAfterUserScroll(previewContainer, img, () => (
+    markdownImageFallbackNode(path, failureMessage, img)
+  ));
+}
+
 function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
   if (!root || !markdownPath) return [];
   for (const img of Array.from(root.querySelectorAll?.('img[src]') || [])) {
     const original = img.getAttribute('src') || '';
     const target = markdownPreviewImageTarget(original, markdownPath);
     if (!target) continue;
+    const reloadGeneration = img._markdownReloadGeneration;
     img.classList.add('markdown-preview-image');
     img.dataset.originalSrc = original;
     if (target.path) img.dataset.resolvedPath = target.path;
@@ -1192,9 +1312,13 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
     if (target.external) {
       img.setAttribute('src', target.src);
       img.addEventListener('error', () => {
-        void scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
-          markdownImageFallbackNode(target.path, markdownImageUnavailableMessage(target.path || original))
-        ));
+        if (img._markdownReloadGeneration !== reloadGeneration) return;
+        showMarkdownPreviewImageFailure(
+          options.previewContainer,
+          img,
+          target.path,
+          markdownImageUnavailableMessage(target.path || original),
+        );
       }, {once: true});
       continue;
     }
@@ -1203,13 +1327,14 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
     img.dataset.markdownRawPath = target.path;
     img.removeAttribute('src');
     img.addEventListener('error', () => {
-      if (options.isCurrent?.() === false) return;
-      const message = markdownImageUnavailableMessage(target.path || original);
-      img.classList.add('markdown-preview-image-error');
-      img.title = message;
-      void scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
-        markdownImageFallbackNode(target.path, message)
-      ));
+      if (img._markdownReloadGeneration !== reloadGeneration) return;
+      showMarkdownPreviewImageFailure(
+        options.previewContainer,
+        img,
+        target.path,
+        markdownImageUnavailableMessage(target.path || original),
+        options.isCurrent,
+      );
     }, {once: true});
   }
   return [];
@@ -1798,7 +1923,28 @@ function fallbackMarkdownToHtml(text) {
 
 function markdownPreviewHtml(text) {
   if (typeof window.marked !== 'undefined' && typeof window.marked.parse === 'function') {
-    return window.marked.parse(markdownTextWithSourceAnchors(text), {
+    const renderer = token => `<span class="markdown-tex-math">${esc(token.raw)}</span>`;
+    const parser = new window.marked.Marked({extensions: [{
+      name: 'tex_math_block',
+      level: 'block',
+      start(source) { return source.search(/^(?:\$\$|\\\[)/m); },
+      tokenizer(source) {
+        const math = markdownTexMathAt(source);
+        return math?.display ? {type: 'tex_math_block', ...math} : undefined;
+      },
+      renderer,
+    }, {
+      name: 'tex_math',
+      level: 'inline',
+      start(source) { return source.search(/[$\\]/); },
+      tokenizer(source) {
+        if (this.lexer.state.inRawBlock) return undefined;
+        const math = markdownTexMathAt(source);
+        return math ? {type: 'tex_math', ...math} : undefined;
+      },
+      renderer,
+    }]});
+    return parser.parse(markdownTextWithSourceAnchors(text), {
       gfm: true,
       breaks: true,
       renderer: markdownMarkedTaskRenderer(window.marked),
@@ -1827,6 +1973,10 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   disposeMarkdownPreviewEditing(container);
   const html = markdownPreviewHtml(text);
   const frag = sanitizeMarkdownPreviewHtml(html);
+  for (const element of frag.querySelectorAll('.markdown-tex-math')) {
+    const math = markdownTexMathAt(element.textContent);
+    if (math) renderTexMathSource(element, math);
+  }
   applyMarkdownTaskListClasses(frag, text);
   trimMarkdownCodeBlockEdgeNewlines(frag);
   applyMarkdownHtmlBackgroundClasses(frag);
@@ -1843,17 +1993,19 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
     const rawPath = String(img.dataset.markdownRawPath || '');
     if (!rawPath) continue;
     if (options.snapshot === true || img.isConnected) {
+      const isCurrent = () => container._markdownPreviewGeneration === generation && img.isConnected;
+      const onImageFailure = () => showMarkdownPreviewImageFailure(
+        container,
+        img,
+        rawPath,
+        markdownImageUnavailableMessage(rawPath),
+        isCurrent,
+      );
       localImagePromises.push(installRawFileMediaSource(img, rawPath, {
         snapshot: options.snapshot === true,
-        isCurrent: () => container._markdownPreviewGeneration === generation && img.isConnected,
-        onFailure: error => {
-          img.classList.add('markdown-preview-image-error');
-          img.title = markdownImageUnavailableMessage(rawPath);
-        },
-        onDecodeFailure: error => {
-          img.classList.add('markdown-preview-image-error');
-          img.title = markdownImageUnavailableMessage(rawPath);
-        },
+        isCurrent,
+        onFailure: onImageFailure,
+        onDecodeFailure: onImageFailure,
       }));
     }
     delete img.dataset.markdownRawPath;

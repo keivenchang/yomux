@@ -36,6 +36,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.instance_isolation import apply_early_instance_environment
+from tools.browser_runtime import resolve_chrome as find_chrome
 
 
 # Authentication, state, and local-service paths are resolved at product-module
@@ -98,17 +99,6 @@ DEMAND_DRIVEN_SNAPSHOT_PENDING_CODES = {
 
 class MeasurementSnapshotPending(RuntimeError):
     """A demanded status snapshot has not published its first current body yet."""
-
-
-def find_chrome() -> str:
-    candidates = [
-        shutil.which("google-chrome"),
-        shutil.which("chromium"),
-        shutil.which("chromium-browser"),
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    ]
-    return next((candidate for candidate in candidates if candidate and Path(candidate).is_file()), "")
 
 
 def service_pid_for_socket(socket_path: str) -> int:

@@ -52,7 +52,7 @@ test('numbered Markdown task labels are a post-parse presentation transform', ()
   assert.match(parsed, /<ol start="3">/, 'the vendored parser retains the original 3) list start');
   assert.equal((parsed.match(/markdown-rendered-task-checkbox/g) || []).length, 3, 'only parser-generated task inputs carry task provenance');
   assert.equal(source.includes('markdownTextForMarkedParser'), false, 'the preview path has no source-text preprocessor');
-  assert.match(source, /window\.marked\.parse\(markdownTextWithSourceAnchors\(text\)/, 'marked parses the unmodified source text');
+  assert.match(source, /parser\.parse\(markdownTextWithSourceAnchors\(text\)/, 'marked parses the unmodified source text');
 
   const createElement = tagName => {
     const node = new TestElement('', tagName);

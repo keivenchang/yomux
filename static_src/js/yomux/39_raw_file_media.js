@@ -180,7 +180,7 @@ async function installRawFileMediaSource(media, path, options = {}) {
 }
 
 function releaseRawFileMediaSources(root) {
-  for (const media of Array.from(root?.querySelectorAll?.('img, audio, video') || [])) releaseRawFileMediaSource(media);
+  for (const media of Array.from(root?.querySelectorAll?.('img, audio, video, iframe') || [])) releaseRawFileMediaSource(media);
 }
 
 function waitForImageDecode(image) {

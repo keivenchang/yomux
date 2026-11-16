@@ -13,13 +13,16 @@ Do not replace third-party notices with the YOmux project license. They are not 
 - `github.com/mattn/go-sqlite3` 1.14.52 - SQLite driver used by the Go backend and declared in `go.mod`; its upstream `LICENSE` is MIT.
 - `golang.org/x/sys` 0.48.0 - system-call interfaces declared in `go.mod`; its upstream `LICENSE` is BSD 3-Clause.
 
-## Vendored Browser Assets
+## Prepared Browser Assets
 
 - Dockview Core 6.6.1 - `static/vendor/dockview-core.noStyle.js` and `static/vendor/dockview.css`; upstream package metadata and bundle headers report MIT license.
 - Mermaid 11.15.0 - `static/vendor/mermaid.min.js`; upstream package metadata and bundle headers report MIT license and include bundled notices for transitive components including DOMPurify, js-yaml, lodash, Underscore-derived code, and other browser-side libraries.
 - xterm.js 6.0.0 and Unicode11 addon 0.9.0 - `static/vendor/xterm.js`, `xterm.css` and `xterm-addon-unicode11.js`; MIT licenses.
 - Highlight.js 11.9.0 - `static/vendor/highlight.min.js` and `highlight-github-dark.min.css`; BSD-3-Clause license.
 - Marked 12.0.2 - `static/vendor/marked.min.js`; MIT license.
+- KaTeX 0.16.22 - browser math renderer, auto-render extension, CSS, and fonts under `static/vendor/katex/`; MIT license retained in `static/vendor/katex/LICENSE`.
+- PDF.js 6.5.438 - PDF and TeX viewer runtime under `static/vendor/pdfjs/`; Apache-2.0 license included in its distribution.
+- Unicode Emoji 16.0 and CLDR 47.0.0 - generated multilingual emoji names and search keywords; Unicode license: https://www.unicode.org/license.txt. Their pinned source inputs are acquired during setup.
 - Noto Sans 2.004 and Noto Sans Mono 2.006 - `static/fonts/yomux-ui.woff2` and `yomux-mono.woff2`; embedded copyright 2015 Google LLC. All Rights Reserved. These fonts use the SIL Open Font License 1.1; their family and version records remain embedded in the files.
 
 ## Generated Browser Bundles

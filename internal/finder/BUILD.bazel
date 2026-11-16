@@ -45,8 +45,8 @@ go_test_pair(
         "//:static_src/js/yomux/20_layout_state.js",
     ],
     embed = [":finder_lib"],
-    race_shard_count = 2,
-    shard_count = 2,
+    race_shard_count = 4,
+    shard_count = 4,
     deps = [
         "//internal/testsupport:testsupport_lib",
         "@com_github_go_git_go_billy_v5//:go_default_library",

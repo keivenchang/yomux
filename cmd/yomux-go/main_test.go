@@ -32,6 +32,7 @@ import (
 	"github.com/keivenchang/yomux/internal/finder"
 	"github.com/keivenchang/yomux/internal/stats"
 	"github.com/keivenchang/yomux/internal/testsupport"
+	"github.com/keivenchang/yomux/internal/tmuxcmd"
 	"github.com/keivenchang/yomux/internal/work"
 )
 
@@ -424,6 +425,11 @@ func TestTmuxCommandContextClearsInheritedNestedClientForGlobalRoster(t *testing
 	t.Setenv("LC_CTYPE", "")
 
 	command := (&server{}).tmuxCommand("list-sessions", "-F", "#{session_name}\t#{session_id}\t#{session_created}\t#{pid}\t#{@yomux_view_source_id}\t#{@yomux_view_source}")
+	selected := testsupport.ToolPath(t, "tmux")
+	explicit := tmuxcmd.CommandPath(context.Background(), selected, "list-sessions")
+	if explicit.Path != selected || !reflect.DeepEqual(explicit.Env, command.Env) {
+		t.Fatal("resolved tmux executable bypassed the shared command environment")
+	}
 	for _, value := range command.Env {
 		if strings.HasPrefix(value, "TMUX=") || strings.HasPrefix(value, "TMUX_PANE=") {
 			t.Fatalf("global tmux command inherited nested client variable %q", value)
@@ -505,7 +511,7 @@ func TestGoCreateSessionLaunchesShellAndAgentsWithExplicitDangerousFlags(t *test
 	t.Setenv("YOLOMUX_TMUX_SOCKET", tmuxSocket)
 	t.Cleanup(func() { _ = exec.Command("tmux", "-S", tmuxSocket, "kill-server").Run() })
 
-	srv := &server{root: t.TempDir(), dangerouslyYolo: true}
+	srv := &server{root: t.TempDir()}
 	cases := []struct {
 		name    string
 		session string
@@ -516,6 +522,8 @@ func TestGoCreateSessionLaunchesShellAndAgentsWithExplicitDangerousFlags(t *test
 		{name: "bash", session: "1", query: "agent=term&terminal=bash&dangerously_yolo=0", agent: "term", want: "bash"},
 		{name: "claude", session: "2", query: "agent=claude&dangerously_yolo=1", agent: "claude", want: "claude --dangerously-skip-permissions"},
 		{name: "codex", session: "3", query: "agent=codex&dangerously_yolo=1", agent: "codex", want: "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
+		{name: "claude", session: "4", query: "agent=claude", agent: "claude", want: "claude"},
+		{name: "codex", session: "5", query: "agent=codex&dangerously_yolo=0", agent: "codex", want: "codex"},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
@@ -544,13 +552,6 @@ func TestGoCreateSessionLaunchesShellAndAgentsWithExplicitDangerousFlags(t *test
 		})
 	}
 
-	denied := &server{root: t.TempDir(), dangerouslyYolo: false}
-	request := httptest.NewRequest(http.MethodPost, "/api/create-session?agent=codex&dangerously_yolo=1", nil)
-	record := httptest.NewRecorder()
-	denied.createSession(record, request)
-	if record.Code != http.StatusForbidden || !bytes.Contains(record.Body.Bytes(), []byte("--dangerously-yolo")) {
-		t.Fatalf("dangerous launch without opt-in = %d %s", record.Code, record.Body.String())
-	}
 }
 
 func TestGoRenameSessionRouteValidatesAndRenamesExactTmuxSession(t *testing.T) {
@@ -3416,11 +3417,11 @@ func TestGoRootAdvertisesTheFullCapabilityGatedApplicationShell(t *testing.T) {
 	if statsPage.Code != http.StatusOK || !bytes.Contains(statsPage.Body.Bytes(), []byte(`"statsOnly":true`)) {
 		t.Fatalf("explicit stats-only root = %d, body=%s", statsPage.Code, statsPage.Body.String())
 	}
-	dangerous := &server{root: testsupport.RepoRoot(t), config: config, port: 7221, dangerouslyYolo: true, capabilities: catalog}
-	dangerousPage := httptest.NewRecorder()
-	dangerous.protected(http.HandlerFunc(dangerous.index)).ServeHTTP(dangerousPage, pageRequest.Clone(context.Background()))
-	if dangerousPage.Code != http.StatusOK || !bytes.Contains(dangerousPage.Body.Bytes(), []byte(`"dangerouslyYolo":true`)) || !bytes.Contains(dangerousPage.Body.Bytes(), []byte(`--dangerously-bypass-approvals-and-sandbox`)) {
-		t.Fatalf("Go dangerous bootstrap = %d, body=%s", dangerousPage.Code, dangerousPage.Body.String())
+	if _, exists := bootstrap["dangerouslyYolo"]; exists {
+		t.Fatal("bootstrap retains a server-wide launch permission switch")
+	}
+	if !bytes.Contains(page.Body.Bytes(), []byte(`--dangerously-bypass-approvals-and-sandbox`)) {
+		t.Fatal("bootstrap omitted the explicit full-access command")
 	}
 	capabilityDocument, ok := bootstrap["capabilities"].(map[string]any)
 	if !ok {
@@ -5163,6 +5164,15 @@ func TestActivityWarmReadUsesPublishedMetadata(t *testing.T) {
 			tmuxRosterSampledAt:   time.Now(),
 			tmuxSessionActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil }},
 	}
+	s.events = newEventBroker()
+	s.tmuxSessionActivityFn = func() (map[string]float64, error) {
+		// The metadata response must retain the captured snapshot identity even
+		// when its slower live inventory outlasts another cache publication.
+		s.metadataMu.Lock()
+		s.metadataGeneration = 8
+		s.metadataMu.Unlock()
+		return map[string]float64{}, nil
+	}
 	record := httptest.NewRecorder()
 	s.activity(record, httptest.NewRequest(http.MethodGet, "/api/activity?scope=all", nil))
 	if record.Code != http.StatusOK {
@@ -5173,6 +5183,10 @@ func TestActivityWarmReadUsesPublishedMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	info := payload["sessions"].(map[string]any)["cached"].(map[string]any)
+	identity := payload["metadata_identity"].(map[string]any)
+	if identity["epoch"] != s.metadataEpoch() || identity["generation"] != float64(7) {
+		t.Fatalf("activity metadata lost its captured epoch/build identity: %#v", identity)
+	}
 	if info["work_graph"].(map[string]any)["marker"] != "published" {
 		t.Fatalf("activity discarded published session metadata: %#v", info)
 	}
@@ -7008,17 +7022,25 @@ func TestFinderPointReadsDoNotBlockOnSpecialFiles(t *testing.T) {
 	defer service.Close()
 	s := &server{root: root, finder: service, events: newEventBroker(), finderJobs: newFinderJobScheduler(), operationState: operationState{operations: map[string]*goOperation{}}}
 	defer s.finderJobs.Close()
-	handlers := []func(http.ResponseWriter, *http.Request){s.fsRead, s.fsInfo, s.fsRaw}
-	for _, handler := range handlers {
+	handlers := []struct {
+		handler     func(http.ResponseWriter, *http.Request)
+		status      int
+		rangeHeader string
+	}{{s.fsRead, http.StatusBadRequest, ""}, {s.fsInfo, http.StatusOK, ""}, {s.fsRaw, http.StatusBadRequest, ""}, {s.fsRaw, http.StatusBadRequest, "bytes=0-3"}}
+	for _, item := range handlers {
 		done := make(chan struct{})
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodGet, "/api/fs/read?path="+url.QueryEscape(fifo), nil)
+		request.Header.Set("Range", item.rangeHeader)
 		go func() {
-			handler(recorder, request)
+			item.handler(recorder, request)
 			close(done)
 		}()
 		select {
 		case <-done:
+			if recorder.Code != item.status {
+				t.Fatalf("special file response = %d %s", recorder.Code, recorder.Body.String())
+			}
 		case <-time.After(time.Second):
 			t.Fatalf("Finder handler blocked on special file, status=%d", recorder.Code)
 		}
@@ -8946,24 +8968,69 @@ func TestEventBatchKeepsValidRowsWhenSessionDisappears(t *testing.T) {
 	}
 }
 
-func TestEventBatchFailsAtomicallyWhenSessionValidationIsUnavailable(t *testing.T) {
-	dir := t.TempDir()
-	eventLog := filepath.Join(dir, "event-log.jsonl")
-	s := &server{eventLogPath: eventLog, events: newEventBroker()}
-	s.tmuxCommandContextFn = func(ctx context.Context, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "false")
+func TestEventBatchAcknowledgesLastTmuxSessionExit(t *testing.T) {
+	socket := shortSyntheticTmuxSocket(t)
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+	if output, err := exec.Command("tmux", "-S", socket, "-f", "/dev/null", "new-session", "-d", "-s", "last-event-session", "/bin/sleep 60").CombinedOutput(); err != nil {
+		t.Fatalf("create private session: %v (%s)", err, output)
 	}
-	body := `{"events":[{"session":"","type":"state_changed","message":"valid prefix"},{"session":"uncertain-session","type":"note","message":"cannot validate"}]}`
+	if output, err := exec.Command("tmux", "-S", socket, "kill-session", "-t", "last-event-session").CombinedOutput(); err != nil {
+		t.Fatalf("kill last private session: %v (%s)", err, output)
+	}
+	output, err := exec.Command("tmux", "-S", socket, "has-session", "-t", "last-event-session").CombinedOutput()
+	if err == nil || !stats.TmuxNoServerError(output) {
+		t.Fatalf("last session did not retire its private server: %v (%s)", err, output)
+	}
+	s := &server{eventLogPath: filepath.Join(t.TempDir(), "event-log.jsonl"), events: newEventBroker()}
+	body := `{"events":[{"session":"last-event-session","type":"terminal_disconnected","message":"closed"},{"session":"","type":"note","message":"healthy host event"}]}`
 	recorder := httptest.NewRecorder()
 	s.eventsRoute(recorder, httptest.NewRequest(http.MethodPost, "/api/events", strings.NewReader(body)))
-	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"retryable":true`) {
-		t.Fatalf("validation outage status = %d %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("last-session event batch=%d %s; private tmux diagnostic=%s", recorder.Code, recorder.Body.String(), output)
 	}
-	if _, err := os.Stat(eventLog); !os.IsNotExist(err) {
-		t.Fatalf("validation outage wrote event log, stat error = %v", err)
+	var response struct {
+		Events       []map[string]any `json:"events"`
+		RejectedRows []map[string]any `json:"rejected_rows"`
 	}
-	if len(s.events.events) != 0 {
-		t.Fatalf("validation outage published events = %#v", s.events.events)
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Events) != 1 || response.Events[0]["message"] != "healthy host event" || len(s.eventLogTail("", 10)) != 1 {
+		t.Fatalf("host event was lost with retired session: %s", recorder.Body.String())
+	}
+	if len(response.RejectedRows) != 1 || response.RejectedRows[0]["index"] != float64(0) || response.RejectedRows[0]["session"] != "last-event-session" {
+		t.Fatalf("retired session receipt=%s", recorder.Body.String())
+	}
+}
+
+func TestEventBatchFailsAtomicallyWhenSessionValidationIsUnavailable(t *testing.T) {
+	for _, diagnostic := range []string{
+		"",
+		"error connecting to /fixture/tmux.sock (Permission denied)",
+		"error connecting to /fixture/tmux.sock (Connection refused)",
+		"tmux request timed out",
+	} {
+		t.Run(diagnostic, func(t *testing.T) {
+			dir := t.TempDir()
+			eventLog := filepath.Join(dir, "event-log.jsonl")
+			s := &server{eventLogPath: eventLog, events: newEventBroker()}
+			s.tmuxCommandContextFn = func(ctx context.Context, args ...string) *exec.Cmd {
+				return exec.CommandContext(ctx, "sh", "-c", `printf '%s' "$1" >&2; exit 1`, "fixture", diagnostic)
+			}
+			body := `{"events":[{"session":"","type":"state_changed","message":"valid prefix"},{"session":"uncertain-session","type":"note","message":"cannot validate"}]}`
+			recorder := httptest.NewRecorder()
+			s.eventsRoute(recorder, httptest.NewRequest(http.MethodPost, "/api/events", strings.NewReader(body)))
+			if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"retryable":true`) {
+				t.Fatalf("validation outage status = %d %s", recorder.Code, recorder.Body.String())
+			}
+			if _, err := os.Stat(eventLog); !os.IsNotExist(err) {
+				t.Fatalf("validation outage wrote event log, stat error = %v", err)
+			}
+			if len(s.events.events) != 0 {
+				t.Fatalf("validation outage published events = %#v", s.events.events)
+			}
+		})
 	}
 }
 

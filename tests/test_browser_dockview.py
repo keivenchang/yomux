@@ -3,6 +3,7 @@ import shlex
 import time
 from urllib.parse import quote
 from urllib.parse import urlencode
+from urllib.parse import parse_qs
 
 from selenium.webdriver.common.keys import Keys
 
@@ -14,6 +15,101 @@ from tests.gate_harness import assert_fixture_client_event_demand_claimed
 from tests.gate_harness import claim_fixture_client_event_demand
 from tests.gate_harness import release_fixture_client_event_demand
 from tests.tmux_runtime import run_isolated_tmux
+
+
+def file_new_permission_choice_snapshot(browser, labels):
+    return browser.execute_script("""
+      const menu=document.querySelector('[data-app-menu="file"]');
+      const popover=menu?.querySelector(':scope > .app-menu-popover');
+      const open=menu?.classList.contains('open')===true;
+      const opacity=popover?getComputedStyle(popover).opacity:'0';
+      const buttons=[...(menu?.querySelectorAll('.app-menu-command') || [])];
+      const choices=arguments[0].map(label=>{
+        const button=buttons.find(button=>button.querySelector('.app-menu-label')?.textContent.trim()===label);
+        if(!button) return {label,visible:false,enabled:false,selector:null};
+        const rect=button.getBoundingClientRect(),style=getComputedStyle(button);
+        return {label,visible:rect.width>0 && rect.height>0 && style.visibility==='visible',enabled:!button.disabled,
+          selector:'[data-app-menu="file"].open .app-menu-command[aria-label="'+CSS.escape(button.getAttribute('aria-label'))+'"]'};
+      });
+      return {open,opacity,ready:open && opacity==='1' && choices.every(choice=>choice.selector),choices};
+    """, labels)
+
+
+@pytest.mark.parametrize('agent,dangerous', [('claude', False), ('claude', True), ('codex', False), ('codex', True)])
+def test_file_new_always_offers_explicit_agent_permission_choices(browser, tmp_path, agent, dangerous):
+    load_dockview_runtime_boot_fixture(
+        browser, tmp_path, '?sessions=1&layout=left&tabs=left:1', sessions=['1'],
+        available_agents=['claude', 'codex', 'term'], dangerously_yolo=False,
+        settings={'general': {'default_tabber_mode': 'advanced'}},
+    )
+    wait = WebDriverWait(browser, 10)
+    wait.until(lambda driver: driver.execute_script("return typeof newTmuxSessionItems === 'function' && !!document.querySelector('[data-app-menu=\"file\"] > .app-menu-button')"))
+    browser.execute_script("window.__fixtureCreateSessionRoster = ['1', '2'];")
+    try:
+        click_visible_selector(browser, '[data-app-menu="file"] > .app-menu-button')
+        labels = [f'new {agent.title()}', f'new {agent.title()} (dangerously auto approve)']
+        snapshot = wait.until(lambda driver: (state if (state := file_new_permission_choice_snapshot(driver, labels))['ready'] else False))
+        for choice in snapshot['choices']:
+            assert choice['visible'] and choice['enabled'], snapshot
+        click_visible_selector(browser, snapshot['choices'][int(dangerous)]['selector'])
+        request = wait.until(lambda driver: driver.execute_script("return window.__bootFetches.find(request => request.path === '/api/create-session') || null;"))
+        query = parse_qs(request['search'].lstrip('?'))
+        assert request['method'] == 'POST'
+        assert query['agent'] == [agent]
+        assert query['dangerously_yolo'] == ['1' if dangerous else '0']
+    finally:
+        browser.execute_script("if (typeof closeAppMenus === 'function') closeAppMenus();")
+
+
+def test_file_new_permission_choices_wait_for_opening_paint(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser, tmp_path, '?sessions=1&layout=left&tabs=left:1', sessions=['1'],
+        available_agents=['claude', 'codex', 'term'], dangerously_yolo=False,
+        settings={'general': {'default_tabber_mode': 'advanced'}},
+    )
+    WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
+        "return typeof newTmuxSessionItems === 'function' && !!document.querySelector('[data-app-menu=\"file\"] > .app-menu-button')"))
+    browser.execute_script("""
+      window.__fileMenuPriorAutoFocus=autoFocusEnabled;
+      autoFocusEnabled=false;
+      closeAppMenus();
+      const button=document.querySelector('[data-app-menu="file"] > .app-menu-button');
+      const popover=button.parentElement.querySelector(':scope > .app-menu-popover');
+      for(const animation of popover.getAnimations()) animation.finish();
+      getComputedStyle(popover).opacity;
+      window.__fileMenuOpeningAnimations=[];
+      button.addEventListener('pointerdown',()=>{
+        for(const animation of popover.getAnimations()){
+          if(animation.transitionProperty!=='opacity') continue;
+          animation.pause();animation.currentTime=0;
+          window.__fileMenuOpeningAnimations.push(animation);
+        }
+      },{once:true});
+    """)
+    try:
+        click_visible_selector(browser, '[data-app-menu="file"] > .app-menu-button')
+        probe = browser.execute_script("""
+          const menu=document.querySelector('[data-app-menu="file"]');
+          const popover=menu.querySelector(':scope > .app-menu-popover');
+          return {open:menu.classList.contains('open'),opacity:getComputedStyle(popover).opacity,
+            held:window.__fileMenuOpeningAnimations.length,
+            labels:[...menu.querySelectorAll('.app-menu-label')].map(node=>node.textContent.trim())};
+        """)
+        assert probe['open'] and probe['opacity'] == '0' and probe['held'] == 1, probe
+        labels = ['new Claude', 'new Claude (dangerously auto approve)']
+        assert all(label in probe['labels'] for label in labels), probe
+        pending = file_new_permission_choice_snapshot(browser, labels)
+        assert pending['open'] and not pending['ready'] and pending['opacity'] == '0', pending
+        assert [choice['label'] for choice in pending['choices']] == labels, pending
+        browser.execute_script('for(const animation of window.__fileMenuOpeningAnimations) animation.finish()')
+        painted = WebDriverWait(browser, 10).until(lambda driver: (state if (state := file_new_permission_choice_snapshot(driver, labels))['ready'] else False))
+        assert all(choice['visible'] and choice['enabled'] for choice in painted['choices']), painted
+    finally:
+        browser.execute_script("""
+          for(const animation of window.__fileMenuOpeningAnimations || []) animation.finish();
+          autoFocusEnabled=window.__fileMenuPriorAutoFocus;
+          delete window.__fileMenuPriorAutoFocus;delete window.__fileMenuOpeningAnimations;closeAppMenus();
+        """)
 
 
 @pytest.mark.parametrize('platform, modifier', [('mac', '⌘'), ('pc', 'Ctrl')])
@@ -61,21 +157,28 @@ def test_experimental_features_preference_controls_file_and_tabs_menus(browser, 
         sessions=['one'], grid_width=1500, settings={'general': {'default_tabber_mode': 'advanced'}})
     browser.execute_async_script("selectSession(prefsItemId,{userInitiated:true}).then(arguments[0])")
     wait = WebDriverWait(browser, 10)
-    toggle = wait.until(lambda driver: driver.find_element('css selector', '[data-setting-path="general.enable_experimental_features"]'))
-    assert not toggle.is_selected()
+    toggle = wait.until(lambda driver: driver.execute_script("const node=document.querySelector('[data-setting-path=\"general.enable_experimental_features\"]');return node?{checked:node.checked}:null"))
+    assert not toggle['checked']
     assert browser.execute_script("return preferenceSections().at(-1).items.at(-1).path") == 'general.enable_experimental_features'
     for enabled in [False, True, False]:
-        toggle = browser.find_element('css selector', '[data-setting-path="general.enable_experimental_features"]')
-        if toggle.is_selected() != enabled:
+        checked = browser.execute_script("return document.querySelector('[data-setting-path=\"general.enable_experimental_features\"]').checked")
+        if checked != enabled:
             click_visible_selector(browser, '[data-setting-path="general.enable_experimental_features"]')
         wait.until(lambda driver: driver.execute_script("return initialSetting('general.enable_experimental_features',false) === arguments[0]", enabled))
         result = browser.execute_script("""
           const ids=[chatItemId,yoagentItemId,infoItemId];
           const file=fileMenuPanelCommands().map(item=>item.targetItem);
           const tabs=flattenMenuCommands(tabMenuItems(ids)).map(item=>item.targetItem);
-          return {file:ids.map(id=>file.includes(id)),tabs:ids.map(id=>tabs.includes(id))};
+          const palette=commandPaletteCommandItems().map(item=>item.targetItem);
+          return {file:ids.map(id=>file.includes(id)),tabs:ids.map(id=>tabs.includes(id)),palette:ids.map(id=>palette.includes(id))};
         """)
-        assert result == {'file': [enabled] * 3, 'tabs': [enabled] * 3}
+        assert result == {'file': [enabled] * 3, 'tabs': [enabled] * 3, 'palette': [enabled] * 3}
+        browser.execute_async_script("selectSession(tabberItemId,{userInitiated:true}).then(arguments[0])")
+        wait.until(lambda driver: driver.execute_script("return !!document.querySelector('.file-explorer-panel[data-file-explorer-view=tabber]')"))
+        tabber = browser.execute_script("const rows=new Set(Array.from(document.querySelectorAll('.file-tree-row[data-tabber-item]'),row=>row.dataset.tabberItem));return ['__chat__','__yoagent__','__info__'].map(item=>rows.has(item))")
+        assert tabber == [enabled] * 3, ('Tabber follows Experimental', enabled, tabber)
+        browser.execute_async_script("selectSession(prefsItemId,{userInitiated:true}).then(arguments[0])")
+        wait.until(lambda driver: bool(driver.find_elements('css selector', '[data-setting-path="general.enable_experimental_features"]')))
         for menu in ['file', 'tabs']:
             selector = f'.app-menu[data-app-menu="{menu}"]'
             click_visible_selector(browser, selector + ' > .app-menu-button')
@@ -1047,6 +1150,34 @@ def test_dockview_empty_tab_strip_context_menu_uses_active_session(browser, tmp_
     assert "Kill tmux session '1'" in result["labels"], result
 
 
+def test_dockview_tab_view_actions_are_not_checkbox_controls(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
+    wait_for_dockview(browser, min_tabs=1)
+    result = browser.execute_script(
+        """
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
+        const rect = tab.getBoundingClientRect();
+        tab.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true, cancelable: true,
+          clientX: Math.round(rect.left + rect.width / 2),
+          clientY: Math.round(rect.bottom),
+        }));
+        return [...document.querySelectorAll('.session-context-menu button')]
+          .filter(button => /^(Transcript|YO!summary|Event log) for session/.test(button.textContent.trim()))
+          .map(button => ({
+            label: button.textContent.trim(),
+            role: button.getAttribute('role'),
+            checked: button.getAttribute('aria-checked'),
+            checkbox: Boolean(button.querySelector('.context-menu-check')),
+            icon: button.querySelector('.file-context-menu-icon-svg')?.dataset.menuIcon || '',
+          }));
+        """
+    )
+    assert [row["label"].split(" for session")[0] for row in result] == ["Transcript", "YO!summary", "Event log"], result
+    assert all(row["role"] == "menuitem" and row["checked"] is None and row["checkbox"] is False for row in result), result
+    assert [row["icon"] for row in result] == ["transcript", "summary", "event"], result
+
+
 def test_dockview_editor_and_differ_tabs_close_from_right_click_menu(browser, tmp_path):
     path = "/home/test/yolomux.dev/CONTEXT-CLOSE.md"
     load_dockview_runtime_boot_fixture(
@@ -1298,7 +1429,7 @@ def test_dockview_advanced_tabber_keeps_toolbar_and_flat_rows(browser, tmp_path)
     assert all(row["primary"] and row["description"] for row in result["rowData"]), result
 
 
-def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(browser, tmp_path):
+def test_dockview_tab_actions_preserve_target_focus_and_readable_description(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)
     result = browser.execute_script(
@@ -1315,12 +1446,17 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
         tab.dispatchEvent(event);
         const menu = document.querySelector('.session-context-menu');
         const menuWidth = menu?.getBoundingClientRect().width || 0;
-        const menuCapacity = rootCssLengthPx('--context-menu-compact-inline-size');
         const initial = Array.from(menu?.querySelectorAll('button') || []).map(button => button.textContent.trim());
         const actionIcons = Array.from(menu?.querySelectorAll('button:not(.tab-split-action)') || []).map(button => ({
           label: button.textContent.trim(),
           icon: button.querySelector('.file-context-menu-icon-svg')?.dataset.menuIcon || '',
           leadingIcon: Boolean(button.querySelector('.context-menu-icon')),
+          actionIconCenter: (() => {
+            const container = button.querySelector('.context-menu-icon');
+            const icon = Array.from(container?.children || []).find(child => !child.classList.contains('context-menu-check'));
+            const iconRect = icon?.getBoundingClientRect();
+            return iconRect ? iconRect.left + iconRect.width / 2 : 0;
+          })(),
           checked: button.getAttribute('aria-checked'),
           danger: button.classList.contains('danger'),
           labelLeft: button.querySelector('.context-menu-label')?.getBoundingClientRect().left || 0,
@@ -1331,6 +1467,18 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
           const style = getComputedStyle(descriptionNode);
           return {whiteSpace: style.whiteSpace, textOverflow: style.textOverflow, overflow: style.overflow};
         })() : null;
+        const menuRow = menu?.querySelector('button:not(.tab-split-action) .context-menu-line');
+        const menuIcon = menu?.querySelector('button:not(.tab-split-action) .context-menu-icon');
+        const menuFontSize = menuRow ? parseFloat(getComputedStyle(menuRow.closest('button')).fontSize) : 0;
+        const iconColumnWidth = menuRow ? parseFloat(getComputedStyle(menuRow).gridTemplateColumns) : 0;
+        const menuIconWidth = menuIcon?.getBoundingClientRect().width || 0;
+        const button = menuRow?.closest('button');
+        const originalButtonFontSize = button?.style.fontSize || '';
+        if (button) button.style.fontSize = `${menuFontSize * 1.5}px`;
+        const enlargedIconColumnWidth = menuRow ? parseFloat(getComputedStyle(menuRow).gridTemplateColumns) : 0;
+        if (button) button.style.fontSize = originalButtonFontSize;
+        const label = descriptionNode?.querySelector('.context-menu-label');
+        const labelFits = label ? label.scrollWidth <= label.clientWidth + 1 : false;
         descriptionNode?.click();
         const detailPopover = paneTabPopoverForAnchor(tab);
         const descriptionOpensDetail = Boolean(
@@ -1353,9 +1501,14 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
           iconRows: menu?.classList.contains('context-menu-icon-rows') === true,
           actionIcons,
           menuWidth,
-          menuCapacity,
           description,
           descriptionStyle,
+          menuFontSize,
+          iconColumnWidth,
+          menuIconWidth,
+          enlargedIconColumnWidth,
+          labelFits,
+          viewportWidth: innerWidth,
           descriptionTag: descriptionNode?.tagName || '',
           descriptionOpensDetail,
           detailClosesOnTerminalEngagement,
@@ -1401,14 +1554,24 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
     assert rename_action["icon"] == "rename", result
     label_positions = [action["labelLeft"] for action in result["actionIcons"] if action["labelLeft"]]
     assert max(label_positions) - min(label_positions) <= 1, result
+    icon_centers = [action["actionIconCenter"] for action in result["actionIcons"] if action["actionIconCenter"]]
+    assert max(icon_centers) - min(icon_centers) <= 1, result
     kill_action = next(action for action in result["actionIcons"] if action["label"].startswith("Kill tmux session"))
     assert kill_action["danger"] is True and kill_action["icon"] == "delete", result
     assert all(action["leadingIcon"] for action in result["actionIcons"]), result
-    assert 0 < result["menuWidth"] <= result["menuCapacity"] + 1, result
+    assert 0 < result["menuWidth"] <= result["viewportWidth"], result
+    assert result["iconColumnWidth"] / result["menuFontSize"] < 3, result
+    assert result["menuIconWidth"] / result["menuFontSize"] < 2.5, result
+    assert abs(result["enlargedIconColumnWidth"] / result["iconColumnWidth"] - 1.5) < 0.05, result
+    assert result["labelFits"] is True, result
     assert result["descriptionTag"] == "BUTTON" and result["descriptionOpensDetail"] is True, result
     assert result["detailClosesOnTerminalEngagement"] is True, result
-    assert result["descriptionStyle"] == {"whiteSpace": "nowrap", "textOverflow": "ellipsis", "overflow": "hidden"}, result
+    assert result["descriptionStyle"] == {"whiteSpace": "normal", "textOverflow": "clip", "overflow": "visible"}, result
     assert "details" not in result["initial"], result
+    hover_point = browser.execute_script("const rect=document.querySelector('.session-context-menu .tab-action-description').getBoundingClientRect(); return {x:rect.left+rect.width/2,y:rect.top+rect.height/2};")
+    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": hover_point["x"], "y": hover_point["y"]})
+    hover_color = browser.execute_script("return getComputedStyle(document.querySelector('.session-context-menu .tab-action-description')).color")
+    assert hover_color == "rgb(231, 236, 243)", f"Info Description hover must retain readable chrome text, got {hover_color}"
     assert all(f"Split {zone}" in result["directionalLabels"] for zone in ("left", "right", "top", "bottom")), result
     assert all(f"Swap {zone}" in result["directionalLabels"] for zone in ("left", "right", "top", "bottom")), result
     assert len(result["directionalGeometry"]) == 2, result
@@ -1492,7 +1655,7 @@ def test_dockview_touch_long_press_opens_sheet_without_activating_tab(browser, t
               sheet: menu?.classList.contains('tab-action-sheet') === true,
               description: menu?.querySelector('.tab-action-description')?.textContent.trim() || '',
               sheetWidth: sheetRect?.width || 0,
-              sheetCapacity: rootCssLengthPx('--context-menu-compact-inline-size'),
+              viewportWidth: innerWidth,
               tabBottom: rect.bottom,
               sheetTop: sheetRect?.top || 0,
               viewportHeight: window.innerHeight,
@@ -1501,7 +1664,7 @@ def test_dockview_touch_long_press_opens_sheet_without_activating_tab(browser, t
         )
     assert result["active"] == "1", result
     assert result["sheet"] is True and result["description"].startswith("More desc: 2"), result
-    assert 0 < result["sheetWidth"] <= result["sheetCapacity"] + 1, result
+    assert 0 < result["sheetWidth"] <= result["viewportWidth"], result
     assert result["sheetTop"] >= result["tabBottom"] and result["sheetTop"] - result["tabBottom"] <= 12, result
 
 
@@ -1855,6 +2018,8 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
         f"?sessions=1,2,3,4,{encoded_file}&layout=row@50(left,right)&tabs=left:1,2,{encoded_file};right:3,4",
         sessions=sessions,
         transcript_sessions=transcript_sessions,
+        # The 31-row workload includes the three experimental utility tabs.
+        settings={"general": {"enable_experimental_features": True}},
     )
     wait_for_dockview(browser, min_tabs=5)
     # Preserve this existing tree-heavy activation workload as an Advanced-mode check.
@@ -1893,7 +2058,7 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
             const done = arguments[arguments.length - 1];
             (async () => {
               await Promise.all([loadAutoStatuses.request, tabberActivityState.request]);
-              const originalFetch = window.fetch;
+              const originalApiFetchJson = apiFetchJson;
               const state = window.__tabSwitchActivity = {heldCalls: 0, heldStatusCalls: 0, pollBefore: runtimeIntervalDiagnostics('auto-approve')[0].lastStartedAtMs, nextStatusRevision: 41, responseRevisions: [], activityPayload: JSON.parse(JSON.stringify(tabberActivityPayload))};
               state.barrier = new Promise(resolve => { state.release = resolve; });
               state.statusBarrier = new Promise(resolve => { state.releaseStatus = resolve; });
@@ -1907,7 +2072,7 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
                 return callback;
               };
               state.restore = async () => {
-                window.fetch = originalFetch;
+                apiFetchJson = originalApiFetchJson;
                 state.release();
                 state.releaseStatus();
                 refreshAutoStatuses = originalRefreshAutoStatuses;
@@ -1916,7 +2081,9 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
               };
               // Go auto-approval snapshots and Tabber activity are separate owners. Hold both routes
               // until the timer proves it entered the status refresh path.
-              window.fetch = async (...args) => {
+              // Hold the publication owner before its transport deadline starts. Native
+              // pointer orchestration can outlast a real request's 15s budget.
+              apiFetchJson = async (...args) => {
                 const input = args[0];
                 const url = new URL(typeof input === 'string' ? input : input.url, location.href);
                 if (url.pathname === '/api/activity') {
@@ -1927,9 +2094,8 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
                   state.heldStatusCalls += 1;
                   await state.statusBarrier;
                 }
-                const response = await originalFetch.apply(window, args);
+                let payload = await originalApiFetchJson.apply(window, args);
                 if (url.pathname === '/api/activity' || url.pathname === '/api/auto-approve') {
-                  let payload = await response.json();
                   if (url.pathname === '/api/activity') {
                     payload = JSON.parse(JSON.stringify(state.activityPayload));
                     payload.agent_window_snapshot_revision = 41;
@@ -1942,9 +2108,9 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
                     payload.sessions['1'].agent_window_snapshot_revision = state.nextStatusRevision;
                     state.responseRevisions.push({producer: 'status-response', revision: payload.agent_window_snapshot_revision});
                   }
-                  return new Response(JSON.stringify(payload), {status:response.status, headers:{'Content-Type':'application/json'}});
+                  return payload;
                 }
-                return response;
+                return payload;
               };
               state.promise = fetchTabberActivity({visible: true, allowHidden: true});
               state.request = tabberActivityState.request;
@@ -7130,6 +7296,134 @@ def test_dockview_drag_moves_tab_to_other_pane(browser, tmp_path):
     assert any(state.get("tabs") == ["2", "1"] for key, state in metrics["slots"].items() if key != "__tree")
 
 
+def test_dockview_dragging_active_tab_restores_most_recent_source_tab(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2,3,4&layout=row@50(left,right)&tabs=left:1,2,3;right:4",
+        sessions=["1", "2", "3", "4"],
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    browser.execute_script("activatePaneTab('left', '2'); activatePaneTab('left', '3');")
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return activeItemForSide('left') === '3'"))
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5)
+    end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="4"]', 0.68, 0.5)
+    cdp_drag(browser, start, end)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return !itemInLayout('3') || slotForItem('3') === 'right'")
+    )
+    result = browser.execute_script(
+        """
+        return {
+          sourceTabs: [...paneTabs('left')],
+          sourceActive: activeItemForSide('left'),
+          targetTabs: [...paneTabs('right')],
+          targetActive: activeItemForSide('right'),
+        };
+        """
+    )
+    assert result == {"sourceTabs": ["1", "2"], "sourceActive": "2", "targetTabs": ["4", "3"], "targetActive": "3"}, result
+
+
+def test_tab_activation_order_survives_reload_before_active_tab_move(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2,3,4&layout=row@50(left,right)&tabs=left:1,2,3;right:4",
+        sessions=["1", "2", "3", "4"],
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    browser.execute_script("activatePaneTab('left', '2'); activatePaneTab('left', '3');")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "const state = JSON.parse(new URLSearchParams(location.search).get('state') || '{}'); return activeItemForSide('left') === '3' && state.tabHistory?.[0] === '3' && state.tabHistory?.[1] === '2';"
+        )
+    )
+    browser.refresh()
+    wait_for_dockview(browser, min_tabs=4)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "const group = document.querySelector('.dv-groupview'); const tabs = [...(group?.querySelectorAll('.dockview-pane-tab') || [])]; return activeItemForSide('left') === '3' && mostRecentlyActivatedTab(paneTabs('left')) === '3' && tabs.filter(tab => tab.classList.contains('active')).length === 1 && tabs.filter(tab => tab.closest('.dv-tab')?.classList.contains('dv-active-tab')).length === 1"
+        )
+    )
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5)
+    end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="4"]', 0.68, 0.5)
+    cdp_drag(browser, start, end)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return slotForItem('3') === 'right'")
+    )
+    result = browser.execute_script(
+        "return {sourceTabs: [...paneTabs('left')], sourceActive: activeItemForSide('left'), targetTabs: [...paneTabs('right')], targetActive: activeItemForSide('right')};"
+    )
+    assert result == {"sourceTabs": ["1", "2"], "sourceActive": "2", "targetTabs": ["4", "3"], "targetActive": "3"}, result
+
+
+def test_terminal_and_file_tabs_show_only_one_active_tab(browser, tmp_path):
+    path = "/home/test/yolomux.dev/2026.md"
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        fs_entries={"/home/test/yolomux.dev": [{"name": "2026.md", "kind": "file"}]},
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    result = browser.execute_async_script(
+        """
+        const path = arguments[0], done = arguments[arguments.length - 1], originalFetch = window.fetch.bind(window);
+        window.fetch = async (input, init = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/read') {
+            return new Response(JSON.stringify({path, content: '# 2026\\n', size: 7, mtime: 1, mtime_ns: 1, realpath: path, file_id: 'stack-image:1', git_tracked: false, git_history: [], git_has_history: false}), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          return originalFetch(input, init);
+        };
+        (async () => {
+          const fileItem = await openFileInEditor(path, {name: '2026.md'}, {userInitiated: true});
+          const tabs = await window.__yomuxTestWaitFor(() => {
+              const tabs = [...document.querySelectorAll('.dv-groupview .dockview-pane-tab')];
+              return tabs.length === 2 ? tabs.map(tab => ({
+                item: tab.dataset.paneTab,
+                activeClass: tab.classList.contains('active'),
+                dockviewActive: tab.closest('.dv-tab')?.classList.contains('dv-active-tab') === true,
+                background: getComputedStyle(tab).backgroundColor,
+              })) : false;
+          }, {description: 'terminal and file tabs rendered'});
+          return {fileItem, tabs};
+        })().then(done, error => done({error: String(error && error.stack || error)}));
+        """,
+        path,
+    )
+    assert result.get("error") is None, result
+    assert sum(tab["activeClass"] for tab in result["tabs"]) == 1, result
+    assert sum(tab["dockviewActive"] for tab in result["tabs"]) == 1, result
+    active = next(tab for tab in result["tabs"] if tab["dockviewActive"])
+    inactive = next(tab for tab in result["tabs"] if not tab["dockviewActive"])
+    assert active["background"] != inactive["background"], result
+
+
+def test_removing_tabs_preserves_active_selection_and_uses_recent_fallback(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2,3&layout=left&tabs=left:1,2,3", sessions=["1", "2", "3"])
+    wait_for_dockview(browser, min_tabs=3)
+    result = browser.execute_script(
+        """
+        activatePaneTab('left', '2');
+        activatePaneTab('left', '3');
+        removeSessionFromLayout('1');
+        const afterInactiveRemoval = {tabs: [...paneTabs('left')], active: activeItemForSide('left')};
+        removeSessionFromLayout('3');
+        return {
+          afterInactiveRemoval,
+          afterActiveRemoval: {tabs: [...paneTabs('left')], active: activeItemForSide('left')},
+        };
+        """
+    )
+    assert result == {
+        "afterInactiveRemoval": {"tabs": ["2", "3"], "active": "3"},
+        "afterActiveRemoval": {"tabs": ["2"], "active": "2"},
+    }, result
+
+
 def test_cross_pane_drag_gate_rejects_noop_gesture(browser, tmp_path, monkeypatch):
     monkeypatch.setitem(globals(), "cdp_drag", lambda *args, **kwargs: None)
     with pytest.raises(TimeoutException, match="cross-pane gesture did not move tab"):
@@ -11054,6 +11348,47 @@ def test_tabber_idle_conversation_dates_ignore_repaint_and_observation(browser, 
       return {before,repaint,unavailable,input};
     """, mode)
     assert result == {"before": "2 hours ago", "repaint": "2 hours ago", "unavailable": "", "input": "1 min ago"}, result
+
+
+@pytest.mark.parametrize('reorder_phase', ['pointermove', 'animation-frame'])
+@pytest.mark.parametrize('target_kind', ['selector', 'panel'])
+def test_native_click_retains_semantic_target_after_hover_reorders_rows(browser, tmp_path, reorder_phase, target_kind):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, '?sessions=one&layout=left&tabs=left:one', sessions=['one'])
+    browser.execute_cdp_cmd('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': 0, 'y': 0, 'button': 'none'})
+    browser.execute_script("""
+      const host = document.createElement('div');
+      host.id = 'native-pointer-reorder-fixture';
+      host.style.cssText = 'position:fixed;left:100px;top:100px;width:300px;z-index:2147483647;background:white';
+      host.innerHTML = '<div id="native-pointer-target" data-click-row="target">requested row</div>'
+        + '<div data-click-row="other">other row</div>';
+      for (const row of host.children) row.style.cssText = 'height:40px;width:300px';
+      const target = host.firstElementChild;
+      window.__nativePointerReorder = {phase:arguments[0], reordered:false, presses:[]};
+      host.addEventListener('pointermove', () => {
+        if (window.__nativePointerReorder.reordered) return;
+        window.__nativePointerReorder.reordered = true;
+        const reorder = () => host.appendChild(target);
+        if (window.__nativePointerReorder.phase === 'animation-frame') requestAnimationFrame(reorder);
+        else reorder();
+      });
+      host.addEventListener('pointerdown', event => {
+        window.__nativePointerReorder.presses.push({
+          row:event.target.closest('[data-click-row]')?.dataset.clickRow,
+          trusted:event.isTrusted,
+        });
+      });
+      document.body.appendChild(host);
+    """, reorder_phase)
+    try:
+        if target_kind == 'panel':
+            click_visible_panel(browser, 'native-pointer-target')
+        else:
+            click_visible_selector(browser, '#native-pointer-target')
+        state = browser.execute_script('return window.__nativePointerReorder')
+        assert state['reordered'], state
+        assert state['presses'] == [{'row': 'target', 'trusted': True}], state
+    finally:
+        browser.execute_script("document.getElementById('native-pointer-reorder-fixture')?.remove(); delete window.__nativePointerReorder;")
 
 
 def test_dockview_tabber_native_click_selects_numbered_sessions(browser, tmp_path):

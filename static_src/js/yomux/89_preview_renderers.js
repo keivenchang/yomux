@@ -1141,22 +1141,237 @@ function renderRawImagePreviewInto(container, path, state = null, options = {}) 
   });
 }
 
-function renderPdfPreviewInto(container, path) {
-  const frame = document.createElement('iframe');
+function renderPdfPreviewInto(container, path, {sourceUrl = rawFileUrl(path), objectUrl = '', item: previewItem = ''} = {}) {
+  const ownerDocument = container.ownerDocument || document;
+  const source = new URL(sourceUrl, `${location.protocol}//${location.host}/`).href;
+  const frame = ownerDocument.createElement('iframe');
   frame.className = 'file-editor-pdf-preview';
-  frame.setAttribute('sandbox', '');
   frame.setAttribute('title', t('preview.pdf.frameTitle', {name: basenameOf(path)}));
-  frame.src = rawFileUrl(path);
-  const fallback = document.createElement('div');
+  const item = previewItem || container.closest?.('[data-layout-item]')?.dataset.layoutItem || fileEditorItemFor(path);
+  frame.dataset.layoutItem = item;
+  const savedPage = fileEditorViewState.get(item)?.pdfPage;
+  const initialPage = Number.isSafeInteger(savedPage) && savedPage > 0 ? savedPage : 1;
+  let active = true;
+  let app = null;
+  let viewerDocument = null;
+  let documentInitialized = false;
+  let wasVisible = false;
+  const visible = () => active && frame.isConnected && frame.getBoundingClientRect().width > 0
+    && frame.getBoundingClientRect().height > 0;
+  const blockDocumentReplacement = event => {
+    if (event.dataTransfer?.files?.[0]?.type === 'application/pdf' || event.type === 'change' && event.target?.id === 'fileInput'
+        || event.type === 'keydown' && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'o') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  };
+  const rememberViewState = patch => {
+    if (!visible()) {
+      wasVisible = false;
+      return;
+    }
+    // A reveal can publish PDF.js's temporary page before the resize observer restores ours.
+    if (!wasVisible || app !== frame.contentWindow?.PDFViewerApplication || app?.url !== source) return;
+    if (patch.pdfPage) frame.dataset.pdfPage = String(patch.pdfPage);
+    const previous = fileEditorViewState.get(item) || {};
+    if (Object.entries(patch).every(([key, value]) => previous[key] === value)) return;
+    fileEditorViewState.set(item, {...previous, ...patch});
+    if (itemInLayout(item)) updateActiveSessionParam();
+  };
+  const rememberPage = ({pageNumber}) => {
+    if (Number.isSafeInteger(pageNumber) && pageNumber > 0) rememberViewState({pdfPage: pageNumber});
+  };
+  const rememberSidebar = () => {
+    if (isPdfSidebarView(app?.viewsManager?.active)) {
+      rememberViewState({pdfSidebarView: app.viewsManager.active, pdfSidebarOpen: app.viewsManager.isOpen});
+    }
+  };
+  const documentReady = () => {
+    if (!active || app !== frame.contentWindow?.PDFViewerApplication || app.url !== source) return;
+    documentInitialized = true;
+    if (!visible()) return;
+    app.eventBus.off('pagechanging', rememberPage);
+    app.eventBus.off('sidebarviewchanged', rememberSidebar);
+    const state = fileEditorViewState.get(item);
+    if (isPdfSidebarView(state?.pdfSidebarView)) app.viewsManager.switchView(state.pdfSidebarView, state.pdfSidebarOpen === true);
+    if (state?.pdfSidebarOpen === false) app.viewsManager.switchView(0);
+    const page = state?.pdfPage || initialPage;
+    app.pdfViewer.currentPageNumber = Math.min(page, app.pagesCount);
+    wasVisible = true;
+    rememberPage({pageNumber: app.pdfViewer.currentPageNumber});
+    rememberSidebar();
+    app.eventBus.on('pagechanging', rememberPage);
+    app.eventBus.on('sidebarviewchanged', rememberSidebar);
+    frame.dataset.pdfReady = 'true';
+    const fallback = frame.parentElement?.querySelector('.file-editor-preview-fallback');
+    if (fallback) fallback.hidden = true;
+  };
+  const detachViewer = () => {
+    for (const type of ['drop', 'change', 'keydown']) viewerDocument?.removeEventListener(type, blockDocumentReplacement, true);
+    app?.eventBus?.off('documentinit', documentReady);
+    app?.eventBus?.off('pagechanging', rememberPage);
+    app?.eventBus?.off('sidebarviewchanged', rememberSidebar);
+  };
+  const initialize = event => {
+    if (!active || event.detail?.source !== frame.contentWindow) return;
+    detachViewer();
+    documentInitialized = false;
+    wasVisible = false;
+    delete frame.dataset.pdfReady;
+    const viewer = event.detail.source;
+    viewerDocument = viewer.document;
+    for (const type of ['drop', 'change', 'keydown']) viewerDocument.addEventListener(type, blockDocumentReplacement, true);
+    const sidebar = fileEditorViewState.get(item);
+    viewer.PDFViewerApplicationOptions.setAll({
+      disablePreferences: true, disableHistory: true, viewOnLoad: 1,
+      sidebarViewOnLoad: typeof sidebar?.pdfSidebarOpen === 'boolean'
+        ? (sidebar.pdfSidebarOpen ? (isPdfSidebarView(sidebar.pdfSidebarView) ? sidebar.pdfSidebarView : 1) : 0) : -1,
+      enableScripting: false, enableXfa: false, externalLinkTarget: 2,
+      enableWebGPU: false,
+    });
+    app = viewer.PDFViewerApplication;
+    const initializedApp = app;
+    app.initializedPromise.then(() => {
+      if (!active || app !== initializedApp) return;
+      // Dockview hides inactive iframe documents, where PDF.js cannot scroll a page into layout.
+      const scrollPage = app.pdfViewer.scrollPageIntoView.bind(app.pdfViewer);
+      app.pdfViewer.scrollPageIntoView = options => { if (visible()) scrollPage(options); };
+      app.eventBus.on('documentinit', documentReady);
+    }).catch(error => {
+      if (active && app === initializedApp) statusErr(userMessageText(error, t('common.requestFailed')));
+    });
+  };
+  ownerDocument.addEventListener('webviewerloaded', initialize);
+  const ResizeObserverCtor = ownerDocument.defaultView?.ResizeObserver;
+  const visibilityObserver = ResizeObserverCtor ? new ResizeObserverCtor(() => {
+    const isVisible = visible();
+    if (isVisible && !wasVisible && documentInitialized) documentReady();
+    if (!isVisible) wasVisible = false;
+  }) : null;
+  visibilityObserver?.observe(frame);
+  const retire = () => releaseRawFileMediaSource(frame);
+  ownerDocument.defaultView?.addEventListener('pagehide', retire, {once: true});
+  frame._rawFileReadyCleanup = () => {
+    active = false;
+    visibilityObserver?.disconnect();
+    ownerDocument.removeEventListener('webviewerloaded', initialize);
+    ownerDocument.defaultView?.removeEventListener('pagehide', retire);
+    detachViewer();
+  };
+  frame.src = `/static/vendor/pdfjs/web/viewer.html?file=${encodeURIComponent(source)}`;
+  frame._rawFileObjectUrl = objectUrl;
+  const fallback = ownerDocument.createElement('div');
   fallback.className = 'file-editor-preview-fallback';
-  const title = document.createElement('div');
+  const title = ownerDocument.createElement('div');
   title.className = 'file-editor-empty-title';
   title.textContent = t('preview.pdf.title');
-  const detail = document.createElement('div');
+  const detail = ownerDocument.createElement('div');
   detail.className = 'file-editor-empty-detail';
-  detail.append(...previewFileActionLinks(path));
+  if (!objectUrl) detail.append(...previewFileActionLinks(path));
   fallback.append(title, detail);
   container.replaceChildren(frame, fallback);
+}
+
+function renderTexPreviewStrategy({container, path, text, signature}) {
+  if (!prepareRetainedPreviewStrategy(container, signature, '[data-tex-preview]')) return false;
+  const host = document.createElement('div');
+  host.dataset.texPreview = '';
+  host.style.cssText = 'display:flex;flex-direction:column;min-height:100%;height:100%';
+  container.replaceChildren(host);
+  const controller = new AbortController();
+  let instructions = '';
+  container._texPreviewController = controller;
+  const current = () => container._texPreviewController === controller && !controller.signal.aborted;
+  const request = (url, body) => apiFetch(url, {
+    ...(body ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)} : {}),
+    signal: controller.signal, deadlineMs: 200000, startupImmediate: true,
+  }, {abortRetirementReason: 'tex_preview_replaced'});
+  const show = (title, detail = '', payload = null) => {
+    if (!current()) return;
+    releaseRawFileMediaSources(host);
+    delete host.dataset.texPreviewReady;
+    const card = fileEditorEmptyState(title, detail);
+    card.classList.add('tex-preview-status');
+    if (payload?.instructions) {
+      const instructions = document.createElement('pre');
+      instructions.className = 'tex-preview-instructions';
+      instructions.textContent = payload.instructions;
+      card.append(instructions);
+    }
+    host.replaceChildren(card);
+    return card;
+  };
+  const button = (parent, label, action) => {
+    const control = makeButton({label, title: label, ariaLabel: label, onClick: () => {
+      control.disabled = true;
+      container._previewAsync = run(action);
+    }});
+    if (!parent.classList.contains('tex-preview-status')) {
+      parent.append(control);
+      return;
+    }
+    let actions = parent.querySelector('.tex-preview-actions');
+    if (!actions) {
+      actions = document.createElement('div');
+      actions.className = 'tex-preview-actions';
+      parent.append(actions);
+    }
+    actions.append(control);
+  };
+  const compile = async () => {
+    show(t('preview.tex.compiling'));
+    const response = await request('/api/tex/preview', {path, content: text});
+    if (!response.ok) await apiJsonResponse(response);
+    if (!current()) return;
+    if (!String(response.headers.get('Content-Type') || '').startsWith('application/pdf')) {
+      const payload = await response.json();
+      if (payload.code === 'compiler_missing') return missing(payload);
+      const card = show(t('preview.tex.failed'), payload.error || t('common.requestFailed'), payload);
+      if (card) button(card, t('common.retry'), check);
+      return;
+    }
+    const blob = await response.blob();
+    if (!current()) return;
+    releaseRawFileMediaSources(host);
+    const objectUrl = URL.createObjectURL(blob);
+    renderPdfPreviewInto(host, path, {sourceUrl: objectUrl, objectUrl});
+    host.dataset.texPreviewReady = 'true';
+  };
+  const missing = payload => {
+    const card = show(t('preview.tex.missing'), t('preview.tex.consent'), payload);
+    if (!card) return;
+    if (payload.install_supported !== false) button(card, t('preview.tex.install'), async () => {
+      show(t('preview.tex.installing'));
+      const response = await request('/api/tex/compiler/install', {consent: true});
+      if (!response.ok) await apiJsonResponse(response);
+      const installed = await response.json();
+      if (!current()) return;
+      if (installed.available) return compile();
+      const failure = show(t('preview.tex.failed'), installed.error, installed);
+      if (failure) button(failure, t('common.retry'), check);
+    });
+    button(card, t('common.retry'), check);
+  };
+  const check = async () => {
+    show(t('common.loading'));
+    const response = await request('/api/tex/compiler');
+    if (!response.ok) await apiJsonResponse(response);
+    const status = await response.json();
+    instructions = status.instructions || '';
+    if (!current()) return;
+    if (!status.available) return missing(status);
+    return compile();
+  };
+  const run = async action => {
+    try { await action(); }
+    catch (error) {
+      if (!current()) return;
+      const card = show(t('preview.tex.failed'), userMessageText(error, t('common.requestFailed')), {instructions});
+      if (card) button(card, t('common.retry'), check);
+    }
+  };
+  container._previewAsync = run(check);
+  return true;
 }
 
 function previewFileActionLinks(path, {separator = ' · ', leadingSeparator = '', target = '_blank'} = {}) {
@@ -1294,6 +1509,16 @@ function renderHtmlPreviewInto(container, path, text) {
   frame.setAttribute('title', t('preview.htmlTitle'));
   frame.addEventListener('load', () => {
     restorePreviewEmbeddedScrollPosition(container, frame, embeddedScrollPosition);
+    const frameDocument = frame.contentDocument;
+    const mathStylesheet = document.querySelector('link[data-katex-stylesheet]');
+    if (frameDocument && mathStylesheet && !frameDocument.querySelector('link[data-katex-stylesheet]')) {
+      const stylesheet = frameDocument.createElement('link');
+      stylesheet.rel = 'stylesheet';
+      stylesheet.href = mathStylesheet.href;
+      stylesheet.dataset.katexStylesheet = '1';
+      frameDocument.head?.append(stylesheet);
+    }
+    renderTexMathInElement(frameDocument?.body);
   });
   frame.srcdoc = String(text ?? '');
   children.push(frame);
@@ -1330,6 +1555,8 @@ function disconnectPreviewZoomSurfaces(root) {
 }
 
 function releasePreviewSurfaceResources(container) {
+  container?._texPreviewController?.abort();
+  if (container) container._texPreviewController = null;
   releaseRawFileMediaSources(container);
   disconnectPreviewZoomSurfaces(container);
 }
@@ -1409,6 +1636,11 @@ function renderUnsupportedPreviewStrategy({container, path, state}) { renderUnsu
 function renderCodePreviewStrategy({container, path, text}) { renderEditorCodePreviewInto(container, path, text); }
 
 function renderPreviewDescriptor(renderer, context) {
+  if (context.snapshot && renderer.snapshot === false) {
+    releasePreviewSurfaceResources(context.container);
+    context.container.replaceChildren(fileEditorEmptyState(t('preview.unsupported.default')));
+    return false;
+  }
   if (context.container._previewRendererId && context.container._previewRendererId !== renderer.id) {
     releasePreviewSurfaceResources(context.container);
   }

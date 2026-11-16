@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -89,6 +90,12 @@ func TestParseDiskUsageDFListingUsesOnlyReportedPartitions(t *testing.T) {
 	spaced, ok := ParseDiskUsageDFListing([]byte("Filesystem 1024-blocks Used Available Capacity Mounted on\nserver:/export name 1000 250 750 25% /Volumes/My Data\n"))
 	if !ok || len(spaced) != 1 || spaced[0].Mountpoint != "/Volumes/My Data" {
 		t.Fatalf("df listing did not preserve whitespace in filesystem and mountpoint: %#v, %t", spaced, ok)
+	}
+	unicodeMount := "/Volumes/synology_\u5f35\u5bb6 data"
+	unicodeListing := "Filesystem 1024-blocks Used Available Capacity Mounted on\nserver:/\u5f35\u5bb6 share 1000 250 750 25% " + unicodeMount + "\n"
+	unicodeSamples, ok := ParseDiskUsageDFListing([]byte(unicodeListing))
+	if !ok || len(unicodeSamples) != 1 || unicodeSamples[0].Mountpoint != unicodeMount || unicodeSamples[0].SourceID != diskMountSourceID(unicodeMount) || unicodeSamples[0].UsedBytes != 250*1024 || unicodeSamples[0].CapacityBytes != 1000*1024 {
+		t.Fatalf("df listing lost Unicode mount identity or numeric columns: %#v, %t", unicodeSamples, ok)
 	}
 	mixed, ok := ParseDiskUsageDFListing([]byte("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/root 100 25 75 25% /\n/dev/unavailable 100 20 N/A N/A /mnt/unavailable\ntmpfs 80 8 72 10% /run\n"))
 	if !ok || len(mixed) != 3 || mixed[0].Reason != "" || mixed[1].Mountpoint != "/mnt/unavailable" || mixed[1].Reason != "invalid_sample" || mixed[2].Mountpoint != "/run" || mixed[2].Reason != "" {
@@ -223,18 +230,43 @@ func TestLinuxSystemLogicalCPUsUsesInjectedOnlineList(t *testing.T) {
 	}
 }
 
-func TestRunBoundedPSUsesStableSyntheticLocale(t *testing.T) {
+func TestRunBoundedHostCommandsUseStableSyntheticLocale(t *testing.T) {
 	root := t.TempDir()
-	ps := filepath.Join(root, "ps")
-	if err := os.WriteFile(ps, []byte(testsupport.ShellScript(t, "printf '%s\\n' \"$LC_ALL\"\n")), 0o700); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"ps", "df"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(testsupport.ShellScript(t, "printf '%s\\n' \"$LC_ALL\"\n")), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("LC_ALL", "fr_FR.UTF-8")
+	t.Setenv("LC_CTYPE", "C")
+	t.Setenv("LC_NUMERIC", "fr_FR.UTF-8")
+	t.Setenv("LC_MESSAGES", "fr_FR.UTF-8")
+	t.Setenv("LANG", "fr_FR.UTF-8")
 
-	result, err := runBoundedCommand(context.Background(), []string{"ps", "-axo", "synthetic"})
-	if err != nil || result.ExitCode != 0 || string(result.Stdout) != "C\n" {
-		t.Fatalf("synthetic ps locale = %q, err=%v exit=%d; want C locale", result.Stdout, err, result.ExitCode)
+	for _, name := range []string{"ps", "df"} {
+		for _, executable := range []string{name, filepath.Join(root, name)} {
+			t.Run(executable, func(t *testing.T) {
+				want := "C"
+				if name == "df" && runtime.GOOS == "darwin" {
+					want = "C.UTF-8"
+				}
+				command := NewHostCommand(context.Background(), executable, "synthetic")
+				var locales []string
+				for _, assignment := range command.Env {
+					if strings.HasPrefix(assignment, "LC_ALL=") {
+						locales = append(locales, assignment)
+					}
+				}
+				if !reflect.DeepEqual(locales, []string{"LC_ALL=" + want}) {
+					t.Fatalf("collector locale overrides=%v, want exactly one %q", locales, want)
+				}
+				result, err := runBoundedCommand(context.Background(), []string{executable, "synthetic"})
+				if err != nil || result.ExitCode != 0 || string(result.Stdout) != want+"\n" {
+					t.Fatalf("synthetic %s locale = %q, err=%v exit=%d; want %s", name, result.Stdout, err, result.ExitCode, want)
+				}
+			})
+		}
 	}
 }
 

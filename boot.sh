@@ -23,7 +23,6 @@ http_mode=0
 print_command=0
 check_assets=0
 force_start=0
-dangerously_yolo=true
 config_path=""
 stats_path=""
 launched_pid=""
@@ -50,6 +49,17 @@ EOF
 die() {
   printf 'error: %s\n' "$*" >&2
   exit 2
+}
+
+require_port_available() {
+  local port="$1" listener_pids="${2-}"
+  if [[ "$#" -eq 1 ]]; then
+    listener_pids="$(yomux_port_listener_pids "$port")" || die "listener census could not identify a unique owner for port $port"
+  fi
+  if [[ -n "$listener_pids" && "$force_start" -ne 1 ]]; then
+    printf 'error: port %s already has listener(s) %s; use --force to replace the existing YOmux instance\n' "$port" "$listener_pids" >&2
+    return 2
+  fi
 }
 
 add_port() {
@@ -100,8 +110,7 @@ while [[ "$#" -gt 0 ]]; do
       host="$2"
       shift 2
       ;;
-    --no-dang) dangerously_yolo=false; shift ;;
-    --dang|--dangerously-yolo) dangerously_yolo=true; shift ;;
+    --no-dang|--dang|--dangerously-yolo|--dang=*|--dangerously-yolo=*) shift ;; # Retired compatibility inputs; choose permissions per launch.
     --config|--stats)
       [[ "$#" -ge 2 ]] || die "$1 requires a path"
       if [[ "$1" == --config ]]; then config_path="$2"; else stats_path="$2"; fi
@@ -193,6 +202,21 @@ yomux_use_machine_tmux
 # TODO: verify this is still accurate on the current macOS `claude` release.
 go_binary="$(yomux_go_binary "$repo_root")" || exit $?
 "$go_binary" --operator version --root "$repo_root" >/dev/null || exit $?
+if [[ "$check_assets" -eq 0 ]]; then
+  log_dir="$("$go_binary" --operator resolve-product-path --root "$repo_root" -- "$(product_env_name LOG_DIR)" "$log_dir")" \
+    || die "log directory refused by product-root policy"
+  restart_lock_base="$("$go_binary" --operator resolve-product-path --root "$repo_root" -- TMPDIR "$restart_lock_base")" \
+    || die "restart lock directory refused by product-root policy"
+  if ! yomux_validate_root_environment "$repo_root" "$go_binary"; then
+    die "startup root validation failed before listener mutation"
+  fi
+fi
+if [[ "$force_start" -ne 1 && "$print_command" -eq 0 && "$check_assets" -eq 0 ]]; then
+  # Refuse occupied ports before preparing roots, logs, or startup locks.
+  for port in "${ports[@]}"; do
+    require_port_available "$port" || exit $?
+  done
+fi
 extra_env=()
 while IFS= read -r -d '' assignment; do
   extra_env+=("$assignment")
@@ -201,7 +225,7 @@ done < <(yomux_server_launch_environment "$backend" "$go_binary")
 server_args=()
 build_server_args() {
   local port="$1"
-  server_args=(--host "$host" --port "$port" "--dang=$dangerously_yolo")
+  server_args=(--host "$host" --port "$port")
   [[ -z "$config_path" ]] || server_args+=(--config "$config_path")
   [[ -z "$stats_path" ]] || server_args+=(--stats "$stats_path")
   if [[ "$http_mode" -eq 1 ]]; then
@@ -236,15 +260,15 @@ print_launch_command() {
     env_count="${#extra_env[@]}"
     printf 'launchctl bootout %q 2>/dev/null || true\n' "$(yomux_macos_launch_target "$port")"
     printf 'env -u TMUX -u TMUX_PANE tmux kill-session -t %q 2>/dev/null || true\n' "=$session_name"
-    printf 'env -u TMUX -u TMUX_PANE tmux new-session -d -s %q -c %q /bin/bash -c %q bash %q %q %q %q %q %q %q %q' \
-      "$session_name" "$repo_root" "$launcher" "$repo_root" "$PATH" "$server_shell" "$go_binary" "$go_binary" "$log_path" "$plan_json" "$env_count"
+    printf 'nohup /bin/bash -c %q bash %q %q %q %q %q %q %q %q' \
+      "$launcher" "$repo_root" "$PATH" "$server_shell" "$go_binary" "$go_binary" "$log_path" "$plan_json" "$env_count"
     for item in "${extra_env[@]}"; do
       printf ' %q' "$item"
     done
     for item in "${server_args[@]}"; do
       printf ' %q' "$item"
     done
-    printf '\n'
+    printf ' >> %q 2>&1 < /dev/null & disown\n' "$log_path"
     return
   fi
   printf 'PATH=%s\n' "$PATH"
@@ -459,9 +483,9 @@ restart_port() {
     release_port_restart_lock "$port"
     die "log path is not writable: $log_path"
   fi
-  if [[ -n "$previous_listener_pids" && "$force_start" -ne 1 ]]; then
+  if ! require_port_available "$port" "$previous_listener_pids"; then
     release_port_restart_lock "$port"
-    die "port $port already has listener(s) $previous_listener_pids; use --force to replace the existing YOmux instance"
+    return 2
   fi
   build_server_args "$port"
   launched_pid=""
@@ -496,6 +520,10 @@ restart_port() {
   local ready_args=(--operator ready --root "$repo_root" --host "$host" --port "$port" --timeout 20s)
   [[ "$http_mode" -eq 0 ]] || ready_args+=(--http)
   "$go_binary" "${ready_args[@]}" || { release_port_restart_lock "$port"; return 1; }
+  if ! verify_browser_assets "$port"; then
+    release_port_restart_lock "$port"
+    return 1
+  fi
   release_port_restart_lock "$port"
 }
 
@@ -506,17 +534,15 @@ ensure_xterm_assets() {
   done
 }
 
+verify_browser_assets() {
+  local args=(--operator browser-assets-ready --root "$repo_root" --host "$host" --port "$1")
+  [[ "$http_mode" -eq 0 ]] || args+=(--http)
+  "$go_binary" "${args[@]}"
+}
+
 if [[ "$check_assets" -eq 1 ]]; then
   ensure_xterm_assets
   exit 0
-fi
-
-log_dir="$("$go_binary" --operator resolve-product-path --root "$repo_root" -- "$(product_env_name LOG_DIR)" "$log_dir")" \
-  || die "log directory refused by product-root policy"
-restart_lock_base="$("$go_binary" --operator resolve-product-path --root "$repo_root" -- TMPDIR "$restart_lock_base")" \
-  || die "restart lock directory refused by product-root policy"
-if ! yomux_validate_root_environment "$repo_root" "$go_binary"; then
-  die "startup root validation failed before listener mutation"
 fi
 
 if [[ "$print_command" -eq 1 ]]; then
@@ -535,6 +561,8 @@ preflight_log_sinks
 yomux_acquire_start_lock || die "startup lock unavailable"
 trap yomux_release_start_lock EXIT
 ensure_xterm_assets
+"$go_binary" --operator startup-assets --root "$repo_root" \
+  || die "browser assets could not be built before server startup"
 
 for port in "${ports[@]}"; do
   restart_port "$port"

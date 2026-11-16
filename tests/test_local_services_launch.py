@@ -18,6 +18,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.helpers.child_processes import fork_blocking_child as _fork_blocking_child
+from tests.helpers.child_processes import await_zombie
 from tools.instance_isolation import apply_yomux_environment_assignments
 from yomux_lib.infra.host_identity import LocalProcessReason
 from yomux_lib.infra.host_identity import current_host_identity
@@ -338,20 +340,14 @@ def test_adopted_demand_daemon_is_reaped_not_left_a_zombie(tmp_path):
 def test_ensure_started_reaps_an_adopted_child_that_already_exited(tmp_path, monkeypatch):
     """A daemon that exits before post-reexec adoption must not block replacement."""
 
-    child = os.fork()
-    if child == 0:  # pragma: no cover - child never returns
-        os._exit(0)
+    child, release_fd = _fork_blocking_child()
     spawned = []
-    registry = LocalServiceRegistry(
-        tmp_path,
-        LocalServiceSpec("statsd", "yomux_lib.stats_current.service", "statsd.sock", 24),
-        popen=lambda *args, **kwargs: spawned.append(True) or _NeverExitingProcess(),
-    )
     try:
-        deadline = time.monotonic() + 2.0
-        while registry_mod.process_state(child) != "Z" and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert registry_mod.process_state(child) == "Z"
+        registry = LocalServiceRegistry(
+            tmp_path,
+            LocalServiceSpec("statsd", "yomux_lib.stats_current.service", "statsd.sock", 24),
+            popen=lambda *args, **kwargs: spawned.append(True) or _NeverExitingProcess(),
+        )
         registry._write_record({
             **current_host_identity().process_record_fields(
                 pid=child,
@@ -363,6 +359,9 @@ def test_ensure_started_reaps_an_adopted_child_that_already_exited(tmp_path, mon
             "version": registry_mod.LOCAL_SERVICE_REGISTRY_VERSION,
             "launcher_pid": os.getpid(),
         })
+        os.close(release_fd)
+        release_fd = None
+        await_zombie(child)
         monkeypatch.setattr(registry, "_request", lambda *args, **kwargs: {})
 
         assert registry.ensure_started() is False
@@ -371,6 +370,8 @@ def test_ensure_started_reaps_an_adopted_child_that_already_exited(tmp_path, mon
         with pytest.raises(ChildProcessError):
             os.waitpid(child, os.WNOHANG)
     finally:
+        if release_fd is not None:
+            os.close(release_fd)
         try:
             os.waitpid(child, 0)
         except ChildProcessError:
@@ -3225,21 +3226,6 @@ def test_a_child_that_survives_sigkill_is_reported_unconfirmed_not_declared_dead
 # product symbols directly. See
 # `test_serving_predicate_has_exactly_one_owner_and_it_is_the_product`.
 # ---------------------------------------------------------------------------
-
-
-def _fork_blocking_child():
-    """A real child that lives until its pipe is closed. Returns (pid, release)."""
-
-    read_fd, write_fd = os.pipe()
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover - child never returns
-        os.close(write_fd)
-        try:
-            os.read(read_fd, 1)
-        finally:
-            os._exit(0)
-    os.close(read_fd)
-    return pid, write_fd
 
 
 def _fork_reparented_blocking_grandchild():

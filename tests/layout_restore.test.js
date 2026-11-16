@@ -39,6 +39,62 @@ function layoutItemsAfterQueryRoundTrip(api, slots) {
 }
 
 async function runLayoutRestoreSuite() {
+  await testAsync('single event posts share retired-session acknowledgement and fenced batch refresh', async () => {
+    const source = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+    const start = source.indexOf('function postEvent(');
+    const end = source.indexOf('\nfunction normalizeRole', start);
+    const requests = [];
+    const refreshes = [];
+    let incarnation = 1;
+    let missing = false;
+    let responseOK = true;
+    let release = null;
+    let deferred = false;
+    const context = vm.createContext({
+      Promise, JSON,
+      tmuxSessionLifecycleToken: session => ({session, incarnation}),
+      tmuxSessionLifecycleTokenIsCurrent: token => token.incarnation === incarnation,
+      apiFetch: (url, options) => {
+        const body = JSON.parse(options.body);
+        requests.push({url, body});
+        const response = {
+          ok: responseOK && (url === '/api/events' || !missing),
+          json: async () => ({ok: true, events: missing ? [] : body.events,
+            rejected_rows: missing ? [{index: 0, error: 'unknown session', session: 'one'}] : [],
+            event_log_refresh_required: deferred}),
+        };
+        return deferred ? new Promise(resolve => { release = () => resolve(response); }) : Promise.resolve(response);
+      },
+      refreshEventLogsFromPush: target => { refreshes.push(target); return Promise.resolve([]); },
+      refreshOpenEventLogs: () => { refreshes.push('unscoped'); return Promise.resolve([]); },
+      console: {warn() {}},
+    });
+    vm.runInContext(source.slice(start, end), context);
+    for (missing of [false, true]) {
+      requests.length = 0;
+      assert.equal(await context.postEvent('one', 'terminal_disconnected', 'closed', {}), true);
+      assert.deepStrictEqual(canonical(requests), [{url: '/api/events', body: {events: [
+        {session: 'one', type: 'terminal_disconnected', message: 'closed', details: {}},
+      ]}}], 'an already removed session uses the batch acknowledgement instead of a failing single-event request');
+    }
+    responseOK = false;
+    assert.equal(await context.postEvent('one', 'terminal_disconnected', 'closed', {}), false);
+    responseOK = true;
+    missing = false;
+    deferred = true;
+    refreshes.length = 0;
+    const pending = context.postEvent('one', 'terminal_disconnected', 'old owner', {});
+    assert.equal(typeof release, 'function');
+    incarnation += 1;
+    release();
+    assert.equal(await pending, true, 'the server acknowledgement still settles the old event');
+    assert.deepStrictEqual(refreshes, [], 'old completion cannot refresh the replacement session');
+    const current = context.postEvent('one', 'terminal_disconnected', 'current owner', {});
+    release();
+    assert.equal(await current, true);
+    assert.deepStrictEqual(canonical(refreshes), [{sessions: ['one']}], 'current owner retains the existing publication fallback');
+  });
+
   test('topbar activity renders one fresh count snapshot per update', () => {
     const source = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
     const htmlStart = source.indexOf('function globalActivityStatusLineHtml(');
@@ -1534,6 +1590,39 @@ async function runLayoutRestoreSuite() {
     assert.equal(restored.pendingFileEditorLineTargetForTest(item), 3, 'reload schedules the saved line through the shared editor line-target path');
   });
 
+  test('layout URL keeps independent PDF pages and modes for duplicate editor tabs', () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/multipage.tex';
+    const item = api.registerFileEditorLayoutItemForTest(path);
+    const copy = api.registerFileEditorLayoutItemForTest(path, {item: `filecopy:copy:${path}`});
+    api.setOpenFileStateForTest(path, {kind: 'text', content: 'source', original: 'source'});
+    api.applyLayoutUrlEditorModeEntryForTest({path, item, mode: 'split', pdfPage: 3, pdfSidebarView: 2, pdfSidebarOpen: false});
+    api.applyLayoutUrlEditorModeEntryForTest({path, item: copy, mode: 'preview', pdfPage: 2, pdfSidebarView: 1, pdfSidebarOpen: true});
+    api.setLayoutSlotsForTest({[api.layoutTreeKey]: api.leafNode('left'), left: api.paneStateWithTabs([item, copy], item)});
+    api.setFileEditorViewMode(path, 'edit', item);
+    const params = parseUrl(api.lastUrlForTest());
+    const restored = loadYomux(`?${params.toString()}`, ['1']);
+    restored.setOpenFileStateForTest(path, {kind: 'text', content: 'source', original: 'source'});
+    assert.equal(restored.editorViewModeFor(path, item), 'edit', 'mode clicks update URL synchronously');
+    assert.equal(restored.editorViewModeFor(path, copy), 'preview');
+    assert.equal(restored.fileEditorViewStateForTest(item).pdfPage, 3);
+    assert.equal(restored.fileEditorViewStateForTest(copy).pdfPage, 2);
+    assert.equal(restored.fileEditorViewStateForTest(item).pdfSidebarView, 2, 'closed sidebar retains its selected view');
+    assert.equal(restored.fileEditorViewStateForTest(item).pdfSidebarOpen, false);
+    assert.equal(restored.fileEditorViewStateForTest(copy).pdfSidebarView, 1);
+    assert.equal(restored.fileEditorViewStateForTest(copy).pdfSidebarOpen, true);
+    for (const invalid of [0, -1, 5, 1.5, '1', null]) {
+      restored.applyLayoutUrlEditorModeEntryForTest({path, item, mode: 'edit', pdfSidebarView: invalid});
+      assert.equal(restored.fileEditorViewStateForTest(item).pdfSidebarView, 2);
+    }
+    restored.applyLayoutUrlEditorModeEntryForTest({path, item, mode: 'edit', pdfSidebarOpen: 'true'});
+    assert.equal(restored.fileEditorViewStateForTest(item).pdfSidebarOpen, false);
+    for (const invalid of [0, -1, 1.5, '4', Number.MAX_SAFE_INTEGER + 1]) {
+      restored.applyLayoutUrlEditorModeEntryForTest({path, item, mode: 'edit', pdfPage: invalid});
+      assert.equal(restored.fileEditorViewStateForTest(item).pdfPage, 3);
+    }
+  });
+
   test('legacy compact session layout restores without Finder', () => {
     const api = loadYomuxWithFileExplorerClosed('?sessions=3&layout=left&tabs=left:3,2');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
@@ -1775,6 +1864,15 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.previewRendererForPath('/repo/events.jsonl').id, 'json-lines-table', 'JSONL table dispatch comes from the shared renderer registry');
     assert.equal(api.defaultFileEditorViewModeForPath('/repo/README.md', 'text'), 'preview', 'Markdown opens in ViewEdit by default');
     assert.equal(api.defaultFileEditorViewModeForPath('/repo/page.html', 'text'), 'preview', 'HTML opens in ViewEdit by default');
+    for (const extension of ['tex', 'ltx']) {
+      const path = `/repo/paper.${extension}`;
+      assert.equal(api.defaultFileEditorViewModeForPath(path, 'text'), 'preview');
+      assert.equal(api.editorViewModeFor(path), 'preview', 'URL-opened TeX tabs share the registry default');
+      for (const mode of ['edit', 'split', 'preview', 'diff']) {
+        api.setFileEditorViewMode(path, mode);
+        assert.equal(api.editorViewModeFor(path), mode, 'explicit view choices override the default');
+      }
+    }
     assert.equal(api.defaultFileEditorViewModeForPath('/repo/app.py', 'text'), 'edit', 'other text files keep the TextEditor default');
     assert.equal(api.defaultFileEditorViewModeForPath('/repo/photo.png', 'image'), 'preview', 'non-text preview defaults remain registry-owned');
     assert.equal(api.defaultFileEditorViewModeForPath('/repo/events.jsonl', 'text'), 'preview', 'JSONL opens in table Preview by default');
@@ -1786,22 +1884,23 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.previewRendererForPath('/repo/photo.tiff').id, 'unsupported-image', 'recognized image fallbacks are registry-owned');
     assert.equal(api.previewRendererForPath('/repo/archive.zip').id, 'unsupported-archive', 'recognized archive fallbacks are registry-owned');
     const previewRendererSamples = {
-      'tests/fixtures/preview-samples/10-markdown.md': 'markdown',
-      'tests/fixtures/preview-samples/11-html.html': 'html',
-      'tests/fixtures/preview-samples/12-image.svg': 'image',
-      'tests/fixtures/preview-samples/14-mermaid.mmd': 'mermaid',
-      'tests/fixtures/preview-samples/15-structured.json': 'structured',
-      'tests/fixtures/preview-samples/16-structured.jsonl': 'json-lines-table',
-      'tests/fixtures/preview-samples/17-notebook.ipynb': 'structured',
-      'tests/fixtures/preview-samples/18-structured.yaml': 'structured',
-      'tests/fixtures/preview-samples/19-structured.toml': 'structured',
-      'tests/fixtures/preview-samples/20-structured.drawio': 'structured',
-      'tests/fixtures/preview-samples/21-config.properties': 'structured',
-      'tests/fixtures/preview-samples/22-table.csv': 'table',
-      'tests/fixtures/preview-samples/23-table.tsv': 'table',
+      'examples/preview/10-markdown.md': 'markdown',
+      'examples/preview/11-html.html': 'html',
+      'examples/preview/12-image.svg': 'image',
+      'examples/preview/13-pdf.pdf': 'pdf',
+      'examples/preview/14-mermaid.mmd': 'mermaid',
+      'examples/preview/15-structured.json': 'structured',
+      'examples/preview/16-structured.jsonl': 'json-lines-table',
+      'examples/preview/17-notebook.ipynb': 'structured',
+      'examples/preview/18-structured.yaml': 'structured',
+      'examples/preview/19-structured.toml': 'structured',
+      'examples/preview/20-structured.drawio': 'structured',
+      'examples/preview/21-config.properties': 'structured',
+      'examples/preview/22-table.csv': 'table',
+      'examples/preview/23-table.tsv': 'table',
     };
     for (const [samplePath, rendererId] of Object.entries(previewRendererSamples)) {
-      assert.equal(fs.existsSync(samplePath), true, `${rendererId} renderer has a preview-samples fixture`);
+      assert.equal(fs.existsSync(samplePath), true, `${rendererId} renderer has an example file`);
       assert.equal(api.previewRendererForPath(`/repo/${samplePath}`).id, rendererId, `${samplePath} routes to ${rendererId}`);
     }
     const transcriptPreview = api.jsonLinesTablePreview('/repo/transcript.jsonl', [
@@ -1827,18 +1926,17 @@ async function runLayoutRestoreSuite() {
     assert.equal(wideJsonl.columns.length, 40, 'JSONL column count is capped');
     assert.equal(wideJsonl.overflowColumns.length, 4, 'JSONL retains overflow keys behind one affordance');
     [
-      'tests/fixtures/preview-samples/13-pdf.pdf',
-      'tests/fixtures/preview-samples/24-audio.wav',
-      'tests/fixtures/preview-samples/25-video.mp4',
-      'tests/fixtures/preview-samples/26-text.log',
-      'tests/fixtures/preview-samples/27-diff.patch',
-      'tests/fixtures/preview-samples/28-diagram.dot',
-      'tests/fixtures/preview-samples/29-plantuml.puml',
-      'tests/fixtures/preview-samples/30-unsupported-image.tiff',
-      'tests/fixtures/preview-samples/31-unsupported-document.xlsx',
-      'tests/fixtures/preview-samples/32-unsupported-data.parquet',
-      'tests/fixtures/preview-samples/33-unsupported-archive.zip',
-      'tests/fixtures/preview-samples/34-unsupported.unknown',
+      'examples/preview/24-audio.wav',
+      'examples/preview/25-video.mp4',
+      'examples/preview/26-text.log',
+      'examples/preview/27-diff.patch',
+      'examples/preview/28-diagram.dot',
+      'examples/preview/29-plantuml.puml',
+      'examples/preview/30-unsupported-image.tiff',
+      'examples/preview/31-unsupported-document.xlsx',
+      'examples/preview/32-unsupported-data.parquet',
+      'examples/preview/33-unsupported-archive.zip',
+      'examples/preview/34-unsupported.unknown',
     ].forEach(samplePath => {
       assert.equal(fs.existsSync(samplePath), false, `${samplePath} stays out of the curated preview sample set`);
     });
@@ -2532,10 +2630,20 @@ async function runLayoutRestoreSuite() {
     // trailing fit; the redundant middle timer (fitFinalTimer) is gone.
     assert.equal(source.includes('item.fitFinalTimer'), false, 'C12 F3: the redundant third fit timer is removed');
     assert.ok(/function scheduleFit[\s\S]*?requestAnimationFrame\([\s\S]*?item\.fitTimer = setTimeout/.test(source), 'C12 F3: fit scheduling is one rAF plus a single trailing timeout');
-    assert.ok(/function terminalProbeFontFamily\(container\)[\s\S]*--mono-font[\s\S]*terminalFontFamily/.test(source), 'terminal fallback cell measurement uses the shared bundled mono font token');
+    const terminalFunctionBody = (name, nextName) => {
+      const start = source.indexOf(`function ${name}(`);
+      const end = source.indexOf(`function ${nextName}(`, start);
+      assert.ok(start > 0 && end > start, `could not locate ${name} body`);
+      return source.slice(start, end);
+    };
+    assert.ok(/--mono-font[\s\S]*terminalFontFamily/.test(terminalFunctionBody('terminalProbeFontFamily', 'terminalContentSize')), 'terminal fallback cell measurement uses the shared bundled mono font token');
     assert.equal(source.includes("probe.style.font = '13px ui-monospace"), false, 'terminal fallback cell measurement must not use a hardcoded fallback font stack');
-    assert.ok(/function terminalFitSignature\(size\)[\s\S]*contentWidth[\s\S]*cellWidth[\s\S]*terminalFontSize[\s\S]*terminalFontFamily/.test(source), 'terminal fit skips are keyed by pane size, cell metrics, and terminal font settings');
-    assert.ok(/function fitTerminal\(session, options = \{\}\)[\s\S]*terminalFitIsUnchanged\(item, size\)[\s\S]*return[\s\S]*if \(changed\) item\.term\.resize/.test(source), 'terminal fit drops duplicate observer echoes before calling term.resize again');
+    assert.ok(/contentWidth[\s\S]*cellWidth[\s\S]*terminalFontSize[\s\S]*terminalFontFamily/.test(terminalFunctionBody('terminalFitSignature', 'terminalFitIsUnchanged')), 'terminal fit skips are keyed by pane size, cell metrics, and terminal font settings');
+    const fitBody = terminalFunctionBody('fitTerminal', 'sendRemoteResize');
+    const fitGuard = /terminalFitIsUnchanged\(item, size\)[\s\S]*return[\s\S]*if \(changed\) item\.term\.resize/;
+    assert.ok(fitGuard.test(fitBody), 'terminal fit drops duplicate observer echoes before calling term.resize again');
+    assert.equal(fitGuard.test(fitBody.replace('if (options.force !== true && !claim && unchanged) return;', '')), false, 'the contract rejects a missing early return');
+    assert.equal(fitGuard.test(fitBody.replace('if (changed) item.term.resize', 'item.term.resize')), false, 'the contract rejects an unconditional resize');
     const dockviewSource = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
     assert.ok(/function dockviewScheduleLayoutToHost\(api = dockviewLayoutState\.api, host = dockviewLayoutState\.host\)[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*dockviewLayoutToHost\(api, host\)/.test(dockviewSource), 'Dockview host ResizeObserver layout work is coalesced to one layout per frame');
     assert.equal(source.includes('esm.sh'), false, 'CodeMirror loading never falls back to a third-party CDN');
@@ -2624,8 +2732,8 @@ async function runLayoutRestoreSuite() {
     // #73: the item-keyed editor maps are cleaned up on close + migrated on rename (no unbounded growth),
     // and the per-pane LRU timestamp survives a session rename.
     assert.ok(/function removeFilePanelOwner[\s\S]*?fileEditorViewState\.delete\(item\)[\s\S]*?tabLastActivatedAt\.delete\(item\)/.test(source), '#73: editor view-state + LRU timestamp are dropped on tab close');
-    assert.ok(/function renameOpenFilePath[\s\S]*?for \(const map of \[state\.viewMode, state\.previewZoom, fileEditorViewState, fileEditorDiffExpandOverrides, tabLastActivatedAt\]\)[\s\S]*?map\.set\(newKey, map\.get\(oldKey\)\)/.test(source), '#73: editor view-state + LRU timestamp are migrated on rename');
-    assert.ok(/function replaceSessionMetadata[\s\S]*?tabLastActivatedAt,\s*\n\s*\]\)/.test(source), '#73: the LRU timestamp is rekeyed across a session rename');
+    assert.ok(/function renameOpenFilePath[\s\S]*?for \(const map of \[state\.viewMode, state\.previewZoom, fileEditorViewState, fileEditorDiffExpandOverrides, tabLastActivatedAt, tabActivationOrder\]\)[\s\S]*?map\.set\(newKey, map\.get\(oldKey\)\)/.test(source), '#73: editor view-state, LRU timestamp, and activation order are migrated on rename');
+    assert.ok(/function replaceSessionMetadata[\s\S]*?tabLastActivatedAt,\s*tabActivationOrder,\s*\n\s*\]\)/.test(source), '#73: the LRU timestamp and activation order are rekeyed across a session rename');
     const infoCss = fs.readFileSync('static/yomux.css', 'utf8');
     assert.equal(/\.info-subview\s*\{/.test(infoCss), false, 'old merged sub-view CSS is removed');
     assert.equal(/\.info-subtab\.active\s*\{/.test(infoCss), false, 'old merged sub-tab active CSS is removed');
@@ -5219,6 +5327,7 @@ async function runLayoutRestoreSuite() {
     const item = api.registerFileEditorLayoutItemForTest(path);
     const contentText = Array.from({length: 120}, (_, index) => `line ${index + 1}`).join('\n');
     api.setOpenFileStateForTest(path, {mtime: 1, size: contentText.length, kind: 'text', original: contentText, content: contentText, dirty: false});
+    api.setFileEditorViewMode(path, 'edit', item);
     const panel = new TestElement('editor-panel');
     panel.dataset.layoutItem = item;
     panel.dataset.filePath = path;

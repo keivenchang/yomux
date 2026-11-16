@@ -21,6 +21,7 @@ BROWSER_BOOT_ROUTES = tuple(
         ("/api/chat/search", ("GET",)), ("/api/chat/send", ("POST",)),
         ("/api/chat/yoagent", ("POST",)), ("/api/chat/typing", ("POST",)),
         ("/api/chat/read", ("POST",)), ("/api/yoagent/chat", ("POST",)),
+        ("/api/runtime/compatibility", ("GET",)),
         ("/api/settings", ("GET", "POST")), ("/api/notify", ("GET", "POST")),
         ("/api/create-session-plan", ("GET",)), ("/api/create-session", ("POST",)),
         ("/api/rename-session", ("POST",)), ("/api/ensure-session", ("POST",)),

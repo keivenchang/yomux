@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Tests for the disposable Docker image identity."""
 
-from tests.helpers.fixture_tools import fixture_executable, fixture_script
+from tests.helpers.fixture_tools import fixture_command, fixture_executable, fixture_script
 import copy
 import json
 import os
@@ -200,6 +200,7 @@ def test_fingerprint_changes_when_any_image_input_changes(tmp_path):
         "cmd/yomux-go/main.go",
         "tests/test_docker_image.py",
         "static_src/js/yomux.js",
+        "static/vendor/xterm.js",
     ],
 )
 def test_source_only_edits_do_not_change_image_fingerprint(tmp_path, relative):
@@ -370,6 +371,7 @@ def test_execution_contract_identity_changes_with_runner_or_sandbox_inputs(tmp_p
         "tools/bazel_output_slot_entrypoint.sh",
         "tools/bazel_test_entrypoint.sh",
         "tools/bazel_test_common.sh",
+        "tools/browser_runtime.py",
         "tools/instance_isolation.py",
         "tools/product_environment.py",
         "tools/product_namespace.json",
@@ -396,6 +398,9 @@ def test_execution_contract_identity_changes_with_runner_or_sandbox_inputs(tmp_p
 def test_native_browser_resolution_requires_a_host_chromedriver_on_path(tmp_path, with_driver):
     binary_dir = tmp_path / "bin"
     binary_dir.mkdir()
+    python = binary_dir / "python3"
+    python.write_text(fixture_script(f'#!/bin/sh\nexec {fixture_command("python3")} "$@"\n'), encoding="utf-8")
+    python.chmod(0o755)
     chrome = binary_dir / "chromium"
     chrome.write_text(fixture_script("#!/bin/sh\nexit 0\n"), encoding="utf-8")
     chrome.chmod(0o755)
@@ -408,7 +413,7 @@ def test_native_browser_resolution_requires_a_host_chromedriver_on_path(tmp_path
         [fixture_executable("bash"), "-c", 'source "$1"; if bazel_native_browser_resolve; then printf "%s|%s" "$BAZEL_NATIVE_CHROME_BIN" "$BAZEL_NATIVE_CHROMEDRIVER_BIN"; else printf unavailable; fi', "native-browser-test", str(helper)],
         capture_output=True,
         text=True,
-        env={"PATH": str(binary_dir), "CHROME_BIN": str(chrome)},
+        env={"PATH": str(binary_dir), "HOME": str(tmp_path / "home"), "CHROME_BIN": str(chrome)},
         check=False,
     )
     assert result.returncode == 0
@@ -455,12 +460,12 @@ def test_docker_admission_failure_does_not_launch_native_fallback():
     assert 'selecting native' not in result.stderr
 
 
-def test_linux_auto_refuses_unreachable_docker_without_native_fallback():
+def test_docker_refuses_unreachable_daemon_without_native_fallback():
     root = Path(__file__).resolve().parents[1]
     source = (root / 'tools/run_bazel_tests.sh').read_text()
     start = source.index('case "$execution" in\n')
     end = source.index('if [ "$execution" = native ]; then', start)
-    script = '''execution=auto
+    script = '''execution=docker
 bazel_test_in_container() { return 1; }
 uname() { printf Linux; }
 docker() { return 1; }
@@ -470,6 +475,25 @@ docker() { return 1; }
     assert 'WARNING: HERMETIC DOCKER TESTING FAILED' in result.stderr
     assert '--execution native' in result.stderr
     assert '"failure_phase":"daemon"' in result.stdout
+
+
+@pytest.mark.parametrize("system,in_container,expected", [
+    ("Darwin", False, "native"), ("Linux", False, "docker"),
+    ("Darwin", True, "docker"), ("Linux", True, "docker"),
+])
+@pytest.mark.parametrize("requested", bazel_execution_contract.EXECUTION_MODES)
+def test_execution_default_is_shared_and_explicit_modes_are_preserved(system, in_container, expected, requested):
+    assert bazel_execution_contract.resolve_execution(requested, system=system, in_container=in_container) == (
+        expected if requested == "auto" else requested)
+
+
+def test_macos_default_never_probes_docker(monkeypatch):
+    monkeypatch.delenv("YOMUX_CHECK_CONTAINER", raising=False)
+    monkeypatch.delenv("YOLOMUX_CHECK_CONTAINER", raising=False)
+    monkeypatch.setattr(docker_image, "running_inside_container", lambda: False)
+    monkeypatch.setattr(bazel_execution_contract.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(docker_image.subprocess, "run", lambda *args, **kwargs: pytest.fail("macOS default probed Docker"))
+    assert docker_image.container_available() == (False, "native execution selected")
 
 
 def test_image_build_failure_reports_phase_and_retains_exit_status():

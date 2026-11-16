@@ -763,12 +763,72 @@ func (s *Service) Move(ctx context.Context, paths []string, destination string) 
 }
 
 func (s *Service) Delete(ctx context.Context, raw string, recursive ...bool) (map[string]any, *Error) {
+	deletion, finderErr := s.PrepareDeletion(ctx, raw)
+	if finderErr != nil {
+		return nil, finderErr
+	}
+	defer deletion.Close()
+	return deletion.Delete(ctx, len(recursive) > 0 && recursive[0])
+}
+
+// Deletion retains the authorized parent and target generation across the
+// bounded-rmdir to bulk-recursion handoff. Callers serialize use and close it
+// only after the final worker has returned.
+type Deletion struct {
+	service *Service
+	parent  *mutationParent
+	target  *os.File
+}
+
+func (s *Service) PrepareDeletion(ctx context.Context, raw string) (*Deletion, *Error) {
+	if ctx.Err() != nil {
+		return nil, cancelled(raw)
+	}
 	parent, finderErr := s.openMutationParent(raw)
 	if finderErr != nil {
 		return nil, finderErr
 	}
-	defer parent.Close()
+	deletion := &Deletion{service: s, parent: parent}
+	if parent.targetIdentity != nil && parent.targetIdentity.mode.IsDir() {
+		// Metadata-only access keeps unreadable directories deletable while
+		// retaining the inode against reuse throughout a queued continuation.
+		file, err := openAt(parent.directory, parent.name, platformMetadataOpenFlags()|syscall.O_DIRECTORY, 0)
+		if err != nil {
+			deletion.Close()
+			return nil, filesystemError(raw, err)
+		}
+		deletion.target = file
+		info, err := file.Stat()
+		if err != nil {
+			deletion.Close()
+			return nil, filesystemError(raw, err)
+		}
+		if !sameDescriptorIdentity(identityFor(info), *parent.targetIdentity) {
+			deletion.Close()
+			return nil, changed(raw)
+		}
+	}
+	return deletion, nil
+}
+
+func (deletion *Deletion) Close() {
+	if deletion.target != nil {
+		_ = deletion.target.Close()
+	}
+	deletion.parent.Close()
+}
+
+func (deletion *Deletion) Delete(ctx context.Context, recursive bool) (map[string]any, *Error) {
+	s, parent := deletion.service, deletion.parent
 	requested := parent.requested
+	mutated := false
+	defer func() {
+		// A restored directory can still have lost children before cancellation
+		// or a bounded-walk failure. Publish only after restoration has settled.
+		if mutated {
+			s.noteChange([]string{requested}, "delete")
+		}
+	}()
 	info, finderErr := s.requireMutationTarget(parent, false)
 	if finderErr != nil {
 		return nil, finderErr
@@ -783,8 +843,7 @@ func (s *Service) Delete(ctx context.Context, raw string, recursive ...bool) (ma
 	if err := ctx.Err(); err != nil {
 		return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, cancelled(requested)))
 	}
-	removeRecursively := len(recursive) > 0 && recursive[0]
-	if info.IsDir() && !removeRecursively {
+	if info.IsDir() && !recursive {
 		if err := unlinkAt(parent.directory, quarantine, true); err != nil {
 			if errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST) {
 				if restoreErr := restoreMutationFailure(parent, quarantine, nil); restoreErr != nil {
@@ -794,7 +853,7 @@ func (s *Service) Delete(ctx context.Context, raw string, recursive ...bool) (ma
 			}
 			return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, filesystemError(requested, err)))
 		}
-		s.noteChange([]string{requested}, "delete")
+		mutated = true
 		return map[string]any{"path": requested, "deleted": true, "kind": "dir"}, nil
 	}
 	if info.IsDir() {
@@ -804,6 +863,7 @@ func (s *Service) Delete(ctx context.Context, raw string, recursive ...bool) (ma
 		}
 		deleted := make([]string, 0)
 		deleteErr := s.deleteDirectoryContents(ctx, directory, requested, &deleted)
+		mutated = len(deleted) > 0
 		_ = directory.Close()
 		if deleteErr != nil {
 			deleteErr = restoreMutationFailure(parent, quarantine, deleteErr)
@@ -834,13 +894,13 @@ func (s *Service) Delete(ctx context.Context, raw string, recursive ...bool) (ma
 			}
 			return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, cause))
 		}
-		s.noteChange([]string{requested}, "delete")
+		mutated = true
 		return map[string]any{"path": requested, "deleted": true, "kind": "dir"}, nil
 	}
 	if err := unlinkAt(parent.directory, quarantine, false); err != nil {
 		return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, filesystemError(requested, err)))
 	}
-	s.noteChange([]string{requested}, "delete")
+	mutated = true
 	return map[string]any{"path": requested, "deleted": true, "kind": "file"}, nil
 }
 

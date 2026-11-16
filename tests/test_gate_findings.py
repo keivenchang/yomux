@@ -15,6 +15,7 @@ from tests.gate_harness import HttpPortLease
 from tests.gate_harness import run_fixture_cleanup_phases
 from tests.isolated_dev_server import go_test_server_binary
 from tests.test_native_launch import native_launch_environment  # noqa: F401
+from tests.test_native_launch import authenticated_native_launch_environment  # noqa: F401
 from tests.test_native_launch import run_native
 from tests.helpers.browser_scenarios import assert_terminal_wheel_observation
 from tests.helpers.browser_scenarios import terminal_wheel_observation
@@ -74,9 +75,9 @@ def test_n3_existing_settings_survive_new_defaults_after_upgrade(tmp_path):
 
 
 @pytest.mark.browser
-def test_n4_live_source_revision_change_restarts_without_orphaning_old_backends(native_launch_environment, monkeypatch, tmp_path):
+def test_n4_live_source_revision_change_restarts_without_orphaning_old_backends(authenticated_native_launch_environment, monkeypatch, tmp_path):
     """A pinned local source upgrade replaces the real listener with the matching native binary."""
-    binary, environment = native_launch_environment
+    binary, environment = authenticated_native_launch_environment
     repo = Path(__file__).resolve().parents[1]
     checkout = tmp_path / "upgrade-source"
     checkout.mkdir()
@@ -107,6 +108,7 @@ def test_n4_live_source_revision_change_restarts_without_orphaning_old_backends(
     # offline module cache, source identity and build lock.
     with monkeypatch.context() as build_environment:
         build_environment.delenv("YOMUX_GO_BINARY", raising=False)
+        build_environment.delenv("YOLOMUX_GO_BINARY", raising=False)
         target_binary = go_test_server_binary(checkout)
     git("checkout", previous_sha)
     lease = HttpPortLease.reserve()

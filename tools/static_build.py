@@ -2216,7 +2216,7 @@ def lint_asset_source_completeness() -> list[str]:
     """Every source partial on disk must be shipped or explicitly retired with a reason."""
     source_families = (
         ("static_src/js/yomux", "*.js"),
-        ("static_src/js/emoji", "*.js"),
+        ("node_modules/.yomux", "emoji_data.js"),
         ("static_src/css/yomux", "*.css"),
     )
     discovered = {

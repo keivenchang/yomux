@@ -343,6 +343,7 @@ class NativeLaneSession:
             steps = shared_lane_options(steps)
             request = {"root": str(root), "workspace": str(workspace), "cache": str(cache), "flags": flags,
                        "bazel": str(bazel), "steps": steps, "system": bundle.system, "home": str(home),
+                       "java_home": str(payload / "jdk") if bundle.system == "Darwin" else "",
                        "admitted": session["admitted"], "admission_only": args.admission_only,
                        "reuse": args.cache == "on" and args.reuse != "no" and any(step.get("reuse", True) for step in steps), "cache_on": args.cache == "on",
                        "identity": identity, "revision": revision, "source_digest": session["source_digest"]}
@@ -410,10 +411,12 @@ def execute_lane(request, environment, contract, *, envelope=(), process_scope=N
     run = subprocess.run if process_scope is None else process_scope.run
     root, workspace, cache = (Path(request[key]) for key in ("root", "workspace", "cache"))
     flags = request["flags"]
+    java_environment = {"JAVA_HOME": request["java_home"]} if request["system"] == "Darwin" else {}
+    startup_flags = contract.native_bazel_startup_flags(java_environment, system=request["system"])
     version = subprocess.check_output([*envelope, request["bazel"], "--version"], env=environment, text=True).strip()
     if version != "bazel " + (workspace / ".bazelversion").read_text().strip():
         raise ValueError("native Bazel version differs from .bazelversion")
-    startup = [*envelope, request["bazel"], "--ignore_all_rc_files"]
+    startup = [*envelope, request["bazel"], *startup_flags, "--ignore_all_rc_files"]
     with ExitStack() as cleanup:
         output = root / "output"
         quarantine = root / "process-cleanup.quarantine" if request["system"] == "Darwin" else None

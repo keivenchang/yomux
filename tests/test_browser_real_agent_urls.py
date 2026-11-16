@@ -17,6 +17,7 @@ from http.server import ThreadingHTTPServer
 import pytest
 from selenium.webdriver.support.ui import WebDriverWait
 
+from tests.browser_helpers.native_pointer import terminal_menu_action
 from tests.browser_helpers.browser_console import assert_only_expected_browser_network_error
 from tests.browser_helpers.browser_layout import browser, fixture_asset_url, load_live_runtime_boot_fixture  # noqa: F401
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
@@ -34,26 +35,6 @@ URLS = [
     'https://www.google.com/maps/search/?api=1&query=San+Francisco',
     'https://example.com/search?q=terminal%20URL%20wrapping%20regression&mode=expanded&path=%2Fworkspace%2Fstatic_src%2Fjs%2Fyomux%2F99_terminal_boot.js&line=4024&display=plain#terminal-link-detection',
 ]
-
-
-def menu_action(driver, point, label):
-    for event in ('mousePressed', 'mouseReleased'):
-        driver.execute_cdp_cmd('Input.dispatchMouseEvent', {
-            'type': event, 'x': point['x'], 'y': point['y'], 'button': 'right', 'clickCount': 1,
-        })
-    item = driver.execute_script("""
-      const buttons=[...document.querySelectorAll('.terminal-context-menu button')];
-      const button=buttons.find(node=>node.textContent.startsWith(arguments[0]));
-      if(!button)return {labels:buttons.map(node=>node.textContent)};
-      const rect=button.getBoundingClientRect(),x=rect.left+rect.width/2,y=rect.top+rect.height/2;
-      return {x,y,interactable:button.contains(document.elementFromPoint(x,y))};
-    """, label)
-    assert item.get('interactable'), {'action':label,'point':point,'item':item}
-    for event in ('mousePressed', 'mouseReleased'):
-        driver.execute_cdp_cmd('Input.dispatchMouseEvent', {
-            'type':event,'x':item['x'],'y':item['y'],'button':'left','clickCount':1,
-        })
-
 
 
 @pytest.mark.real_agent_urls
@@ -340,7 +321,7 @@ def test_real_agent_url_menu(browser, isolated_dev_server_factory, request, tmp_
         # Keep the reported two-space hard break in the mandatory corpus.
         # A renderer change to soft wraps must not silently remove this case.
         assert any(
-            first['text'] == '  https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/'
+            first['text'].rstrip(' ') == '  https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/'
             and second['text'].startswith('  Global_Objects/Array')
             and not first['wrapped'] and not second['wrapped']
             for first, second in zip(observation['rows'], observation['rows'][1:])
@@ -442,11 +423,11 @@ def test_real_agent_url_menu(browser, isolated_dev_server_factory, request, tmp_
                 chosen = {rows[0], rows[len(rows)//2], rows[-1]}
                 points['points'] = [point for index, point in enumerate(points['points']) if point['row'] in chosen and (index == 0 or points['points'][index-1]['row'] != point['row'])]
             for point in points['points']:
-                menu_action(browser, point, 'Copy URL')
+                terminal_menu_action(browser, point, 'Copy URL')
                 copied = browser.execute_async_script('const done=arguments[0];navigator.clipboard.readText().then(done)')
                 before = set(browser.window_handles)
                 opened_events.clear()
-                menu_action(browser, point, 'Open URL')
+                terminal_menu_action(browser, point, 'Open URL')
                 WebDriverWait(browser, 10, poll_frequency=0.01).until(lambda d: opened_events and set(d.window_handles) != before)
                 opened = opened_events[-1].url
                 handle = (set(browser.window_handles) - before).pop()
@@ -508,10 +489,12 @@ def test_real_xterm_explicit_hyperlink_lifecycle(browser, isolated_dev_server_fa
           term.reset();await write(osc('javascript:alert(1)','unsafe'));check('xterm protocol filter',1,1,null);
           term.reset();term.resize(75,4);
           const rows=['  https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/','  Global_Objects/Array'];
-          await write(rows.join('\r\n'));term.yomuxAgentKind='codex';
           const full=rows[0].trim()+rows[1].trim();
-          check('two-space first',3,1,full);check('two-space continuation',3,2,full);
-          check('two-space final',rows[1].length,2,full);check('two-space after',rows[1].length+1,2,null);check('two-space indent',2,2,null);
+          for(const padding of ['', '       ']){
+            term.reset();await write(rows[0]+padding+'\r\n'+rows[1]);term.yomuxAgentKind='codex';
+            check('two-space first '+padding.length,3,1,full);check('two-space continuation '+padding.length,3,2,full);
+            check('two-space final '+padding.length,rows[1].length,2,full);check('two-space after '+padding.length,rows[1].length+1,2,null);check('two-space indent '+padding.length,2,2,null);
+          }
           term.reset();await write('  https://example.test/path/\r\n  unrelated words here');
           check('prose separated',3,1,'https://example.test/path/');check('prose not linked',3,2,null);
           return {checks,failures};
@@ -567,7 +550,7 @@ def test_real_xterm_unicode_url_pointer_contract(browser, isolated_dev_server_fa
     browser.execute_cdp_cmd('Input.dispatchMouseEvent', {
         'type': 'mouseMoved', 'x': point['x'], 'y': point['y'],
     })
-    menu_action(browser, point, 'Copy URL')
+    terminal_menu_action(browser, point, 'Copy URL')
     WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
         'return statusEl?.textContent === t("status.copied")'))
     copied = browser.execute_async_script('const done=arguments[0];navigator.clipboard.readText().then(done,error=>done({error:String(error)}))')
@@ -579,6 +562,6 @@ def test_real_xterm_unicode_url_pointer_contract(browser, isolated_dev_server_fa
     opened = []
     callback = connection.add_callback(devtools.page.WindowOpen, opened.append)
     request.addfinalizer(lambda: connection.remove_callback(devtools.page.WindowOpen, callback))
-    menu_action(browser, point, 'Open URL')
+    terminal_menu_action(browser, point, 'Open URL')
     WebDriverWait(browser, 5).until(lambda driver: opened)
     assert opened[-1].url == observation['url']

@@ -1,0 +1,75 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath}
+
+\title{A Three-Page LaTeX Example}
+\author{YO!mux examples}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Equations and navigation}
+This document uses explicit page breaks to make a compact, three-page PDF for
+preview and scrolling checks.
+
+For a particle of mass $m$, its rest energy is
+\begin{equation}
+E = mc^2.
+\label{eq:energy}
+\end{equation}
+The Gaussian integral is
+\[
+\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}.
+\]
+The matrix below has determinant $-2$:
+\[
+A = \begin{pmatrix}1 & 2 \\ 3 & 4\end{pmatrix},
+\qquad \det(A) = 1\cdot4 - 2\cdot3 = -2.
+\]
+\vfill
+Page one ends here. Page two contains a table and a short list.
+
+\newpage
+\section{Tables and lists}
+The table lists values for a particle with mass $2$ kg and speed $3$ m/s.
+\begin{center}
+\begin{tabular}{lrr}
+\hline
+Quantity & Symbol & Value \\
+\hline
+Mass (kg) & $m$ & 2 \\
+Speed (m/s) & $v$ & 3 \\
+Kinetic energy (J) & $K$ & 9 \\
+\hline
+\end{tabular}
+\end{center}
+The classical kinetic energy is $K=\tfrac12 mv^2$. This example has three
+pages so the preview's page controls and scroll position are easy to inspect.
+\begin{enumerate}
+\item Open this file in Preview to see the complete PDF.
+\item Choose Split to keep the source beside the preview.
+\item Change a heading or equation and check the refreshed preview.
+\end{enumerate}
+Equation~\eqref{eq:energy} on page one gives the rest energy.
+\vfill
+Page two ends here. Page three contains a worked calculation.
+
+\newpage
+\section{A worked calculation}
+Integrating a polynomial term by term gives
+\begin{align*}
+\int_0^1 (3x^2 + 2x + 1)\,dx
+&= \left[x^3 + x^2 + x\right]_0^1 \\
+&= 1 + 1 + 1 \\
+&= 3.
+\end{align*}
+For comparison, the power rule states
+\[
+\int_0^1 x^n\,dx = \frac{1}{n+1}, \qquad n > -1.
+\]
+\subsection{Preview checklist}
+The title, equations, table, page breaks, and cross-reference should appear in
+the compiled document.
+\vfill
+Page three ends here.
+\end{document}

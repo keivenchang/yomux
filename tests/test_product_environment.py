@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
@@ -105,14 +106,25 @@ def test_shell_suffix_lookup_preserves_bytes_and_presence(values, expected, pres
     assert not result.stderr
 
 
-def test_generated_namespaces_and_installed_shell_owner_match():
+def test_generated_namespaces_and_installed_shell_owner_match(tmp_path, monkeypatch):
     namespace = json.loads((ROOT / "tools/product_namespace.json").read_text())
     assert namespace == json.loads((ROOT / "internal/productenv/namespace.json").read_text())
     source = (ROOT / "tools/product_environment.sh").read_text()
     assert generate_product_environment.render_namespace(namespace) in source
-    installed = Path.home() / "dev/ai-config/agents/skills/yomux-dev-start/scripts/environment.sh"
-    if installed.exists():
-        assert installed.read_text() == source
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    installed = tmp_path / "dev/ai-config/agents/skills/yomux-dev-start/scripts/environment.sh"
+    installed.parent.mkdir(parents=True)
+    installed.write_text(source)
+    monkeypatch.setattr(sys, "argv", ["generate_product_environment.py", "--check", "--check-installed"])
+    assert generate_product_environment.main() == 0
+    installed.write_text("stale installed owner\n")
+    assert generate_product_environment.main() == 1
+    installed_mtime = installed.stat().st_mtime_ns
+    monkeypatch.setattr(sys, "argv", ["generate_product_environment.py", "--check-installed"])
+    assert generate_product_environment.main() == 1
+    assert installed.stat().st_mtime_ns == installed_mtime
+    monkeypatch.setattr(sys, "argv", ["generate_product_environment.py", "--check"])
+    assert generate_product_environment.main() == 0
 
 
 def test_shell_rename_needs_no_caller_change(tmp_path):

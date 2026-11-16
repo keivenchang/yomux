@@ -3,7 +3,10 @@ load("//:tools/bazel_rules.bzl", "go_test_pair", "product_version")
 
 package(default_visibility = ["//visibility:public"])
 
-exports_files(["BUILD.bazel"])
+exports_files([
+    "BUILD.bazel",
+    "runtime_limits.json",
+])
 
 SQLITE = "@com_github_mattn_go_sqlite3//:go_default_library"
 
@@ -17,7 +20,7 @@ go_library(
         ["*.go"],
         exclude = ["*_test.go"],
     ) + [":generate_product_version"],
-    embedsrcs = glob(["pages/*.gohtml"]),
+    embedsrcs = glob(["pages/*.gohtml"]) + ["runtime_limits.json"],
     importpath = "github.com/keivenchang/yomux/cmd/yomux-go",
     deps = [
         "//internal/atomicfile:atomicfile_lib",
@@ -55,15 +58,18 @@ alias(
 
 go_test_pair(
     name = "yomux_go",
+    # Each shard aggregates dozens of tests with their own operation deadlines.
+    size = "medium",
+    timeout = "moderate",
     srcs = glob(
         ["*_test.go"],
         exclude = ["agent_window_browser_test.go"],
     ),
     data = ["//:go_cmd_test_support"],
     embed = [":yomux_go_lib"],
-    race_shard_count = 4,
+    race_shard_count = 8,
     repo_root_runfile = "yomux/go_cmd_test_support",
-    shard_count = 4,
+    shard_count = 8,
     deps = [
         "//internal/cache:cache_lib",
         "//internal/productenv:productenv_lib",

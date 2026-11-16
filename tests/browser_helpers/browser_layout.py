@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+import ast
 import atexit
 import contextlib
 import difflib
@@ -27,7 +28,9 @@ from urllib.parse import urlunsplit
 
 import pytest
 
+from tests.helpers.pdf_fixtures import preview_pdf
 from tools import static_build
+from tools.browser_runtime import resolve_browser_executables
 from tools.instance_isolation import apply_yomux_environment_assignments
 from tools.instance_isolation import normalize_yomux_environment
 from yomux_lib import common
@@ -52,7 +55,7 @@ from tests.browser_helpers.native_pointer import cdp_drag_hold as native_drag_ho
 from tests.browser_helpers.native_pointer import cdp_release
 from tests.browser_helpers.native_pointer import wait_for_visible_selector
 from tests.browser_helpers.native_pointer import _assert_browser_point_hits_target
-from tests.browser_helpers.native_pointer import _cdp_click_point
+from tests.browser_helpers.native_pointer import _click_browser_target
 from tests.browser_helpers.native_pointer import click_visible_selector
 from tests.browser_helpers.webdriver_lease import WebDriverLease
 from tests.browser_helpers.webdriver_lease import retire_all
@@ -363,7 +366,7 @@ class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
                 body = _FIXTURE_BLACK_WEBM
                 content_type = "video/webm"
             elif suffix == ".pdf":
-                body = b"%PDF-1.4\n%%EOF\n"
+                body = preview_pdf(1)
                 content_type = "application/pdf"
             else:
                 body = _FIXTURE_PIXEL_GIF
@@ -461,41 +464,64 @@ def register_browser_new_document_script(driver, source: str, *, reset_after_tes
         if identifiers is None:
             identifiers = []
             driver._yomux_test_script_ids = identifiers
-        identifiers.append(identifier)
+        identifiers.append((driver.current_window_handle, identifier))
     return identifier
 
 
-def remove_browser_test_new_document_scripts(driver):
-    identifiers = list(getattr(driver, "_yomux_test_script_ids", []))
-    driver._yomux_test_script_ids = []
-    for identifier in identifiers:
+def remove_browser_new_document_script(driver, identifier: str, *, window_handle: str | None = None):
+    records = getattr(driver, "_yomux_test_script_ids", [])
+    matching = [record for record in records if record[1] == identifier
+                and (window_handle is None or record[0] == window_handle)]
+    if len(matching) != 1:
+        raise AssertionError(f"expected one target owner for browser script {identifier!r}: {matching!r}")
+    target, _identifier = matching[0]
+    if target not in driver.window_handles:
+        # Closing the owning target destroys its document scripts as well.
+        records.remove(matching[0])
+        return
+    previous = driver.current_window_handle
+
+    def remove():
+        driver.switch_to.window(target)
         driver.execute_cdp_cmd("Page.removeScriptToEvaluateOnNewDocument", {"identifier": identifier})
+        records.remove(matching[0])
+
+    run_fixture_cleanup_phases("browser document script", (
+        ("target script", remove),
+        ("selected window", lambda: driver.switch_to.window(previous)),
+    ))
+
+
+def remove_browser_test_new_document_scripts(driver):
+    records = list(getattr(driver, "_yomux_test_script_ids", []))
+    run_fixture_cleanup_phases("browser document scripts", [
+        (f"script {identifier} on {target}", lambda target=target, identifier=identifier:
+         remove_browser_new_document_script(driver, identifier, window_handle=target))
+        for target, identifier in records
+    ])
+
+
+def select_current_value(browser, selector: str, value):
+    """Select and emit the input/change path in one task across replaceable controls."""
+    return browser.execute_script("""
+      const control = document.querySelector(arguments[0]);
+      if (control?.tagName !== 'SELECT' || control.disabled || control.multiple) throw new Error('select unavailable');
+      const option = [...control.options].find(option => option.value === arguments[1]);
+      if (!option || option.disabled || option.closest('optgroup[disabled]')) throw new Error('select value unavailable');
+      control.focus({preventScroll: true});
+      if (control.value !== option.value) {
+        control.value = option.value;
+        control.dispatchEvent(new Event('input', {bubbles: true}));
+        control.dispatchEvent(new Event('change', {bubbles: true}));
+      }
+      return control.value;
+    """, selector, str(value))
 
 
 def new_chrome_driver(window_size: str | tuple[int, int] | None = None, *, profile_dir: Path | None = None):
-    configured_chrome = os.environ.get("CHROME_BIN", "").strip()
-    if configured_chrome:
-        chrome_path = Path(configured_chrome)
-        if not chrome_path.is_file() or not os.access(chrome_path, os.X_OK):
-            raise RuntimeError(f"CHROME_BIN is not an executable file: {configured_chrome}")
-        chrome = str(chrome_path)
-    else:
-        # macOS installs Chrome as an app bundle rather than a PATH binary.  Keep
-        # the Linux lookup first, then use the canonical executable inside either
-        # common macOS bundle so browser regressions do not silently skip there.
-        chrome = (
-            shutil.which("google-chrome")
-            or shutil.which("chromium")
-            or shutil.which("chromium-browser")
-            or next((str(path) for path in (
-                Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-                Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
-            ) if path.is_file()), None)
-        )
-    if not chrome:
-        pytest.skip("Chrome/Chromium is not installed")
+    browser_tools = resolve_browser_executables()
     options = Options()
-    options.binary_location = chrome
+    options.binary_location = browser_tools.chrome
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -511,14 +537,7 @@ def new_chrome_driver(window_size: str | tuple[int, int] | None = None, *, profi
     if profile_dir is not None:
         profile_dir.mkdir(parents=True, exist_ok=True)
         options.add_argument(f"--user-data-dir={profile_dir}")
-    configured_driver = os.environ.get("CHROMEDRIVER_BIN", "").strip()
-    if configured_driver:
-        driver_path = Path(configured_driver)
-        if not driver_path.is_file() or not os.access(driver_path, os.X_OK):
-            raise RuntimeError(f"CHROMEDRIVER_BIN is not an executable file: {configured_driver}")
-        driver = webdriver.Chrome(service=ChromeService(executable_path=str(driver_path)), options=options)
-    else:
-        driver = webdriver.Chrome(options=options)
+    driver = webdriver.Chrome(service=ChromeService(executable_path=browser_tools.chromedriver), options=options)
     driver._yomux_primary_window_handle = driver.current_window_handle
     register_browser_new_document_script(driver, BROWSER_WAIT_HELPER_SOURCE, reset_after_test=False)
     driver.execute_script(BROWSER_WAIT_HELPER_SOURCE)
@@ -607,15 +626,20 @@ def animated_property_at_progress(browser, selector, property_name, progress=0.5
     )
 
 
-def set_browser_visual_profile(browser, *, theme="dark", dpr=1):
+def set_browser_visual_profile(browser, *, theme="dark", dpr=1, viewport=None):
     """Apply a small explicit visual profile; reset hook clears CDP device metrics afterwards."""
     if theme not in {"dark", "light"}:
         raise ValueError(f"unsupported visual theme: {theme!r}")
     scale = float(dpr)
     if scale <= 0:
         raise ValueError(f"device pixel ratio must be positive: {dpr!r}")
-    size = browser.get_window_size()
-    width, height = size["width"], size["height"]
+    if viewport is None:
+        size = browser.get_window_size()
+        width, height = size["width"], size["height"]
+    else:
+        width, height = viewport
+        if int(width) <= 0 or int(height) <= 0:
+            raise ValueError(f"viewport dimensions must be positive: {viewport!r}")
     browser.execute_cdp_cmd(
         "Emulation.setDeviceMetricsOverride",
         {"width": int(width), "height": int(height), "deviceScaleFactor": scale, "mobile": False},
@@ -1115,7 +1139,6 @@ def _reset_browser_windows(driver):
 def _reset_reused_browser_state(driver, *, retired_origin=None):
     """Return a worker-reused browser to a known blank, profile-clean state."""
     def reset_profile():
-        remove_browser_test_new_document_scripts(driver)
         origin = retired_origin
         if origin is None:
             origin = driver.execute_script("return location.origin;")
@@ -1141,6 +1164,7 @@ def _reset_reused_browser_state(driver, *, retired_origin=None):
         driver.set_window_size(*DEFAULT_BROWSER_WINDOW_SIZE)
 
     run_fixture_cleanup_phases("browser profile", (
+        ("document scripts", lambda: remove_browser_test_new_document_scripts(driver)),
         ("browser windows", lambda: _reset_browser_windows(driver)),
         ("profile state", reset_profile),
     ))
@@ -2469,7 +2493,6 @@ def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
         "availableAgents": list(scenario.available_agents) if scenario.available_agents is not None else ["term"],
         "accessRole": scenario.access_role,
         "authUsername": scenario.auth_username,
-        "dangerouslyYolo": scenario.dangerously_yolo,
         "terminalOnly": scenario.terminal_only,
         "statsOnly": scenario.stats_only,
         "capabilities": None,
@@ -2519,11 +2542,42 @@ def validate_browser_boot_routes(stub_script: str) -> None:
 
 
 def browser_boot_production_contract_errors(bootstrap: Mapping[str, object]) -> tuple[str, ...]:
-    production = json.loads(re.search(
-        r'<script id="yomux-bootstrap" type="application/json">(.*?)</script>',
-        web.html_page(["1"]),
-        re.DOTALL,
-    ).group(1))
+    # Rendering this page starts auth probes and reads operator settings/rules.
+    # Inventory its literal keys without evaluating any value or provider.
+    tree = ast.parse(Path(web.__file__).read_text(encoding="utf-8"))
+    owners = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "html_page"]
+    if len(owners) != 1:
+        raise AssertionError("production bootstrap inventory requires one html_page owner")
+    owner = owners[0]
+    assignments = [node for node in owner.body if isinstance(node, ast.Assign)
+                   and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "bootstrap"]
+    if len(assignments) != 1 or not isinstance(assignments[0].value, ast.Dict):
+        raise AssertionError("production bootstrap inventory requires one unconditional literal dictionary")
+    assignment = assignments[0]
+    keys = assignment.value.keys
+    if any(not isinstance(key, ast.Constant) or not isinstance(key.value, str) for key in keys):
+        raise AssertionError("production bootstrap inventory rejects dynamic keys and dictionary spreads")
+    production = {key.value for key in keys}
+    if len(production) != len(keys):
+        raise AssertionError("production bootstrap inventory rejects duplicate keys")
+    parents = {child: node for node in ast.walk(owner) for child in ast.iter_child_nodes(node)}
+    for node in ast.walk(owner):
+        if not isinstance(node, ast.Name) or node.id != "bootstrap" or node is assignment.targets[0]:
+            continue
+        parent = parents[node]
+        serialized = (
+            isinstance(node.ctx, ast.Load) and isinstance(parent, ast.Call)
+            and isinstance(parent.func, ast.Attribute) and parent.func.attr == "dumps"
+            and isinstance(parent.func.value, ast.Name) and parent.func.value.id == "json"
+            and bool(parent.args) and parent.args[0] is node
+        )
+        field_read = (
+            isinstance(node.ctx, ast.Load) and isinstance(parent, ast.Subscript)
+            and isinstance(parent.ctx, ast.Load) and isinstance(parent.slice, ast.Constant)
+            and isinstance(parent.slice.value, str) and parent.slice.value in production
+        )
+        if not serialized and not field_read:
+            raise AssertionError("production bootstrap inventory rejects later mutation or aliasing")
     missing = (
         set(production)
         - set(bootstrap)
@@ -2598,6 +2652,9 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
       window.marked = {parse(text) {
         return String(text || '').replace(/`\\/yo <query>`/g, '<code>/yo &lt;query&gt;</code>');
       }};
+      window.marked.Marked = class {
+        parse(...args) { return window.marked.parse(...args); }
+      };
       window.hljs = {highlightAuto(text) { return {value: String(text || '')}; }, highlightElement() {}};
       window.Notification = {permission: 'denied', requestPermission: async () => 'denied'};
       class FakeTerminal {
@@ -2943,9 +3000,14 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         if (allowedMethods && !allowedMethods.includes(method)) {
           return jsonResponse({error: 'fixture method not allowed'}, 405);
         }
-        // Stats-only mode intentionally models the partial Go boot: every known non-stats API
-        // route is absent. Keep this before the normal handlers so the test proves that unrelated
-        // 404s cannot change stats readiness, rather than accidentally exercising fixture 200s.
+        // Runtime diagnostics exist independently of optional product capabilities, including
+        // the stats-only fixture. Preserve the native response schema for ordinary boot.
+        if (url.pathname === '/api/runtime/compatibility') {
+          return jsonResponse({probe_status: 'not_applicable', warnings: []});
+        }
+        // Stats-only mode models optional non-stats APIs as absent. Keep this before
+        // their normal handlers so unrelated 404s cannot decide stats readiness,
+        // rather than accidentally exercising fixture 200s.
         const statsOnlyUnavailableRoutes = new Set([
           ...Object.keys(window.__fixtureRouteMethods || {}),
           '/api/background/status', '/api/fs/fast/list', '/api/fs/index-status', '/api/watched-prs', '/api/update-status',
@@ -3161,14 +3223,14 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
             rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
           });
         }
-        if (url.pathname === '/api/session-metadata' || url.pathname === '/api/transcripts') {
+        if (url.pathname === '/api/session-metadata' || url.pathname === '/api/transcripts' || url.pathname === '/api/activity') {
           const transcriptSessions = window.__fixtureTranscriptSessions || {};
           const currentPath = window.__fixtureTranscriptCurrentPath || '/home/test/yolomux.dev';
           const gitRoot = window.__fixtureTranscriptGitRoot || '/home/test/yolomux.dev';
           // The production metadata contract has one owner for Git associations: work_graph. Keep
           // the browser fixture on that contract too, so Finder sync tests cannot accidentally
           // keep a retired session.project compatibility path alive.
-          const fixtureWorkGraph = (session, info, path, root) => {
+          const fixtureWorkGraph = (session, info, path, root, generation) => {
             const sessionId = `tmux-session:${session}`;
             const windowId = `tmux-window:${session}:0`;
             const paneId = `tmux-pane:${session}:0.0`;
@@ -3180,7 +3242,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
             const git = {root, cwd: root, branch: branchName, dirty_count: 0, ahead: 0, behind: 0};
             return {
               version: 1,
-              generation: 1,
+              generation,
               tmux_sessions: {[sessionId]: {id: sessionId, name: String(session), tmux_window_ids: [windowId], tmux_pane_ids: [paneId], runtime_actor_ids: [], path_observation_ids: [observationId]}},
               tmux_windows: {[windowId]: {id: windowId, tmux_session_id: sessionId, index: 0, name: '0', tmux_pane_ids: [paneId]}},
               tmux_panes: {[paneId]: {id: paneId, tmux_window_id: windowId, target: `${session}:0.0`, pane_id: '0', index: 0, current_path: path, command: '', active: true, window_active: true, runtime_actor_ids: [], path_observation_ids: [observationId]}},
@@ -3198,52 +3260,56 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           // The rows are rebuilt from CURRENT fixture state on every read, so the payload served at
           // generation N+1 genuinely observes the mutation. Nothing here relabels pre-mutation
           // bytes with a newer identity: that is the exact lie the epoch identity exists to catch.
-          const buildSessionRows = () => Object.fromEntries(window.__fixtureSessions.map(session => {
+          const buildSessionRows = generation => Object.fromEntries(window.__fixtureSessions.map(session => {
             const info = transcriptSessions[session] || {};
             const path = info.current_path || currentPath;
             const root = info.git_root || gitRoot;
             return [session, {
+              ...info,
               session,
-              selected_pane: {target: `${session}:0.0`, current_path: path},
-              work_graph: fixtureWorkGraph(session, info, path, root),
+              label: info.label || session,
+              selected_pane: Object.prototype.hasOwnProperty.call(info, 'selected_pane')
+                ? info.selected_pane : {target: `${session}:0.0`, current_path: path},
+              work_graph: info.work_graph || fixtureWorkGraph(session, info, path, root, generation),
               agents: info.agents || [],
               panes: info.panes || [],
+              window_metadata: info.window_metadata || [],
             }];
           }));
           const meta = window.__fixtureMetadata;
-          const forced = url.searchParams.get('force') === '1';
-          // A forced read is answered from the build that already exists and names the build that
-          // will observe this request -- the server's contract exactly.
           const servedGeneration = meta.generation;
-          const cache = {
-            hit: true,
-            stale: forced,
-            age_seconds: 0,
-            refresh_seconds: 15,
-            generation: servedGeneration,
-            refreshing: forced,
-          };
-          if (forced) {
-            meta.pending = servedGeneration + 1;
-            cache.pending_generation = meta.pending;
-            cache.pending_identity = {epoch: meta.epoch, generation: meta.pending};
-            // The promised build commits unless a test is deliberately withholding it, so the next
-            // read converges on freshly built rows. `withholdPendingBuild` is how a test models a
-            // build that never lands without also breaking the protocol.
-            if (!meta.withholdPendingBuild) meta.generation = meta.pending;
+          if (url.pathname !== '/api/activity') {
+            const forced = url.searchParams.get('force') === '1';
+            // A forced read is answered from the build that already exists and names the build that
+            // will observe this request -- the server's contract exactly.
+            const cache = {
+              hit: true,
+              stale: forced,
+              age_seconds: 0,
+              refresh_seconds: 15,
+              generation: servedGeneration,
+              refreshing: forced,
+            };
+            if (forced) {
+              meta.pending = servedGeneration + 1;
+              cache.pending_generation = meta.pending;
+              cache.pending_identity = {epoch: meta.epoch, generation: meta.pending};
+              // The promised build commits unless a test is deliberately withholding it, so the next
+              // read converges on freshly built rows. `withholdPendingBuild` is how a test models a
+              // build that never lands without also breaking the protocol.
+              if (!meta.withholdPendingBuild) meta.generation = meta.pending;
+            }
+            return jsonResponse({
+              metadata_identity: {epoch: meta.epoch, generation: servedGeneration},
+              metadata_generation: servedGeneration,
+              cache,
+              session_order: window.__fixtureSessions,
+              sessions: buildSessionRows(servedGeneration),
+            });
           }
-          return jsonResponse({
-            metadata_identity: {epoch: meta.epoch, generation: servedGeneration},
-            metadata_generation: servedGeneration,
-            cache,
-            session_order: window.__fixtureSessions,
-            sessions: buildSessionRows(),
-          });
-        }
-        if (url.pathname === '/api/activity') {
-          // Go owns live agent status on the real 7222 backend. Keep the browser
-          // fixture on that contract instead of silently falling through to an
-          // empty response (which would erase the working marker before render).
+          // Activity and direct metadata carry the same published session rows.
+          // Keep the graph and identity together so a fixture response cannot
+          // erase Git metadata that the native activity contract always includes.
           const autoPayload = window.__fixtureAutoApprovePayload || {};
           const sessionsPayload = autoPayload.sessions && typeof autoPayload.sessions === 'object'
             ? autoPayload.sessions
@@ -3260,6 +3326,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
             window_index: row.window_index ?? row.window ?? null,
           })));
           return jsonResponse({
+            metadata_identity: {epoch: meta.epoch, generation: servedGeneration},
             activity: {},
             agent_window_snapshot_revision: Number(autoPayload.agent_window_snapshot_revision || 0),
             agent_windows: agentWindows,
@@ -3267,7 +3334,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
             errors: [],
             session_order: window.__fixtureSessions,
             session_scope: 'all',
-            sessions: Object.fromEntries(window.__fixtureSessions.map(session => [session, window.__fixtureTranscriptSessions?.[session] || {session, panes: []}])),
+            sessions: buildSessionRows(servedGeneration),
             topology_generation: 1,
           });
         }
@@ -3879,8 +3946,7 @@ def wait_for_visible_panel(browser, panel_id):
 
 def click_visible_panel(browser, panel_id):
     point = wait_for_visible_panel(browser, panel_id)
-    _assert_browser_point_hits_target(browser, point, panel_id=panel_id)
-    _cdp_click_point(browser, point)
+    _click_browser_target(browser, point, panel_id=panel_id)
 
 
 def move_to_visible_panel(browser, panel_id):

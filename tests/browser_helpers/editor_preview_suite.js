@@ -2383,7 +2383,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(networkErrorStatus.message, `${api.t('dialog.unableLoadDisk')}: network down`, 'file-state errors use the shared localized disk-load message');
     assert.equal(networkErrorStatus.message.includes('deleted'), false, 'network/list refresh errors are not reported as deletion');
     assert.equal(
-      api.fileInspectionErrorMessageForTest({payload: {error: 'outside allowed root'}, status: 403}, '/home/test/yolomux.dev3/tests/fixtures/preview-samples/03-mixed.md'),
+      api.fileInspectionErrorMessageForTest({payload: {error: 'outside allowed root'}, status: 403}, '/home/test/yolomux.dev3/examples/preview/03-mixed.md'),
       'outside allowed root',
       'file inspection resolves the structured backend reason through the shared user-message parent',
     );
@@ -4377,7 +4377,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const definitions = notificationApi.notificationEventDefinitionsForTest();
     const expectedNotificationPolicies = {
       sessionAttention: ['global', 'session'], agentAttention: ['global', 'session'], agentDone: ['global', 'session'], terminalConnection: ['global', 'session'],
-      chatMessage: ['global', 'chat'], yoagentJob: ['global', 'session'], watchedPullRequest: ['global', undefined], update: ['global', undefined], indexCoverage: ['global', undefined], statsResolution: ['global', undefined], startupTip: ['global', undefined], notificationTest: ['global', undefined], commandNotice: ['global', undefined],
+      chatMessage: ['global', 'chat'], yoagentJob: ['global', 'session'], watchedPullRequest: ['global', undefined], runtimeCompatibility: ['global', undefined], update: ['global', undefined], indexCoverage: ['global', undefined], statsResolution: ['global', undefined], startupTip: ['global', undefined], notificationTest: ['global', undefined], commandNotice: ['global', undefined],
       uploadResult: ['pane', 'session'], fileTransfer: ['pane', 'operation'], fileOpen: ['pane', 'finder'], yoloRules: ['pane', 'preferences'], previewOpen: ['pane', 'operation'],
     };
     for (const [event, [scope, target]] of Object.entries(expectedNotificationPolicies)) {
@@ -7042,6 +7042,31 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const provider = await api.terminalReferenceProviderLinks('url-html-extension', {buffer: {active: {getLine: () => terminalLine(url, false)}}, cols: url.length}, 1);
     assert.equal(provider[0]?.range?.start?.x, 1, 'the xterm provider range starts at the first URL character');
     assert.equal(provider[0]?.range?.end?.x, url.length, 'the xterm provider range includes the final html character');
+  });
+
+  test('Codex TeX preview link preserves a dot-split final fragment before prose', () => {
+    const api = loadYomux('', ['codex-tex-url']);
+    const rows = [
+      'Open the TeX example (https://localhost:7111/?',
+      'layout=left&tabs=left:file%3A%2Fhome%2Fkeivenc%2Fdev%2Fyomux%2Fyo7111%2Fexamples%2Ftex%2Fpaper.',
+      'tex*) and choose Preview or Split.',
+    ];
+    const url = 'https://localhost:7111/?' + rows[1] + 'tex*';
+    const lines = rows.map(row => terminalLine(row, false));
+    const term = {cols: rows[1].length, yomuxAgentKind: 'codex', buffer: {active: {getLine: index => lines[index] || null}}};
+    for (let row = 1; row <= rows.length; row++) {
+      assert.equal(api.terminalWrappedLineLinks(term, row)[0]?.text, url, `complete URL from screenshot row ${row}`);
+    }
+    assert.equal(api.terminalReferenceAtPosition(term, {x: 1, y: 3})?.text, url);
+    assert.equal(api.terminalReferenceAtPosition(term, {x: 4, y: 3})?.text, url, 'active-tab marker belongs to URL');
+    assert.equal(api.terminalReferenceAtPosition(term, {x: 5, y: 3}), null, 'closing prose wrapper is excluded');
+    for (const indent of ['', '  ']) {
+      const ordinary = ['See https://example.com/complete', indent + 'done) ordinary following prose.'];
+      const ordinaryLines = ordinary.map(row => terminalLine(row, false));
+      const ordinaryTerm = {cols: ordinary[0].length, yomuxAgentKind: 'codex', buffer: {active: {getLine: index => ordinaryLines[index] || null}}};
+      assert.equal(api.terminalWrappedLineLinks(ordinaryTerm, 1)[0]?.text, 'https://example.com/complete');
+      assert.equal(api.terminalReferenceAtPosition(ordinaryTerm, {x: indent.length + 1, y: 2}), null, 'plain closing word cannot extend a complete URL');
+    }
   });
 
   test('OpenCode repeated-gutter URLs continue after a dot-split extension', () => {
@@ -10207,7 +10232,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/\.chat-search-results\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/.test(conversationCss) && /\.chat-timeline\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/.test(conversationCss), 'search results and ordinary history retain independent scroll owners');
     assert.ok(shared.includes('function conversationSendButtonHtml(') && agent.includes('conversationSendButtonHtml(') && chat.includes('conversationSendButtonHtml('), 'both conversation panels inherit one send-button owner');
     assert.ok(!fs.readFileSync('static/yomux.js', 'utf8').includes('YOLOMUX_EMOJI_DATA = ['), 'emoji data does not ride the main bundle');
-    const emojiCatalog = fs.readFileSync('static_src/js/emoji/emoji_data.js', 'utf8');
+    const emojiSource = JSON.parse(fs.readFileSync('static_src/build-manifest.json', 'utf8'))['emoji-data.js'][0];
+    const emojiCatalog = fs.readFileSync(emojiSource, 'utf8');
     assert.ok(emojiCatalog.includes('globalThis.YOMUX_EMOJI_DATA = ['), 'emoji catalog publishes its canonical global');
     assert.ok(emojiCatalog.includes('globalThis.YOLOMUX_EMOJI_DATA = globalThis.YOMUX_EMOJI_DATA;'), 'emoji catalog aliases the same data for old clients');
     const emojiBuilder = fs.readFileSync('tools/build_emoji_catalog.py', 'utf8');

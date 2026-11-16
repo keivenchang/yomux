@@ -3,6 +3,10 @@
 """Native filesystem event delivery through the rendered Finder."""
 
 import json
+import os
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import shlex
 import tempfile
 from http.client import HTTPConnection
@@ -11,6 +15,7 @@ from urllib.parse import urlencode
 
 import pytest
 
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
 from selenium.webdriver.common.by import By
@@ -18,6 +23,8 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
+from tests.browser_helpers.browser_layout import register_browser_new_document_script
+from tests.browser_helpers.browser_layout import set_browser_visual_profile
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
 from tests.gate_harness import run_fixture_cleanup_phases
 from tests.tmux_runtime import run_isolated_tmux
@@ -25,6 +32,7 @@ from tests.browser_helpers.visual_contracts import wcag_contrast_ratio
 from tests.browser_helpers.browser_console import assert_only_expected_browser_http_error
 from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
 from tests.helpers.terminal_url_fixtures import terminal_url_matrix_examples
+from tests.helpers.fixture_tools import fixture_executable
 from tools.product_environment import product_env
 
 
@@ -110,7 +118,8 @@ def test_native_finder_get_info_permissions(browser, isolated_dev_server_factory
     browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-dialog-action]').click()
     guest_server = isolated_dev_server_factory('get-info-guest-' + theme, auth_bypass=False)
     guest_server.paths.auth_config_path.write_text('users:\n  - username: reader\n    password: fixture-password\n    role: readonly\n', encoding='utf-8')
-    browser.get(guest_server.base_url)
+    # The guest modal owns this refusal; incidental startup enrichment is not an auth probe.
+    browser.get(guest_server.base_url + '/?stats_only=1&sessions=debug&layout=left&tabs=left:__debug__')
     browser.find_element(By.NAME, 'username').send_keys('reader')
     browser.find_element(By.NAME, 'password').send_keys('fixture-password')
     browser.find_element(By.CSS_SELECTOR, 'button[type=submit]').click()
@@ -120,7 +129,12 @@ def test_native_finder_get_info_permissions(browser, isolated_dev_server_factory
     assert not browser.find_element(By.CSS_SELECTOR, '[data-permission-apply]').is_enabled()
     reason_colors = browser.execute_script("const p=document.querySelector('[data-info-permissions] p[role=status]');return [getComputedStyle(p).color,getComputedStyle(p.closest('.file-editor-dialog')).backgroundColor]")
     assert wcag_contrast_ratio(*reason_colors) >= 4.5
-    # The native batch route requires admin; the guest's startup probe must be refused.
+    denied = browser.execute_async_script("""
+      const path=arguments[0],done=arguments[arguments.length-1];
+      fetchFilesystemBatchItem('info',path,{immediate:true,dedupe:false,user:true})
+        .then(value=>done({unexpected:value}),error=>done({status:error.status}));
+    """, str(target))
+    assert denied == {'status':403}, denied
     assert_only_expected_browser_http_error(browser, path='/api/fs/batch', status=403, query={})
     consume_only_expected_js_debug_api_error(browser, path='/api/fs/batch', status=403, method='POST', query={})
     browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-dialog-action]').click()
@@ -178,21 +192,26 @@ def test_native_finder_get_info_permissions(browser, isolated_dev_server_factory
     wait.until(lambda driver: len(driver.find_elements(By.CSS_SELECTOR, '[data-info-warning]')) == 1)
     assert not browser.find_element(By.CSS_SELECTOR, '[data-permission-apply]').is_enabled()
     browser.execute_script("apiFetchJson=originalGetInfoFetch;delete window.originalGetInfoFetch")
-    browser.set_window_size(390, 700)
-    browser.execute_script("document.querySelector('[data-info-warning]').textContent += ' ' + 'wrapped-path/'.repeat(40)")
-    narrow = browser.execute_script("""
-      const dialog=document.querySelector('.file-get-info .file-editor-dialog'),body=dialog.querySelector('.file-editor-dialog-body'),footer=dialog.querySelector('.file-editor-dialog-actions');
-      const rect=dialog.getBoundingClientRect();
-      return {width:rect.width,viewport:innerWidth,bottom:footer.getBoundingClientRect().bottom,height:innerHeight,
-        scroll:body.scrollHeight,client:body.clientHeight,columns:getComputedStyle(dialog.querySelector('dl')).gridTemplateColumns};
-    """)
-    assert narrow['width'] <= narrow['viewport'] * 0.92 + 1, narrow
-    assert narrow['bottom'] <= narrow['height'], narrow
-    assert narrow['scroll'] > narrow['client'], narrow
-    assert len(narrow['columns'].split()) == 1, narrow
-    browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-dialog-action]').send_keys(Keys.TAB)
-    assert browser.execute_script("return document.activeElement.closest('.file-get-info') !== null")
-    browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-dialog-action]').click()
+    # Desktop Chrome can clamp its native window above the CSS breakpoint on macOS.
+    set_browser_visual_profile(browser, theme=theme, viewport=(390, 700))
+    try:
+        browser.execute_script("document.querySelector('[data-info-warning]').textContent += ' ' + 'wrapped-path/'.repeat(40)")
+        narrow = browser.execute_script("""
+          const dialog=document.querySelector('.file-get-info .file-editor-dialog'),body=dialog.querySelector('.file-editor-dialog-body'),footer=dialog.querySelector('.file-editor-dialog-actions');
+          const rect=dialog.getBoundingClientRect();
+          return {width:rect.width,viewport:innerWidth,bottom:footer.getBoundingClientRect().bottom,height:innerHeight,
+            scroll:body.scrollHeight,client:body.clientHeight,columns:getComputedStyle(dialog.querySelector('dl')).gridTemplateColumns};
+        """)
+        assert narrow['viewport'] == 390, narrow
+        assert narrow['width'] <= narrow['viewport'] * 0.92 + 1, narrow
+        assert narrow['bottom'] <= narrow['height'], narrow
+        assert narrow['scroll'] > narrow['client'], narrow
+        assert len(narrow['columns'].split()) == 1, narrow
+        browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-dialog-action]').send_keys(Keys.TAB)
+        assert browser.execute_script("return document.activeElement.closest('.file-get-info') !== null")
+        browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-dialog-action]').click()
+    finally:
+        browser.execute_cdp_cmd('Emulation.clearDeviceMetricsOverride', {})
     browser.set_window_size(1280, 1200)
     for dialog_class in ['finder-move-dialog', 'markdown-link-url-dialog', 'drop-action-result-dialog',
                          'file-editor-compare-dialog', 'file-editor-conflict-dialog',
@@ -381,7 +400,11 @@ def test_chmod_read_permission_reloads_an_open_unreadable_markdown_file(browser,
     apply = browser.find_element(By.CSS_SELECTOR, '.file-get-info [data-permission-apply]')
     assert apply.is_displayed()
     apply.click()
-    wait.until(lambda driver: driver.execute_script("return fileState.get(arguments[0])?.kind==='text'", str(target)))
+    wait.until(lambda driver: driver.execute_script("""
+      const panel=panelNodes.get(fileEditorItemFor(arguments[0]));
+      return fileState.get(arguments[0])?.kind==='text' && editorViewModeFor(arguments[0],fileEditorItemFor(arguments[0]))==='edit' &&
+        panel?._cmView?.contentDOM.isConnected && panel._cmView.state.doc.toString()==='# Recovered content\\n';
+    """, str(target)))
     result = browser.execute_script("""
       const path=arguments[0],state=fileState.get(path),item=fileEditorItemFor(path),panel=panelNodes.get(item);
       return {content:state.content,writable:state.writable,mode:editorViewModeFor(path,item),readCount:window.__chmodReadCount,
@@ -573,6 +596,112 @@ def test_native_codex_wrapped_file_context_menu_opens_complete_path(browser, iso
                 """, str(path), content))
 
 
+def test_native_terminal_url_right_click_preserves_scrollback(browser, isolated_dev_server_factory, request, tmp_path):
+    server = isolated_dev_server_factory('url-scrollbar-context')
+    (server.paths.config_dir / 'settings.yaml').write_text('general:\n  startup_tips: false\n', encoding='utf-8')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    session = server.tmux.sessions[0]
+    browser.get(server.base_url + f'/?sessions={session}&layout=left&tabs=left:{session}')
+    WebDriverWait(browser, 15).until(lambda driver: driver.execute_script(
+        "return initialAppShellPainted && typeof installTerminalContextMenu === 'function' && terminals.get(arguments[0])?.term?.element?.classList.contains('xterm')",
+        session,
+    ))
+    browser.execute_cdp_cmd('Browser.grantPermissions', {
+        'origin':server.base_url, 'permissions':['clipboardReadWrite', 'clipboardSanitizedWrite'],
+    })
+    try:
+        expected = terminal_url_matrix_examples()[32]
+        assert len(expected) == 128
+        point = browser.execute_async_script("""
+          const session=arguments[0],url=arguments[1],done=arguments[arguments.length-1];
+          (async()=>{
+            const host=document.createElement('div');
+            host.className='terminal';
+            Object.assign(host.style,{position:'fixed',left:'40px',top:'100px',width:'600px',height:'420px',zIndex:'100'});
+            document.body.appendChild(host);
+            const TerminalCtor=window.Terminal?.Terminal||window.Terminal;
+            const term=new TerminalCtor({cols:64,rows:20,scrollback:1000,fontSize:13});
+            term.open(host);
+            const cell=terminalCellDimensions(term,host);
+            host.style.width=`${Math.ceil(64*cell.width)}px`;
+            host.style.height=`${Math.ceil(20*cell.height)}px`;
+            installTerminalContextMenu(session,term,host);
+            window.__urlScrollbarFixture={term,host};
+            await new Promise(resolve=>term.write('scrollbar history\\r\\n'.repeat(120)+'\\x1b[2J\\x1b[H'+url+'\\r\\nURL-SCROLLBAR-DONE',resolve));
+            await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+            const rect=terminalScreenElement(host).getBoundingClientRect();
+            return {x:rect.left+63.5*cell.width,y:rect.top+1.5*cell.height,
+              realXterm:term.element.classList.contains('xterm'),cols:term.cols,rows:term.rows,
+              viewportY:term.buffer.active.viewportY,
+              href:terminalReferenceAtPosition(term,{x:64,y:term.buffer.active.viewportY+2})?.href||null};
+          })().then(done,error=>done({error:String(error.stack||error)}));
+        """, session, expected)
+        assert 'error' not in point, point
+        assert point['realXterm'] and point['cols'] == 64 and point['rows'] == 20, point
+        assert point['viewportY'] > 0 and point['href'] == expected, point
+        browser.execute_cdp_cmd('Input.dispatchMouseEvent', {
+            'type':'mouseMoved', 'x':point['x'], 'y':point['y'], 'button':'none',
+        })
+        before = browser.execute_async_script("""
+          const x=arguments[0],y=arguments[1],done=arguments[arguments.length-1];
+          const {term,host}=window.__urlScrollbarFixture;
+          window.__yomuxTestWaitFor(()=>host.querySelector('.scrollbar.vertical.visible'),{timeoutMs:5000})
+            .then(()=>{
+              const hit=document.elementFromPoint(x,y);
+              done({viewportY:term.buffer.active.viewportY,hit:hit?.className,
+                rail:!!hit?.closest('.scrollbar.vertical.visible'),
+                href:terminalReferenceAtClientPoint(term,host,x,y)?.href||null});
+            },error=>done({error:String(error.stack||error)}));
+        """, point['x'], point['y'])
+        assert before.get('rail') and before['href'] == expected, before
+        evidence = Path(product_env('E2E_EVIDENCE_DIR', '') or tmp_path)
+        evidence.mkdir(parents=True, exist_ok=True)
+        browser.save_screenshot(str(evidence / 'terminal-url-scrollbar-before.png'))
+        for event_type in ('mousePressed', 'mouseReleased'):
+            browser.execute_cdp_cmd('Input.dispatchMouseEvent', {
+                'type':event_type, 'x':point['x'], 'y':point['y'], 'button':'right', 'clickCount':1,
+            })
+        after = browser.execute_script("""
+          const {term,host}=window.__urlScrollbarFixture;
+          return {viewportY:term.buffer.active.viewportY,
+            href:terminalReferenceAtClientPoint(term,host,arguments[0],arguments[1])?.href||null,
+            labels:Array.from(document.querySelectorAll('.terminal-context-menu button'),button=>button.textContent)};
+        """, point['x'], point['y'])
+        (evidence / 'terminal-url-scrollbar.json').write_text(json.dumps({'point':point,'before':before,'after':after}, indent=2), encoding='utf-8')
+        assert after['viewportY'] == before['viewportY'], {'before':before,'after':after}
+        copy = next(button for button in browser.find_elements(By.CSS_SELECTOR, '.terminal-context-menu button') if button.text == 'Copy URL')
+        browser.execute_script('window.__urlScrollbarCopyButton=arguments[0]', copy)
+        copy.click()
+        copied = browser.execute_async_script("""
+          const done=arguments[arguments.length-1];
+          window.__yomuxTestWaitFor(()=>window.__urlScrollbarCopyButton.dataset.copyFeedbackActive==='true',{timeoutMs:5000})
+            .then(()=>navigator.clipboard.readText()).then(done,error=>done({error:String(error)}));
+        """)
+        assert copied == expected
+        browser.execute_script('closeTerminalContextMenu();window.__urlScrollbarFixture.term.scrollToBottom();')
+        browser.execute_cdp_cmd('Input.dispatchMouseEvent', {
+            'type':'mouseMoved', 'x':point['x'], 'y':point['y'], 'button':'none',
+        })
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+            "return !!document.elementFromPoint(arguments[0],arguments[1])?.closest('.scrollbar.vertical.visible')",
+            point['x'], point['y'],
+        ))
+        for event_type in ('mousePressed', 'mouseReleased'):
+            browser.execute_cdp_cmd('Input.dispatchMouseEvent', {
+                'type':event_type, 'x':point['x'], 'y':point['y'], 'button':'left', 'clickCount':1,
+            })
+        assert browser.execute_script('return window.__urlScrollbarFixture.term.buffer.active.viewportY') < before['viewportY']
+    finally:
+        browser.execute_script("""
+          closeTerminalContextMenu();
+          const fixture=window.__urlScrollbarFixture;
+          fixture?.term?.dispose();
+          fixture?.host?.remove();
+          delete window.__urlScrollbarFixture;
+          delete window.__urlScrollbarCopyButton;
+        """)
+
+
 @pytest.mark.parametrize('width', [40, 64, 80, 120])
 def test_native_tmux_random_url_clipboard_matrix(browser, isolated_dev_server_factory, request, tmp_path, width):
     server = isolated_dev_server_factory(f'url-matrix-{width}')
@@ -648,7 +777,7 @@ def test_native_tmux_random_url_clipboard_matrix(browser, isolated_dev_server_fa
             const active=term.buffer.active;
             const lines=Array.from({length:term.rows},(_,index)=>active.getLine(active.viewportY+index)?.translateToString(true)||'');
             const end=lines.indexOf(marker);
-            const rows=lines.slice(0,end);
+            const rows=lines.slice(0,end).map(line=>line.replace(/ +$/,''));
             const container=document.getElementById(`term-${session}`),rect=terminalScreenElement(container).getBoundingClientRect();
             const cell=terminalCellDimensions(term,container);
             const points=[...new Set([0,Math.floor((rows.length-1)/2),rows.length-1])].map(row=>{
@@ -668,20 +797,37 @@ def test_native_tmux_random_url_clipboard_matrix(browser, isolated_dev_server_fa
         tmux_width = run_isolated_tmux(server.tmux, 'display-message', '-p', '-t', session, '#{pane_width}').stdout.strip()
         assert observation['realXterm'] and observation['cols'] == width and tmux_width == str(width), observation
         captured = run_isolated_tmux(server.tmux, 'capture-pane', '-p', '-t', session).stdout.splitlines()
-        assert captured[:captured.index(marker)] == observation['rows'], {'tmux':captured, 'xterm':observation}
+        assert [line.rstrip(' ') for line in captured[:captured.index(marker)]] == observation['rows'], {'tmux':captured, 'xterm':observation}
         copied_values = []
         for point in observation['points']:
-            point['hit'] = browser.execute_script("""
-              const x=arguments[0],y=arguments[1],session=arguments[2],hit=document.elementFromPoint(x,y);
-              const {term,container}=terminals.get(session);
-              return {tag:hit?.tagName,className:hit?.className,inside:container.contains(hit),
-                href:terminalReferenceAtClientPoint(term,container,x,y)?.href||null};
+            browser.execute_cdp_cmd('Input.dispatchMouseEvent', {
+                'type':'mouseMoved', 'x':point['x'], 'y':point['y'], 'button':'none',
+            })
+            point['hit'] = browser.execute_async_script("""
+              const done=arguments[arguments.length-1];
+              const x=arguments[0],y=arguments[1],session=arguments[2];
+              requestAnimationFrame(()=>requestAnimationFrame(()=>{
+                const {term,container}=terminals.get(session),hit=document.elementFromPoint(x,y);
+                done({tag:hit?.tagName,className:hit?.className,inside:container.contains(hit),
+                  href:terminalReferenceAtClientPoint(term,container,x,y)?.href||null,
+                  viewportY:term.buffer.active.viewportY});
+              }));
             """, point['x'], point['y'], session)
             assert point['hit']['inside'], {'index':index,'layout':layout,'point':point}
             for event_type in ('mousePressed', 'mouseReleased'):
                 browser.execute_cdp_cmd('Input.dispatchMouseEvent', {
                     'type':event_type, 'x':point['x'], 'y':point['y'], 'button':'right', 'clickCount':1,
                 })
+            point['afterRightClick'] = browser.execute_script("""
+              const session=arguments[0],x=arguments[1],y=arguments[2];
+              const {term,container}=terminals.get(session);
+              return {viewportY:term.buffer.active.viewportY,
+                href:terminalReferenceAtClientPoint(term,container,x,y)?.href||null,
+                rows:Array.from({length:3},(_,index)=>term.buffer.active.getLine(term.buffer.active.viewportY+index)?.translateToString(true)||'')};
+            """, session, point['x'], point['y'])
+            assert point['afterRightClick']['viewportY'] == point['hit']['viewportY'], {
+                'index':index, 'layout':layout, 'point':point,
+            }
             copy_button = next((button for button in browser.find_elements(By.CSS_SELECTOR, '.terminal-context-menu button')
                                 if button.text == 'Copy URL'), None)
             if copy_button is None:
@@ -1076,3 +1222,156 @@ def test_native_filesystem_events_refresh_visible_finder_and_hidden_finder_edito
             ("server", server.stop),
         ])
     assert all(item["converged"] for item in observations), observations
+
+
+@pytest.mark.browser
+def test_native_terminal_info_bar_receives_cold_metadata_publication(browser, isolated_dev_server_factory, tmp_path, request):
+    held = threading.Event()
+    released = threading.Event()
+
+    class MetadataBarrier(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/hold':
+                held.set()
+                allowed = released.wait(timeout=8)
+            elif self.path == '/entered':
+                allowed = held.wait(timeout=8)
+            elif self.path == '/release':
+                released.set()
+                allowed = True
+            else:
+                allowed = False
+            self.send_response(200 if allowed else 503)
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(b'released' if allowed else b'barrier failed')
+
+        def log_message(self, _format, *_args):
+            pass
+
+    barrier = ThreadingHTTPServer(('127.0.0.1', 0), MetadataBarrier)
+    worker = threading.Thread(target=barrier.serve_forever, daemon=True)
+    worker.start()
+    endpoint = f'http://127.0.0.1:{barrier.server_port}'
+    tools = tmp_path / 'metadata-tools'
+    tools.mkdir()
+    wrapper = tools / 'tmux'
+    attempts = tools / 'metadata-inventory.log'
+    # Hold only the enrichment inventory, never roster discovery or PTY attachment.
+    wrapper.write_text(f"""#!{sys.executable}
+import os
+import sys
+from urllib.request import urlopen
+if any('#{{@yomux_description}}' in argument for argument in sys.argv[1:]):
+    with open({str(attempts)!r}, 'a') as evidence:
+        evidence.write('inventory-entered\\n')
+    try:
+        with urlopen({endpoint + '/hold'!r}, timeout=8) as response:
+            response.read()
+        with open({str(attempts)!r}, 'a') as evidence:
+            evidence.write('barrier-released\\n')
+    except OSError as error:
+        with open({str(attempts)!r}, 'a') as evidence:
+            evidence.write('barrier-error: ' + repr(error) + '\\n')
+        raise
+os.execv({fixture_executable('tmux')!r}, [{fixture_executable('tmux')!r}, *sys.argv[1:]])
+""", encoding='utf-8')
+    wrapper.chmod(0o700)
+    try:
+        server = isolated_dev_server_factory('cold-terminal-metadata', env_overrides={
+            'PATH': str(tools) + os.pathsep + os.environ['PATH'],
+            'YOMUX_GO_EVENT_QUEUE_SIZE': '1', 'YOMUX_GO_EVENT_STREAM_DELAY_MS': '500',
+        })
+        request.addfinalizer(lambda: browser.get('about:blank'))
+        (server.paths.config_dir / 'settings.yaml').write_text(
+            'general:\n  default_tabber_mode: advanced\n  startup_tips: false\n', encoding='utf-8')
+        session = server.tmux.sessions[0]
+        window = run_isolated_tmux(server.tmux, 'new-window', '-d', '-t', '=' + session + ':', '-n', 'second', '/bin/bash')
+        assert window.returncode == 0, window.stderr
+        server.restart()
+        register_browser_new_document_script(browser, r"""
+          window.__coldMetadataBarrier = {requests:[], holdAdmitted:false, placeholderApplied:false, releaseSent:false, releaseAcknowledged:false};
+          const originalFetch = window.fetch;
+          window.fetch = async (...args) => {
+            const response = await originalFetch(...args);
+            if (String(args[0]).includes('/api/session-metadata')) {
+              const payload = await response.clone().json();
+              window.__coldMetadataBarrier.requests.push({url:String(args[0]), generation:payload.metadata_generation});
+              if (payload.metadata_generation === 0) {
+                const admission = await originalFetch(ENTERED_URL);
+                window.__coldMetadataBarrier.admissionStatus = admission.status;
+                window.__coldMetadataBarrier.holdAdmitted = admission.ok;
+                if (!admission.ok) throw new Error('Metadata inventory barrier was not entered');
+                const releaseWhenApplied = () => {
+                  const state = typeof transcriptMetadataState === 'undefined' ? null : transcriptMetadataState;
+                  const info = state?.payload.sessions?.[SESSION];
+                  if (state?.loaded && state.generation === 0 && info?.work_graph?.loading === true) {
+                    window.__coldMetadataBarrier.placeholderApplied = true;
+                    window.__coldMetadataBarrier.releaseSent = true;
+                    void originalFetch(RELEASE_URL).then(acknowledgement => {
+                      window.__coldMetadataBarrier.releaseStatus = acknowledgement.status;
+                      window.__coldMetadataBarrier.releaseAcknowledged = acknowledgement.ok;
+                    }, error => {
+                      window.__coldMetadataBarrier.releaseError = String(error);
+                    });
+                  } else requestAnimationFrame(releaseWhenApplied);
+                };
+                requestAnimationFrame(releaseWhenApplied);
+              }
+            }
+            return response;
+          };
+        """.replace('SESSION', json.dumps(session)).replace('ENTERED_URL', json.dumps(endpoint + '/entered')).replace('RELEASE_URL', json.dumps(endpoint + '/release')))
+        browser.get(server.base_url + '/?sessions=' + session + '&layout=left&tabs=left:' + session)
+        wait = WebDriverWait(browser, 10)
+        def barrier_state():
+            return {
+                'held': held.is_set(), 'released': released.is_set(),
+                'inventory': attempts.read_text() if attempts.exists() else '',
+                'browser': browser.execute_script('return window.__coldMetadataBarrier'),
+            }
+
+        try:
+            wait.until(lambda driver: driver.execute_script('return window.__coldMetadataBarrier?.placeholderApplied === true && window.__coldMetadataBarrier.releaseAcknowledged === true'))
+        except TimeoutException:
+            print('Cold metadata admission diagnostic: ' + json.dumps(barrier_state(), sort_keys=True), flush=True)
+            raise
+        assert held.is_set(), barrier_state()
+        assert released.is_set(), barrier_state()
+        try:
+            wait.until(lambda driver: driver.execute_script("""
+              const session=arguments[0], info=transcriptMetadataState.payload.sessions?.[session];
+              const button=document.querySelector('.panel-detail-row [data-window-session="'+CSS.escape(session)+'"][data-window-index="1"]');
+              return transcriptMetadataState.generation > 0 && info?.work_graph?.loading !== true
+                && button?.getClientRects().length > 0;
+            """, session))
+        except TimeoutException:
+            # Observe server publication only AFTER the browser convergence assertion has failed.
+            # This read cannot supply the missing client demand or make that assertion pass.
+            status, _headers, body = server.request('/api/session-metadata')
+            state = browser.execute_script("""
+              return {barrier:window.__coldMetadataBarrier, demand:clientEventDemandDescriptor(),
+                mode:tabberMode, activeItems:activePaneItems(), generation:transcriptMetadataState.generation,
+                info:transcriptMetadataState.payload.sessions[arguments[0]],
+                connected:clientEventTransportState.connected};
+            """, session)
+            print('Cold terminal metadata publication diagnostic: ' + json.dumps({
+                'browser':state, 'serverStatus':status, 'serverMetadata':json.loads(body),
+            }, sort_keys=True), flush=True)
+            raise
+        observation = browser.execute_script("""
+          return {barrier:window.__coldMetadataBarrier, mode:tabberMode,
+            activeItems:activePaneItems(), demand:clientEventDemandDescriptor(),
+            generation:transcriptMetadataState.generation,
+            panes:transcriptMetadataState.payload.sessions[arguments[0]].panes};
+        """, session)
+        assert observation['mode'] == 'advanced', observation
+        assert observation['activeItems'] == [session], observation
+        assert all('force=1' not in item['url'] for item in observation['barrier']['requests']), observation
+        assert len(observation['panes']) == 2, observation
+    finally:
+        released.set()
+        barrier.shutdown()
+        barrier.server_close()
+        worker.join(timeout=5)
+        assert not worker.is_alive()

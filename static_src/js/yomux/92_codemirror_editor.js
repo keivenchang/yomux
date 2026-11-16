@@ -32,6 +32,8 @@ function destroyCodeMirrorPanel(panel, {invalidateEnsure = true} = {}) {
 }
 
 function destroyFileEditorPanel(panel) {
+  const preview = panel?.querySelector?.('.file-editor-preview-pane-panel');
+  if (preview) releasePreviewSurfaceResources(preview);
   destroyCodeMirrorPanel(panel);
   destroyProseMirrorPanel(panel);
 }
@@ -1229,6 +1231,7 @@ function editorPanelParts(panel) {
     diffRefPanel: panel.querySelector('.file-editor-diff-ref-panel'),
     diffExpandButton: panel.querySelector('.file-editor-diff-expand-panel'),
     popoutPreviewButton: panel.querySelector('.file-editor-popout-preview-panel'),
+    popoutEditorButton: panel.querySelector('.file-editor-popout-editor-panel'),
     reloadButton: panel.querySelector('.file-editor-reload-panel'),
     uploadButton: panel.querySelector('.file-editor-upload-panel'),
     themeButton: panel.querySelector('.file-editor-theme-panel'),
@@ -1247,6 +1250,7 @@ function editorPanelParts(panel) {
     parts.diffExpandButton,
     parts.diffRefPanel,
     parts.popoutPreviewButton,
+    parts.popoutEditorButton,
     parts.reloadButton,
     parts.uploadButton,
   ];
@@ -1340,6 +1344,7 @@ function syncEditorDiffRefPanel(path, state, item, parts, mode) {
 function syncTextEditorControls(panel, path, state, item, parts, mode) {
   const diffExpandButton = parts.diffExpandButton;
   const popoutPreviewButton = parts.popoutPreviewButton;
+  const popoutEditorButton = parts.popoutEditorButton;
   const previewable = editorPreviewModeAvailable(path, state);
   updateEditorThemeButton(parts.themeButton, {includeVanilla: true});
   updateEditorModeControl(parts.modeControl, path, state, item);
@@ -1362,7 +1367,8 @@ function syncTextEditorControls(panel, path, state, item, parts, mode) {
   updateFileEditorBlameButton(parts.blameButton, path, state, item);
   updateFileEditorDiffButton(parts.diffButton, path, state, item);
   updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
-  if (popoutPreviewButton) popoutPreviewButton.hidden = !previewable || state.historical === true;
+  if (popoutPreviewButton) popoutPreviewButton.hidden = !previewable || state.historical === true || previewRendererForPath(path, state).snapshot === false;
+  if (popoutEditorButton) popoutEditorButton.hidden = state.kind !== 'text' || state.historical === true;
   syncEditorDiffRefPanel(path, state, item, parts, mode);
   updateFileEditorToolbarSeparators(panel);
   return {previewable};

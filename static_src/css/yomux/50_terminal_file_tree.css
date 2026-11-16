@@ -552,11 +552,12 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   box-shadow: var(--shadow-elevated);
 }
 .terminal-context-menu:not(.repo-chip-menu) {
-  max-width: var(--context-menu-compact-inline-size);
+  width: max-content;
+  max-width: var(--context-menu-max-inline-size);
 }
 .terminal-context-menu.tab-action-sheet {
-  width: var(--context-menu-compact-inline-size);
-  max-width: var(--popover-max-inline-size);
+  width: max-content;
+  max-width: var(--context-menu-max-inline-size);
   max-height: var(--context-menu-max-block-size);
   overflow: auto;
   transform: none;
@@ -575,6 +576,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .tab-action-description:hover,
 .tab-action-description:focus-visible {
+  color: var(--chrome-text-strong);
   background: var(--overlay-option-hover-bg);
   outline: none;
 }
@@ -728,7 +730,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .terminal-context-menu.file-context-menu {
   width: max-content;
   min-width: min(12rem, calc(100vw - 2rem));
-  max-width: min(24rem, calc(100vw - 2rem));
+  max-width: var(--context-menu-max-inline-size);
   padding: var(--space-7);
   border-radius: var(--radius-lg);
 }
@@ -740,21 +742,24 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   font: var(--ui-font-size)/1.2 var(--ui-font);
 }
 .context-menu-icon-rows > button .context-menu-line {
-  grid-template-columns: calc(40px + var(--space-4)) minmax(0, 1fr) auto;
+  grid-template-columns: 2.25em minmax(0, 1fr) auto;
   gap: var(--space-4);
 }
 .context-menu-icon-rows > button .context-menu-icon {
-  width: 34px;
-  height: 18px;
-  margin-inline-start: calc(var(--space-4) + var(--space-6));
-  justify-content: center;
-  gap: var(--space-2);
+  width: 2.25em;
+  height: 1.2em;
+  display: grid;
+  grid-template-columns: 1.1em minmax(0, 1fr);
+  align-items: center;
+  justify-items: center;
   color: inherit;
 }
+.context-menu-icon-rows > button .context-menu-icon > .context-menu-check { grid-column: 1; }
+.context-menu-icon-rows > button .context-menu-icon > :not(.context-menu-check) { grid-column: 2; justify-self: center; }
 .file-context-menu-icon-svg {
   display: block;
-  width: 15px;
-  height: 15px;
+  width: 1em;
+  height: 1em;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.7;
@@ -770,11 +775,14 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   font: 600 var(--ui-font-size)/1.2 var(--ui-font);
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
 }
-.context-menu-icon-rows > .tab-action-description .context-menu-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.context-menu-icon-rows > button .context-menu-label {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
 }
 .context-menu-line {
   min-width: 0;
@@ -798,11 +806,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .context-menu-label {
   min-width: 0;
-}
-.context-menu-icon-rows > button .context-menu-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .terminal-context-menu .context-menu-check {
   display: inline-flex;

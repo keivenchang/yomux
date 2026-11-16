@@ -653,6 +653,14 @@ def is_current_local_process(
     except OSError:
         return result(LocalProcessReason.PROCESS_IDENTITY_UNAVAILABLE, recorded=recorded_start)
     if not observed_start:
+        # Darwin may drop a zombie's birth identity before its parent reaps it.
+        # Proven exit permits discarding a record, never signalling an unknown PID.
+        read_state = process_state if state_reader is None else state_reader
+        try:
+            if read_state(pid) == "Z":
+                return result(LocalProcessReason.PROCESS_NOT_FOUND, recorded=recorded_start)
+        except (PermissionError, OSError):
+            return result(LocalProcessReason.PROCESS_IDENTITY_UNAVAILABLE, recorded=recorded_start)
         probe = pid_is_alive if pid_probe is None else pid_probe
         try:
             alive_without_identity = bool(probe(pid))

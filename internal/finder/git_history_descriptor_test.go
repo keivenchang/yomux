@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-git/go-billy/v5"
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func TestMain(m *testing.M) {
@@ -25,7 +27,22 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	cleanup, err := testsupport.NewPrivateTestEnvironment()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "create private test environment:", err)
+		os.Exit(2)
+	}
+	code := m.Run()
+	cleanup()
+	os.Exit(code)
+}
+
+func TestFinderFixtureTemporaryRootIsPhysical(t *testing.T) {
+	root := t.TempDir()
+	physical, err := filepath.EvalSymlinks(root)
+	if err != nil || root != physical {
+		t.Fatalf("fixture temp root must be physical: %q -> %q (%v)", root, physical, err)
+	}
 }
 
 func prototypeFS(t *testing.T, root string) *descriptorGitFS {

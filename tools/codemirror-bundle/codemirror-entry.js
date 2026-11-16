@@ -71,6 +71,7 @@ import {xml} from "@codemirror/lang-xml";
 import {yaml} from "@codemirror/lang-yaml";
 import {shell} from "@codemirror/legacy-modes/mode/shell";
 import {toml} from "@codemirror/legacy-modes/mode/toml";
+import {stex} from "@codemirror/legacy-modes/mode/stex";
 import {tags} from "@lezer/highlight";
 
 window.YOmuxCodeMirror = {
@@ -123,6 +124,7 @@ window.YOmuxCodeMirror = {
   search,
   searchKeymap,
   shell,
+  stex,
   StreamLanguage,
   syntaxHighlighting,
   tags,

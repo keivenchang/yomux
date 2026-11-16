@@ -3849,6 +3849,25 @@ testAsync('browser observation writer fences acknowledge, retry authentication, 
   );
   assert.ok(byteBatch.api.state.queue.length > 0, 'byte overflow waits for a later batch');
 
+  const storageRetry = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-storage');
+  storageRetry.api.queue('page-storage:error:1', {...event, type: 'error', message: 'retained through storage failure'});
+  storageRetry.api.state.timer = null;
+  storageRetry.outcomes.push({status: 503});
+  await storageRetry.api.flush();
+  const failedStorageBatch = JSON.stringify(storageRetry.requests[0].body);
+  assert.equal(storageRetry.api.state.queue.length, 1, 'a storage outage retains the exact queued event');
+  assert.equal(storageRetry.api.state.drops, 0, 'a storage outage never permanently drops a valid event');
+  assert.equal(storageRetry.api.barrier('page-storage').retrying, 1, 'the storage failure retains its blocking receipt');
+  assert.equal(storageRetry.api.barrier('page-storage').rejected, 0, 'storage failure is not invalid input');
+  storageRetry.api.state.timer = null;
+  await storageRetry.api.flush();
+  assert.equal(JSON.stringify(storageRetry.requests[1].body), failedStorageBatch, 'storage recovery retries byte-identical event identities and payloads');
+  assert.equal(storageRetry.api.state.queue.length, 0, 'a durable acknowledgement retires the retained storage batch');
+  assert.equal(storageRetry.api.state.drops, 0, 'recovery preserves zero dropped observations');
+  assert.deepEqual(JSON.parse(JSON.stringify(storageRetry.api.barrier('page-storage'))), {
+    epoch: 'page-storage', accepted: 1, pending: 0, retrying: 0, rejected: 0, dropped: 0, quiescent: true, blocking: [],
+  }, 'the original storage-blocked receipt converges to accepted');
+
   current.api.queue('page-1:api:2', event);
   current.api.state.timer = null;
   current.outcomes.push({status: 503});

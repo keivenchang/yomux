@@ -360,10 +360,10 @@ func TestOpenWriterTruncatesInheritedWALAfterProcessExit(t *testing.T) {
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "stats.sqlite3")
 	command := exec.Command(os.Args[0], "-test.run=^TestWriterWALCrashHelper$")
-	command.Env = testsupport.SyntheticEnvironment(
+	command.Env = testsupport.GoHelperProcessEnvironment(testsupport.SyntheticEnvironment(
 		"YOLOMUX_WRITER_WAL_CRASH_HELPER=1",
 		"YOLOMUX_WRITER_WAL_CRASH_DATABASE="+databasePath,
-	)
+	))
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("synthetic writer crash helper failed: %v\n%s", err, output)
@@ -493,11 +493,11 @@ func TestWriterPruneProcessCrashBeforeCommitRecoversAndRetries(t *testing.T) {
 	}
 
 	command := exec.Command(os.Args[0], "-test.run=^TestWriterPruneCrashHelper$")
-	command.Env = testsupport.SyntheticEnvironment(
+	command.Env = testsupport.GoHelperProcessEnvironment(testsupport.SyntheticEnvironment(
 		"YOLOMUX_PRUNE_CRASH_HELPER=1",
 		"YOLOMUX_PRUNE_CRASH_DATABASE="+databasePath,
 		"YOLOMUX_PRUNE_CRASH_AT="+fmt.Sprint(pruneAt),
-	)
+	))
 	killWriterChildAtCommit(t, command, "synthetic-prune-before-commit\n", "prune")
 
 	writer, err = OpenWriter(ctx, databasePath)
@@ -623,10 +623,10 @@ func TestWriterRingPublicationCrashBeforeCommitRecoversAndReplays(t *testing.T) 
 	}
 
 	command := exec.Command(os.Args[0], "-test.run=^TestWriterRingPublicationCrashHelper$")
-	command.Env = testsupport.SyntheticEnvironment(
+	command.Env = testsupport.GoHelperProcessEnvironment(testsupport.SyntheticEnvironment(
 		"YOLOMUX_RING_CRASH_HELPER=1",
 		"YOLOMUX_RING_CRASH_DATABASE="+databasePath,
-	)
+	))
 	killWriterChildAtCommit(t, command, "synthetic-ring-before-commit\n", "ring publication")
 
 	writer, err = OpenWriter(ctx, databasePath)

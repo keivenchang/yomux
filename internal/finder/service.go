@@ -417,6 +417,10 @@ func (s *Service) open(raw string, directory bool) (*os.File, string, string, *E
 		_ = file.Close()
 		return nil, "", "", invalid(requested, "path is a directory")
 	}
+	if !directory && !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, "", "", invalid(requested, "path is not a regular file")
+	}
 	return file, requested, resolved, nil
 }
 
@@ -2230,7 +2234,7 @@ func isTextPath(path string) bool {
 	if ext == "" {
 		return name == "makefile" || name == "dockerfile" || name == "license" || name == "readme"
 	}
-	for _, value := range []string{".txt", ".md", ".markdown", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".go", ".py", ".js", ".ts", ".tsx", ".jsx", ".css", ".html", ".htm", ".sh", ".bash", ".rs", ".c", ".h", ".cpp", ".java", ".sql"} {
+	for _, value := range []string{".txt", ".md", ".markdown", ".tex", ".ltx", ".dtx", ".cls", ".sty", ".ins", ".bbl", ".bib", ".bst", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".go", ".py", ".js", ".ts", ".tsx", ".jsx", ".css", ".html", ".htm", ".sh", ".bash", ".rs", ".c", ".h", ".cpp", ".java", ".sql"} {
 		if ext == value {
 			return true
 		}

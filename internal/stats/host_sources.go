@@ -22,15 +22,19 @@ func finite(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value
 
 const maxHostCommandOutput = 8 << 20
 
-// NewHostCommand creates a host collector command with the deterministic C
-// locale required by parsers of ps output.
+// NewHostCommand keeps collector output deterministic without losing Darwin
+// filesystem names that df replaces with question marks in the ASCII C locale.
 func NewHostCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
 	if filepath.Base(name) == "tmux" {
 		return tmuxcmd.Command(ctx, args...)
 	}
 	command := exec.CommandContext(ctx, name, args...)
 	if filepath.Base(name) == "ps" || filepath.Base(name) == "df" {
-		command.Env = hostCommandEnvironment("LC_ALL", "C")
+		locale := "C"
+		if filepath.Base(name) == "df" && runtime.GOOS == "darwin" {
+			locale = "C.UTF-8"
+		}
+		command.Env = hostCommandEnvironment("LC_ALL", locale)
 	}
 	return command
 }

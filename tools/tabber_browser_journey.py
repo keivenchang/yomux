@@ -10,10 +10,21 @@ import subprocess
 import time
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from tests.browser_helpers.native_keyboard import native_document_end, native_logical_key, native_logical_text
 from tests.browser_helpers.native_pointer import cdp_drag_hold, cdp_release, click_visible_selector
+
+
+NUMERIC_VISIBLE_HISTORY_SOURCE = r"""
+function numericVisibleHistoryLines(term) {
+  if (!term) return [];
+  const buffer = term.buffer.active;
+  return Array.from({length:term.rows}, (_,index) =>
+    (buffer.getLine(buffer.viewportY + index)?.translateToString(true) || '').replace(/ +$/, ''))
+    .filter(line => /^[0-9]+$/.test(line));
+}
+"""
 
 
 def normal_journey_resource_snapshot(driver, tmux):
@@ -79,11 +90,60 @@ def normal_tabber_journey(driver, tmux, sessions, file_path=None):
     ''')
     assert empty['titlesHidden'] and not empty['dropPromptVisible'], empty
     cold_open_ms = []
-    for session in sessions[:2]:
-        cold_start = time.monotonic()
-        select_row(session)
-        wait.until(lambda browser: browser.execute_script("return tabberNormalSelections.length === 1 && tabberNormalSelections[0] === arguments[0] && terminals.get(arguments[0])?.socket?.readyState === 1 && document.querySelector('#panel-' + arguments[0] + ' .xterm') !== null", session))
-        cold_open_ms.append((time.monotonic() - cold_start) * 1000)
+    driver.execute_script("""
+      window.__normalColdClickEvents = [];
+      window.__normalColdClickListener = event => {
+        const row = event.target?.closest?.('.file-tree-row');
+        window.__normalColdClickEvents.push({type:event.type, trusted:event.isTrusted,
+          target:event.target?.className || '', session:row?.dataset.tabberSession,
+          window:row?.dataset.tabberWindow, x:event.clientX, y:event.clientY,
+          suppressed:dockviewTabContentInteractionSuppressed(),
+          selections:[...tabberNormalSelections]});
+        if (window.__normalColdClickEvents.length > 8) window.__normalColdClickEvents.shift();
+      };
+      document.addEventListener('pointerdown', window.__normalColdClickListener, true);
+      document.addEventListener('click', window.__normalColdClickListener, true);
+    """)
+    try:
+        for session in sessions[:2]:
+            cold_start = time.monotonic()
+            try:
+                select_row(session)
+                wait.until(lambda browser: browser.execute_script("return tabberNormalSelections.length === 1 && tabberNormalSelections[0] === arguments[0] && terminals.get(arguments[0])?.socket?.readyState === 1 && document.querySelector('#panel-' + arguments[0] + ' .xterm') !== null", session))
+            except TimeoutException:
+                state = driver.execute_script("""
+                  const session = arguments[0], terminal = terminals.get(session);
+                  const panel = document.getElementById('panel-' + session);
+                  const connection = terminalConnectionStateNode(session);
+                  return {requested:session, selections:[...tabberNormalSelections], mode:tabberMode,
+                    modeRevision:tabberModeRevision, activationRevision:tabberNormalPointerPreviewState.activationRevision,
+                    layout:layoutSlotsSignature(layoutSlots), activeItems:activePaneItems(),
+                    layoutGeneration:runtimeState.layoutMutationSnapshot(),
+                    suppressed:dockviewTabContentInteractionSuppressed(),
+                    rows:[...document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="normal"]')]
+                      .filter(row => row.dataset.tabberSession === session).map(row => ({session:row.dataset.tabberSession,
+                        window:row.dataset.tabberWindow, paneItem:row.dataset.tabberPaneItem,
+                        classes:row.className, text:row.textContent, visible:Boolean(row.getClientRects().length)})),
+                    terminal:terminal ? {socket:terminal.socket?.readyState, socketUrl:terminal.socket?.url,
+                      containerConnected:terminal.container?.isConnected, boundToPanel:terminal.container === panel,
+                      manualClose:terminal.manualClose, reconnectAttempt:terminal.reconnectAttempt,
+                      reconnectPending:Boolean(terminal.reconnectTimer), outputSeen:terminal.terminalOutputSeen} : null,
+                    panelConnected:Boolean(panel?.isConnected), xtermPresent:Boolean(panel?.querySelector('.xterm')),
+                    startupPending:[...terminalStartupPromises.keys()],
+                    connection:connection ? {state:connection.dataset.terminalConnectionState, text:connection.textContent} : null,
+                    activeElement:document.activeElement?.className || '', focusedTerminal, focusedPanelItem,
+                    clickEvents:window.__normalColdClickEvents,
+                    status:document.getElementById('status')?.textContent || '', lastError:window.lastError || ''};
+                """, session)
+                print('Go Normal cold-open diagnostic: ' + json.dumps(state, sort_keys=True), flush=True)
+                raise
+            cold_open_ms.append((time.monotonic() - cold_start) * 1000)
+    finally:
+        driver.execute_script("""
+          document.removeEventListener('pointerdown', window.__normalColdClickListener, true);
+          document.removeEventListener('click', window.__normalColdClickListener, true);
+          delete window.__normalColdClickListener;
+        """)
     selected([sessions[1]])
     assert driver.execute_script('return paneItems(layoutSlots).filter(isTmuxSession).join(",")') == sessions[1]
     select_row(sessions[1])
@@ -101,7 +161,7 @@ def normal_tabber_journey(driver, tmux, sessions, file_path=None):
     wait.until(lambda browser: browser.execute_script("return document.querySelector('#panel-__tabber__ .file-tree-row[data-tabber-session=\"' + CSS.escape(arguments[0]) + '\"] .file-tree-date')?.textContent.trim().endsWith('ago')", retained))
     driver.execute_script("window.__retainedTerminal = terminals.get(arguments[0]);", retained)
     draft = "printf 'retained-draft-ok\\n'"
-    driver.find_element('css selector', f'#panel-{retained} .xterm-helper-textarea').send_keys(draft)
+    native_logical_text(driver, draft)
     select_row(sessions[2])
     selected([sessions[2]])
     assert driver.execute_script("return terminals.get(arguments[0]) === window.__retainedTerminal", retained)
@@ -120,7 +180,7 @@ def normal_tabber_journey(driver, tmux, sessions, file_path=None):
         focus = driver.execute_script('return {focusedTerminal, focusedPanelItem, activeElement: document.activeElement?.className || ""};')
         print('Go Normal retained draft diagnostic: ' + json.dumps({'focus': focus, 'capture': capture}, sort_keys=True))
         raise
-    driver.find_element('css selector', f'#panel-{retained} .xterm-helper-textarea').send_keys(Keys.ENTER)
+    native_logical_key(driver, 'Enter')
     wait.until(lambda browser: any(line.strip() == 'retained-draft-ok' for line in subprocess.check_output((*tmux, 'capture-pane', '-p', '-J', '-t', '=' + retained + ':')).decode().splitlines()))
     driver.execute_cdp_cmd("Performance.enable", {})
     print('Go Normal resources before: ' + json.dumps(normal_journey_resource_snapshot(driver, tmux), sort_keys=True))
@@ -227,15 +287,15 @@ def normal_tabber_journey(driver, tmux, sessions, file_path=None):
         });
       });
     """, retained)
-    textarea = driver.find_element('css selector', f'#panel-{retained} .xterm-helper-textarea')
+    wait.until(lambda browser: browser.execute_script("return document.activeElement === terminals.get(arguments[0])?.term?.textarea", retained))
     for index in range(20):
-        textarea.send_keys('z')
+        native_logical_key(driver, 'z')
         wait.until(lambda browser: browser.execute_script('return window.__echoTimings.length >= arguments[0]', index + 1))
     echo = sorted(driver.execute_script('window.__normalEchoSubscription.dispose(); return window.__echoTimings'))
     metrics['echo_p95_ms'] = echo[math.ceil(len(echo) * .95) - 1]
     captured = subprocess.check_output((*tmux, 'capture-pane', '-p', '-J', '-t', '=' + retained + ':')).decode()
     assert 'z' * 20 in captured, captured
-    textarea.send_keys(Keys.CONTROL, 'u')
+    native_logical_key(driver, 'u', ['ctrl'])
     # Close fixture startup tips through their normal UI before admitting a drag.
     for close in driver.find_elements("css selector", "[data-toast-close]"):
         if close.is_displayed():
@@ -283,9 +343,9 @@ def normal_tabber_journey(driver, tmux, sessions, file_path=None):
     select_row(retained)
     selected([retained])
     assert driver.execute_script("return terminals.get(arguments[0]) === window.__retainedTerminal", retained)
-    retained_field = driver.find_element('css selector', f'#panel-{retained} .xterm-helper-textarea')
-    retained_field.send_keys(Keys.CONTROL, 'u')
-    retained_field.send_keys("seq 1 150", Keys.ENTER)
+    wait.until(lambda browser: browser.execute_script("return document.activeElement === terminals.get(arguments[0])?.term?.textarea", retained))
+    native_logical_key(driver, 'u', ['ctrl'])
+    native_logical_text(driver, "seq 1 150\n")
     wait.until(lambda browser: int(subprocess.check_output((*tmux, 'display-message', '-p', '-t', '=' + retained + ':', '#{history_size}')).decode().strip() or '0') > 100)
     subprocess.run((*tmux, 'copy-mode', '-t', '=' + retained + ':'), check=True)
     subprocess.run((*tmux, 'send-keys', '-X', '-t', '=' + retained + ':', 'page-up'), check=True)
@@ -293,23 +353,63 @@ def normal_tabber_journey(driver, tmux, sessions, file_path=None):
         return subprocess.check_output((*tmux, 'display-message', '-p', '-t', '=' + retained + ':', '#{scroll_position}')).decode().strip()
     wait.until(lambda browser: int(scroll_position() or '0') > 0)
     wait.until(lambda browser: browser.execute_script("const term=terminals.get(arguments[0]).term; return Array.from({length:term.rows},(_,i)=>term.buffer.active.getLine(term.buffer.active.viewportY+i)?.translateToString(true)||'').some(line=>line.includes('['))", retained))
-    viewport = driver.execute_script("""
+    viewport = driver.execute_script(NUMERIC_VISIBLE_HISTORY_SOURCE + """
       const term = terminals.get(arguments[0]).term;
-      const lines = Array.from({length: term.rows}, (_, index) => term.buffer.active.getLine(term.buffer.active.viewportY + index)?.translateToString(true) || '');
-      return {cols: term.cols, rows: term.rows, anchor: lines.find(line => /^\\d+$/.test(line.trim()))};
+      return {cols: term.cols, rows: term.rows, anchor: numericVisibleHistoryLines(term)[0]};
     """, retained)
     assert viewport['anchor'], viewport
     # Hiding and reopening a terminal preserves the visible history and identity.
-    select_row(sessions[2])
-    selected([sessions[2]])
-    select_row(retained)
-    selected([retained])
-    wait.until(lambda browser: browser.execute_script("const term=terminals.get(arguments[0]).term; return Array.from({length:term.rows},(_,i)=>term.buffer.active.getLine(term.buffer.active.viewportY+i)?.translateToString(true)||'').includes(arguments[1]);", retained, viewport['anchor']))
-    assert driver.execute_script("""
-      const term = terminals.get(arguments[0]).term;
-      const lines = Array.from({length: term.rows}, (_, index) => term.buffer.active.getLine(term.buffer.active.viewportY + index)?.translateToString(true) || '');
-      return terminals.get(arguments[0]) === window.__retainedTerminal && lines.includes(arguments[1]);
+    history_snapshot_script = NUMERIC_VISIBLE_HISTORY_SOURCE + """
+      const item = terminals.get(arguments[0]), term = item?.term, buffer = term?.buffer.active;
+      const lines = term ? Array.from({length:term.rows}, (_,index) => buffer.getLine(buffer.viewportY+index)?.translateToString(true)||'') : [];
+      return {identity:item === window.__retainedTerminal, anchorPresent:numericVisibleHistoryLines(term).includes(arguments[1]),
+        anchor:arguments[1], lines, cols:term?.cols, rows:term?.rows, viewportY:buffer?.viewportY,
+        baseY:buffer?.baseY, cursorY:buffer?.cursorY, length:buffer?.length,
+        connected:item?.container?.isConnected, pendingWrites:item?.pendingTerminalWrites,
+        socket:item?.socket?.readyState, selections:[...tabberNormalSelections],
+        layout:layoutSlotsSignature(layoutSlots), layoutGeneration:runtimeState.layoutMutationSnapshot(),
+        events:window.__normalHistoryTrace?.events || []};
+    """
+    driver.execute_script(NUMERIC_VISIBLE_HISTORY_SOURCE + """
+      const session=arguments[0], anchor=arguments[1], term=terminals.get(session).term;
+      const trace=window.__normalHistoryTrace={events:[], subscriptions:[]};
+      const record=event => {
+        const current=terminals.get(session), view=current?.term, buffer=view?.buffer.active;
+        trace.events.push({event, at:performance.now(), identity:current === window.__retainedTerminal,
+          anchorPresent:numericVisibleHistoryLines(view).includes(anchor), cols:view?.cols, rows:view?.rows,
+          viewportY:buffer?.viewportY, baseY:buffer?.baseY, pendingWrites:current?.pendingTerminalWrites});
+        if (trace.events.length > 16) trace.events.shift();
+      };
+      trace.subscriptions.push(term.onScroll(()=>record('scroll')), term.onResize(()=>record('resize')),
+        term.onWriteParsed(()=>record('write')));
     """, retained, viewport['anchor'])
+    before_history = driver.execute_script(history_snapshot_script, retained, viewport['anchor'])
+    visible_history = None
+    try:
+        select_row(sessions[2])
+        selected([sessions[2]])
+        select_row(retained)
+        selected([retained])
+
+        def history_anchor_visible(browser):
+            state = browser.execute_script(history_snapshot_script, retained, viewport['anchor'])
+            return state if state['anchorPresent'] else False
+
+        visible_history = wait.until(history_anchor_visible)
+        final_history = driver.execute_script(history_snapshot_script, retained, viewport['anchor'])
+        assert final_history['identity'] and final_history['anchorPresent'], final_history
+    except (AssertionError, TimeoutException):
+        failed_history = driver.execute_script(history_snapshot_script, retained, viewport['anchor'])
+        print('Go Normal retained history diagnostic: ' + json.dumps({
+            'before': before_history, 'anchorWait': visible_history, 'failure': failed_history,
+            'tmuxScrollPosition': scroll_position(),
+        }, sort_keys=True), flush=True)
+        raise
+    finally:
+        driver.execute_script("""
+          window.__normalHistoryTrace.subscriptions.forEach(subscription=>subscription.dispose());
+          delete window.__normalHistoryTrace;
+        """)
     assert int(scroll_position() or '0') > 0
     subprocess.run((*tmux, 'send-keys', '-X', '-t', '=' + retained + ':', 'cancel'), check=True)
     if file_path:
@@ -321,9 +421,8 @@ def normal_tabber_journey(driver, tmux, sessions, file_path=None):
         wait.until(lambda browser: browser.execute_script('return panelNodes.get(arguments[0])?._cmView && itemInLayout(arguments[0]);', result))
         field = driver.execute_script('return panelNodes.get(arguments[0])._cmView.contentDOM;', result)
         field.click()
-        field.send_keys(Keys.CONTROL, Keys.END)
-        for character in '\n// normal retained draft':
-            field.send_keys(character)
+        native_document_end(driver)
+        native_logical_text(driver, '\n// normal retained draft')
         state = driver.execute_script('''
           const panel=panelNodes.get(arguments[0]); window.__normalFilePanel=panel; window.__normalFileView=panel._cmView;
           return {text:panel._cmView.state.doc.toString(), path:arguments[1]};
@@ -384,10 +483,12 @@ def normal_multiwindow_journey(driver, tmux, session):
       apiFetchJson = async (...args) => {
         try {
           const result = await window.__tabberMultiOriginalFetchJson(...args);
-          if (String(args[0]).includes('/api/tabber-')) window.__tabberMultiRequests.push({url:String(args[0]), ok:true, result});
+          if (String(args[0]).includes('/api/tabber-')) window.__tabberMultiRequests.push({url:String(args[0]), ok:true, result,
+            descriptionBody: String(args[0]).includes('/api/tabber-description') ? args[1]?.body : undefined});
           return result;
         } catch (error) {
-          if (String(args[0]).includes('/api/tabber-')) window.__tabberMultiRequests.push({url:String(args[0]), ok:false, error:String(error?.stack || error)});
+          if (String(args[0]).includes('/api/tabber-')) window.__tabberMultiRequests.push({url:String(args[0]), ok:false, error:String(error?.stack || error),
+            descriptionBody: String(args[0]).includes('/api/tabber-description') ? args[1]?.body : undefined});
           throw error;
         }
       };
@@ -481,7 +582,7 @@ def normal_multiwindow_journey(driver, tmux, session):
     select_window(0)
     wait.until(lambda browser: browser.execute_script("return tabberNormalSelections[0] === arguments[0] && tabberViewDescriptorForSession(arguments[0])?.windowIndex === 0 && terminals.get(arguments[0])?.socket?.readyState === 1", first_item))
     wait.until(lambda browser: browser.execute_script('return document.activeElement === terminals.get(arguments[0])?.term?.textarea', first_item))
-    driver.find_element('css selector', f'#panel-{first_item} .xterm-helper-textarea').send_keys("printf 'window-zero-input-ok\\n'", Keys.ENTER)
+    native_logical_text(driver, "printf 'window-zero-input-ok\\n'\n")
     wait.until(lambda browser: any('window-zero-input-ok' in line for line in subprocess.check_output((*tmux, 'capture-pane', '-p', '-J', '-t', f'={session}:0')).decode().splitlines()))
     # A cached per-window alias can be left on another linked window. Re-selecting its
     # Tabber row must restore the stable window ID before xterm input is routed.
@@ -493,7 +594,7 @@ def normal_multiwindow_journey(driver, tmux, session):
     wait.until(lambda browser: browser.execute_script("return document.activeElement === terminals.get(arguments[0])?.term?.textarea", second_item))
     selected_window_id = subprocess.check_output((*tmux, 'display-message', '-p', '-t', f'={second_item}:', '#{window_id}')).decode().strip()
     assert selected_window_id == second_window_id, {'selected_alias_window_id': selected_window_id, 'expected_window_one_id': second_window_id}
-    driver.find_element('css selector', f'#panel-{second_item} .xterm-helper-textarea').send_keys("printf 'window-one-bash-input-ok\\n'", Keys.ENTER)
+    native_logical_text(driver, "printf 'window-one-bash-input-ok\\n'\n")
     wait.until(lambda browser: any('window-one-bash-input-ok' in line for line in subprocess.check_output((*tmux, 'capture-pane', '-p', '-J', '-t', f'={session}:1')).decode().splitlines()))
     driver.execute_script("document.querySelector('#panel-__tabber__ .file-explorer-changes-panel').dispatchEvent(new KeyboardEvent('keydown', {key: arguments[0], bubbles: true, cancelable: true}));", session)
     wait.until(lambda browser: browser.execute_script('return tabberNormalSelections.length === 0'))
@@ -506,11 +607,42 @@ def normal_multiwindow_journey(driver, tmux, session):
     menu_button.click()
     dialog = wait.until(EC.visibility_of_element_located(('css selector', '.session-rename-dialog')))
     value = dialog.find_element('css selector', '.session-rename-input')
+    # The dialog's deferred opening callback also selects the input. Let it
+    # finish before our click can make focus appear ready ahead of that callback.
+    wait.until(lambda browser: browser.execute_script('return arguments[0].isConnected && document.activeElement === arguments[0]', value))
     value.clear()
-    value.send_keys('Window one retained description')
+    value.click()
+    native_logical_text(driver, 'Window one retained description')
+    typed_description = driver.execute_script('''
+      const input = arguments[0];
+      return {value: input.value, focused: document.activeElement === input, connected: input.isConnected,
+        selectionStart: input.selectionStart, selectionEnd: input.selectionEnd,
+        modelDescription: tabberWindowDescription(arguments[1], 1)};
+    ''', value, session)
+    print('Go Normal description typed: ' + json.dumps(typed_description, sort_keys=True), flush=True)
     dialog.find_element('css selector', '.session-rename-submit').click()
-    wait.until(lambda browser: not browser.find_elements('css selector', '.session-rename-dialog'))
-    wait.until(lambda browser: browser.execute_script("return [...document.querySelectorAll(arguments[0])].find(row => row.dataset.tabberWindow === '1')?.querySelector('.tabber-normal-description')?.textContent.trim() === 'Window one retained description'", selector))
+    try:
+        wait.until(lambda browser: not browser.find_elements('css selector', '.session-rename-dialog'))
+        wait.until(lambda browser: browser.execute_script("return [...document.querySelectorAll(arguments[0])].find(row => row.dataset.tabberWindow === '1')?.querySelector('.tabber-normal-description')?.textContent.trim() === 'Window one retained description'", selector))
+    except TimeoutException:
+        state = driver.execute_script('''
+          const input = document.querySelector('.session-rename-input');
+          return {requests: window.__tabberMultiRequests,
+            metadata: transcriptMetadataState.payload.sessions?.[arguments[0]],
+            metadataEpoch: transcriptMetadataState.epoch,
+            mutationGeneration: transcriptMetadataState.mutationGeneration,
+            selections: [...tabberNormalSelections], mode: tabberMode,
+            rows: [...document.querySelectorAll(arguments[1])].map(row => ({window: row.dataset.tabberWindow,
+              windowId: row.dataset.tabberWindowId, paneItem: row.dataset.tabberPaneItem,
+              description: row.querySelector('.tabber-normal-description')?.textContent,
+              connected: row.isConnected, visible: Boolean(row.getClientRects().length), classes: row.className})),
+            input: input ? {value: input.value, focused: document.activeElement === input,
+              error: document.querySelector('.session-rename-error')?.textContent} : null,
+            activeElement: document.activeElement?.className || '',
+            status: document.getElementById('status')?.textContent || ''};
+        ''', session, selector)
+        print('Go Normal description transition diagnostic: ' + json.dumps({'typed': typed_description, 'state': state}, sort_keys=True), flush=True)
+        raise
     driver.refresh()
     wait.until(lambda browser: browser.execute_script("return typeof apiFetchJson === 'function' && [...document.querySelectorAll(arguments[0])].some(row => row.dataset.tabberWindow === '1' && row.querySelector('.tabber-normal-description')?.textContent.trim() === 'Window one retained description')", selector))
     print('Go Normal multi-window: ' + json.dumps({'session': session, 'window_zero_view': first_item, 'window_one_view': second_item, 'window_labels': window_labels, 'description_persisted': True, 'codex_window_zero_input': True, 'bash_window_one_input': True}, sort_keys=True))

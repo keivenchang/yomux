@@ -1864,6 +1864,7 @@ function reusableFileEditorDiffPreviewItem(path) {
     fileEditorViewState.delete(oldItem);
     fileEditorDiffExpandOverrides.delete(oldItem);
     tabLastActivatedAt.delete(oldItem);
+    tabActivationOrder.delete(oldItem);
     removePanelForItem(oldItem);
     if (!openFilePathHasOwner(oldPath) && !oldState?.dirty) deleteFileState(oldPath);
   }
@@ -1891,6 +1892,7 @@ function removeFilePanelOwner(path, item) {
   fileEditorViewState.delete(item);
   fileEditorDiffExpandOverrides.delete(item);
   tabLastActivatedAt.delete(item);
+  tabActivationOrder.delete(item);
   if (!openFilePathHasOwner(path)) state?.ownerSessions.clear();
 }
 
@@ -2653,6 +2655,7 @@ function releaseFileEditorItem(path, item) {
   fileEditorViewState.delete(item);
   fileEditorDiffExpandOverrides.delete(item);
   tabLastActivatedAt.delete(item);
+  tabActivationOrder.delete(item);
   removePanelForItem(item);
   if (!openFilePathHasOwner(path) && !fileStateFor(path)?.dirty) deleteFileState(path);
   syncFileLayoutItems();
@@ -3399,7 +3402,9 @@ async function reloadOpenFileFromDisk(path, options = {}) {
     const confirmed = window.confirm(t('dialog.externalMessage', {name: basenameOf(path)}));
     if (!confirmed) return false;
   }
-  return replaceOpenFileStateFromDisk(path, null, options);
+  const result = await replaceOpenFileStateFromDisk(path, null, options);
+  if (options.returnState === true ? result?.result : result) await refreshOpenMarkdownImages(path);
+  return result;
 }
 
 function refreshOpenFileWriteAccess(path, state, metadata) {
@@ -4137,6 +4142,7 @@ function codeMirrorLanguageExtension(api, path) {
   if (language === 'yaml') return safeCodeMirrorExtension(language, () => api.yaml?.());
   if (language === 'shell' && api.shell) return safeCodeMirrorExtension(language, () => api.StreamLanguage?.define(api.shell));
   if (language === 'toml' && api.toml) return safeCodeMirrorExtension(language, () => api.StreamLanguage?.define(api.toml));
+  if (language === 'stex' && api.stex) return safeCodeMirrorExtension(language, () => api.StreamLanguage?.define(api.stex));
   return [];
 }
 
@@ -5163,7 +5169,7 @@ function renameOpenFilePath(oldPath, newPath) {
   if (sharedImageViewerPath === oldPath) registerImageViewerLayoutItem(newPath);
   for (const [oldKey, newKey] of replacements) {
     if (state.editorTabItems.delete(oldKey)) state.editorTabItems.add(newKey);
-    for (const map of [state.viewMode, state.previewZoom, fileEditorViewState, fileEditorDiffExpandOverrides, tabLastActivatedAt]) {
+    for (const map of [state.viewMode, state.previewZoom, fileEditorViewState, fileEditorDiffExpandOverrides, tabLastActivatedAt, tabActivationOrder]) {
       if (!map.has(oldKey)) continue;
       map.set(newKey, map.get(oldKey));
       map.delete(oldKey);

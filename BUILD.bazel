@@ -35,11 +35,13 @@ alias(
 filegroup(
     name = "runtime_assets",
     srcs = [
+        "assets/runtime/browser-assets.json",
         "assets/runtime/chat-question-rules.json",
         "assets/runtime/internal_model_pricing.json",
         "assets/runtime/locale-registry.json",
         "assets/runtime/model_pricing.json",
         "assets/runtime/model_pricing.schema.json",
+        "assets/runtime/pdfjs-assets.json",
         "assets/runtime/settings-schema.json",
     ],
     visibility = ["//visibility:public"],
@@ -52,6 +54,7 @@ filegroup(
         "assets/runtime/internal_rates_2026-09-10.json",
         "version.yaml",
         ":runtime_assets",
+        "//cmd/yomux-go:runtime_limits.json",
     ] + glob(["yomux_lib/**/*.py"]),
 )
 
@@ -82,6 +85,7 @@ filegroup(
     srcs = [
         "tools/auto_approve_tmux.py",
         "tools/bazel_go_browser_e2e.py",
+        "tools/browser_runtime.py",
         "tools/docker_image.py",
         "tools/generate_go_version.py",
         "tools/go_binary.py",
@@ -118,6 +122,7 @@ filegroup(
     srcs = [
         "version.yaml",
         ":runtime_assets",
+        "//cmd/yomux-go:runtime_limits.json",
     ] + glob(["yomux_lib/**/*.py"]),
 )
 
@@ -149,7 +154,6 @@ filegroup(
         ":go_test_python_support",
         ":go_test_tool_inputs",
     ] + glob([
-        "static/locales/*.json",
         "yomux_lib/yoagent/builtin_context/*.md",
         "yomux_lib/yoagent/builtin_skills/*.yaml",
     ]),
@@ -159,6 +163,7 @@ runtime_tree(
     name = "go_cmd_test_support",
     testonly = True,
     srcs = [":go_cmd_test_support_inputs"],
+    frontend = ":frontend_assets",
     runtime_groups = ["git_tmux"],
     visibility = ["//visibility:public"],
 )
@@ -202,7 +207,10 @@ runtime_tree(
 
 filegroup(
     name = "frontend_source_inputs",
-    srcs = ["//internal/finder:search_rank_weights.json"] + glob(["static_src/**"]),
+    srcs = [
+        "node_modules/.yomux/emoji_data.js",
+        "//internal/finder:search_rank_weights.json",
+    ] + glob(["static_src/**"]),
 )
 
 filegroup(
@@ -275,6 +283,7 @@ filegroup(
         "tests/helpers/browser_boot.py",
         "tests/helpers/fixture_content_root.py",
         "tests/helpers/fixture_tools.py",
+        "tests/helpers/pdf_fixtures.py",
         "tests/helpers/route_contract.py",
         "tests/helpers/terminal_url_fixtures.py",
         "tests/isolated_dev_server.py",
@@ -313,6 +322,7 @@ filegroup(
     testonly = True,
     srcs = [
         "tests/browser_helpers/__init__.py",
+        "tests/browser_helpers/native_keyboard.py",
         "tests/browser_helpers/native_pointer.py",
         "tests/browser_helpers/webdriver_lease.py",
         ":frontend_runtime",
@@ -579,9 +589,11 @@ sh_test(
     ],
     data = [
         "tests/browser_helpers/__init__.py",
+        "tests/browser_helpers/native_keyboard.py",
         "tests/browser_helpers/webdriver_lease.py",
         "tools/bazel_go_browser_e2e.py",
         "tools/bazel_test_common.sh",
+        "tools/browser_runtime.py",
         "tools/product_environment.sh",
         "tools/tabber_browser_journey.py",
         ":go_browser_runtime",
@@ -677,9 +689,11 @@ filegroup(
     name = "native_execution_support",
     testonly = True,
     srcs = [
+        "assets/runtime/browser-assets.json",
         "tests/browser_helpers/__init__.py",
         "tests/browser_helpers/webdriver_lease.py",
         "tools/bazel_test_entrypoint.sh",
+        "tools/browser_runtime.py",
         "tools/fixture_storage.py",
         "tools/instance_isolation.py",
         "tools/native_process_scope.py",

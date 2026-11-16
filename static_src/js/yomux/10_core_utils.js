@@ -4420,8 +4420,19 @@ function setFocusedTerminalMeasured(session, options = {}) {
   }
 }
 
-function clearFocusedTerminal(session) {
+function terminalContainerOwnsNativeFocus(session, container) {
+  return Boolean(container && terminals.get(session)?.container === container
+    && terminalPaneIsActive(session) && container.contains(document.activeElement));
+}
+
+function clearFocusedTerminal(session, {blurredContainer = null} = {}) {
   if (focusedTerminal !== session) return;
+  if (blurredContainer) {
+    const liveContainer = terminals.get(session)?.container;
+    if (liveContainer && liveContainer !== blurredContainer) return;
+    // A native focusout can finish bubbling after another owner has refocused the live input.
+    if (terminalContainerOwnsNativeFocus(session, blurredContainer)) return;
+  }
   focusedTerminal = null;
   focusedPanelItem = null;
   updateFocusOnlyChrome();
@@ -5763,7 +5774,9 @@ function terminalRowIsHangingUrlContinuation(buffer, index, cols, allowsRepeated
       if (!previous) return false;
       const previousText = previous.text;
       const continuationToken = terminalUrlContinuationToken(shape.text);
-      const closedPath = /[)\]}]$/.test(continuationToken) && /[/.]/.test(continuationToken);
+      // An extension fragment can follow a dot on the preceding physical row.
+      const closedPath = /[)\]}]$/.test(continuationToken)
+        && (/[/.]/.test(continuationToken) || /\.$/.test(previousText));
       const suffix = shape.text.slice(continuationToken.length);
       // Codex can append the full Markdown target after a bare label continuation. Its exact
       // repetition establishes the boundary without treating arbitrary following words as URL text.
@@ -8250,7 +8263,10 @@ function installTerminalContextMenu(session, term, container) {
   const terminalPointReference = event => terminalReferenceAtClientPoint(term, container, event?.clientX, event?.clientY);
   const nativeContextMenuForEvent = event => preservesNativeContextMenu() && !terminalPointReference(event);
   container.addEventListener('pointerdown', event => {
-    if (preservesNativeContextMenu() && !terminalPointReference(event)) return;
+    if (nativeContextMenuForEvent(event)) return;
+    // xterm's scrollbar scrolls on secondary pointerdown before mousedown can
+    // preserve the context target. Leave primary presses with the scrollbar.
+    if (event.button === 2) event.stopPropagation();
     if (event.pointerType === 'touch') void primeTerminalClipboardAvailability();
   }, {capture: true, passive: true});
   container.addEventListener('mousedown', event => {
@@ -8462,8 +8478,7 @@ function appendTabActionCommands(menu, item, options = {}) {
     for (const [index, command] of viewItems.entries()) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {
         disabled: command.disabled,
-        checked: command.checked,
-        checkedIconHtml: fileContextMenuIcon(viewIcons[index]),
+        iconHtml: fileContextMenuIcon(viewIcons[index]),
         title: command.detail || '',
       });
     }

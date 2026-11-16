@@ -230,7 +230,7 @@ def validate_arguments(url: str, duration: int, expected_head: str, expected_bun
         raise ValueError("--expected-head must be a lowercase full 40-character SHA")
     if len(expected_bundle_sha256) != 64 or any(char not in "0123456789abcdef" for char in expected_bundle_sha256):
         raise ValueError("--expected-bundle-sha256 must be a lowercase SHA256 hex digest")
-    if not output.expanduser().resolve(strict=False).is_relative_to(Path("/tmp")):
+    if not output.expanduser().resolve(strict=False).is_relative_to(Path("/tmp").resolve()):
         raise ValueError("--output must be under /tmp")
     if expected_cwd is not None and not expected_cwd.startswith("/"):
         raise ValueError("--expected-cwd must be an absolute path")

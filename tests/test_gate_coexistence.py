@@ -689,13 +689,14 @@ def test_o6_exact_member_barrier_signals_pidfd_not_reused_numeric_pid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     signals: list[tuple[int, int]] = []
-    monkeypatch.setattr(gate_harness_module.os, "pidfd_open", lambda pid: pid + 1000)
+    monkeypatch.setattr(gate_harness_module.os, "pidfd_open", lambda pid: pid + 1000, raising=False)
     monkeypatch.setattr(gate_harness_module.os, "close", lambda _descriptor: None)
     monkeypatch.setattr(gate_harness_module, "process_start_identity", lambda pid: f"proc:{pid}")
     monkeypatch.setattr(
         gate_harness_module.signal,
         "pidfd_send_signal",
         lambda descriptor, signum: signals.append((descriptor, signum)),
+        raising=False,
     )
     monkeypatch.setattr(
         gate_harness_module.os,
@@ -713,13 +714,14 @@ def test_o6_exact_member_barrier_signals_pidfd_not_reused_numeric_pid(
 def test_o6_exact_member_exit_after_pidfd_resolution_is_already_retired(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(gate_harness_module.os, "pidfd_open", lambda pid: pid + 1000)
+    monkeypatch.setattr(gate_harness_module.os, "pidfd_open", lambda pid: pid + 1000, raising=False)
     monkeypatch.setattr(gate_harness_module.os, "close", lambda _descriptor: None)
     monkeypatch.setattr(gate_harness_module, "process_start_identity", lambda _pid: "proc:43210")
     monkeypatch.setattr(
         gate_harness_module.signal,
         "pidfd_send_signal",
         lambda _descriptor, _signum: (_ for _ in ()).throw(ProcessLookupError()),
+        raising=False,
     )
 
     with FixtureMemberExitBarrier(((43210, "proc:43210"),)) as barrier:
@@ -741,7 +743,7 @@ def test_o6_exact_member_barrier_fails_closed_on_darwin_kqueue_without_numeric_s
         def close(self) -> None:
             events.append(("closed", None))
 
-    monkeypatch.delattr(gate_harness_module.os, "pidfd_open")
+    monkeypatch.delattr(gate_harness_module.os, "pidfd_open", raising=False)
     monkeypatch.setattr(gate_harness_module.select, "kqueue", Queue, raising=False)
     monkeypatch.setattr(gate_harness_module.select, "kevent", lambda pid, **_kwargs: ("event", pid), raising=False)
     monkeypatch.setattr(gate_harness_module.select, "KQ_FILTER_PROC", 1, raising=False)
@@ -777,13 +779,14 @@ def test_o6_exact_member_barrier_reports_partial_pidfd_open_failure_without_nume
             raise PermissionError(pid)
         return pid + 1000
 
-    monkeypatch.setattr(gate_harness_module.os, "pidfd_open", pidfd_open)
+    monkeypatch.setattr(gate_harness_module.os, "pidfd_open", pidfd_open, raising=False)
     monkeypatch.setattr(gate_harness_module.os, "close", lambda _descriptor: None)
     monkeypatch.setattr(gate_harness_module, "process_start_identity", lambda pid: f"proc:{pid}")
     monkeypatch.setattr(
         gate_harness_module.signal,
         "pidfd_send_signal",
         lambda descriptor, signum: signals.append((descriptor, signum)),
+        raising=False,
     )
     monkeypatch.setattr(
         gate_harness_module.os,

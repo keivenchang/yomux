@@ -22,7 +22,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from yomux_lib.local_services.runtime import redact_local_service_text
-from tools.bazel_execution_contract import execution_event
+from tools.bazel_execution_contract import execution_event, resolve_execution
 from tools.product_environment import product_env, product_env_name, product_env_names
 from tools.instance_isolation import normalize_yomux_environment
 
@@ -47,9 +47,7 @@ IMAGE_INPUT_FILES = (
     Path("package-lock.json"),
     Path("docker") / "agent-clients" / "package.json",
     Path("docker") / "agent-clients" / "package-lock.json",
-    Path("static/vendor/xterm.js"),
-    Path("static/vendor/xterm.css"),
-    Path("static/vendor/xterm-addon-unicode11.js"),
+    Path("assets/runtime/browser-assets.json"),
 )
 IMAGE_INPUT_DIRECTORIES = ()
 CONTAINER_MARKER_PATH = Path("/.dockerenv")
@@ -345,13 +343,16 @@ def running_inside_container() -> bool:
     return False
 
 
-def container_available(repo_root: Path = REPO_ROOT) -> tuple[bool, str]:
+def container_available(repo_root: Path = REPO_ROOT, *, execution=None) -> tuple[bool, str]:
     """Return whether tests can route into Docker and an explicit reason when not."""
 
     if running_inside_container():
         return False, "already running inside the test container"
-    if product_env('CHECK_CONTAINER', environ=os.environ) == "0":
-        return False, f"{product_env_name('CHECK_CONTAINER')}=0"
+    if execution is None:
+        override = product_env('CHECK_CONTAINER', environ=os.environ)
+        execution = {"0": "native", "1": "docker"}.get(override, "auto")
+    if resolve_execution(execution) in {"native", "qualified-native"}:
+        return False, "native execution selected"
     if not (repo_root / "docker" / "run-tests.sh").exists():
         return False, "docker/run-tests.sh is missing from this checkout"
     if shutil.which("docker") is None:

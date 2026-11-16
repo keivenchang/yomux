@@ -68,7 +68,6 @@ type server struct {
 	host                   string
 	port                   int
 	sessionFilesListener   string
-	dangerouslyYolo        bool
 	config                 string
 	httpMode               bool
 	tlsCertificate         string
@@ -110,6 +109,8 @@ type server struct {
 	instanceID                          string
 	launchIdentity                      map[string]string
 	updateJobMu                         sync.Mutex
+	texInstallMu                        work.ContextMutex
+	texCompileMu                        work.ContextMutex
 	updateJobPath                       string
 	statsPath                           string
 	statsNow                            func() time.Time
@@ -412,6 +413,7 @@ func (l *goLogRing) payload() map[string]any {
 
 type wsConn struct {
 	net.Conn
+	reader       *bufio.Reader
 	writeMu      sync.Mutex
 	writeTimeout time.Duration
 }
@@ -504,6 +506,9 @@ func (s *server) registerFilesystemRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/fs/git-history-stats-stream", s.protected(http.HandlerFunc(s.fsGitHistoryStatsStream)))
 	mux.Handle("/api/fs/git-commit", s.protected(http.HandlerFunc(s.fsGitCommit)))
 	mux.Handle("/api/fs/raw", s.protected(http.HandlerFunc(s.fsRaw)))
+	mux.Handle("/api/tex/compiler", s.protected(http.HandlerFunc(s.texCompilerStatus)))
+	mux.Handle("/api/tex/compiler/install", s.protected(http.HandlerFunc(s.texCompilerInstall)))
+	mux.Handle("/api/tex/preview", s.protected(http.HandlerFunc(s.texPreview)))
 	mux.Handle("/api/fs/search", s.protected(http.HandlerFunc(s.fsSearch)))
 	mux.Handle("/api/fs/search-stream", s.protected(http.HandlerFunc(s.fsSearch)))
 	mux.Handle("/api/fs/index-status", s.protected(http.HandlerFunc(s.fsIndexStatus)))
@@ -623,7 +628,6 @@ func main() {
 	httpMode := options.httpMode
 	certPath := options.certPath
 	keyPath := options.keyPath
-	dangerouslyYolo := options.dangerouslyYolo
 	searchIndexWorker := options.searchIndexWorker
 	searchIndexDB := options.searchIndexDB
 	showVersion := options.showVersion
@@ -649,7 +653,7 @@ func main() {
 	if *managedLaunch {
 		explicit := make(map[string]bool)
 		flag.Visit(func(value *flag.Flag) { explicit[value.Name] = true })
-		if err := nativeManagedDefaults(explicit, port, host, dangerouslyYolo); err != nil {
+		if err := nativeManagedDefaults(explicit, port, host); err != nil {
 			fatal(err.Error())
 		}
 	}
@@ -762,7 +766,7 @@ func main() {
 	// releasing here would let a replacement process race those final mutations.
 	defer func() { runtime.KeepAlive(configLease) }()
 	eventPath := filepath.Join(*configDir, "go-events.jsonl")
-	s := &server{root: rootPath, host: *host, port: *port, dangerouslyYolo: *dangerouslyYolo, config: *configDir, state: stateDir, httpMode: *httpMode, statsPath: *statsPath, pricing: pricing, children: make(map[*exec.Cmd]struct{}), processEntriesFn: processEntries, childProcessEntriesFn: descendantProcessEntries, startedAt: time.Now(), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), updates: newUpdateChecker(rootPath, version, nil), instanceID: fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()), launchIdentity: nativeLaunchIdentityEnvironment(), updateJobPath: filepath.Join(*configDir, "self-update-job.json"), finderJobs: newFinderJobScheduler(), finderBackgroundJobs: newFinderBackgroundJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler(), operationState:
+	s := &server{root: rootPath, host: *host, port: *port, config: *configDir, state: stateDir, httpMode: *httpMode, statsPath: *statsPath, pricing: pricing, children: make(map[*exec.Cmd]struct{}), processEntriesFn: processEntries, childProcessEntriesFn: descendantProcessEntries, startedAt: time.Now(), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), updates: newUpdateChecker(rootPath, version, nil), instanceID: fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()), launchIdentity: nativeLaunchIdentityEnvironment(), updateJobPath: filepath.Join(*configDir, "self-update-job.json"), finderJobs: newFinderJobScheduler(), finderBackgroundJobs: newFinderBackgroundJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler(), operationState:
 	// The Go server has no parent observer to retain lifecycle history. Keep the
 	// port-scoped ledger in the configured state directory so normal operator
 	// restarts expose measured restart/demand counters instead of zeros or an
@@ -910,6 +914,7 @@ func main() {
 	mux.HandleFunc("/logout", s.logout)
 	mux.HandleFunc("/api/auth-setup", s.authSetup)
 	mux.Handle("/api/ping", s.protected(http.HandlerFunc(s.ping)))
+	mux.Handle("/api/runtime/compatibility", s.protected(http.HandlerFunc(s.runtimeCompatibility)))
 	mux.Handle("/api/update-status", s.protected(http.HandlerFunc(s.updateStatus)))
 	mux.Handle("/api/self-update", s.protected(http.HandlerFunc(s.selfUpdate)))
 	mux.Handle("/api/self-update/status", s.protected(http.HandlerFunc(s.selfUpdateStatus)))
@@ -1042,6 +1047,9 @@ func main() {
 	defer stopSignals()
 	s.serverCancel = stopSignals
 	s.producerContext = shutdownContext
+	s.startBackgroundWork(func() {
+		runTabberDescriptionReconciler(shutdownContext, 60001*time.Millisecond, s.reconcileTabberDescriptionTargets)
+	})
 	s.startBackgroundWork(func() { s.runUpdateChecker(shutdownContext) })
 	if s.chat != nil {
 		s.capabilities.Set("pane.chat.v1", capabilities.Entry{Available: true})
@@ -1342,6 +1350,7 @@ func main() {
 	if *httpMode {
 		scheme = "http"
 	}
+	warnRuntimeInotifyLimits(os.Stderr, runtime.GOOS, os.ReadFile)
 	slog.Info("YOmux Go backend", "version", version, "backend", "go", "addr", addr, "scheme", scheme)
 	_, _ = s.events.publish("update_available", map[string]any{"available": false, "version": version, "bundle_revision": "go:" + version, "instance_id": s.instanceID})
 	serveErr := make(chan error, 1)
@@ -4476,7 +4485,7 @@ func (s *server) prepareEventRecord(body map[string]any) (map[string]any, int, m
 
 func tmuxReportsMissingSession(output []byte) bool {
 	diagnostic := strings.ToLower(string(output))
-	return strings.Contains(diagnostic, "can't find session:") || strings.Contains(diagnostic, "session not found")
+	return stats.TmuxNoServerError(output) || strings.Contains(diagnostic, "can't find session:") || strings.Contains(diagnostic, "session not found")
 }
 
 func utcEventTime() string { return time.Now().UTC().Format("2006-01-02T15:04:05Z") }
@@ -4826,8 +4835,9 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 		// activity product normally follows session-metadata, but a Go-only boot
 		// can receive activity first; carrying the same pane shape lets the client
 		// render one Tabber session row even when metadata is still unavailable.
-		"sessions": metadataSessions,
-		"errors":   activityErrors, "session_order": sessions, "session_scope": scope,
+		"sessions":          metadataSessions,
+		"metadata_identity": map[string]any{"epoch": s.metadataEpoch(), "generation": publishedGeneration},
+		"errors":            activityErrors, "session_order": sessions, "session_scope": scope,
 		"topology_generation": topology.generation, "renames": topology.renames,
 		"agent_window_snapshot_revision": projection.revision,
 		"agent_window_status_fresh":      projection.fresh,
@@ -4919,16 +4929,7 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 		agent = "claude"
 	}
 	terminal := strings.TrimSpace(r.URL.Query().Get("terminal"))
-	launchDangerously := s.dangerouslyYolo
-	if rawDangerously := r.URL.Query().Get("dangerously_yolo"); rawDangerously != "" {
-		launchDangerously = queryTrue(rawDangerously)
-	}
-	if launchDangerously && !s.dangerouslyYolo {
-		jsonResponse(w, http.StatusForbidden, map[string]any{
-			"ok": false, "agent": agent, "error": "full-access agent launches require YOmux --dangerously-yolo",
-		})
-		return
-	}
+	launchDangerously := queryTrue(r.URL.Query().Get("dangerously_yolo"))
 	command, err := goSessionLaunchCommand(agent, terminal, launchDangerously)
 	if err != nil {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"ok": false, "agent": agent, "terminal": terminal, "error": err.Error()})
@@ -5579,62 +5580,97 @@ func (s *server) configureTmuxSession(session string, contexts ...context.Contex
 	}
 }
 
-func (s *server) claimResizeAuthority(ctx context.Context, session, activeClient string, cols, rows int) {
-	if activeClient == "" || !s.supportsIgnoreSize(ctx) {
-		return
-	}
-	target := s.exactTarget(session)
-	format := "#{client_tty}\t#{client_session}\t#{client_width}\t#{client_height}\t#{window_id}"
-	out, err := s.tmuxCommandContext(ctx, "list-clients", "-F", format).Output()
+func (s *server) refreshTmuxClientScreen(ctx context.Context, session string) error {
+	const format = "#{client_tty}\t#{client_session}"
+	output, err := s.tmuxCommandContext(ctx, "list-clients", "-F", format).Output()
 	if err != nil {
-		return
+		return fmt.Errorf("tmux list-clients for redraw: %w", err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	activeWindow := ""
-	for _, line := range lines {
+	clients := make([]string, 0, 1)
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		fields := strings.Split(line, "\t")
-		if len(fields) == 5 && fields[0] == activeClient {
-			activeWindow = fields[4]
+		if len(fields) >= 2 && fields[0] != "" && fields[1] == session {
+			clients = append(clients, fields[0])
 		}
 	}
-	for _, line := range lines {
-		if ctx.Err() != nil {
-			return
-		}
-		fields := strings.Split(line, "\t")
-		if len(fields) < 4 || (fields[1] != session && (len(fields) != 5 || activeWindow == "" || fields[4] != activeWindow)) {
-			continue
-		}
-		client := fields[0]
-		width, _ := strconv.Atoi(fields[2])
-		height, _ := strconv.Atoi(fields[3])
-		if client == activeClient {
-			_ = s.tmuxCommandContext(ctx, "refresh-client", "-t", client, "-f", "!ignore-size").Run()
-		} else if width > cols || height > rows {
-			_ = s.tmuxCommandContext(ctx, "refresh-client", "-t", client, "-f", "ignore-size").Run()
+	if len(clients) == 0 {
+		return fmt.Errorf("tmux has no attached clients for session %s", session)
+	}
+	for _, client := range clients {
+		command := s.tmuxCommandContext(ctx, "refresh-client", "-R", "-t", client)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("tmux refresh-client -R for %s: %w: %s", client, err, strings.TrimSpace(string(output)))
 		}
 	}
-	_ = s.tmuxCommandContext(ctx, "refresh-client", "-t", target).Run()
+	return nil
+}
+
+func (s *server) claimResizeAuthority(ctx context.Context, session, activeClient string, cols, rows int, claims ...string) error {
+	if activeClient == "" || !s.supportsIgnoreSize(ctx) {
+		return nil
+	}
+	claim := ""
+	if len(claims) > 0 {
+		claim = claims[0]
+	} else {
+		var err error
+		claim, err = newTerminalResizeClaim()
+		if err != nil {
+			return err
+		}
+	}
+	if !validTerminalResizeClaim(claim) {
+		return fmt.Errorf("terminal resize authority has no receipt token")
+	}
+	format := "#{client_tty}\t#{client_session}\t#{client_width}\t#{client_height}\t#{window_id}\t#{client_pid}\t#{client_created}"
+	waitCtx, cancel := context.WithTimeout(ctx, terminalResizeConvergenceTimeout)
+	defer cancel()
+	for {
+		out, err := s.tmuxCommandContext(waitCtx, "list-clients", "-F", format).Output()
+		if err != nil {
+			return err
+		}
+		clients := terminalResizeClients(out)
+		for _, client := range clients {
+			if client.tty == activeClient {
+				return s.tmuxCommandContext(waitCtx, terminalResizeClaimArgs(clients, client, cols, rows, claim)...).Run()
+			}
+		}
+		if err := waitCtx.Err(); err != nil {
+			return fmt.Errorf("terminal resize client did not attach: %w", err)
+		}
+	}
 }
 
 // Terminal controls share the connection's lifetime and latest resize owner. A
 // slow tmux client must never hold the goroutine delivering keyboard bytes.
-func (s *server) startTerminalControls(conn *wsConn, session, tty string, resize ...func(int, int) error) (func(int, int, int, ...bool), func()) {
+func (s *server) startTerminalControls(conn *wsConn, session, tty, initialClaim string, initialClaimError error, resize ...func(int, int) error) (func(int, int, int, ...bool), func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	wake := make(chan struct{}, 1)
 	done := make(chan struct{})
 	var mu sync.Mutex
 	var cols, rows, txn, generation int
-	var claim, pendingResize bool
+	var claim, pendingResize, pendingRedraw bool
+	var claimToken string
+	var claimError error
 	var activeCancel context.CancelFunc
 	request := func(nextCols, nextRows, nextTxn int, authority ...bool) {
 		mu.Lock()
 		if nextCols > 0 && nextRows > 0 {
 			cols, rows, pendingResize = nextCols, nextRows, true
 			claim = len(authority) == 0 || authority[0]
+			claimToken = initialClaim
+			claimError = initialClaimError
+			initialClaim = ""
+			initialClaimError = nil
+			if claim && claimToken == "" && claimError == nil {
+				claimToken, claimError = newTerminalResizeClaim()
+			}
 		}
 		if nextTxn > 0 {
 			txn = nextTxn
+			pendingRedraw = true
 		}
 		generation++
 		if activeCancel != nil {
@@ -5659,28 +5695,41 @@ func (s *server) startTerminalControls(conn *wsConn, session, tty string, resize
 			case <-wake:
 			default:
 			}
-			currentCols, currentRows, currentTxn, currentGeneration, currentClaim, currentResize := cols, rows, txn, generation, claim, pendingResize
+			currentCols, currentRows, currentTxn, currentGeneration, currentClaim, currentResize, currentRedraw := cols, rows, txn, generation, claim, pendingResize, pendingRedraw
+			currentClaimToken := claimToken
+			currentClaimError := claimError
 			commandCtx, commandCancel := context.WithCancel(ctx)
 			activeCancel = commandCancel
 			mu.Unlock()
-			var controlErr error
-			if currentResize && len(resize) > 0 {
-				controlErr = s.resizeTerminalNative(commandCtx, session, tty, currentCols, currentRows, resize[0], currentClaim)
+			var controlErr, redrawErr error
+			if currentClaimError != nil {
+				controlErr = currentClaimError
+			} else if currentResize && len(resize) > 0 {
+				controlErr = s.resizeTerminalNative(commandCtx, session, tty, currentCols, currentRows, resize[0], currentClaim, currentClaimToken)
+				if currentRedraw {
+					redrawErr = s.refreshTmuxClientScreen(commandCtx, session)
+					controlErr = errors.Join(controlErr, redrawErr)
+				}
+			} else if currentRedraw {
+				redrawErr = s.refreshTmuxClientScreen(commandCtx, session)
+				controlErr = redrawErr
 			} else if currentClaim && tty != "" && s.supportsIgnoreSize(commandCtx) {
-				s.claimResizeAuthority(commandCtx, session, tty, currentCols, currentRows)
+				controlErr = s.claimResizeAuthority(commandCtx, session, tty, currentCols, currentRows, currentClaimToken)
 			} else {
-				_ = s.tmuxCommandContext(commandCtx, "refresh-client", "-t", s.exactTarget(session)).Run()
+				controlErr = s.tmuxCommandContext(commandCtx, "refresh-client", "-t", s.exactTarget(session)).Run()
 			}
-			if commandCtx.Err() == nil && controlErr == nil && currentTxn > 0 {
+			if commandCtx.Err() == nil && currentClaimError == nil && redrawErr == nil && currentRedraw && currentTxn > 0 {
 				payload, _ := json.Marshal(map[string]any{"type": "refresh-ack", "txn": currentTxn})
 				_ = conn.frame(1, payload)
 			}
 			if controlErr != nil && commandCtx.Err() == nil {
-				slog.Warn("terminal resize did not converge", "session", session, "cols", currentCols, "rows", currentRows, "error", controlErr)
+				slog.Warn("terminal control did not converge", "session", session, "cols", currentCols, "rows", currentRows, "error", controlErr)
 			}
 			mu.Lock()
 			if generation == currentGeneration {
-				claim, pendingResize, txn, activeCancel = false, false, 0, nil
+				claim, pendingResize, pendingRedraw, txn, activeCancel = false, false, false, 0, nil
+				claimToken = ""
+				claimError = nil
 			}
 			mu.Unlock()
 			commandCancel()
@@ -5748,7 +5797,7 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 		conn.Close()
 		return
 	}
-	s.bridge(&wsConn{Conn: conn}, session, readonly, clientID, r.Context())
+	s.bridge(&wsConn{Conn: conn, reader: rw.Reader}, session, readonly, clientID, r.Context())
 }
 
 func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID string, contexts ...context.Context) {
@@ -5763,14 +5812,21 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 		conn.writeTimeout = s.terminalWriteTimeout
 	}
 	rows, cols := 36, 120
-	reader := bufio.NewReader(conn)
+	initialClaim := ""
+	var initialClaimError error
+	initialAuthority := false
+	buffered := conn.reader
+	if buffered == nil {
+		buffered = bufio.NewReader(conn)
+	}
+	reader := websocketMessageReader{reader: buffered}
 	_ = conn.SetReadDeadline(time.Now().Add(750 * time.Millisecond))
 	var pending [][]byte
 	for {
-		opcode, payload, err := readFrame(reader)
+		opcode, payload, err := reader.read()
 		if err != nil {
 			var networkError net.Error
-			if errors.As(err, &networkError) && networkError.Timeout() {
+			if errors.As(err, &networkError) && networkError.Timeout() && !reader.incomplete() {
 				break
 			}
 			return
@@ -5795,6 +5851,8 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 			if message.Foreground == nil || *message.Foreground {
 				rows = clampDimension(message.Rows, 2, 300, rows)
 				cols = clampDimension(message.Cols, 20, 500, cols)
+				initialAuthority = true
+				initialClaim, initialClaimError = newTerminalResizeClaim()
 			}
 			break
 		}
@@ -5842,18 +5900,23 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 	s.mu.Lock()
 	s.children[cmd] = struct{}{}
 	s.mu.Unlock()
-	defer func() {
-		if cmd.ProcessState == nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-			_ = cmd.Process.Kill()
-		}
+	childDone := make(chan error, 1)
+	go func() {
 		err := cmd.Wait()
+		// An attach failure must retire the bridge even before tmux publishes its
+		// client. Keeping the parent's slave FD open otherwise masks PTY EOF.
+		cancel()
+		childDone <- err
+	}()
+	defer func() {
+		cancel()
+		err := <-childDone
 		slog.Info("tmux attach exited", "session", session, "error", err)
 		s.mu.Lock()
 		delete(s.children, cmd)
 		s.mu.Unlock()
 	}()
-	requestControl, stopControls := s.startTerminalControls(conn, session, pty.tty, func(rows, cols int) error {
+	requestControl, stopControls := s.startTerminalControls(conn, session, pty.tty, initialClaim, initialClaimError, func(rows, cols int) error {
 		changed := pty.rows != rows || pty.cols != cols
 		if err := pty.resize(rows, cols); err != nil {
 			return err
@@ -5880,12 +5943,12 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 			}
 		}
 	}()
-	requestControl(cols, rows, 0)
+	requestControl(cols, rows, 0, initialAuthority)
 	for _, payload := range pending {
 		s.handleMessage(pty.master, pty, cmd, conn, session, clientID, payload, !readonly, ctx)
 	}
 	for {
-		opcode, payload, err := readFrame(reader)
+		opcode, payload, err := reader.read()
 		if err != nil {
 			break
 		}
@@ -6049,6 +6112,11 @@ func decodeJSONBody(reader io.Reader, limit int64, destination any) error {
 }
 
 func readFrame(r *bufio.Reader) (byte, []byte, error) {
+	header, payload, err := readFrameFragment(r)
+	return header & 0x0f, payload, err
+}
+
+func readFrameFragment(r *bufio.Reader) (byte, []byte, error) {
 	b1, err := r.ReadByte()
 	if err != nil {
 		return 0, nil, err
@@ -6057,7 +6125,6 @@ func readFrame(r *bufio.Reader) (byte, []byte, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	opcode := b1 & 0x0f
 	masked := b2&0x80 != 0
 	length := int64(b2 & 0x7f)
 	if length == 126 {
@@ -6071,12 +6138,12 @@ func readFrame(r *bufio.Reader) (byte, []byte, error) {
 		if err := binaryRead(r, &x); err != nil {
 			return 0, nil, err
 		}
-		if x > 16<<20 {
+		if x > websocketMessageLimit {
 			return 0, nil, fmt.Errorf("frame too large")
 		}
 		length = int64(x)
 	}
-	if length > 16<<20 {
+	if length > websocketMessageLimit {
 		return 0, nil, fmt.Errorf("frame too large")
 	}
 	var mask [4]byte
@@ -6094,7 +6161,7 @@ func readFrame(r *bufio.Reader) (byte, []byte, error) {
 			p[i] ^= mask[i%4]
 		}
 	}
-	return opcode, p, nil
+	return b1, p, nil
 }
 
 func binaryRead(r io.Reader, data any) error { return binary.Read(r, binary.BigEndian, data) }

@@ -12,6 +12,7 @@ import pytest
 from urllib.parse import urlsplit
 
 from yomux_lib import live_browser_soak as soak
+from tools.browser_runtime import BrowserExecutables
 from yomux_lib.infra import listener_census
 from yomux_lib import browser_diagnostic_receipts
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
@@ -25,6 +26,29 @@ TOOLS_MODULE = importlib.util.spec_from_file_location("live_browser_soak_tool", 
 assert TOOLS_MODULE is not None and TOOLS_MODULE.loader is not None
 tool = importlib.util.module_from_spec(TOOLS_MODULE)
 TOOLS_MODULE.loader.exec_module(tool)
+
+
+@pytest.fixture(autouse=True)
+def declared_browser_tools(monkeypatch):
+    # These unit tests replace WebDriver; browser discovery must not read the operator's machine.
+    monkeypatch.setattr(tool, 'resolve_browser_executables',
+                        lambda: BrowserExecutables('/fixture/chrome','/fixture/chromedriver'))
+
+
+@pytest.fixture
+def fake_soak_chrome(monkeypatch):
+    """Artifact tests own construction and cleanup without starting a host browser."""
+    class Driver(FakeDriver):
+        def set_page_load_timeout(self, _timeout):
+            return None
+
+        def set_script_timeout(self, _timeout):
+            return None
+
+    driver = Driver()
+    monkeypatch.setattr(tool.webdriver, "Chrome", lambda *_args, **_kwargs: driver)
+    monkeypatch.setattr(tool, "cleanup_driver", lambda _driver: None)
+    return driver
 
 
 RECORDED_LAYOUT_URL = (
@@ -98,31 +122,15 @@ def test_validate_arguments_accepts_exact_recorded_layout_url_without_rewriting_
     )
 
 
-def test_main_forwards_and_records_exact_recorded_layout_url(tmp_path, monkeypatch):
+def test_main_forwards_and_records_exact_recorded_layout_url(tmp_path, monkeypatch, fake_soak_chrome):
     forwarded = {}
-
-    class Options:
-        def add_argument(self, _argument):
-            return None
-
-        def set_capability(self, _name, _value):
-            return None
-
-    class Driver:
-        def set_page_load_timeout(self, _timeout):
-            return None
-
-        def set_script_timeout(self, _timeout):
-            return None
 
     def run_soak(_driver, **kwargs):
         forwarded.update(kwargs)
         return {"url": kwargs["url"], "samples": []}
 
     output = tmp_path / "exact-layout-url.json"
-    monkeypatch.setattr(tool, "webdriver", type("WebDriver", (), {"ChromeOptions": Options, "Chrome": lambda *_args, **_kwargs: Driver()})())
     monkeypatch.setattr(tool, "run_soak", run_soak)
-    monkeypatch.setattr(tool, "cleanup_driver", lambda _driver: None)
     monkeypatch.setattr(tool, "evidence_failed", lambda _artifact: False)
     monkeypatch.setattr(tool, "validate_success_artifact", lambda _artifact: None)
 
@@ -721,7 +729,7 @@ def test_shared_redactor_covers_probe_channels_and_keeps_the_matching_logs_row(t
     assert "[redacted" in persisted_row["message"]
 
 
-def test_completion_probe_failure_retains_runtime_artifact_and_makes_main_fail(tmp_path, monkeypatch):
+def test_completion_probe_failure_retains_runtime_artifact_and_makes_main_fail(tmp_path, monkeypatch, fake_soak_chrome):
     identity = soak.ListenerIdentity(pid=12, cwd="/repo", started="now", head="a" * 40)
     samples = iter((
         {"browserEvents": [], "browserLocalFailures": [], "browserReceiptBarrier": clean_receipt_barrier(), "serverLogErrors": [], "browserLogFailures": [], "serverLogDropped": {"count": 0}, "cursors": {"js": 0, "server_epoch": "a", "server_sequence": 0, "server_log_ids": []}},
@@ -772,21 +780,7 @@ def test_write_artifact_redacts_complete_ordinary_quoted_assignments(tmp_path):
 
 
 @pytest.mark.parametrize("completion_error", [RuntimeError("listener disappeared"), OSError("cannot resolve listener cwd")])
-def test_main_preserves_real_runtime_artifact_when_completion_probe_fails(tmp_path, monkeypatch, completion_error):
-    class Options:
-        def add_argument(self, _arg):
-            return None
-
-        def set_capability(self, _name, _value):
-            return None
-
-    class Driver(FakeDriver):
-        def set_page_load_timeout(self, _timeout):
-            return None
-
-        def set_script_timeout(self, _timeout):
-            return None
-
+def test_main_preserves_real_runtime_artifact_when_completion_probe_fails(tmp_path, monkeypatch, completion_error, fake_soak_chrome):
     identity = soak.ListenerIdentity(pid=12, cwd="/repo", started="now", head="a" * 40)
     outcomes = iter((identity, completion_error))
     samples = iter((
@@ -802,9 +796,7 @@ def test_main_preserves_real_runtime_artifact_when_completion_probe_fails(tmp_pa
         return outcome
 
     output = tmp_path / f"{type(completion_error).__name__}.json"
-    monkeypatch.setattr(tool, "webdriver", type("WebDriver", (), {"ChromeOptions": Options, "Chrome": lambda *_args, **_kwargs: Driver()})())
     monkeypatch.setattr(tool, "validate_arguments", lambda *_args: None)
-    monkeypatch.setattr(tool, "cleanup_driver", lambda _driver: None)
     monkeypatch.setattr(soak, "listener_identity", listener_probe)
     monkeypatch.setattr(soak, "install_auth_cookie", lambda *_args: None)
     monkeypatch.setattr(soak, "install_start_of_document_sentinels", lambda *_args: None)

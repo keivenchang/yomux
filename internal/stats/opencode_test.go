@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
 
 type queryCaptureDB struct {
@@ -807,6 +807,77 @@ func TestOpenCodeReadStepFinishPartsWindowStaysBoundedOnLongSyntheticHistory(t *
 	metrics := db.ReadMetrics()
 	if metrics.Queries != 1 || metrics.LastDuration <= 0 {
 		t.Fatalf("long-history SQLite metrics = %+v, want one measured bounded query", metrics)
+	}
+}
+
+// Count real SQLite row visits so out-of-window history cannot silently turn
+// initial clipping into a full historical scan on every newly discovered root.
+func TestOpenCodeInitialClippingDoesNotVisitUnrequestedHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opencode-unrequested-history.db")
+	writeOpenCodeManyRootHistory(t, path, 1, 2000)
+	ctx := context.Background()
+	database, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	database.SetMaxOpenConns(1)
+	connection, err := database.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	visits := 0
+	registerErr := connection.Raw(func(driverConnection any) error {
+		return driverConnection.(*sqlite3.SQLiteConn).RegisterFunc("fixture_history_visit", func(updatedAt int64) bool {
+			// SQLite may evaluate this predicate before excluding the fresh row.
+			// Count only the historical rows outside the first requested window.
+			if updatedAt < 700_000 {
+				visits++
+			}
+			return true
+		}, false)
+	})
+	closeErr := connection.Close()
+	if registerErr != nil || closeErr != nil {
+		t.Fatalf("register history visit counter: register=%v close=%v", registerErr, closeErr)
+	}
+	reader := &sqliteReadOnlyDB{db: database}
+	for _, activeSince := range []int64{700_000, 1} {
+		capture := &queryCaptureDB{}
+		queryDB := &OpenCodeDatabase{reader: capture, partSessionIndex: true, partSessionTimeIndex: true}
+		_, err := queryDB.ReadStepFinishPartsForSelections(ctx, []OpenCodeStepFinishSelection{{
+			SessionID: "root-00", RootSessionID: "root-00", ActiveSince: activeSince,
+		}}, 10_000_001, nil, MaxOpenCodePartReadLimit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		needle := "WHERE older.session_id = newest.session_id"
+		if strings.Count(capture.query, needle) != 1 {
+			t.Fatal("expected one initial clipping probe to instrument")
+		}
+		query := strings.Replace(capture.query, needle, needle+" AND fixture_history_visit(older.time_updated)", 1)
+		visits = 0
+		rows, err := reader.Rows(ctx, query, capture.args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if activeSince == 700_000 && visits != 0 {
+			t.Fatalf("clipping visited %d rows wholly before requested history", visits)
+		}
+		if activeSince == 1 && visits == 0 {
+			t.Fatal("clipping did not inspect requested historical rows")
+		}
+		wantRows := 1
+		if activeSince == 1 {
+			wantRows = 2001
+		}
+		foundFresh := false
+		for _, row := range rows {
+			foundFresh = foundFresh || row[1] == "part-00-fresh"
+		}
+		if len(rows) != wantRows || !foundFresh {
+			t.Fatalf("selection changed for active_since=%d: rows=%d fresh=%v", activeSince, len(rows), foundFresh)
+		}
 	}
 }
 

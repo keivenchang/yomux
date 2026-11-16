@@ -58,6 +58,7 @@ function clientEventReadyWatchRootsGeneration(envelope = {}, recoveryEpisodeId =
 }
 
 function repairClientEventReadyChannels(channels, watchRootsForceOptions = {}) {
+  if (channels.has('core')) void refreshSettings({silent: true});
   if (channels.has('files')) {
     if (typeof retryNetworkFailedFileExplorerExpansion === 'function') void retryNetworkFailedFileExplorerExpansion();
     if (typeof syncServerWatchRoots === 'function') {
@@ -829,6 +830,8 @@ function clientEventDemandDescriptor() {
     const tabberActive = activeItems.includes(tabberItemId);
     const differActive = activeItems.includes(differItemId);
     const fileEditorActive = activeItems.some(item => isFileEditorItem(item));
+    // Inactive terminal tabs still render metadata labels; active subviews also show the Info Bar.
+    if (paneItems(layoutSlots).some(isTmuxSession)) channels.add('transcripts');
     if ((finderActive && fileExplorerMode === 'tabber') || tabberActive) {
       channels.add('activity');
       channels.add('transcripts');

@@ -15,6 +15,7 @@
 const {
   assert,
   fs,
+  vm,
   TestElement,
   loadYomux,
   flushAsyncWork,
@@ -71,6 +72,53 @@ function renderHealth(api, payload) {
 }
 
 async function runBackendHealthIndicatorSuite() {
+  await testAsync('runtime crash warning is checked once per load and expires after two hours', async () => {
+    const warning = {code: 'tmux_glibc_crash_risk', message_key: 'runtime.warning.tmuxGlibc', message_params: {tmux: '3.4', glibc: '2.39'}, timeout_ms: 7_200_000};
+    const requests = [];
+    const notifications = [];
+    const context = {
+      apiFetchJson: async (...args) => { requests.push(args); return {probe_status: 'measured', warnings: [warning]}; },
+      t: (key, params) => EN[key].replace('{tmux}', params.tmux).replace('{glibc}', params.glibc),
+      emitNotification: (...args) => notifications.push(args),
+      console,
+    };
+    const source = BOOT_SOURCE.slice(BOOT_SOURCE.indexOf('let runtimeCompatibilityChecked = false;'), BOOT_SOURCE.indexOf('async function boot()'));
+    vm.runInNewContext(source, context);
+    await context.checkRuntimeCompatibilityOnce();
+    await context.checkRuntimeCompatibilityOnce();
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0][0], '/api/runtime/compatibility');
+    assert.equal(notifications.length, 1);
+    assert.equal(notifications[0][0], 'runtimeCompatibility');
+    assert.equal(notifications[0][1].countdownMs, 7_200_000);
+    assert.match(notifications[0][1].lines, /tmux 3\.4 with glibc 2\.39/);
+    assert.match(notifications[0][1].lines, /Upgrade tmux to 3\.8/);
+    const safe = {...context, apiFetchJson: async () => ({probe_status: 'measured', warnings: []})};
+    vm.runInNewContext(source, safe);
+    await safe.checkRuntimeCompatibilityOnce();
+    assert.equal(notifications.length, 1, 'safe combinations produce no warning');
+  });
+
+  await testAsync('low inotify limits use the startup warning with measured limits and a recommendation', async () => {
+    const notifications = [];
+    const command = 'sudo sysctl -w fs.inotify.max_user_instances=1024 fs.inotify.max_queued_events=65536';
+    const context = {
+      apiFetchJson: async () => ({probe_status: 'tmux_unavailable', warnings: [{code: 'inotify_limits_low', message_key: 'runtime.warning.inotifyLimits', message_params: {limits: 'fs.inotify.max_user_instances=128', command}, timeout_ms: 7_200_000}]}),
+      t: (key, params) => EN[key].replace(/\{(\w+)\}/g, (_match, name) => params[name]),
+      emitNotification: (...args) => notifications.push(args),
+      console: {warn() {}},
+    };
+    const source = BOOT_SOURCE.slice(BOOT_SOURCE.indexOf('let runtimeCompatibilityChecked = false;'), BOOT_SOURCE.indexOf('async function boot()'));
+    vm.runInNewContext(source, context);
+    await context.checkRuntimeCompatibilityOnce();
+    await context.checkRuntimeCompatibilityOnce();
+    assert.equal(notifications.length, 1, 'startup reports the low limit even when tmux probing is unavailable');
+    assert.equal(notifications[0][0], 'runtimeCompatibility');
+    assert.match(notifications[0][1].lines, /fs\.inotify\.max_user_instances=128/);
+    assert.ok(notifications[0][1].lines.includes(command));
+    assert.equal(notifications[0][1].countdownMs, 7_200_000);
+  });
+
   test('backend_health_changed is on the browser EventSource contract so the indicator is actually subscribed', () => {
     const api = loadYomux();
     assert.ok(

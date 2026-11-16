@@ -1878,7 +1878,13 @@ func (s *server) statsObservations(w http.ResponseWriter, r *http.Request) {
 	phase = "writer"
 	result, err := s.statsWriter.AppendBatch(stats.WithAppendTimings(r.Context(), appendTimings), stats.AppendBatch{Observations: observations})
 	if err != nil {
-		fail(http.StatusBadRequest, statsObservationUnsupported(err.Error()))
+		var contractError *stats.ContractError
+		if errors.As(err, &contractError) || errors.Is(err, stats.ErrObservationIdentityConflict) {
+			fail(http.StatusBadRequest, statsObservationUnsupported(err.Error()))
+		} else {
+			// Storage failures must retain the browser's immutable batch for retry.
+			fail(http.StatusServiceUnavailable, statsError(err.Error()))
+		}
 		return
 	}
 	finishPhase()

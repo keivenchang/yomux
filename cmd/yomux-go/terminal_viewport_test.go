@@ -43,7 +43,7 @@ func TestTerminalViewportNativeReflowKeepsCopyMode(t *testing.T) {
 			case "wrapped":
 				line = "printf '%s-%0150d\\n' \"$i\" 0"
 			case "unicode":
-				line = "printf '%s-' \"$i\"; printf '界%.0s' $(seq 1 90); printf '\\n'"
+				line = "printf '%s-%s\\n' \"$i\" " + shellQuote(strings.Repeat("界", 90))
 			case "repeated":
 				line = "printf 'same\\n\\n'"
 			}

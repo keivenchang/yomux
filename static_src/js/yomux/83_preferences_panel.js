@@ -199,9 +199,9 @@ function yoagentClaudeEffortPreferenceChoices() {
   return effortPreferenceChoices('yoagent.claude_effort', ['low', 'medium', 'high']);
 }
 
-function yoagentCodexEffortPreferenceChoices() {
-  const selectedModel = String(preferenceValue('yoagent.codex_model') || '').trim();
-  const modelMetadata = settingChoiceMetadata('yoagent.codex_model')[selectedModel] || {};
+function codexEffortPreferenceChoices(modelPath = 'yoagent.codex_model') {
+  const selectedModel = String(preferenceValue(modelPath) || '').trim();
+  const modelMetadata = settingChoiceMetadata(modelPath)[selectedModel] || {};
   const options = Array.isArray(modelMetadata.effort_options) && modelMetadata.effort_options.length
     ? modelMetadata.effort_options
     : ['low', 'medium', 'high', 'xhigh'];
@@ -239,7 +239,7 @@ function yoagentModelPreferenceChoicesForBackend(backend) {
 }
 
 function yoagentEffortPreferenceChoicesForBackend(backend) {
-  return backend === 'claude' ? yoagentClaudeEffortPreferenceChoices() : backend === 'codex' ? yoagentCodexEffortPreferenceChoices() : [];
+  return backend === 'claude' ? yoagentClaudeEffortPreferenceChoices() : backend === 'codex' ? codexEffortPreferenceChoices() : [];
 }
 
 function preferencesStatusPulseExampleMarkerHtml(state, group) {
@@ -311,6 +311,10 @@ function preferenceSections() {
           advanced: t('pref.general.default_tabber_mode.advanced'),
         }),
       }),
+      preferenceSettingItem('tabber.automatic_descriptions', {type: 'boolean'}),
+      preferenceSettingItem('tabber.codex_model', {type: 'select', choices: modelPreferenceChoices('tabber.codex_model', Object.keys(YOAGENT_CODEX_MODEL_LABELS), YOAGENT_CODEX_MODEL_LABELS)}),
+      preferenceSettingItem('tabber.codex_effort', {type: 'radio', choices: codexEffortPreferenceChoices('tabber.codex_model')}),
+      preferenceSettingItem('tabber.description_interval_minutes', {type: 'number', min: 5, max: 60, step: 1, suffix: 'min'}),
       preferenceSettingItem('appearance.date_time_hour_cycle', {type: 'radio', choices: [
         {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
         {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},
@@ -439,7 +443,7 @@ function preferenceSections() {
       preferenceSettingItem('yoagent.claude_model', {type: 'select', choices: yoagentClaudeModelPreferenceChoices()}),
       preferenceSettingItem('yoagent.claude_effort', {type: 'radio', choices: yoagentClaudeEffortPreferenceChoices()}),
       preferenceSettingItem('yoagent.codex_model', {type: 'select', choices: yoagentCodexModelPreferenceChoices()}),
-      preferenceSettingItem('yoagent.codex_effort', {type: 'radio', choices: yoagentCodexEffortPreferenceChoices()}),
+      preferenceSettingItem('yoagent.codex_effort', {type: 'radio', choices: codexEffortPreferenceChoices()}),
       preferenceSettingItem('yoagent.system_prompt', {type: 'textarea', alwaysEnableReset: true}),
       preferenceSettingItem('yoagent.intro', {type: 'textarea', alwaysEnableReset: true}),
       preferenceSettingItem('yoagent.format', {type: 'textarea', alwaysEnableReset: true}),

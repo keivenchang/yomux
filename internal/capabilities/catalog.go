@@ -200,6 +200,7 @@ type RoutePolicy struct {
 
 var routePolicies = []RoutePolicy{
 	{"GET", "/api/ping", "readonly", "core.diagnostics.v1", false},
+	{"GET", "/api/runtime/compatibility", "readonly", "core.diagnostics.v1", false},
 	{"GET", "/api/capabilities", "readonly", "core.diagnostics.v1", false},
 	{"GET", "/api/background/status", "readonly", "core.diagnostics.v1", false},
 	{"GET", "/api/system-status", "readonly", "core.diagnostics.v1", false},
@@ -251,6 +252,9 @@ var routePolicies = []RoutePolicy{
 	{"*", "/api/batch/blame", "admin", "finder.git.v1", false},
 	{"*", "/api/batch/zip", "admin", "finder.preview.v1", false},
 	{"*", "/api/batch/html-preview", "admin", "finder.preview.v1", false},
+	{"GET", "/api/tex/compiler", "admin", "finder.preview.v1", false},
+	{"POST", "/api/tex/compiler/install", "admin", "finder.preview.v1", false},
+	{"POST", "/api/tex/preview", "admin", "finder.preview.v1", false},
 	{"*", "/api/fs/write", "admin", "finder.write.v1", false},
 	{"POST", "/api/fs/chmod", "admin", "finder.write.v1", false},
 	{"GET", "/api/fs/directory-size", "readonly", "finder.read.v1", false},

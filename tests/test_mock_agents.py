@@ -1,4 +1,4 @@
-from tests.helpers.fixture_tools import fixture_executable
+from tests.helpers.fixture_tools import fixture_executable, fixture_python_environment
 import io
 import os
 from pathlib import Path
@@ -36,12 +36,25 @@ VISUAL_TMUX_SESSION_PREFIX = "test-mock-visual"
 UNIX_SOCKET_SAFE_PATH_BYTES = 100
 
 
+@pytest.fixture(autouse=True)
+def private_mock_client_home(monkeypatch, tmp_path):
+    home = tmp_path / "mock-home"
+    history = home / ".cache/yomux/history"
+    history.parent.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home / ".cache"))
+    monkeypatch.setattr(mock_agent_common, "HISTORY_FILE", str(history))
+
+
 @pytest.mark.parametrize("agent", ["claude", "codex", "opencode"])
-def test_mock_startup_imports_renderer_once(tmp_path, agent):
-    environment = {name: os.environ[name] for name in ("PATH", "LANG") if name in os.environ}
-    environment.update(HOME=str(tmp_path), PYTHONDONTWRITEBYTECODE="1")
+@pytest.mark.parametrize("named_entrypoint", [False, True], ids=["identity-reexec", "named-interpreter"])
+def test_mock_startup_imports_renderer_once(tmp_path, agent, named_entrypoint):
+    environment = fixture_python_environment({"HOME": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"})
+    arguments = [agent if named_entrypoint else sys.executable, "-X", "importtime", str(TOOLS_DIR / f"{agent}.py"), "--mock"]
+    if agent == "opencode":
+        arguments.extend(["--session", "ses-live"])
     result = subprocess.run(
-        [sys.executable, "-X", "importtime", str(TOOLS_DIR / f"{agent}.py"), "--mock"],
+        arguments, executable=sys.executable,
         input="", capture_output=True, text=True, env=environment, cwd=REPO_ROOT, timeout=20,
     )
     assert result.returncode == 0, result.stderr
@@ -245,7 +258,7 @@ def run_mockcase(monkeypatch, tmp_path, case):
         "78",
         "-y",
         "35",
-            f"cd {REPO_ROOT} && exec python3 tools/mockers/{agent}.py --mock",
+        "exec " + shlex.join([sys.executable, str(TOOLS_DIR / f"{agent}.py"), "--mock"]),
     )
     assert created.returncode == 0, created.stderr or created.stdout
     try:
@@ -3321,7 +3334,7 @@ def test_tmux_claude_shell_launch_scrolls_history_instead_of_clobbering(visual_t
     visual_tmux.send_keys(session, "printf 'history-one\\nhistory-two\\nhistory-three\\nhistory-four\\n'", "Enter")
     printed, pane = visual_tmux.wait_until(session, lambda text: "history-four" in text)
     assert printed, pane
-    visual_tmux.send_keys(session, "python3 tools/mockers/claude.py --mock", "Enter")
+    visual_tmux.send_keys(session, shlex.join([sys.executable, str(TOOLS_DIR / "claude.py"), "--mock"]), "Enter")
     booted, pane = visual_tmux.wait_until(
         session,
         lambda text: "Claude Code v2.1.185" in text and '❯ Try "fix typecheck errors"' in text,

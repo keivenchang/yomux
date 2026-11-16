@@ -16,6 +16,44 @@ import (
 	"github.com/keivenchang/yomux/internal/productenv"
 )
 
+// GoHelperProcessRaceOptions keeps race reporting enabled while removing the
+// runtime's exit grace: fixture parents explicitly join their owned children.
+func GoHelperProcessRaceOptions(options string) string {
+	const override = "atexit_sleep_ms=0"
+	if options == "" || options == override {
+		return override
+	}
+	if strings.HasSuffix(options, " "+override) {
+		return options
+	}
+	// Sanitizer options use the last assignment. Preserve quoted values and
+	// whitespace verbatim rather than reparsing another runtime's flag syntax.
+	return options + " " + override
+}
+
+// GoHelperProcessEnvironment changes only the owned Go child's race exit grace.
+// It does not inherit ambient values omitted by the caller's private environment.
+func GoHelperProcessEnvironment(environment []string) []string {
+	result := make([]string, 0, len(environment)+1)
+	var options string
+	for _, entry := range environment {
+		if key, value, _ := strings.Cut(entry, "="); key == "GORACE" {
+			options = value
+		} else {
+			result = append(result, entry)
+		}
+	}
+	return append(result, "GORACE="+GoHelperProcessRaceOptions(options))
+}
+
+// GoHelperProcessCommand applies fixture race options at exec time, after a
+// production caller replaces Cmd.Env with its restricted worker environment.
+func GoHelperProcessCommand(t testing.TB, args ...string) *exec.Cmd {
+	t.Helper()
+	arguments := []string{"GORACE=" + GoHelperProcessRaceOptions(os.Getenv("GORACE")), os.Args[0]}
+	return exec.Command(ToolPath(t, "env"), append(arguments, args...)...)
+}
+
 // ToolPath keeps executable fixtures on the declared runtime PATH in Bazel actions.
 func ToolPath(t testing.TB, name string) string {
 	t.Helper()
@@ -176,7 +214,7 @@ var privateTestDirectories = map[string]string{
 func ShortTempBase() (string, error) {
 	root, present := os.LookupEnv("YOMUX_NATIVE_SHORT_TMPDIR")
 	if !present {
-		return "/tmp", nil
+		return filepath.EvalSymlinks("/tmp")
 	}
 	if !filepath.IsAbs(root) {
 		return "", errors.New("native short fixture root must be absolute")
@@ -189,7 +227,7 @@ func ShortTempBase() (string, error) {
 	if !ok || !metadata.IsDir() || metadata.Mode().Perm() != 0o700 || owner.Uid != uint32(os.Getuid()) {
 		return "", errors.New("native short fixture root must be user-owned mode 0700 (uid " + strconv.Itoa(os.Getuid()) + ")")
 	}
-	return root, nil
+	return filepath.EvalSymlinks(root)
 }
 
 // MkdirShortTemp preserves caller prefixes under the shared socket-safe base.

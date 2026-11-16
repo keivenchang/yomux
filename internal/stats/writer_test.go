@@ -25,6 +25,25 @@ func writerBatch() AppendBatch {
 	}
 }
 
+func TestObservationIdentityConflictRetainsTypedCause(t *testing.T) {
+	writer := newAgentTokenTestWriter(t)
+	ctx := context.Background()
+	batch := AppendBatch{Observations: writerBatch().Observations}
+	if _, err := writer.AppendBatch(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	generation := writer.SourceGeneration()
+	batch.Observations[0].ObservedAt++
+	_, err := writer.AppendBatch(ctx, batch)
+	var detail *AppendError
+	if !errors.Is(err, ErrObservationIdentityConflict) || !errors.As(err, &detail) || detail.Reason != ErrObservationIdentityConflict.Error() {
+		t.Fatalf("immutable conflict lost its typed cause: %v", err)
+	}
+	if writer.SourceGeneration() != generation {
+		t.Fatal("immutable conflict advanced the source generation")
+	}
+}
+
 type singleUseJSONPayload struct{ calls *int }
 
 func (value singleUseJSONPayload) MarshalJSON() ([]byte, error) {

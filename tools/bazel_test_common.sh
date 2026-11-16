@@ -65,35 +65,15 @@ bazel_test_in_container() {
 }
 
 bazel_native_browser_resolve() {
-  local chrome="${CHROME_BIN:-}"
-  local chromedriver="${CHROMEDRIVER_BIN:-}"
-  local candidate
-  if [ -z "$chrome" ]; then
-    for candidate in chromium chromium-browser google-chrome google-chrome-stable; do
-      if command -v "$candidate" >/dev/null 2>&1; then
-        chrome="$(command -v "$candidate")"
-        break
-      elif [ -x "$candidate" ]; then
-        chrome="$candidate"
-        break
-      fi
-    done
+  local resolved
+  # The native runner already admits Python before browser discovery. Never invoke Selenium Manager
+  # here: gate admission and the executing fixture must use the same offline executable pair.
+  if resolved="$(python3 "${BASH_SOURCE[0]%/*}/browser_runtime.py" --format lines)"; then
+    BAZEL_NATIVE_CHROME_BIN="${resolved%%$'\n'*}"
+    BAZEL_NATIVE_CHROMEDRIVER_BIN="${resolved#*$'\n'}"
+  else
+    return $?
   fi
-  if [ -z "$chromedriver" ] && command -v chromedriver >/dev/null 2>&1; then
-    chromedriver="$(command -v chromedriver)"
-  fi
-  if [ -n "$chrome" ] && [ ! -x "$chrome" ]; then
-    chrome="$(command -v "$chrome" || true)"
-  fi
-  if [ -n "$chromedriver" ] && [ ! -x "$chromedriver" ]; then
-    chromedriver="$(command -v "$chromedriver" || true)"
-  fi
-  if [ -n "$chrome" ] && [ -x "$chrome" ] && [ -n "$chromedriver" ] && [ -x "$chromedriver" ]; then
-    BAZEL_NATIVE_CHROME_BIN="$chrome"
-    BAZEL_NATIVE_CHROMEDRIVER_BIN="$chromedriver"
-    return 0
-  fi
-  return 1
 }
 
 # Generated Go SDK output can be read-only. Repair only this invocation's private

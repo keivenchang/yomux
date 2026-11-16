@@ -153,11 +153,16 @@ async function settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries,
       if (children && fileTreeRenderOwners.get(children)?.renderOwner === renderOwner) children.remove();
     }
   };
+  let completed = true;
   for (const currentRow of rows) {
-    if (options.isCurrent && !options.isCurrent()) return false;
-    if (!await renderExpandedDirectoryRowChildren(currentRow, fullPath, entries, renderOptions)) {
+    if (options.isCurrent && !options.isCurrent()) {
       removeOwnedChildren();
       return false;
+    }
+    if (!await renderExpandedDirectoryRowChildren(currentRow, fullPath, entries, renderOptions)) {
+      // A newer parent publication can replace one container's renderer without
+      // retiring this listing request or the other surfaces awaiting its children.
+      completed = false;
     }
   }
   if (options.isCurrent && !options.isCurrent()) {
@@ -169,7 +174,7 @@ async function settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries,
     refreshLayoutUrlStateSoon();
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   }
-  return true;
+  return completed;
 }
 
 function collapseDirectoryRowsAcrossSurfaces(row, fullPath) {

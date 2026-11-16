@@ -131,6 +131,9 @@ def test_cache_identity_partitions_bundles_and_grouping_policy(monkeypatch, syst
     hashes["fixture_storage.py"] = "changed-fixture-storage-policy"
     assert contract.native_identity(bundle, []) != initial
     hashes.clear()
+    hashes["browser_runtime.py"] = "changed-browser-admission-policy"
+    assert contract.native_identity(bundle, []) != initial
+    hashes.clear()
     scope = contract.native_execution_scope(system)
     monkeypatch.setattr(contract, "native_execution_scope", lambda _system: dict(scope, sandbox_scope="obsolete"))
     assert contract.native_identity(bundle, []) != initial
@@ -172,13 +175,27 @@ def lane_request(tmp_path):
     (workspace / ".bazelversion").write_bytes(b"9.2.0\n")
     cache = tmp_path / "cache"
     cache.mkdir(mode=0o700)
+    java_home = tmp_path / "JDK fixture"
+    (java_home / "bin").mkdir(parents=True)
+    (java_home / "bin/java").write_bytes(b"synthetic JVM; never executed\n")
+    (java_home / "bin/java").chmod(0o700)
+    (java_home / "release").write_bytes(b'JAVA_VERSION="25.0.1"\n')
     return {"root": str(tmp_path), "workspace": str(workspace), "cache": str(cache), "flags": [],
-            "bazel": "/pinned/bazel", "system": "Linux", "home": str(tmp_path),
+            "bazel": "/pinned/bazel", "system": "Linux", "home": str(tmp_path), "java_home": str(java_home),
             "admitted": False, "admission_only": False, "reuse": True, "cache_on": True,
             "identity": "fixture-policy", "revision": "a" * 40, "source_digest": "fixture-source",
             "host_pid": "12345", "host_port": "1234",
             "steps": [{"target": "//:qualified_node_yomux_syntax", "options": []},
                       {"target": "//:qualified_node_wall_syntax", "options": []}]}
+
+
+def mock_lane_contract(events=None):
+    return SimpleNamespace(
+        test_result_cache_mode=contract.test_result_cache_mode,
+        native_bazel_startup_flags=contract.native_bazel_startup_flags,
+        validate_native_probe=lambda *args: None,
+        execution_event=lambda **event: events.append(event) if events is not None else None,
+    )
 
 
 def execute_mock_lane(monkeypatch, request, *, failure=None):
@@ -189,6 +206,8 @@ def execute_mock_lane(monkeypatch, request, *, failure=None):
     def run(command, **kwargs):
         commands.append(command)
         assert "--batch" not in command
+        startup_flags = [value for value in command if value.startswith("--server_javabase=")]
+        assert startup_flags == (["--server_javabase=" + request["java_home"]] if request["system"] == "Darwin" else [])
         if any(target in command for target in ("//:native_runtime_admission", "//:native_sandbox_admission")):
             assert "--cache_test_results=no" in command
             assert "--test_env=YOMUX_NATIVE_HOST_PID=12345" in command
@@ -201,7 +220,7 @@ def execute_mock_lane(monkeypatch, request, *, failure=None):
         return SimpleNamespace(returncode=int(failure == "graph" and "--nobuild" in command))
 
     monkeypatch.setattr(subprocess, "run", run)
-    owner = SimpleNamespace(test_result_cache_mode=contract.test_result_cache_mode, validate_native_probe=lambda *args: None, execution_event=lambda **event: events.append(event))
+    owner = mock_lane_contract(events)
     return commands, events, lambda: bazel_native.execute_lane(request, {}, owner)
 
 
@@ -216,7 +235,9 @@ def test_lightweight_graph_refuses_heavy_inputs_and_compiled_server(unwanted):
 
 @pytest.mark.parametrize("admitted", [False, True])
 @pytest.mark.parametrize("reuse", [False, True])
-def test_lane_reuses_output_and_server_after_fresh_admission(monkeypatch, lane_request, admitted, reuse):
+@pytest.mark.parametrize("system", ["Linux", "Darwin"])
+def test_lane_reuses_output_and_server_after_fresh_admission(monkeypatch, lane_request, admitted, reuse, system):
+    lane_request["system"] = system
     lane_request["admitted"] = admitted
     lane_request["reuse"] = reuse
     commands, events, execute = execute_mock_lane(monkeypatch, lane_request)
@@ -234,7 +255,9 @@ def test_lane_reuses_output_and_server_after_fresh_admission(monkeypatch, lane_r
 
 
 @pytest.mark.parametrize("failure", ["probe", "graph"])
-def test_admission_failure_blocks_result_bearing_tests_and_releases_lease(monkeypatch, lane_request, failure):
+@pytest.mark.parametrize("system", ["Linux", "Darwin"])
+def test_admission_failure_blocks_result_bearing_tests_and_releases_lease(monkeypatch, lane_request, failure, system):
+    lane_request["system"] = system
     commands, events, execute = execute_mock_lane(monkeypatch, lane_request, failure=failure)
     with pytest.raises(ValueError, match="admission failed|graph could not be admitted"):
         execute()
@@ -264,7 +287,7 @@ def test_failed_shutdown_retires_descendants_before_releasing_output_lease(monke
         return True
 
     monkeypatch.setattr(subprocess, "run", fail_shutdown)
-    owner = SimpleNamespace(test_result_cache_mode=contract.test_result_cache_mode, validate_native_probe=lambda *args: None, execution_event=lambda **event: None)
+    owner = mock_lane_contract()
     scope = SimpleNamespace(run=fail_shutdown, retire=retire) if linux else None
     with pytest.raises(subprocess.TimeoutExpired):
         bazel_native.execute_lane(lane_request, {}, owner, process_scope=scope, retire=None if linux else retire)
@@ -282,7 +305,7 @@ def test_failed_retirement_quarantines_output_slot(monkeypatch, lane_request, ra
             raise ValueError("retirement failed")
         return False
 
-    owner = SimpleNamespace(test_result_cache_mode=contract.test_result_cache_mode, validate_native_probe=lambda *args: None, execution_event=lambda **event: None)
+    owner = mock_lane_contract()
     with pytest.raises(ValueError, match="retirement failed|survived cleanup"):
         bazel_native.execute_lane(lane_request, {}, owner, retire=retire)
     assert (Path(lane_request["cache"]) / "slot-0.quarantine").is_file()
@@ -522,8 +545,7 @@ def test_darwin_actions_use_processwrapper_and_single_entrypoint(monkeypatch, tm
 def test_darwin_failed_retirement_preserves_invocation_state(monkeypatch, lane_request, reuse):
     _commands, _events, _execute = execute_mock_lane(monkeypatch, lane_request)
     lane_request.update(system="Darwin", reuse=reuse)
-    owner = SimpleNamespace(test_result_cache_mode=contract.test_result_cache_mode, validate_native_probe=lambda *args: None,
-                            execution_event=lambda **event: None)
+    owner = mock_lane_contract()
     with bazel_native.darwin_invocation_directory() as temporary:
         lane_request["root"] = temporary
         sentinel = Path(temporary) / "output/state"

@@ -21,10 +21,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
 from tests.tmux_runtime import run_isolated_tmux
+from tests.latency_calibration import assert_fixed_ceiling, browser_calibration_qualification, certification_phase_fixture, merged_qualification, run_browser_latency_calibration, write_latency_evidence
 from yomux_lib.local_services.registry import read_process_cpu_seconds_and_rss
 
 
 pytestmark = pytest.mark.browser
+certification_phase_only = certification_phase_fixture()
 
 
 def test_differ_repo_sha_enter_preserves_comparison_after_clearing_rows(browser, isolated_dev_server_factory, request):
@@ -98,6 +100,21 @@ def test_differ_repo_sha_enter_preserves_comparison_after_clearing_rows(browser,
 
 
 def test_differ_home_history_preparation_and_cached_refresh(browser, isolated_dev_server_factory, tmp_path, request):
+    _differ_history_workload(browser, isolated_dev_server_factory, tmp_path, request)
+
+
+def test_differ_history_latency_certification(certification_phase_only, browser, isolated_dev_server_factory, tmp_path, request):
+    calibration = run_browser_latency_calibration(browser)
+    qualification = merged_qualification(certification_phase_only, browser_calibration_qualification(calibration))
+    _differ_history_workload(browser, isolated_dev_server_factory, tmp_path, request, certify=qualification)
+
+
+def _certify_differ_history_view(nodeid, label, metrics, qualification):
+    assert_fixed_ceiling(nodeid=nodeid, label=label, raw_measured_ms=metrics['elapsed'],
+                         ceiling_ms=250, qualification=qualification, extra_evidence={'metrics': metrics})
+
+
+def _differ_history_workload(browser, isolated_dev_server_factory, tmp_path, request, *, certify=None):
     home = tmp_path / 'runtime-1-differ-history' / 'home'
     archive = home / '.codex' / 'sessions'
     archive.mkdir(parents=True)
@@ -165,7 +182,8 @@ def test_differ_home_history_preparation_and_cached_refresh(browser, isolated_de
     """)
     print(json.dumps({'initial': metrics}))
     assert 'error' not in metrics, metrics
-    assert metrics['elapsed'] < 250, metrics
+    if certify:
+        _certify_differ_history_view(request.node.nodeid, 'cold-view', metrics, certify)
     assert metrics['preparation']['partial'] is True, metrics
     assert 'Indexing history' in metrics['text'], metrics
     WebDriverWait(browser, 30).until(lambda driver: driver.execute_script(
@@ -339,7 +357,8 @@ def test_differ_home_history_preparation_and_cached_refresh(browser, isolated_de
     """)
     print(json.dumps({'refresh': result}))
     assert 'error' not in result, result
-    assert result['elapsed'] < 250, result
+    if certify:
+        _certify_differ_history_view(request.node.nodeid, 'prepared-view', result, certify)
     assert set(result['prior']) == set(result['immediate']) == set(result['final']) == {str(repo / 'note.py') for repo in repositories}
     WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
         "return arguments[0].every(path => [...document.querySelectorAll('.file-explorer-changes-panel .file-tree-row')].some(row => row.dataset.path === path))",
@@ -353,6 +372,10 @@ def test_differ_home_history_preparation_and_cached_refresh(browser, isolated_de
     connection.close()
     assert response.status == 200
     print(json.dumps({'cold_view_ms': metrics['elapsed'], 'catchup': result['preparation'], 'idle_ping_ms': ping_ms, 'indexing_ping_ms': metrics['ping_ms'], 'indexing_terminal_ms': metrics['terminal_ms'], 'background_resource': resource, 'prepared_view_ms': result['elapsed']}))
+    write_latency_evidence(nodeid=request.node.nodeid, label='differ-history', payload={
+        'certification': certify, 'initial': metrics, 'prepared': result, 'background_resource': resource,
+        'idle_ping_ms': ping_ms,
+    })
 
 
 @pytest.mark.parametrize('refresh', ['manual', 'automatic'])

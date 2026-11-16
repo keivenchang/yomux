@@ -27,6 +27,7 @@
       "pdf",
       "structured",
       "table",
+      "tex",
       "text",
       "unsupported",
       "unsupported-archive",
@@ -1685,6 +1686,9 @@
       "tests/test_launcher_row_wiring.py:test_launcher_has_no_inherited_global_primary_port_export:3",
       "tests/test_launcher_row_wiring.py:test_launcher_has_no_inherited_global_primary_port_export:4",
       "tests/test_launcher_row_wiring.py:test_launcher_macos_carries_the_plan_through_the_shared_launcher:1",
+      "tests/test_launcher_row_wiring.py:test_launcher_macos_carries_the_plan_through_the_shared_launcher:2",
+      "tests/test_launcher_row_wiring.py:test_launcher_macos_carries_the_plan_through_the_shared_launcher:3",
+      "tests/test_launcher_row_wiring.py:test_launcher_macos_carries_the_plan_through_the_shared_launcher:4",
       "tests/test_launcher_row_wiring.py:test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise:1",
       "tests/test_launcher_row_wiring.py:test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise:2",
       "tests/test_launcher_row_wiring.py:test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise:3",
@@ -1805,7 +1809,7 @@
       "tests/test_yostats_active_browser_window.py:test_deterministic_operation_batch_quiesces_existing_operations_before_freezing_ack_flushes:8",
       "tests/test_yostats_active_browser_window.py:test_deterministic_operation_batch_quiesces_existing_operations_before_freezing_ack_flushes:9"
     ],
-    "inventory_sha256": "397412d74a77afd9ac0b2a09eb9ee5d138a7d724a36209272d3ae686c1730c0b",
+    "inventory_sha256": "6b88c448d97176f73584f51ad3771b10a23e9662d80c0958dd2cca1ec5a3491c",
     "unallowlisted": [],
     "validation_errors": []
   },

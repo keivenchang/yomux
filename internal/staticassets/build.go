@@ -297,8 +297,13 @@ func (p *pseudoLocalizer) pseudo(value string) string {
 // Publish atomically replaces individual files after all inputs have been validated.
 // The caller must own the destination (a private build tree or a writer lease).
 func Publish(destination string, outputs map[string][]byte, check bool) ([]string, error) {
-	var err error
-	destination, err = mutablefs.Canonical(destination)
+	return publishOutputs(destination, outputs, check, (*atomicfile.Staged).Commit)
+}
+
+// Prepare both replacement and rollback files before the first visible change.
+// The caller holds the output tree's writer ownership throughout publication.
+func publishOutputs(destination string, outputs map[string][]byte, check bool, commit func(*atomicfile.Staged) error) ([]string, error) {
+	destination, err := mutablefs.Canonical(destination)
 	if err != nil {
 		return nil, err
 	}
@@ -307,8 +312,24 @@ func Publish(destination string, outputs map[string][]byte, check bool) ([]strin
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	// Preflight the complete set before publishing the first file. A private
-	// root does not confer ownership on symlinked descendants into another tree.
+	type pending struct {
+		name           string
+		next, previous *atomicfile.Staged
+		existed        bool
+	}
+	updates := []pending{}
+	changed := []string{}
+	defer func() {
+		for _, update := range updates {
+			if update.next != nil {
+				update.next.Cleanup()
+			}
+			if update.previous != nil {
+				update.previous.Cleanup()
+			}
+		}
+	}()
+	// Validate every path and file type before staging or publishing anything.
 	for _, name := range names {
 		if !filepath.IsLocal(name) {
 			return nil, fmt.Errorf("output escapes destination: %q", name)
@@ -317,52 +338,96 @@ func Publish(destination string, outputs map[string][]byte, check bool) ([]strin
 		if err := ownedOutputPath(path); err != nil {
 			return nil, err
 		}
-	}
-	changed := make([]string, 0)
-	for _, name := range names {
-		path := filepath.Join(destination, name)
-		if err := ownedOutputPath(path); err != nil {
+		if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("output must be a regular file: %s", name)
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
+	}
+	for _, name := range names {
+		path := filepath.Join(destination, name)
 		current, err := os.ReadFile(path)
+		existed := err == nil
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
-		if err == nil && bytes.Equal(current, outputs[name]) {
+		if existed && bytes.Equal(current, outputs[name]) {
 			continue
 		}
 		changed = append(changed, name)
 		if check {
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		mode := os.FileMode(0644)
+		if existed {
+			info, err := os.Stat(path)
+			if err != nil {
+				return nil, err
+			}
+			mode = info.Mode().Perm()
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return nil, err
 		}
 		if err := ownedOutputPath(path); err != nil {
 			return nil, err
 		}
-		staged, err := atomicfile.Stage(path, outputs[name])
+		update := pending{name: name, existed: existed}
+		updates = append(updates, update)
+		index := len(updates) - 1
+		updates[index].next, err = atomicfile.Stage(path, outputs[name])
 		if err != nil {
 			return nil, err
 		}
-		// Stage is private by default; browser assets must retain their public file mode.
-		mode := os.FileMode(0o644)
-		if info, err := os.Stat(path); err == nil {
-			mode = info.Mode().Perm()
-		} else if !errors.Is(err, os.ErrNotExist) {
-			staged.Cleanup()
+		if err := updates[index].next.Chmod(mode); err != nil {
 			return nil, err
 		}
-		// Commit after setting mode; readers never see a private-mode publication window.
-		if err := staged.Chmod(mode); err != nil {
-			staged.Cleanup()
-			return nil, err
+		if existed {
+			updates[index].previous, err = atomicfile.Stage(path, current)
+			if err != nil {
+				return nil, err
+			}
+			if err := updates[index].previous.Chmod(mode); err != nil {
+				return nil, err
+			}
 		}
-		err = staged.Commit()
-		staged.Cleanup()
-		if err != nil {
-			return nil, err
+	}
+	for index, update := range updates {
+		path := filepath.Join(destination, update.name)
+		err := ownedOutputPath(path)
+		if err == nil {
+			err = commit(update.next)
 		}
+		if err == nil {
+			continue
+		}
+		failures := []error{fmt.Errorf("publish %s: %w", update.name, err)}
+		for rollback := index - 1; rollback >= 0; rollback-- {
+			previous := updates[rollback]
+			path := filepath.Join(destination, previous.name)
+			current, readErr := os.ReadFile(path)
+			if readErr != nil || !bytes.Equal(current, outputs[previous.name]) {
+				if previous.previous != nil {
+					updates[rollback].previous = nil
+					failures = append(failures, fmt.Errorf("rollback refused changed output %s; retained recovery stage %v: %w", previous.name, previous.previous, readErr))
+				} else {
+					failures = append(failures, fmt.Errorf("rollback refused changed output %s: %w", previous.name, readErr))
+				}
+				continue
+			}
+			if previous.existed {
+				err = previous.previous.Commit()
+			} else {
+				err = os.Remove(path)
+			}
+			if err != nil {
+				if previous.previous != nil {
+					updates[rollback].previous = nil
+				}
+				failures = append(failures, fmt.Errorf("rollback %s failed; retained recovery stage %v: %w", previous.name, previous.previous, err))
+			}
+		}
+		return nil, errors.Join(failures...)
 	}
 	return changed, nil
 }

@@ -1,6 +1,6 @@
 {
   "emoji-data.js": [
-    "static_src/js/emoji/emoji_data.js"
+    "node_modules/.yomux/emoji_data.js"
   ],
   "yomux.js": [
     "static_src/js/yomux/00_bootstrap_state.js",

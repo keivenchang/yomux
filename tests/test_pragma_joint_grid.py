@@ -6,6 +6,7 @@ the freeze forbids; the mechanics tests use a real SQLite file built in `tmp_pat
 """
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -13,6 +14,19 @@ import sys
 import pytest
 
 from tools.measurement import pragma_joint_grid as grid
+
+
+@pytest.fixture(autouse=True)
+def deterministic_kernel_probes(monkeypatch):
+    # These tests measure SQLite/control flow; Linux counter parsing has its own fixture below.
+    probes = {"io": grid.proc_io, "status": grid.proc_status, "drop": grid.drop_page_cache}
+    monkeypatch.setattr(grid, "proc_io", lambda: {"syscr": 1, "syscw": 1, "read_bytes": 0, "write_bytes": 0})
+    monkeypatch.setattr(grid, "proc_status", lambda: {
+        "RssAnon": 1024, "VmSwap": 2048, "RssFile": 4096, "RssShmem": 0,
+        "VmRSS": 5120, "VmHWM": 8192, "anonymous": 3072, "mapped": 4096})
+    monkeypatch.setattr(grid, "drop_page_cache", lambda _path: None)
+    monkeypatch.setattr(grid.os, "sync", lambda: None)
+    return probes
 
 
 def _point(cache, mmap_size, syscr, *, anonymous=0, mapped=0, write_bytes=0, note="",
@@ -112,6 +126,24 @@ def test_memory_is_sampled_at_peak_and_again_at_steady(tmp_path):
     assert set(result.memory_peak) == set(result.memory_steady)
 
 
+@pytest.mark.parametrize('arm', ['read', 'write'])
+def test_measurement_boundaries_surround_the_actual_workload(tmp_path, monkeypatch, arm):
+    events = []
+    workload = grid.read_workload if arm == 'read' else grid.write_workload
+
+    def record_workload(*arguments):
+        events.append('workload')
+        return workload(*arguments)
+
+    monkeypatch.setattr(grid.os, 'sync', lambda: events.append('sync'))
+    monkeypatch.setattr(grid, 'proc_io', lambda: events.append('io') or {'syscr': 1})
+    monkeypatch.setattr(grid, 'proc_status', lambda: events.append('memory') or {'VmHWM': 8192})
+    monkeypatch.setattr(grid, arm + '_workload', record_workload)
+    result = grid.run_point(_store(tmp_path), arm, -2000, 0, settle_seconds=0.0, rows=10, batches=2, publish_ring=False)
+    assert result.workload_units > 0
+    assert events == ['sync', 'io', 'workload', 'sync', 'io', 'memory', 'memory']
+
+
 def test_the_page_cache_is_dropped_before_a_read_point(tmp_path, monkeypatch):
     """Without this every point after the first measures a warm cache and the arm reads as flat."""
 
@@ -144,16 +176,62 @@ def test_a_store_with_no_published_ring_says_so_and_prices_the_understatement(tm
     assert "46%" in result.note
 
 
-def test_each_grid_point_runs_in_a_fresh_subprocess(tmp_path):
+def test_each_grid_point_runs_in_a_fresh_subprocess(tmp_path, monkeypatch):
     """`VmHWM` is a process-lifetime high-water mark and does not reset."""
 
     store = _store(tmp_path)
+    run = subprocess.run
+
+    def observe_worker(command, **kwargs):
+        assert "--worker" in command and command[0] == sys.executable
+        bootstrap = '''import os, sys
+from tools.measurement import pragma_joint_grid as grid
+grid.require_measurement_host = lambda: None
+grid.proc_io = lambda: {"syscr": 1, "syscw": 1, "read_bytes": 0, "write_bytes": 0}
+grid.proc_status = lambda: {"VmHWM": 8192, "anonymous": 3072, "mapped": 4096}
+grid.drop_page_cache = lambda path: None
+grid.os.sync = lambda: None
+serialize = grid.PointResult.as_dict
+grid.PointResult.as_dict = lambda point: dict(serialize(point), pid=os.getpid())
+sys.argv = sys.argv[1:]
+raise SystemExit(grid.main())
+'''
+        return run([command[0], "-c", bootstrap, *command[1:]], **kwargs)
+
+    monkeypatch.setattr(grid.subprocess, "run", observe_worker)
     first = grid.spawn_point(store, "read", -2000, 0, settle_seconds=0.0, rows=0, batches=0)
     second = grid.spawn_point(store, "read", -2000, 0, settle_seconds=0.0, rows=0, batches=0)
-    assert first["memory_peak"]["VmHWM"] > 0 and second["memory_peak"]["VmHWM"] > 0
-    # Two points in one process would make the second's HWM at least the first's plus its own
-    # workload; fresh processes make them independent samples of the same shape.
-    assert abs(first["memory_peak"]["VmHWM"] - second["memory_peak"]["VmHWM"]) < first["memory_peak"]["VmHWM"]
+    assert len({os.getpid(), first["pid"], second["pid"]}) == 3
+    assert first["arm"] == second["arm"] == "read"
+    assert first["effective"]["cache_size"] == second["effective"]["cache_size"] == -2000
+
+
+def test_linux_counter_parsers_keep_memory_limbs_separate(tmp_path, deterministic_kernel_probes):
+    proc = tmp_path / "self"
+    proc.mkdir()
+    (proc / "io").write_bytes(b"syscr: 7\nsyscw: 3\nread_bytes: 4096\nwrite_bytes: 8192\n")
+    (proc / "status").write_bytes(b"RssAnon: 1 kB\nVmSwap: 2 kB\nRssFile: 4 kB\nRssShmem: 0 kB\nVmRSS: 5 kB\nVmHWM: 8 kB\n")
+    assert deterministic_kernel_probes["io"](tmp_path)["syscr"] == 7
+    sample = deterministic_kernel_probes["status"](tmp_path)
+    assert sample["anonymous"] == 3072 and sample["mapped"] == 4096
+    assert "total" not in sample and "combined" not in sample
+
+
+def test_cache_advice_targets_the_database_descriptor(tmp_path, monkeypatch, deterministic_kernel_probes):
+    database = tmp_path / "database"
+    database.write_bytes(b"fixture")
+    advised = []
+    monkeypatch.setattr(os, "POSIX_FADV_DONTNEED", 4, raising=False)
+    monkeypatch.setattr(os, "posix_fadvise", lambda fd, offset, length, advice: advised.append(
+        (os.fstat(fd).st_ino, offset, length, advice)), raising=False)
+    deterministic_kernel_probes["drop"](database)
+    assert advised == [(database.stat().st_ino, 0, 0, 4)]
+
+
+def test_unsupported_measurement_host_refuses_explicitly(monkeypatch):
+    monkeypatch.setattr(grid.sys, "platform", "darwin")
+    with pytest.raises(grid.GridError, match="require Linux"):
+        grid.require_measurement_host()
 
 
 # --- the falsification that gates the campaign --------------------------------------------------

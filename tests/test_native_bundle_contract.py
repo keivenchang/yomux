@@ -98,6 +98,34 @@ def test_locked_bundle_is_checked_without_running_tools(bundle, monkeypatch):
     assert admitted.executables["python3"] == bundle[0] / "bin/python3"
 
 
+@pytest.mark.parametrize("version", ["21.0.10", "25.0.1"])
+def test_darwin_bundle_jvm_policy_is_checked_offline(bundle, monkeypatch, version):
+    root, lock, manifest, _digest = bundle
+    manifest["platform"] = {"system": "Darwin", "machine": "arm64"}
+    for name in contract.required_native_tools("Darwin") - manifest["executables"].keys():
+        executable = root / "bin" / name
+        executable.write_bytes(b"synthetic executable; never run\n")
+        executable.chmod(0o555)
+        manifest["executables"][name] = "bin/" + name
+    for name, path in contract.xterm_fixture_paths(contract.native_xterm_package_root(root, "Darwin")).items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((contract.ROOT / "static/vendor" / name).read_bytes())
+        path.chmod(0o444)
+    (root / "jdk/bin").mkdir(parents=True)
+    (root / "jdk/bin/java").write_bytes(b"synthetic JVM; never run\n")
+    (root / "jdk/bin/java").chmod(0o555)
+    (root / "jdk/release").write_text(f'JAVA_VERSION="{version}"\n', encoding="utf-8")
+    (root / "jdk/release").chmod(0o444)
+    digest = write_lock(root, lock, manifest)
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: pytest.fail("offline verification ran a tool"))
+    monkeypatch.setattr(subprocess, "check_output", lambda *_args, **_kwargs: pytest.fail("offline verification ran a tool"))
+    if version.startswith("21."):
+        with pytest.raises(ValueError, match="requires JDK 25"):
+            contract.verify_native_bundle(root, lock, digest, system="Darwin", machine="arm64")
+    else:
+        assert contract.verify_native_bundle(root, lock, digest, system="Darwin", machine="arm64").system == "Darwin"
+
+
 def test_platform_tool_inventory_covers_darwin_normalization_and_fixture_commands():
     darwin = contract.required_native_tools("Darwin")
     assert {"shasum", "lsof", "vm_stat", "dd"}.issubset(darwin)
@@ -121,8 +149,19 @@ def test_newly_locked_xterm_fixture_must_still_match_upstream_vendor_bytes(bundl
     asset.write_bytes(b"different upstream bytes\n")
     asset.chmod(0o444)
     digest = write_lock(root, lock, manifest)
-    with pytest.raises(ValueError, match="differs from tracked vendor asset"):
+    with pytest.raises(ValueError, match="differs from pinned vendor asset"):
         verify((root, lock, manifest, digest))
+
+
+def test_xterm_pins_do_not_require_downloaded_assets(tmp_path):
+    manifest = tmp_path / "assets/runtime/browser-assets.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_bytes((contract.ROOT / "assets/runtime/browser-assets.json").read_bytes())
+    pins = contract.xterm_asset_digests(tmp_path)
+    assert set(pins) == set(contract.NATIVE_XTERM_ASSETS)
+    for name, digest in pins.items():
+        assert digest == contract._sha256_file(contract.ROOT / "static/vendor" / name)
+    assert not (tmp_path / "static").exists()
 
 
 @pytest.mark.parametrize("name", contract.product_env_names("XTERM_PACKAGE_ROOT"))

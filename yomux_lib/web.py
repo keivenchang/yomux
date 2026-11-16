@@ -336,9 +336,6 @@ def html_page(
         "recentSessions": recent_sessions if isinstance(recent_sessions, list) else sessions,
         # Dev-velocity #1b: when true the page subscribes to /api/dev-reload and reloads on bundle change.
         "dev": dev,
-        # Full-access agent launch controls are deliberately available only when the server operator
-        # explicitly opted in with --dangerously-yolo.
-        "dangerouslyYolo": dangerously_yolo,
         "terminalOnly": terminal_only,
         # A partial Go server can serve the stats surface without owning every
         # legacy application route. The client uses this explicit bit to keep

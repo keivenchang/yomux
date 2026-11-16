@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.helpers.child_processes import fork_blocking_child, await_zombie
 from tests.helpers.local_service_records import FixtureLocalServiceRecordBuilder
 from yomux_lib.host_identity import HostIdentity
 from yomux_lib.host_identity import current_host_identity
@@ -40,6 +41,18 @@ def fixture_identity(*, stable_host_id: str = "host-a") -> HostIdentity:
         instance_nonce="instance-a",
         stable_host_id_source="fixture",
     )
+
+
+@pytest.mark.parametrize("state,reason", [
+    ("Z", "process_not_found"), ("S", "process_identity_unavailable"), ("", "process_identity_unavailable"),
+])
+def test_missing_birth_identity_only_allows_proven_zombie_exit(state, reason):
+    identity = fixture_identity()
+    diagnostic = is_current_local_process(
+        identity.process_record_fields(), host_identity=identity,
+        start_identity_reader=lambda _: None, state_reader=lambda _: state, pid_probe=lambda _: True)
+    assert diagnostic.current is False
+    assert diagnostic.reason.value == reason
 
 
 @pytest.mark.parametrize("transient", [False, True])
@@ -458,20 +471,6 @@ def test_one_typed_orphan_row_per_ambiguous_survivor_and_never_a_silent_one(tmp_
 # ---------------------------------------------------------------------------
 
 
-def _fork_unreaped_zombie() -> int:
-    """A real child that has exited and deliberately has NOT been wait()-ed."""
-
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover - child never returns
-        os._exit(0)
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        if registry_mod.process_state(pid) == "Z":
-            return pid
-        time.sleep(0.005)
-    raise AssertionError("the forked child never reached state Z")
-
-
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="zombie lifecycle is POSIX-only")
 def test_shared_identity_fence_treats_a_real_unreaped_zombie_as_gone() -> None:
     """One exited-but-unreaped process, read through both fences.
@@ -490,12 +489,16 @@ def test_shared_identity_fence_treats_a_real_unreaped_zombie_as_gone() -> None:
         "positive control: a genuinely running process must read as current"
     )
 
-    zombie_pid = _fork_unreaped_zombie()
+    zombie_pid, release_fd = fork_blocking_child()
     try:
         zombie_record = current_host_identity().process_record_fields(
             pid=zombie_pid,
             start_identity=registry_mod.process_start_identity(zombie_pid),
         )
+        assert is_current_local_process(zombie_record).current
+        os.close(release_fd)
+        release_fd = None
+        await_zombie(zombie_pid)
         # The zombie-aware fence, for comparison: it already answers correctly.
         assert process_record_diagnostic(zombie_record).current is False
 
@@ -507,6 +510,8 @@ def test_shared_identity_fence_treats_a_real_unreaped_zombie_as_gone() -> None:
         )
         assert diagnostic.reason.value == "process_not_found"
     finally:
+        if release_fd is not None:
+            os.close(release_fd)
         os.waitpid(zombie_pid, 0)
 
 
@@ -552,13 +557,16 @@ def test_process_claim_ledger_reports_a_zombie_target_as_already_exited(tmp_path
         assert live_signals == [(live_pid, signal.SIGTERM)]
 
         # The same shape with a target that has exited and not been reaped.
-        zombie_pid = _fork_unreaped_zombie()
+        zombie_pid, zombie_release = fork_blocking_child()
         try:
             zombie_ledger = ProcessClaimLedger(tmp_path / "zombie", "fixture-helper")
             zombie_claim = zombie_ledger.publish(zombie_pid)
             payload = json.loads(zombie_claim.path.read_text(encoding="utf-8"))
             payload["supervisor"] = dead_supervisor
             zombie_claim.path.write_text(json.dumps(payload), encoding="utf-8")
+            os.close(zombie_release)
+            zombie_release = None
+            await_zombie(zombie_pid)
             zombie_signals: list[tuple[int, int]] = []
 
             rows = zombie_ledger.reap_unsupervised(
@@ -572,6 +580,8 @@ def test_process_claim_ledger_reports_a_zombie_target_as_already_exited(tmp_path
             )
             assert zombie_claim.path.exists() is False, "the spent claim of an exited helper was retained"
         finally:
+            if zombie_release is not None:
+                os.close(zombie_release)
             os.waitpid(zombie_pid, 0)
     finally:
         if release_fd is not None:

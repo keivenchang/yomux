@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Real native launch transitions with a PATH containing no Python interpreter."""
 
+import hashlib
+from http.client import HTTPConnection
 import json
 import os
 import re
@@ -16,8 +18,14 @@ import tempfile
 import pytest
 
 from tests.isolated_dev_server import go_test_server_binary
+from tests.helpers.fixture_tools import run_fixture_cleanup_phases
+from tests.gate_harness import FixtureMemberExitBarrier
+from tests.tmux_runtime import start_isolated_default_tmux_runtime
+from tests.tmux_runtime import stop_isolated_tmux_runtime
 from tools.instance_isolation import synthetic_test_environment
 from tools.tmux_paths import short_temp_base
+from yomux_lib.infra.worktree_writer import acquire_worktree_writer
+from yomux_lib.host_identity import process_start_identity
 
 
 pytestmark = pytest.mark.shared_tooling
@@ -29,9 +37,11 @@ def native_launch_environment(tmp_path):
     binary = go_test_server_binary(REPO)
     executable_path = tmp_path / "bin"
     executable_path.mkdir()
-    commands = ("bash", "env", "dirname", "uname", "sha256sum", "mkdir", "cp", "mv", "rm", "chmod", "tmux", "git", "ps", "sh")
+    commands = ("bash", "env", "dirname", "uname", "sha256sum", "mkdir", "cp", "mv", "rm", "chmod", "tmux", "git", "ps", "sh", "cat", "date", "sleep", "nohup", "curl")
     if sys.platform == "darwin":
         commands += ("lsof",)
+    else:
+        commands += ("setsid",)
     for command in commands:
         source = shutil.which(command)
         assert source, command
@@ -62,6 +72,16 @@ def native_launch_environment(tmp_path):
 def run_native(binary, environment, *arguments):
     return subprocess.run([str(binary), *arguments], env=environment, cwd=REPO,
                           capture_output=True, text=True, timeout=30)
+
+
+@pytest.fixture
+def authenticated_native_launch_environment(native_launch_environment):
+    binary, environment = native_launch_environment
+    config = Path(environment["YOMUX_ROOT"]) / "config"
+    config.mkdir(parents=True)
+    (config / "auth.yaml").write_text("users:\n  - username: fixture\n    password: fixture-password\n    role: admin\n")
+    (config / "auth-cookie-secret").write_text("ab" * 32)
+    return binary, environment
 
 
 @pytest.mark.parametrize("selector", ["--deprecated-python", "--backend=python", "--backend=unknown", "-backend=python", "-backend=unknown"])
@@ -104,7 +124,7 @@ def test_installed_native_launch_duplicate_and_verified_replacement(native_launc
     assert not [path for path in installed.rglob("*") if path.suffix in {".py", ".pyc", ".pyo"}]
     declaration = (REPO / "BUILD.bazel").read_text().split('name = "runtime_assets"', 1)[1].split("\n)", 1)[0]
     expected = {Path(name).name for name in re.findall(r'"(assets/runtime/[^"]+\.json)"', declaration)}
-    assert len(expected) == 6
+    assert len(expected) == 8
     assert {path.name for path in (installed / "lib/yomux/assets/runtime").iterdir()} == expected
     environment = dict(environment)
     environment.pop("YOMUX_GO_BINARY", None)
@@ -149,13 +169,214 @@ def test_installed_native_launch_duplicate_and_verified_replacement(native_launc
                     owned.wait(timeout=20)
 
 
-@pytest.mark.parametrize("initial_http", [True, False], ids=["http-to-tls", "tls-to-http"])
-def test_authenticated_replacement_can_change_protocol_with_strict_readiness(native_launch_environment, tmp_path, initial_http):
+def test_installed_boot_uses_verified_assets_without_its_recorded_source(authenticated_native_launch_environment, monkeypatch, tmp_path):
+    _binary, environment = authenticated_native_launch_environment
+    prefix = tmp_path / "installed"
+    installed = subprocess.run([str(REPO / "tools/install.sh"), "--prefix", str(prefix)],
+                               env=environment, capture_output=True, text=True, timeout=30)
+    assert installed.returncode == 0, installed.stderr
+    root = prefix / "lib/yomux"
+    for name in (".git", "static_src", "node_modules", "tools/codemirror-bundle", "tools/prosemirror-bundle"):
+        assert not (root / name).exists(), name
+    metadata = json.loads((root / "install-source.json").read_bytes())
+    metadata["source_root"] = str(tmp_path / "unavailable-source")
+    (root / "install-source.json").write_bytes(json.dumps(metadata).encode())
+    environment = dict(environment)
+    environment.pop("YOMUX_GO_BINARY", None)
+    environment.pop("YOLOMUX_GO_BINARY", None)
+    assert shutil.which("node", path=environment["PATH"]) is None
+    assert shutil.which("npm", path=environment["PATH"]) is None
+    binary = root / "yomux-go"
+    for operation, success in (("startup-assets", True), ("update-source", False)):
+        result = run_native(binary, environment, "--operator", operation, "--root", str(root))
+        assert (result.returncode == 0) is success, (operation, result.stdout, result.stderr)
+
+    dependency = root / "static/vendor/marked.min.js"
+    original = dependency.read_bytes()
+    before = {path.relative_to(root): hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in (root / "static").rglob("*") if path.is_file()}
+    for mode in ("corrupt", "missing"):
+        if mode == "corrupt":
+            dependency.write_bytes(b"corrupt dependency")
+        else:
+            dependency.unlink()
+        result = run_native(binary, environment, "--operator", "startup-assets", "--root", str(root))
+        assert result.returncode != 0 and "make build" in result.stderr, (result.stdout, result.stderr)
+        if mode == "corrupt":
+            assert dependency.read_bytes() == b"corrupt dependency"
+        else:
+            assert not dependency.exists(), "startup acquired a missing dependency"
+    dependency.write_bytes(original)
+    assert {path.relative_to(root): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in (root / "static").rglob("*") if path.is_file()} == before
+
+    tmux = start_isolated_default_tmux_runtime(monkeypatch, tmp_path)
+    environment.update({"TMUX_TMPDIR": str(tmux.socket_dir), "YOMUX_TMUX_SOCKET": "", "YOLOMUX_TMUX_SOCKET": ""})
+    runtime_root = Path(environment["HOME"]).parent
+    temporary = runtime_root / "tmp"
+    temporary.mkdir()
+    environment.update({"TMPDIR": str(temporary), "YOMUX_LOG_DIR": str(runtime_root / "logs"),
+                        "YOMUX_START_LOCK_DIR": str(runtime_root / "startup-locks")})
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    ready_args = ("--operator", "ready", "--root", str(root), "--http", "--host", "127.0.0.1", "--port", str(port), "--timeout", "20s")
+    with (tmp_path / "replacement.log").open("w+") as output:
+        def stop_boot_server():
+            # The managed replacement owner verifies the detached listener before
+            # retiring it; its replacement is our direct, unreaped child.
+            lease = Path(environment["YOMUX_ROOT"]) / "instance.lock"
+            if not lease.exists():
+                return
+            pid = json.loads(lease.read_bytes())["pid"]
+            identity = process_start_identity(pid)
+            if identity is None:
+                return
+            with FixtureMemberExitBarrier(((pid, identity),)) as retired:
+                replacement = subprocess.Popen([str(prefix / "bin/yomux"), "--force", "--http", "--host", "127.0.0.1", "--port", str(port)],
+                                               env=environment, stdout=output, stderr=output)
+                try:
+                    assert retired.wait(20), "managed replacement did not retire the detached boot server"
+                    ready = run_native(binary, environment, *ready_args)
+                    assert ready.returncode == 0, ready.stderr
+                    assert json.loads(lease.read_bytes())["pid"] == replacement.pid
+                finally:
+                    if replacement.poll() is None:
+                        replacement.terminate()
+                    replacement.wait(timeout=20)
+        try:
+            result = subprocess.run([str(root / "boot.sh"), "--no-dev", "--http", "--host", "127.0.0.1", "--port", str(port)],
+                                    cwd=root, env=environment, capture_output=True, text=True, timeout=60)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert "restarted port" in result.stdout
+            for name, content_type in (("yomux.js", "javascript"), ("yomux.css", "text/css")):
+                connection = HTTPConnection("127.0.0.1", port, timeout=5)
+                try:
+                    connection.request("GET", "/static/" + name)
+                    response = connection.getresponse()
+                    assert response.status == 200
+                    assert content_type in response.getheader("Content-Type")
+                    assert response.read() == (root / "static" / name).read_bytes()
+                finally:
+                    connection.close()
+        finally:
+            run_fixture_cleanup_phases("installed offline boot", (
+                ("server", stop_boot_server),
+                ("tmux", lambda: stop_isolated_tmux_runtime(tmux)),
+            ))
+
+
+def test_install_reads_prepared_source_under_writer_and_refuses_locked_repair(native_launch_environment, tmp_path):
     binary, environment = native_launch_environment
-    config = Path(environment["YOMUX_ROOT"]) / "config"
-    config.mkdir(parents=True)
-    (config / "auth.yaml").write_text("users:\n  - username: fixture\n    password: fixture-password\n    role: admin\n")
-    (config / "auth-cookie-secret").write_text("ab" * 32)
+    source = tmp_path / "source"
+    source.mkdir()
+    for name in ("version.yaml", "boot.sh", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md",
+                 "tools/install.sh", "tools/startup_common.sh", "tools/product_environment.sh", "tools/setup-tls.sh"):
+        destination = source / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO / name, destination)
+    for name in ("assets/runtime", "yomux_lib/yoagent/builtin_skills", "yomux_lib/yoagent/builtin_context"):
+        shutil.copytree(REPO / name, source / name)
+    contents = {
+        "static/yomux.js": b"prepared application",
+        "static/yomux.css": b"prepared stylesheet",
+        "static/codemirror.js": b"prepared editor bundle",
+        "static/vendor/fixture.js": b"verified dependency",
+        "static/vendor/pdfjs/web/viewer.html": b"verified PDF viewer",
+    }
+    for name, body in contents.items():
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+    digest = hashlib.sha256(contents["static/vendor/fixture.js"]).hexdigest()
+    editor = source / "tools/codemirror-bundle"
+    editor.mkdir()
+    inputs = {"package.json": b"package", "package-lock.json": b"lock", "codemirror-entry.js": b"custom entry"}
+    for name, body in inputs.items():
+        (editor / name).write_bytes(body)
+    editor_digest = hashlib.sha256(contents["static/codemirror.js"]).hexdigest()
+    (source / "assets/runtime/browser-assets.json").write_bytes(json.dumps({"files": {
+        "static/vendor/fixture.js": {"sha256": digest, "urls": []},
+    }, "bundles": [{"directory": "codemirror", "output": "static/codemirror.js", "sha256": editor_digest,
+                    "input_sha256": hashlib.sha256(b"".join(inputs.values())).hexdigest()}]}).encode())
+    (source / "assets/runtime/pdfjs-assets.json").write_bytes(json.dumps({"version": "fixture", "archive_sha256": "0" * 64, "files": {
+        "web/viewer.html": hashlib.sha256(contents["static/vendor/pdfjs/web/viewer.html"]).hexdigest(),
+    }}).encode())
+    subprocess.run(["git", "init", "--initial-branch=main", str(source)], env=environment,
+                   check=True, capture_output=True)
+    environment = dict(environment, XDG_CACHE_HOME=str(tmp_path / "cache"))
+    cached = Path(environment["XDG_CACHE_HOME"]) / "yomux/vendor/browser" / digest
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(contents["static/vendor/fixture.js"])
+    editor_cached = cached.parent / editor_digest
+    editor_cached.write_bytes(contents["static/codemirror.js"])
+    prefix = tmp_path / "installed"
+    command = [str(source / "tools/install.sh"), "--prefix", str(prefix)]
+    payload = [source, *(path for path in source.rglob("*") if ".git" not in path.relative_to(source).parts)]
+    modes = {path: path.stat().st_mode & 0o777 for path in payload}
+    original = {name: hashlib.sha256((source / name).read_bytes()).hexdigest() for name in contents}
+    with acquire_worktree_writer(source, purpose="fixture-install-reader", environ={},
+                                 slot_dir=source / ".git/yolomux/worktree-writer") as lease:
+        try:
+            for path, mode in modes.items():
+                path.chmod(0o555 if path.is_dir() or mode & 0o111 else 0o444)
+            installed = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=30)
+            assert installed.returncode == 0, installed.stderr
+            assert {name: hashlib.sha256((source / name).read_bytes()).hexdigest() for name in contents} == original
+            assert (prefix / "lib/yomux/static/vendor/fixture.js").read_bytes() == contents["static/vendor/fixture.js"]
+            installed_root = prefix / "lib/yomux"
+            assert not (installed_root / "tools/codemirror-bundle").exists()
+            verified_runtime = subprocess.run([str(installed_root / "yomux-go"), "--operator", "verify-assets", "--root", str(installed_root)],
+                                            env=environment, capture_output=True, text=True, timeout=30)
+            assert verified_runtime.returncode == 0, verified_runtime.stderr
+            before = {path.relative_to(prefix): (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mode)
+                      for path in prefix.rglob("*") if path.is_file()}
+            for name, body in inputs.items():
+                path = editor / name
+                for mutation in ("changed", "missing"):
+                    editor.chmod(0o755)
+                    path.chmod(0o644)
+                    if mutation == "changed":
+                        path.write_bytes(b"unreviewed source")
+                        path.chmod(0o444)
+                    else:
+                        path.unlink()
+                    editor.chmod(0o555)
+                    try:
+                        for prepared in ("0", "1"):
+                            invalid = subprocess.run(command, env=dict(environment, YOMUX_INSTALL_PREPARED=prepared),
+                                                     capture_output=True, text=True, timeout=30)
+                            assert invalid.returncode != 0, (name, mutation, prepared, invalid.stdout, invalid.stderr)
+                            assert {name: hashlib.sha256((source / name).read_bytes()).hexdigest() for name in contents} == original
+                            assert editor_cached.read_bytes() == contents["static/codemirror.js"]
+                            assert {path.relative_to(prefix): (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mode)
+                                    for path in prefix.rglob("*") if path.is_file()} == before
+                    finally:
+                        editor.chmod(0o755)
+                        if path.exists():
+                            path.chmod(0o644)
+                        path.write_bytes(body)
+                        path.chmod(0o444)
+                        editor.chmod(0o555)
+            damaged = source / "static/vendor/fixture.js"
+            damaged.chmod(0o644)
+            damaged.write_bytes(b"damaged dependency")
+            damaged.chmod(0o444)
+            refused = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=30)
+            assert refused.returncode != 0
+            assert "writer" in refused.stderr
+            assert {path.relative_to(prefix): (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mode)
+                    for path in prefix.rglob("*") if path.is_file()} == before
+            assert damaged.read_bytes() == b"damaged dependency"
+            assert json.loads(lease.record_path.read_bytes())["token"] == lease.token
+        finally:
+            for path, mode in modes.items():
+                path.chmod(mode)
+
+
+@pytest.mark.parametrize("initial_http", [True, False], ids=["http-to-tls", "tls-to-http"])
+def test_authenticated_replacement_can_change_protocol_with_strict_readiness(authenticated_native_launch_environment, tmp_path, initial_http):
+    binary, environment = authenticated_native_launch_environment
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]

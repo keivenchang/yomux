@@ -10,6 +10,35 @@ from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
 pytestmark = [pytest.mark.browser, pytest.mark.socket, pytest.mark.boot]
 
 
+@pytest.mark.parametrize("stats_only", [False, True])
+def test_boot_fixture_runtime_diagnostics_preserve_schema_and_route_boundaries(browser, tmp_path, stats_only):
+    load_live_runtime_boot_fixture(
+        browser, tmp_path, "?debug=1&sessions=debug&layout=left&tabs=left:__debug__",
+        sessions=("debug",), terminal_only=True, stats_only=stats_only,
+    )
+    result = browser.execute_async_script("""
+      const done = arguments[arguments.length - 1];
+      (async () => {
+        const route = '/api/runtime/compatibility';
+        const startupRequests = window.__bootFetches.filter(request => request.path === route).length;
+        const response = await fetch(route);
+        const payload = await response.json();
+        const rejected = await fetch(route, {method: 'POST'});
+        const unrelated = await fetch('/api/notify');
+        return {startupRequests, status: response.status, payload,
+          wrongMethodStatus: rejected.status, unrelatedStatus: unrelated.status};
+      })().then(value => done({value}), error => done({error: String(error)}));
+    """)
+    assert "error" not in result, result
+    assert result["value"] == {
+        "startupRequests": 0 if stats_only else 1,
+        "status": 200,
+        "payload": {"probe_status": "not_applicable", "warnings": []},
+        "wrongMethodStatus": 405,
+        "unrelatedStatus": 404 if stats_only else 200,
+    }
+
+
 def test_finder_and_differ_render_compact_large_line_counts(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path)
     WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(

@@ -68,16 +68,18 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+for native_identity_input in .bazelversion MODULE.bazel MODULE.bazel.lock go.mod go.sum; do
+  if [ ! -r "$REPO_ROOT/$native_identity_input" ]; then
+    echo "required native identity input is missing or unreadable: $REPO_ROOT/$native_identity_input" >&2
+    exit 2
+  fi
+done
+inside_test_container=0
+if bazel_test_in_container; then
+  inside_test_container=1
+fi
+execution="$(python3 "$REPO_ROOT/tools/bazel_execution_contract.py" --resolve-execution "$execution" --inside-test-container "$inside_test_container")"
 case "$execution" in
-  auto)
-    if bazel_test_in_container; then
-      execution=docker
-    elif [ "$(uname -s)" = Darwin ]; then
-      execution=native
-    else
-      execution=docker
-    fi
-    ;;
   qualified-native)
     native_args=(--target "$target" --cache "$cache" --reuse "$reuse_test_results")
     [ -z "$jobs" ] || native_args+=(--jobs "$jobs")
@@ -141,18 +143,23 @@ native_sdk_args=()
 native_test_filter_args=()
 native_browser_args=()
 if [ "$execution" = native ]; then
+  native_python_userbase="$(python3 -c 'import site; print(site.getuserbase())')"
+  native_browser_args+=(--test_env=PYTHONUSERBASE="$native_python_userbase")
   if [ "$(uname -s)" = Darwin ]; then
     native_sdk_version="$(bazel_go_sdk_version)"
     native_sdk_args+=("--@rules_go//go/toolchain:sdk_version=$native_sdk_version")
   fi
   if bazel_native_browser_resolve; then
-    native_python_userbase="${PYTHONUSERBASE:-${HOME:-}/.local}"
     native_browser_args+=(--test_env=CHROME_BIN="$BAZEL_NATIVE_CHROME_BIN")
-    native_browser_args+=(--test_env=PYTHONUSERBASE="$native_python_userbase")
     if [ -n "$BAZEL_NATIVE_CHROMEDRIVER_BIN" ]; then
       native_browser_args+=(--test_env=CHROMEDRIVER_BIN="$BAZEL_NATIVE_CHROMEDRIVER_BIN")
     fi
   else
+    native_browser_status=$?
+    # Invalid explicit configuration is an admission failure, never an optional target omission.
+    if [ "$native_browser_status" -ne 1 ]; then
+      exit "$native_browser_status"
+    fi
     native_test_filter_args+=(--test_tag_filters=-requires_chrome)
     echo 'YOMUX_EXECUTION {"effective":"native","skipped_targets":["requires_chrome"]}'
     echo "Skipping Chrome E2E target because Chrome/Chromium or chromedriver is unavailable" >&2
@@ -165,14 +172,6 @@ if [ "$reuse_test_results" = default ]; then
 fi
 [ "$cache" != off ] || reuse_test_results=no
 printf 'YOMUX_EXECUTION {"test_result_reuse":"%s"}\n' "$reuse_test_results"
-if [ "$execution" = native ]; then
-  for native_identity_input in .bazelversion MODULE.bazel MODULE.bazel.lock go.mod go.sum; do
-    if [ ! -r "$REPO_ROOT/$native_identity_input" ]; then
-      echo "required native identity input is missing or unreadable: $REPO_ROOT/$native_identity_input" >&2
-      exit 2
-    fi
-  done
-fi
 test_result_cache="$(python3 "$REPO_ROOT/tools/bazel_execution_contract.py" --test-result-cache "$reuse_test_results")"
 
 case "$cache" in on|off) ;; *) echo "cache must be on or off" >&2; exit 2 ;; esac
@@ -193,6 +192,9 @@ if [ "$execution" != native ]; then
 fi
 
 if [ "$execution" = native ] && ! bazel_test_in_container; then
+  native_startup_args=()
+  native_startup_flag="$(python3 "$REPO_ROOT/tools/bazel_execution_contract.py" --native-bazel-startup-flags)"
+  [ -z "$native_startup_flag" ] || native_startup_args+=("$native_startup_flag")
   expected_bazel_version="$(<"$REPO_ROOT/.bazelversion")"
   actual_bazel_version="$(bazel --version | awk '{print $2}')"
   if [ "$actual_bazel_version" != "$expected_bazel_version" ]; then
@@ -260,6 +262,7 @@ PY_NATIVE_CACHE
     native_output_user_root="$native_cache_root/output-user-root"
   fi
   bazel_args=(
+    ${native_startup_args[@]+"${native_startup_args[@]}"}
     --batch
     --bazelrc=/dev/null
     --output_user_root="$native_output_user_root"

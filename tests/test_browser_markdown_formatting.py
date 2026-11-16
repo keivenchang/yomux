@@ -3,6 +3,7 @@ import pytest
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
+from tests.browser_helpers.native_keyboard import native_editor_modifier, native_logical_key
 
 
 def setup_formatting_editor(browser, tmp_path):
@@ -30,8 +31,27 @@ def setup_formatting_editor(browser, tmp_path):
 
 def test_markdown_native_bold_second_occurrence(browser, tmp_path):
     setup_formatting_editor(browser, tmp_path)
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('b').key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, 'b', ['ctrl'])
     assert browser.execute_script('return serializeProseMirrorSource(formattingPanel)') == 'same **same**'
+
+
+@pytest.mark.parametrize('surface', ['text-editor', 'view-editor'])
+def test_native_logical_shortcut_keeps_key_distinct_from_physical_code(browser, tmp_path, surface):
+    setup_formatting_editor(browser, tmp_path)
+    browser.execute_script("""
+      const view=arguments[0]==='text-editor'?formattingPanel._cmView:formattingPanel._pmView;
+      if(view===formattingPanel._cmView)view.dispatch({selection:{anchor:5,head:9}});
+      view.focus();window.__logicalShortcutEvents=[];
+      window.addEventListener('keydown',event=>window.__logicalShortcutEvents.push({key:event.key,
+        code:event.code,ctrl:event.ctrlKey,meta:event.metaKey,trusted:event.isTrusted}),{capture:true});
+    """, surface)
+    native_logical_key(browser, 'b', ['ctrl'], code='KeyN')
+    result = browser.execute_script("""
+      return {events:window.__logicalShortcutEvents,source:arguments[0]==='text-editor'
+        ?formattingPanel._cmView.state.doc.toString():serializeProseMirrorSource(formattingPanel)};
+    """, surface)
+    assert result['events'] == [{'key': 'b', 'code': 'KeyN', 'ctrl': True, 'meta': False, 'trusted': True}], result
+    assert result['source'] == 'same **same**', result
 
 
 @pytest.mark.parametrize('surface', ['text-editor', 'view-editor'])
@@ -103,7 +123,7 @@ def test_markdown_source_table_and_setext_native_formatting(browser, tmp_path):
       view.dispatch({changes:{from:0,to:view.state.doc.length,insert:source},selection:{anchor:0,head:source.length}});
       view.focus();
     """)
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('b').key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, 'b', ['ctrl'])
     assert browser.execute_script('return formattingPanel._cmView.state.doc.toString()') == '**a** | **b**\n--|--\n**x**|**y**'
     assert browser.execute_script("""
       flushCodeMirrorSource(formattingPanel, formattingPanel.dataset.filePath);
@@ -114,7 +134,7 @@ def test_markdown_source_table_and_setext_native_formatting(browser, tmp_path):
       view.dispatch({changes:{from:0,to:view.state.doc.length,insert:'title\\n---'},selection:{anchor:2}});
       view.focus();
     """)
-    ActionChains(browser).key_down(Keys.CONTROL).key_down(Keys.ALT).send_keys('1').key_up(Keys.ALT).key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, '1', ['ctrl', 'alt'])
     assert browser.execute_script('return formattingPanel._cmView.state.doc.toString()') == '# title'
     browser.execute_script("""
       const view = formattingPanel._cmView;
@@ -122,7 +142,7 @@ def test_markdown_source_table_and_setext_native_formatting(browser, tmp_path):
       view.dispatch({changes:{from:0,to:view.state.doc.length,insert:source},selection:{anchor:0,head:source.length}});
       view.focus();
     """)
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('b').key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, 'b', ['ctrl'])
     assert browser.execute_script('return formattingPanel._cmView.state.doc.toString()') == '![ref][]\n\n[ref]: https://x'
 
 
@@ -132,12 +152,15 @@ def test_markdown_native_source_range_and_typing_toggle(browser, tmp_path):
       const view = formattingPanel._cmView;
       view.dispatch({selection:{anchor:9,head:5}}); view.focus();
     """)
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('b').key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, 'b', ['ctrl'])
     assert browser.execute_script('return formattingPanel._cmView.state.doc.toString()') == 'same **same**'
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('b').key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, 'b', ['ctrl'])
     assert browser.execute_script('return formattingPanel._cmView.state.doc.toString()') == 'same same'
     browser.execute_script('formattingPanel._cmView.dispatch({selection:{anchor:9}})')
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('i').key_up(Keys.CONTROL).send_keys('X').key_down(Keys.CONTROL).send_keys('i').key_up(Keys.CONTROL).send_keys('Y').perform()
+    native_logical_key(browser, 'i', ['ctrl'])
+    native_logical_key(browser, 'X')
+    native_logical_key(browser, 'i', ['ctrl'])
+    native_logical_key(browser, 'Y')
     assert browser.execute_script('return formattingPanel._cmView.state.doc.toString()') == 'same same*X*Y'
 
 
@@ -148,7 +171,10 @@ def test_markdown_native_viewedit_typing_marks_toolbar_and_undo(browser, tmp_pat
       view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc,10)));
       view.focus();
     """)
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('b').key_up(Keys.CONTROL).send_keys('X').key_down(Keys.CONTROL).send_keys('b').key_up(Keys.CONTROL).send_keys('Y').perform()
+    native_logical_key(browser, 'b', ['ctrl'])
+    native_logical_key(browser, 'X')
+    native_logical_key(browser, 'b', ['ctrl'])
+    native_logical_key(browser, 'Y')
     assert browser.execute_script('return serializeProseMirrorSource(formattingPanel)') == 'same same**X**Y'
     browser.execute_script("""
       const view = formattingPanel._pmView;
@@ -157,7 +183,7 @@ def test_markdown_native_viewedit_typing_marks_toolbar_and_undo(browser, tmp_pat
     browser.find_element('css selector', '.markdown-formatting-toolbar [data-markdown-format="italic"]').click()
     assert browser.execute_script('return serializeProseMirrorSource(formattingPanel)') == 'same *same***X**Y'
     assert browser.execute_script('return formattingPanel._pmView.state.selection.from') == 6
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('z').key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, 'z', [native_editor_modifier(browser)])
     assert browser.execute_script('return serializeProseMirrorSource(formattingPanel)') == 'same same**X**Y'
 
 
@@ -283,10 +309,10 @@ def test_markdown_syntax_boundaries_shortcuts_and_list_caret(browser, tmp_path):
 
 @pytest.mark.parametrize('surface', ['text-editor', 'view-editor'])
 @pytest.mark.parametrize('key,modifiers,expected', [
-    ('i', [Keys.CONTROL], '*same*'),
-    ('u', [Keys.CONTROL], '<u>same</u>'),
-    ('5', [Keys.ALT, Keys.SHIFT], '~~same~~'),
-    ('6', [Keys.CONTROL, Keys.ALT], '###### same same'),
+    ('i', ['ctrl'], '*same*'),
+    ('u', ['ctrl'], '<u>same</u>'),
+    ('5', ['alt', 'shift'], '~~same~~'),
+    ('6', ['ctrl', 'alt'], '###### same same'),
 ])
 def test_markdown_platform_native_shortcut_matrix(browser, tmp_path, surface, key, modifiers, expected):
     setup_formatting_editor(browser, tmp_path)
@@ -296,13 +322,7 @@ def test_markdown_platform_native_shortcut_matrix(browser, tmp_path, surface, ke
         view.dispatch({selection:{anchor:5,head:9}}); view.focus();
       } else formattingPanel._pmView.focus();
     """, surface)
-    actions = ActionChains(browser)
-    for modifier in modifiers:
-        actions.key_down(modifier)
-    actions.send_keys(key)
-    for modifier in reversed(modifiers):
-        actions.key_up(modifier)
-    actions.perform()
+    native_logical_key(browser, key, modifiers)
     actual = browser.execute_script("""
       return arguments[0] === 'text-editor' ? formattingPanel._cmView.state.doc.toString() : serializeProseMirrorSource(formattingPanel);
     """, surface)
@@ -311,7 +331,7 @@ def test_markdown_platform_native_shortcut_matrix(browser, tmp_path, surface, ke
 
 def test_markdown_format_delayed_split_save_reopen(browser, tmp_path):
     setup_formatting_editor(browser, tmp_path)
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('b').key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, 'b', ['ctrl'])
     assert browser.execute_script('return fileEditorPanelState(formattingPanel).content') == 'same same'
     result = browser.execute_async_script("""
       const done = arguments[arguments.length - 1];
@@ -360,7 +380,7 @@ def test_markdown_native_bold_preserves_inline_code(browser, tmp_path, surface):
         view.dispatch(view.state.tr.setSelection(api.TextSelection.create(doc,1,8))); view.focus();
       }
     """, surface)
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('b').key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, 'b', ['ctrl'])
     result = browser.execute_async_script("""
       const done=arguments[arguments.length-1], surface=arguments[0];
       (async()=>{
@@ -391,7 +411,7 @@ def test_markdown_partial_clear_code_round_trip(browser, tmp_path, surface):
         view.dispatch(view.state.tr.setSelection(api.TextSelection.create(doc,1,2)));view.focus();
       }
     """, surface)
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('\\').key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, '\\', ['ctrl'])
     result = browser.execute_script("""
       const panel=formattingPanel, source=arguments[0]==='text-editor'?panel._cmView.state.doc.toString():serializeProseMirrorSource(panel);
       const parsed=panel._pmParser.parse(source), serialized=panel._pmSerializer.serialize(parsed), reopened=panel._pmParser.parse(serialized);
@@ -482,9 +502,9 @@ def test_markdown_preview_list_indent_shortcuts(browser, tmp_path):
       view.dispatch(view.state.tr.setSelection(api.TextSelection.create(doc, position)));
       view.focus();
     """)
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys(']').key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, ']', ['ctrl'])
     assert browser.execute_script('return serializeProseMirrorSource(formattingPanel)').startswith('- first\n  * second')
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('[').key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, '[', ['ctrl'])
     assert browser.execute_script('return serializeProseMirrorSource(formattingPanel)').startswith('- first\n- second')
 
 
@@ -523,7 +543,7 @@ def test_markdown_code_block_shortcut(browser, tmp_path, surface):
         browser.execute_script('formattingPanel._pmView.focus()')
     else:
         browser.execute_script('formattingPanel._cmView.focus()')
-    ActionChains(browser).key_down(Keys.CONTROL).key_down(Keys.ALT).key_down(Keys.SHIFT).send_keys('c').key_up(Keys.SHIFT).key_up(Keys.ALT).key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, 'c', ['ctrl', 'alt', 'shift'])
     value = browser.execute_script(
         "return arguments[0] === 'view-editor' ? serializeProseMirrorSource(formattingPanel) : formattingPanel._cmView.state.doc.toString()",
         surface,
@@ -755,7 +775,7 @@ def test_clear_resets_block_style_to_normal_text(browser, tmp_path, surface, sou
     """, source, selected, surface)
     expected_source = 'title\n\nplain' if source.startswith('title\n=====') and surface == 'view-editor' else expected
     assert result == {'applied': True, 'source': expected_source}, result
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('z').key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, 'z', [native_editor_modifier(browser)])
     restored = browser.execute_script(
         "return arguments[0] === 'view-editor' ? serializeProseMirrorSource(formattingPanel) : formattingPanel._cmView.state.doc.toString()",
         surface,
@@ -885,7 +905,7 @@ def test_clear_selected_table_text_keeps_cells_and_other_columns(browser, tmp_pa
       panel._pmView.dispatch(panel._pmView.state.tr.setSelection(api.TextSelection.create(doc,position,position+3)));
       panel._pmView.focus();
     """)
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('\\').key_up(Keys.CONTROL).perform()
+    native_logical_key(browser, '\\', ['ctrl'])
     output = browser.execute_script('return serializeProseMirrorSource(formattingPanel)')
     assert output == '| h1 | h2 |\n| --- | --- |\n| abc | VALUE |', output
 
@@ -916,7 +936,8 @@ def test_clear_at_caret_removes_typing_styles_after_block_normalization(browser,
       panel._pmView.dispatch(panel._pmView.state.tr.setSelection(api.TextSelection.create(doc,2)));
       panel._pmView.focus();
     """, heading)
-    ActionChains(browser).key_down(Keys.CONTROL).send_keys('\\').key_up(Keys.CONTROL).send_keys('X').perform()
+    native_logical_key(browser, '\\', ['ctrl'])
+    native_logical_key(browser, 'X')
     result = browser.execute_script("""
       const doc = formattingPanel._pmView.state.doc;
       const characters = [];

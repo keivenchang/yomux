@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
@@ -14,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -327,7 +329,14 @@ func nativeListenerPIDs(port int) ([]int, error) {
 }
 
 func nativeProbe(checkout, host string, port int, httpMode bool, path string) (map[string]any, error) {
-	config := defaultConfigDir()
+	var payload map[string]any
+	err := nativeReadProbe(host, port, httpMode, path, true, func(response *http.Response) error {
+		return json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&payload)
+	})
+	return payload, err
+}
+
+func nativeReadProbe(host string, port int, httpMode bool, path string, authenticate bool, read func(*http.Response) error) error {
 	scheme := "https"
 	if httpMode {
 		scheme = "http"
@@ -337,44 +346,67 @@ func nativeProbe(checkout, host string, port int, httpMode bool, path string) (m
 	}
 	request, err := http.NewRequest(http.MethodGet, scheme+"://"+net.JoinHostPort(host, strconv.Itoa(port))+path, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	// Read the existing secret; probes must never create authentication state.
-	secretBytes, secretErr := os.ReadFile(filepath.Join(config, "auth-cookie-secret"))
-	users := (&server{config: config}).users()
-	if len(users) > 0 {
-		if secretErr != nil {
-			return nil, secretErr
-		}
-		secret, err := hex.DecodeString(strings.TrimSpace(string(secretBytes)))
-		if err != nil || len(secret) != 32 {
-			return nil, fmt.Errorf("invalid authentication secret")
-		}
-		user := users[0]
-		for _, candidate := range users {
-			if candidate.role == "admin" {
-				user = candidate
-				break
+	if authenticate {
+		// Read the existing secret; probes must never create authentication state.
+		config := defaultConfigDir()
+		secretBytes, secretErr := os.ReadFile(filepath.Join(config, "auth-cookie-secret"))
+		users := (&server{config: config}).users()
+		if len(users) > 0 {
+			if secretErr != nil {
+				return secretErr
 			}
+			secret, err := hex.DecodeString(strings.TrimSpace(string(secretBytes)))
+			if err != nil || len(secret) != 32 {
+				return fmt.Errorf("invalid authentication secret")
+			}
+			user := users[0]
+			for _, candidate := range users {
+				if candidate.role == "admin" {
+					user = candidate
+					break
+				}
+			}
+			digest := hmac.New(sha256.New, secret)
+			_, _ = digest.Write([]byte(user.username + ":" + user.password))
+			request.AddCookie(&http.Cookie{Name: "yomux_auth_" + strconv.Itoa(port), Value: hex.EncodeToString(digest.Sum(nil))})
 		}
-		digest := hmac.New(sha256.New, secret)
-		_, _ = digest.Write([]byte(user.username + ":" + user.password))
-		request.AddCookie(&http.Cookie{Name: "yomux_auth_" + strconv.Itoa(port), Value: hex.EncodeToString(digest.Sum(nil))})
 	}
 	transport := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, Proxy: nil}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("probe %s returned HTTP %d", path, response.StatusCode)
+		return fmt.Errorf("probe %s returned HTTP %d", path, response.StatusCode)
 	}
-	var payload map[string]any
-	err = json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&payload)
-	return payload, err
+	return read(response)
+}
+
+func nativeBrowserAssetsReady(host string, port int, httpMode bool) error {
+	for _, path := range []string{"/static/yomux.js", "/static/yomux.css"} {
+		if err := nativeReadProbe(host, port, httpMode, path, false, func(response *http.Response) error {
+			contentType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+			if err != nil {
+				return fmt.Errorf("browser asset %s content type: %w", path, err)
+			}
+			if (path == "/static/yomux.css" && contentType == "text/css") ||
+				(path == "/static/yomux.js" && (contentType == "text/javascript" || contentType == "application/javascript")) {
+				if _, err := io.Copy(io.Discard, response.Body); err != nil {
+					return fmt.Errorf("browser asset %s transfer: %w", path, err)
+				}
+				return nil
+			}
+			return fmt.Errorf("browser asset %s has unexpected content type %q", path, contentType)
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func nativeLaunchReady(checkout, host string, port int, httpMode bool, sessions []string) error {
@@ -628,6 +660,8 @@ func runNativeOperator(args []string) error {
 		return nil
 	case "verify-replacement":
 		return nativeManagedPreflightWithMode(absolute, *host, *port, *httpMode, true, false, *planJSON)
+	case "browser-assets-ready":
+		return nativeBrowserAssetsReady(*host, *port, *httpMode)
 	case "ready", "sessions":
 		if *planFile == "" && *planJSON == "" {
 			plan, err := nativeLaunchPlan(absolute, *port, false)
@@ -666,8 +700,20 @@ func runNativeOperator(args []string) error {
 		}
 		fmt.Println(value)
 		return nil
+	case "setup-assets":
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		return staticassets.SetupVendorAssetsWithPublisher(ctx, absolute, func(outputs map[string][]byte) error {
+			return nativeWriteAssets(absolute, absolute, func() (map[string][]byte, error) { return outputs, nil })
+		})
+	case "verify-assets":
+		return staticassets.VerifyVendorAssets(absolute)
+	case "verify-source-assets":
+		return staticassets.VerifyVendorSourceAssets(absolute)
 	case "build-assets":
 		return nativePublishAssets(absolute)
+	case "startup-assets":
+		return nativeStartupAssets(absolute)
 	case "version":
 		if err := verifyNativeVersion(absolute); err != nil {
 			return err
@@ -783,8 +829,30 @@ func verifyNativeVersion(checkout string) error {
 
 // Publish under the same declaration slot as Python developer tools. A busy or
 // malformed owner refuses publication; this path never reclaims another writer.
+func nativeStartupAssets(root string) error {
+	installation, err := readNativeInstallation(root)
+	if err != nil {
+		return err
+	}
+	if installation != nil {
+		return staticassets.VerifyVendorAssets(root)
+	}
+	checkout, err := verifyUpdateCheckout(root)
+	if err != nil {
+		return err
+	}
+	if err := nativePublishAssets(checkout); err != nil {
+		return err
+	}
+	return staticassets.VerifyVendorSourceAssets(checkout)
+}
+
 func nativePublishAssets(checkout string) error {
-	output, err := exec.Command("git", "-C", checkout, "rev-parse", "--absolute-git-dir").Output()
+	return nativeWriteAssets(checkout, filepath.Join(checkout, "static"), func() (map[string][]byte, error) { return staticassets.Build(checkout) })
+}
+
+func nativeWriteAssets(checkout, destination string, build func() (map[string][]byte, error)) error {
+	output, err := nativeRepositoryPath(checkout, "--absolute-git-dir")
 	if err != nil {
 		return fmt.Errorf("resolve asset writer slot: %w", err)
 	}
@@ -832,7 +900,7 @@ func nativePublishAssets(checkout string) error {
 		_ = os.Remove(slot)
 		return err
 	}
-	outputs, err := staticassets.Build(checkout)
+	outputs, err := build()
 	if err != nil {
 		return err
 	}
@@ -851,7 +919,7 @@ func nativePublishAssets(checkout string) error {
 	if time.Since(time.Unix(0, int64(now*1e9))) > 30*time.Second {
 		return fmt.Errorf("asset writer lease expired before publication")
 	}
-	_, err = staticassets.Publish(filepath.Join(checkout, "static"), outputs, false)
+	_, err = staticassets.Publish(destination, outputs, false)
 	return err
 }
 
@@ -1336,7 +1404,7 @@ func runNativeProfile(checkout, session string, port int, preflight, printPlan, 
 
 // Managed commands share boot's environment defaults; direct server invocations
 // retain their existing flags and conservative network and agent defaults.
-func nativeManagedDefaults(explicit map[string]bool, port *int, host *string, dangerouslyYolo *bool) error {
+func nativeManagedDefaults(explicit map[string]bool, port *int, host *string) error {
 	if !explicit["port"] {
 		value, present := productenv.Lookup("PORT")
 		if !present {
@@ -1354,9 +1422,6 @@ func nativeManagedDefaults(explicit map[string]bool, port *int, host *string, da
 			value = "0.0.0.0"
 		}
 		*host = value
-	}
-	if !explicit["dang"] && !explicit["dangerously-yolo"] {
-		*dangerouslyYolo = true
 	}
 	return nil
 }

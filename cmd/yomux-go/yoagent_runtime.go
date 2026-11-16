@@ -438,6 +438,9 @@ func runNativeAgent(ctx context.Context, root string, settings map[string]any, b
 			args = append(args, "resume")
 		}
 		args = append(args, "--json", "--ignore-rules")
+		if settings["_description_data_only"] == true {
+			args = append(args, "--ignore-user-config", "--ephemeral", "--disable", "shell_tool", "--disable", "unified_exec", "--disable", "apps", "--disable", "multi_agent", "-c", `web_search="disabled"`)
+		}
 		if model := nativeAgentStringSetting(settings, "codex_model", ""); model != "" {
 			args = append(args, "-m", model)
 		}
@@ -541,7 +544,7 @@ func runNativeAgent(ctx context.Context, root string, settings map[string]any, b
 	if capturedSessionID == "" && sessionID != "" {
 		capturedSessionID = sessionID
 	}
-	if structuredIntent {
+	if structuredIntent || settings["_description_data_only"] == true {
 		return map[string]any{"backend": backend, "transport": transport, "persistent": false, "resumed": false}, answer.String(), nil
 	}
 	return map[string]any{"backend": backend, "transport": transport, "persistent": true, "resumed": resume, "session_id": capturedSessionID}, answer.String(), nil

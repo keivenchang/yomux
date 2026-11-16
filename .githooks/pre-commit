@@ -4,7 +4,7 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
-if git -C "$repo_root" diff --cached --quiet -- static_src/ tools/static_build.py .githooks/pre-commit static/yomux.js; then
+if git -C "$repo_root" diff --cached --quiet -- static_src/ tools/static_build.py .githooks/pre-commit static/yomux.js assets/runtime/browser-assets.json internal/staticassets tools/codemirror-bundle tools/prosemirror-bundle; then
     exit 0
 fi
 
@@ -18,5 +18,6 @@ index_tree="$(git -C "$repo_root" write-tree)"
 git -C "$repo_root" archive --format=tar "$index_tree" | tar -xf - -C "$index_root"
 git_dir="$(git -C "$repo_root" rev-parse --absolute-git-dir)"
 printf 'gitdir: %s\n' "$git_dir" > "$index_root/.git"
+(cd -- "$index_root" && tools/build_go.sh)
 python3 "$index_root/tools/static_build.py"
 python3 "$index_root/tools/static_build.py" --check

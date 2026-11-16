@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from tools.mockers import opencode
+from tests.helpers.fixture_tools import fixture_python_environment
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +63,7 @@ from codex import APP_SERVER_TIMEOUT_SECONDS, CodexTextClient  # noqa: E402
 
 
 GENERIC_HELP_FLAGS = {"-V", "--version"}
+SYSTEM_HELP_PATH = os.pathsep.join(os.defpath.split(os.pathsep) + ["/usr/sbin", "/sbin"])
 
 
 def parser_startup_flags(module_path: Path, flag_constants: dict[str, str]) -> set[str]:
@@ -325,7 +327,7 @@ def test_claude_help_explains_model_and_config_defaults():
 
 
 def test_codex_help_cli_does_not_require_server_auth(tmp_path):
-    env = {"PATH": "/usr/bin", "HOME": str(tmp_path)}
+    env = fixture_python_environment({"PATH": SYSTEM_HELP_PATH, "HOME": str(tmp_path)})
     result = subprocess.run(
         [sys.executable, str(TOOLS_DIR / "codex.py"), "--help"],
         cwd=str(ROOT),
@@ -351,7 +353,7 @@ def test_codex_help_cli_does_not_require_server_auth(tmp_path):
 
 
 def test_text_client_help_outputs_share_sections(tmp_path):
-    env = {"PATH": "/usr/bin", "HOME": str(tmp_path)}
+    env = fixture_python_environment({"PATH": SYSTEM_HELP_PATH, "HOME": str(tmp_path)})
     codex_result = subprocess.run(
         [sys.executable, str(TOOLS_DIR / "codex.py"), "--help"],
         cwd=str(ROOT),

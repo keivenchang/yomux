@@ -822,7 +822,6 @@ function loadYomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], proto
       term: {normal: 'bash', full_access: 'bash'},
     },
     terminalCommands: ['bash', 'tsh', 'zsh'],
-    dangerouslyYolo: true,
     accessRole,
     homePath: '/home/test',
     repoRoot: '/home/test/yolomux.dev',
@@ -2769,6 +2768,7 @@ globalThis.__layoutTestApi = {
     clientSettingsPayload = {...clientSettingsPayload, ...(patch || {})};
   },
   applySettingsPayloadForTest: applySettingsPayload,
+  settingPatchForPathForTest: settingPatchForPath,
   clientSettingsMetadataDeferredForTest() { return clientSettingsMetadataDeferred; },
   settingsStateForTest() { return {settings: clientSettings, defaults: clientSettingsDefaults}; },
   settingsApplyDependenciesForTest: SETTINGS_APPLY_DEPENDENCIES,
@@ -3306,6 +3306,7 @@ globalThis.__layoutTestApi = {
     return readStoredFileExplorerMode();
   },
   buildTabberNormalRowsForTest: buildTabberNormalRows,
+  tabberEntryCompareForTest(left, right, mode = 'newest') { return fileTreeEntryComparator(mode, {view: 'tabber', tabberNormalOrder: true})(left, right); },
   defaultNormalTabberLayoutSlotsForTest: defaultNormalTabberLayoutSlots,
   toggleTabberNormalPaneForTest: toggleTabberNormalPane,
   activateNormalTabberRowForTest: activateNormalTabberRow,

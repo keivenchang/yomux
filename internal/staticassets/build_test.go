@@ -8,6 +8,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/keivenchang/yomux/internal/atomicfile"
 	"os"
 	"path/filepath"
 	"testing"
@@ -221,5 +224,60 @@ func TestPseudoUnicodeBoundaryContract(t *testing.T) {
 		if actual := tokenCounts(p.protected, example.Input, false); !sameCounts(actual, example.Protected) {
 			t.Errorf("protected(%q)=%v want %v", example.Input, actual, example.Protected)
 		}
+	}
+}
+
+func TestPublishRollsBackEarlierFilesAfterCommitFailure(t *testing.T) {
+	for _, existed := range []bool{false, true} {
+		t.Run(fmt.Sprint(existed), func(t *testing.T) {
+			root := t.TempDir()
+			if existed {
+				if err := os.WriteFile(filepath.Join(root, "a.js"), []byte("previous"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(root, "z.js"), []byte("previous z"), 0640); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			_, err := publishOutputs(root, map[string][]byte{"a.js": []byte("new a"), "z.js": []byte("new z")}, false, func(stage *atomicfile.Staged) error {
+				calls++
+				if calls == 2 {
+					return errors.New("injected publication failure")
+				}
+				return stage.Commit()
+			})
+			if err == nil {
+				t.Fatal("publication failure accepted")
+			}
+			body, err := os.ReadFile(filepath.Join(root, "a.js"))
+			if existed && (err != nil || string(body) != "previous") {
+				t.Fatalf("earlier file not restored: %q %v", body, err)
+			}
+			if !existed && !os.IsNotExist(err) {
+				t.Fatalf("new output survived rollback: %v", err)
+			}
+			body, err = os.ReadFile(filepath.Join(root, "z.js"))
+			if err != nil || string(body) != "previous z" {
+				t.Fatalf("failed output changed: %q %v", body, err)
+			}
+		})
+	}
+}
+
+func TestPublishPreflightsNonregularLaterOutput(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.js"), []byte("previous"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "z.js"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Publish(root, map[string][]byte{"a.js": []byte("new"), "z.js": []byte("new")}, false); err == nil {
+		t.Fatal("directory output accepted")
+	}
+	body, err := os.ReadFile(filepath.Join(root, "a.js"))
+	if err != nil || string(body) != "previous" {
+		t.Fatalf("earlier output changed: %q %v", body, err)
 	}
 }

@@ -31,8 +31,8 @@
   height: 100%;
 }
 .file-editor-pdf-preview {
-  min-height: 420px;
-  height: min(72vh, 100%);
+  min-height: 0;
+  height: 100%;
 }
 .html-preview-body,
 .pdf-preview-body {
@@ -43,6 +43,19 @@
 }
 .pdf-preview-body {
   gap: var(--space-10);
+}
+.pdf-preview-body > .file-editor-preview-fallback {
+  width: fit-content;
+  padding: var(--space-4) var(--space-6);
+}
+.pdf-preview-body > .file-editor-preview-fallback[hidden] {
+  display: none;
+}
+.pdf-preview-body > .file-editor-preview-fallback .file-editor-empty-title {
+  font-size: var(--ui-font-size-sm);
+}
+.pdf-preview-body > .file-editor-preview-fallback .file-editor-empty-detail {
+  margin-top: 0;
 }
 .image-preview-body,
 .file-editor-image-panel {
@@ -2198,6 +2211,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-reload-panel,
 .file-editor-upload-panel,
 .file-editor-popout-preview-panel,
+.file-editor-popout-editor-panel,
 .file-editor-blame-panel,
 .file-editor-save-panel {
   height: 20px;
@@ -2217,6 +2231,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-diff-expand-panel,
 .file-editor-upload-panel,
 .file-editor-popout-preview-panel,
+.file-editor-popout-editor-panel,
 .file-editor-blame-panel,
 .file-editor-theme-panel {
   min-width: 20px;
@@ -2276,6 +2291,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-diff-panel:not([aria-pressed="true"]):hover,
 .file-editor-diff-expand-panel:not([aria-pressed="true"]):hover,
 .file-editor-popout-preview-panel:hover,
+.file-editor-popout-editor-panel:hover,
 .file-editor-theme-panel:hover,
 .file-editor-reload-panel:hover,
 .file-editor-preview-find-panel button:not(:disabled):is(:hover, :focus-visible),
@@ -3376,6 +3392,25 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
   line-height: 1.45;
+}
+.tex-preview-status {
+  align-self: flex-start;
+  text-align: left;
+  font-family: var(--ui-font);
+  font-size: var(--ui-font-size);
+}
+.tex-preview-status .file-editor-empty-detail {
+  font-family: inherit;
+  font-size: inherit;
+}
+.tex-preview-instructions {
+  margin: var(--space-12) 0;
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-xs);
+  line-height: 1.45;
+}
+.tex-preview-actions {
+  margin-top: var(--space-12);
 }
 .file-editor-status-panel {
   min-height: 18px;

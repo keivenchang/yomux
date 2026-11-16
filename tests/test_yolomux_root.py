@@ -52,7 +52,7 @@ def test_rooted_subprocess_isolates_instance_state_but_reuses_user_codex_credent
     # The test container's pytest temp root is deliberately very deep.  A
     # compact /tmp root is the practical container/debugging shape which must
     # fit the Unix-socket budget; the deep-root rejection has its own test.
-    root = Path("/tmp/yolomux-root-7771")
+    root = Path("/tmp/yolomux-root-7771").resolve()
     probe = """
 import json
 from pathlib import Path
@@ -105,7 +105,7 @@ print(json.dumps({
 
 
 def test_root_isolates_instance_state_but_not_user_owned_codex_credentials(tmp_path: Path):
-    root = Path("/tmp/yr")
+    root = Path("/tmp/yr").resolve()
     paths = common.resolve_yomux_roots(
         {"YOLOMUX_ROOT": str(root), "XDG_CACHE_HOME": "/outside/cache", "CODEX_HOME": "/outside/codex"},
         identity=_identity(),
@@ -149,7 +149,7 @@ def test_deep_root_fails_socket_budget_before_creating_a_directory(tmp_path: Pat
 
 
 def test_socket_budget_accepts_a_realistic_development_root():
-    root = Path("/home/keivenc/dev/yolomux-verify-7771")
+    root = Path("/tmp").resolve() / "yomux-verify-7771"
 
     paths = common.resolve_yomux_roots({"YOLOMUX_ROOT": str(root)}, identity=_identity())
 

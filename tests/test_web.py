@@ -16,7 +16,7 @@ from yomux_lib import common
 from yomux_lib import web
 from yomux_lib.stats_current import storage as stats_current_storage
 from tools.bazel_execution_contract import xterm_fixture_paths
-from tools.product_environment import product_env
+from tools.bazel_execution_contract import diagnostic_xterm_package_root
 
 _BOOTSTRAP_RE = re.compile(r'<script id="yomux-bootstrap"[^>]*>(.*?)</script>', re.DOTALL)
 
@@ -212,8 +212,8 @@ def test_xterm_asset_path_requires_tracked_vendor_asset(monkeypatch, tmp_path):
 
 
 def test_tracked_xterm_vendor_assets_match_pinned_package_fixture():
-    package_paths = xterm_fixture_paths(product_env("XTERM_PACKAGE_ROOT", "/opt/xterm/node_modules"))
-    assert all(path.is_file() for path in package_paths.values())
+    package_paths = xterm_fixture_paths(diagnostic_xterm_package_root())
+    assert all(path.is_file() for path in package_paths.values()), package_paths
     assert {
         name: (common.STATIC_DIR / "vendor" / name).read_bytes()
         for name in package_paths

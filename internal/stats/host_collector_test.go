@@ -3,7 +3,9 @@ package stats
 import (
 	"context"
 	"errors"
+	"io"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -38,6 +40,18 @@ func (s *capturedDiskHostSources) Disk(context.Context) ([]DiskUsageSample, erro
 
 func (s topologyHostSources) SystemLogicalCPUs() int { return s.logicalCPUs }
 
+// Captured samples are finite: an extra scheduled cycle reports unavailable
+// instead of inventing another sample or panicking before the observer stops it.
+func popCapturedHostSample[T any](samples *[]T) (T, error) {
+	if len(*samples) == 0 {
+		var zero T
+		return zero, io.EOF
+	}
+	item := (*samples)[0]
+	*samples = (*samples)[1:]
+	return item, nil
+}
+
 func (s *capturedHostSources) CPU(context.Context) (CPUSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -48,15 +62,15 @@ func (s *capturedHostSources) CPU(context.Context) (CPUSnapshot, error) {
 			return CPUSnapshot{}, err
 		}
 	}
-	item := s.cpu[0]
-	s.cpu = s.cpu[1:]
-	return item, nil
+	return popCapturedHostSample(&s.cpu)
 }
 func (s *capturedHostSources) Memory(context.Context) (MemoryCounters, []ProcessCensusRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	item := s.memory[0]
-	s.memory = s.memory[1:]
+	item, err := popCapturedHostSample(&s.memory)
+	if err != nil {
+		return MemoryCounters{}, nil, err
+	}
 	return item, []ProcessCensusRow{{Identity: "pid-1", Binary: "python", RSSBytes: 4096}}, nil
 }
 func (s *capturedHostSources) GPU(context.Context) ([]GPUDevice, error) {
@@ -65,9 +79,53 @@ func (s *capturedHostSources) GPU(context.Context) ([]GPUDevice, error) {
 	if s.gpuError != nil {
 		return nil, s.gpuError
 	}
-	item := s.gpu[0]
-	s.gpu = s.gpu[1:]
-	return item, nil
+	return popCapturedHostSample(&s.gpu)
+}
+
+func TestCapturedHostSourcesReportFiniteSampleExhaustion(t *testing.T) {
+	cpu := snapshot(10, 20, 2)
+	memory := MemoryCounters{UsedBytes: 1, CapacityBytes: 2}
+	gpu := []GPUDevice{{SourceID: "gpu:0", Label: "captured"}}
+	for _, family := range []string{"cpu", "memory", "gpu"} {
+		t.Run(family, func(t *testing.T) {
+			source := &capturedHostSources{cpu: []CPUSnapshot{cpu}, memory: []MemoryCounters{memory}, gpu: [][]GPUDevice{gpu}}
+			var read func() (any, error)
+			var want, zero any
+			switch family {
+			case "cpu":
+				want, zero = cpu, CPUSnapshot{}
+				read = func() (any, error) { return source.CPU(context.Background()) }
+			case "memory":
+				want, zero = memory, MemoryCounters{}
+				read = func() (any, error) {
+					value, rows, err := source.Memory(context.Background())
+					if err == nil && len(rows) != 1 || err != nil && rows != nil {
+						t.Fatalf("memory census disagrees with sample availability: rows=%v err=%v", rows, err)
+					}
+					return value, err
+				}
+			case "gpu":
+				want, zero = gpu, []GPUDevice(nil)
+				read = func() (any, error) { return source.GPU(context.Background()) }
+			}
+			if got, err := read(); err != nil || !reflect.DeepEqual(got, want) {
+				t.Fatalf("captured sample=%v err=%v want=%v", got, err, want)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				if got, err := read(); !errors.Is(err, io.EOF) || !reflect.DeepEqual(got, zero) {
+					t.Fatalf("exhausted sample=%v err=%v want zero=%v and EOF", got, err, zero)
+				}
+			}
+		})
+	}
+	failure := errors.New("configured source failure")
+	source := &capturedHostSources{cpuErrs: []error{failure}, gpuError: failure}
+	if _, err := source.CPU(context.Background()); !errors.Is(err, failure) {
+		t.Fatalf("configured CPU failure lost to exhaustion: %v", err)
+	}
+	if _, err := source.GPU(context.Background()); !errors.Is(err, failure) {
+		t.Fatalf("configured GPU failure lost to exhaustion: %v", err)
+	}
 }
 
 type collectorClock struct {

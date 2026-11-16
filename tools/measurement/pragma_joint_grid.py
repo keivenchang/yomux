@@ -79,21 +79,26 @@ class GridError(RuntimeError):
     """The grid cannot produce a trustworthy answer and says why rather than returning one."""
 
 
-def proc_io() -> dict:
+def require_measurement_host():
+    if sys.platform != "linux" or not hasattr(os, "posix_fadvise"):
+        raise GridError("pragma measurements require Linux /proc counters and posix_fadvise; this host is unsupported")
+
+
+def proc_io(proc_root=Path("/proc")) -> dict:
     values = {}
-    with open("/proc/self/io", encoding="utf-8") as handle:
+    with (proc_root / "self/io").open(encoding="utf-8") as handle:
         for line in handle:
             key, _, raw = line.partition(":")
             values[key.strip()] = int(raw.strip())
     return values
 
 
-def proc_status() -> dict:
+def proc_status(proc_root=Path("/proc")) -> dict:
     """The two memory limbs plus the totals, in bytes. kB in /proc means KiB."""
 
     wanted = {"RssAnon", "RssFile", "RssShmem", "VmSwap", "VmRSS", "VmHWM"}
     values = {}
-    with open("/proc/self/status", encoding="utf-8") as handle:
+    with (proc_root / "self/status").open(encoding="utf-8") as handle:
         for line in handle:
             key, _, raw = line.partition(":")
             if key in wanted:
@@ -514,6 +519,7 @@ def main() -> int:
     if arguments.worker:
         if arguments.store is None or arguments.arm is None:
             parser.error("--worker needs --store and --arm")
+        require_measurement_host()
         point = run_point(
             arguments.store, arguments.arm, arguments.cache_size, arguments.mmap_size,
             settle_seconds=arguments.settle_seconds, rows=arguments.rows,
@@ -539,6 +545,7 @@ def main() -> int:
         print(json.dumps({"skipped": True, "reason": f"--store {arguments.store} does not exist"}, indent=2))
         return 0
 
+    require_measurement_host()
     started = time.monotonic()
     arguments.scratch.mkdir(parents=True, exist_ok=True)
     report = {

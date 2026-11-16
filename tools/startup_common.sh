@@ -178,7 +178,7 @@ yomux_bootout_macos_server() {
   fi
 }
 
-# Capture launch controls in the caller before a retained tmux daemon can replace them.
+# Capture launch controls before detaching the server from the caller.
 # NUL-delimited assignments preserve spaces and newlines in explicit operator paths.
 yomux_server_launch_environment() {
   local backend="$1" go_binary="$2"
@@ -200,8 +200,7 @@ yomux_server_launch_environment() {
 }
 
 yomux_macos_server_launcher() {
-  # The plan JSON is a positional argument, not inherited state: a long-lived
-  # tmux server cannot substitute a stale root or stale plan-file path. Both the
+  # The plan JSON is a positional argument, not inherited state. Both the
   # direct boot path and supported multi-row launcher use this same exec path.
   printf '%s' 'repo=$1; launch_path=$2; shell_bin=$3; native_binary=$4; script=$5; log_path=$6; plan_json=$7; env_count=$8; shift 8; cd "$repo" || exit 2; export PATH="$launch_path" SHELL="$shell_bin" TERM=xterm-256color MALLOC_ARENA_MAX=2 || exit 2; unset TMUX TMUX_PANE; source "$repo/tools/product_environment.sh" || exit 2; for env_suffix in GO_BINARY GO_START_REASON CLAUDE_TRANSCRIPT_ROOT CODEX_TRANSCRIPT_ROOT OPENCODE_DATABASE TEST_AUTH_BYPASS TMUX_SOCKET TMUX_ALLOW_DEFAULT_SERVER; do product_env_unset "$env_suffix"; done; export '"$(yomux_default_server_optin)"' || exit 2; case "$env_count" in ""|*[!0-9]*) exit 2 ;; esac; for ((env_index=0; env_index<env_count; env_index++)); do assignment=$1; shift; case "$assignment" in *=*) ;; *) exit 2 ;; esac; env_name=${assignment%%=*}; if [[ ! "$env_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then exit 2; fi; export "$assignment" || exit 2; done; source "$repo/tools/startup_common.sh" || exit 2; yomux_normalize_environment; exec "$native_binary" --operator exec --root "$repo" --plan-json "$plan_json" -- "$native_binary" --launch --launch-plan-json "$plan_json" --root "$repo" "$@" >> "$log_path" 2>&1'
 }
@@ -231,14 +230,15 @@ yomux_submit_macos_server() {
     printf 'invalid macOS launch environment count: %s\n' "${7:-}" >&2
     return 2
   fi
-  local launcher session_name plan_json
+  local launcher plan_json
   launcher="$(yomux_macos_server_launcher)"
-  session_name="$(yomux_macos_server_tmux_session "$port")"
   if [[ -n "$(product_env_print ROW_PLAN_FILE "")" ]]; then
     plan_json="$(< "$(product_env_print ROW_PLAN_FILE)")"
   else
     plan_json="$("$native_binary" --operator plan-direct --root "$repo_root" --port "$port")" || return
   fi
-  yomux_macos_server_tmux new-session -d -s "$session_name" -c "$repo_root" \
-    /bin/bash -c "$launcher" bash "$repo_root" "$launch_path" "$shell_bin" "$native_binary" "$native_binary" "$log_path" "$plan_json" "$env_count" "$@"
+  nohup /bin/bash -c "$launcher" bash "$repo_root" "$launch_path" "$shell_bin" "$native_binary" "$native_binary" "$log_path" "$plan_json" "$env_count" "$@" \
+    >> "$log_path" 2>&1 < /dev/null &
+  launched_pid="$!"
+  disown 2>/dev/null || true
 }

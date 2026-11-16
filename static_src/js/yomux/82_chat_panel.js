@@ -947,17 +947,22 @@ function loadChatEmojiCatalog() {
   const existingCatalog = globalThis.YOMUX_EMOJI_DATA || globalThis.YOLOMUX_EMOJI_DATA;
   if (Array.isArray(existingCatalog)) return Promise.resolve(existingCatalog);
   if (chatState.emojiCatalogPromise) return chatState.emojiCatalogPromise;
-  chatState.emojiCatalogPromise = new Promise((resolve, reject) => {
+  const promise = new Promise((resolve, reject) => {
     const script = document.createElement('script');
     script.src = '/static/emoji-data.js';
     script.onload = () => {
       const catalog = globalThis.YOMUX_EMOJI_DATA || globalThis.YOLOMUX_EMOJI_DATA;
-      resolve(Array.isArray(catalog) ? catalog : []);
+      if (Array.isArray(catalog)) resolve(catalog);
+      else reject(new Error(t('common.requestFailed')));
     };
     script.onerror = () => reject(new Error(t('common.requestFailed')));
     document.head.appendChild(script);
   });
-  return chatState.emojiCatalogPromise;
+  chatState.emojiCatalogPromise = promise;
+  promise.catch(() => {
+    if (chatState.emojiCatalogPromise === promise) chatState.emojiCatalogPromise = null;
+  });
+  return promise;
 }
 
 function chatRecentEmoji() {

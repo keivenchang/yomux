@@ -1476,7 +1476,7 @@ func (s *server) goYoloApprovalCycle(ctx context.Context, session, target, expec
 		s.publishGoYoloState(session)
 		return nil
 	}
-	decision := yolo.LoadAndEvaluate(rulesPath, prompt.RuleInput, s.dangerouslyYolo)
+	decision := yolo.LoadAndEvaluate(rulesPath, prompt.RuleInput, false)
 	activeAction := decision.Action == yolo.Approve || decision.Action == yolo.Decline
 	if prompt.Hash == lastHash && !lastAt.IsZero() && (!activeAction || time.Since(lastAt) < goYoloApprovalRetryDelay) {
 		return nil

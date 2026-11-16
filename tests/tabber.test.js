@@ -33,6 +33,31 @@ const {
   finishSuite,
 } = require('./browser_helpers/layout_test_helper');
 
+test('Tabber native drag uses the represented window identity', () => {
+  const api = loadYomux('', ['work']);
+  api.setTranscriptInfoForTest('work', {window_metadata: [
+    {window_index: 0, window_id: '@10'}, {window_index: 1, window_id: '@11'},
+  ], panes: [
+    {window: '0', window_id: '@10', pane: '0', active: true, window_active: true, command: 'codex'},
+    {window: '1', window_id: '@11', pane: '0', active: true, window_active: false, command: 'claude'},
+  ]});
+  api.storeTabberViewSessionForTest('__yomux_view_second', {sourceSession: 'work', windowIndex: 1, windowId: '@11'});
+  api.setFileExplorerModeForTest('tabber');
+  const groups = new TestElement('window-drag-groups');
+  api.renderTabberTree(groups);
+  const row = [...groups.querySelectorAll('.file-tree-row[data-tabber-type="normal"]')]
+    .find(node => node.dataset.tabberWindow === '1');
+  assert.ok(row, 'the non-active physical window has a row');
+  const represented = row.dataset.paneTab;
+  assert.ok(represented && represented !== 'work', 'the row represents a distinct window view');
+  const event = dragEvent(20, '');
+  event.target = row;
+  row.listeners.get('dragstart')[0](event);
+  assert.equal(event.dataTransfer['text/plain'], represented);
+  assert.equal(JSON.parse(event.dataTransfer['application/x-yomux-session']).session, represented);
+  api.endSessionDrag(event);
+});
+
 test('Canonical roster supplies counted windows before the top-level session list converges', () => {
   const api = loadYomux('', ['old']);
   api.setTranscriptSessionOrderForTest(['new']);
@@ -850,6 +875,7 @@ test('manual refresh renews terminal size after the mobile viewport settles', ()
     refreshTranscripts() {},
     refreshAutoStatuses() {},
     refreshWatchedFilesystem() {},
+    refreshSettings: async () => {},
   };
   vm.createContext(context);
   vm.runInContext(layoutSource.slice(layoutSource.indexOf('let lastTerminalResizeAuthoritySignature'), layoutSource.indexOf('function fitTerminal(')), context);
@@ -1746,6 +1772,25 @@ test('Dockview native click restores input without repeating consumed activation
 });
 
 async function runTabberSuite() {
+  test('Tabber file and Repo Diff rows show their complete paths in descriptions', () => {
+    const editorPath = '/home/keivenc/work/project/src/editor.ts';
+    const repoPath = '/home/keivenc/work/project';
+    const api = loadYomux(`?layout=left&tabs=left:${encodeURIComponent(`file:${editorPath}`)}`, ['one']);
+    const editorItem = api.fileEditorItemFor(editorPath);
+    const editorRow = api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === editorItem);
+    assert.equal(editorRow?.tabber?.description, editorPath, 'edited file description retains its absolute path');
+    assert.ok(editorRow?.tabber?.normalNameHtml.includes(editorPath), 'edited file path appears below its Tabber label');
+    assert.ok(api.tabberRenderedRowsForTest().find(row => row.paneItem === editorItem)?.title.includes(editorPath), 'the rendered editor row tooltip retains the complete path');
+
+    api.setTabberModeForTest('advanced');
+    const diffItem = api.resolveLayoutItem(api.gitDiffItemFor(repoPath));
+    api.applyLayoutSlotsForTest({left: {tabs: [diffItem], active: diffItem}});
+    const diffRow = api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.item === diffItem);
+    assert.equal(diffRow?.tabber?.description, repoPath, 'Repo Diff description retains its absolute repository path');
+    assert.ok(diffRow?.tabber?.normalNameHtml.includes(repoPath), 'Repo Diff path appears below its Tabber label');
+    assert.ok(api.tabberRenderedRowsForTest().find(row => row.paneItem === diffItem)?.title.includes(repoPath), 'the rendered Repo Diff row tooltip retains the complete path');
+  });
+
   await testAsync('restoring an editor does not count as recent activity', async () => {
     const api = loadYomux('?layout=left&tabs=left:file%3A%2Ftmp%2F2026.md', ['one'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
     const path = '/tmp/2026.md';
@@ -1841,6 +1886,7 @@ async function runTabberSuite() {
     let failRefresh = true;
     let payload = {agent_window_snapshot_revision:7, activity:{one:{active_recency_ts:1}}};
     const context = vm.createContext({URLSearchParams, tabberSessionFileLookbackHours:24, tabberItemId:'tabber',
+      clientEventTransportState:{epochGeneration:0},
       tabberActivityState:{requestGeneration:0, appliedGeneration:0, request:null},
       normalizeSessionFileLookbackHours:value=>value, tabberActivityPayload:null,
       apiFetchJson:async()=>payload, itemInLayout:()=>true,
@@ -1944,6 +1990,35 @@ async function runTabberSuite() {
     assert.equal(api.transcriptMetadataStateForTest().payload.sessions.one.window_metadata[0].description_manual, true);
     assert.equal(await api.applySessionMetadataPayloadForTest({...snapshot(1, 'old'), status: 'refreshing', cache: {pending_identity: {epoch: 'description-overlap', generation: 4}}}, options), false);
     assert.equal(api.transcriptMetadataStateForTest().pendingGeneration, 4);
+  });
+  await testAsync('description rename fences delayed activity metadata while preserving fresh activity and roster', async () => {
+    const api = loadYomux('', ['one']);
+    const snapshot = (generation, description, order = ['one']) => ({
+      metadata_identity: {epoch: 'description-activity-overlap', generation}, topology_generation: order.length,
+      session_order: order, sessions: {one: {session_identity: 'one-A', panes: [], work_graph: {generation},
+        window_metadata: [{window_id: '@1', window_index: 0, description}]}},
+      activity: {one: {active_recency_ts: 999}},
+    });
+    const options = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+    assert.equal(await api.applySessionMetadataPayloadForTest(snapshot(2, 'old'), options), true);
+    let resolveActivity;
+    api.setFetchForTest(() => new Promise(resolve => {resolveActivity = resolve;}));
+    const pendingActivity = api.fetchTabberActivityForTest({visible: true});
+    api.setApiFetchJsonForTest(async () => ({window_id: '@1', description: 'manual',
+      cache: {pending_identity: {epoch: 'description-activity-overlap', generation: 3}}}));
+    assert.equal(await api.renameTabberDescriptionForTest('one', 0, '@1', 'manual'), true);
+    const delayedSnapshot = snapshot(2, 'old', ['one', 'extra']);
+    delayedSnapshot.sessions.extra = {session_identity: 'extra-A', panes: [], work_graph: {generation: 2, loading: true}};
+    resolveActivity(jsonResponse(delayedSnapshot));
+    assert.equal(await pendingActivity, true, 'the useful activity response remains accepted');
+    const state = api.transcriptMetadataStateForTest();
+    assert.equal(state.payload.sessions.one.window_metadata[0].description, 'manual', 'metadata below the mutation floor cannot undo the acknowledged rename');
+    assert.equal(state.payload.sessions.one.window_metadata[0].description_manual, true);
+    assert.deepEqual(canonical(api.sessionsForTest()), ['one', 'extra'], 'fresh roster data still applies');
+    assert.equal(api.tabberActivityPayloadForTest().activity.one.active_recency_ts, 999);
+    assert.equal(state.payload.sessions.extra.session_identity, 'extra-A', 'a new roster row remains available');
+    assert.equal(api.applyTabberActivityPayloadForTest(snapshot(3, 'published manual', ['one', 'extra'])), true);
+    assert.equal(api.transcriptMetadataStateForTest().payload.sessions.one.window_metadata[0].description, 'published manual', 'a build covering the mutation can replace optimistic metadata');
   });
   await testAsync('first event and metadata adoption retain the bootstrap topology fence', async () => {
     const api = loadYomux('', ['fresh'], 'http:', 'Linux x86_64', 'admin', {tmuxTopology: {generation: 7, epoch: 'boot'}});
@@ -2158,6 +2233,27 @@ async function runTabberSuite() {
       .flatMap(group => group.views || []);
     assert.ok(advancedItems.every(item => advancedViews.includes(item)), 'Advanced exposes Differ, YO!chat, and YO!agent as pane tabs');
     assert.equal(api.dynamicVirtualLayoutItemsForTest().includes(diff), true, 'switching modes preserves the hidden dynamic view identity');
+  });
+
+  test('Experimental pane items use the same visibility gate in menus and both Tabber modes', () => {
+    const api = loadYomux('', ['one']);
+    const experimentalItems = ['__chat__', '__yoagent__', '__info__'];
+    for (const enabled of [false, true]) {
+      api.setClientSettingsPatchForTest({general: {enable_experimental_features: enabled}});
+      const menuItems = api.tabMenuItems(experimentalItems).flatMap(group => group.items || [group]);
+      const paletteItems = api.commandPaletteCommandItems().map(command => command.targetItem);
+      for (const item of experimentalItems) {
+        assert.equal(menuItems.some(command => command.targetItem === item), enabled, `${item} Tabs visibility follows Experimental=${enabled}`);
+        assert.equal(paletteItems.includes(item), enabled, `${item} command-palette visibility follows Experimental=${enabled}`);
+      }
+      for (const mode of ['normal', 'advanced']) {
+        api.setTabberModeForTest(mode);
+        const rowItems = api.buildTabberNormalRowsForTest().map(row => row.tabber?.item);
+        assert.equal(rowItems.includes('__info__'), enabled, `YO!info Tabber visibility follows Experimental=${enabled} in ${mode}`);
+        assert.equal(rowItems.includes('__chat__'), enabled && mode === 'advanced', `YO!chat respects Experimental and ${mode} mode`);
+        assert.equal(rowItems.includes('__yoagent__'), enabled && mode === 'advanced', `YO!agent respects Experimental and ${mode} mode`);
+      }
+    }
   });
 
   test('Normal viewport admission reduces old split panes to one content pane', () => {
@@ -5011,6 +5107,7 @@ async function runTabberSuite() {
     assert.ok(/function updatePanelSlot\(panel, session, slot, options = \{\}\)[\s\S]*updatePaneTabStrip\(panel, slot\);\s*\}/.test(source), 'slot-local panel updates do not recursively synchronize global focus state');
     assert.ok(/type === 'tab' && row\.dataset\.tabberItem[\s\S]*selectSession\(row\.dataset\.tabberItem, \{userInitiated: true\}\)/.test(source), 'Tabber virtual-tab rows activate their own layout item directly');
     assert.equal(/tabberOpenFile|tabberOpenStatus|tabberOpenRepo|type === 'path'|data-tabber-type="path"/.test(source), false, 'Tabber has no individual-file row data or activation path');
+    api.setClientSettingsPatchForTest({general: {enable_experimental_features: true}});
     api.setInfoPanelSubTabForTest('yoagent');
 	    api.commandPaletteCommandItems().find(item => item.targetItem === api.infoItemId).run();
 	    assert.equal(api.infoPanelSubTabForTest(), 'yoagent', 'YO!info palette rows no longer mutate the legacy YO!agent chrome marker');
@@ -5623,6 +5720,7 @@ test('Normal Tabber keeps utility tabs alphabetically at the bottom after recent
   assert.ok(recentRows.slice(-utilityLabels.length).every(row => row.type === 'tab'), 'utility tabs remain at the bottom when conversation activity arrives');
 
   api.setTabberModeForTest('advanced');
+  api.setClientSettingsPatchForTest({general: {enable_experimental_features: true}});
   const advancedItems = api.buildTabberNormalRowsForTest().map(entry => entry.tabber?.item);
   assert.ok(['__chat__', '__yoagent__'].every(item => advancedItems.includes(item)), 'Advanced keeps YO!chat and YO!agent available in Tabber');
 });

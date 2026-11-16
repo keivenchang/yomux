@@ -113,6 +113,7 @@ function writePanePopoutDocument(popoutWindow, options = {}) {
   const bodyHtml = options.bodyHtml || '<main class="pane-popout-shell"><section data-pane-popout-root></section></main>';
   const viewportContent = document.querySelector('meta[name="viewport"]')?.getAttribute('content')
     || 'width=device-width, initial-scale=1, viewport-fit=cover';
+  const faviconHref = document.querySelector('link[rel~="icon"]')?.href || 'data:,';
   doc.open();
   doc.write(`<!doctype html>
 <html>
@@ -120,6 +121,7 @@ function writePanePopoutDocument(popoutWindow, options = {}) {
   <meta charset="utf-8">
   <meta name="viewport" content="${esc(viewportContent)}">
   <title>${esc(title)}</title>
+  <link rel="icon" href="${esc(faviconHref)}">
   <link rel="stylesheet" href="${esc(cssHref)}">
   ${style ? `<style>${style}</style>` : ''}
 </head>

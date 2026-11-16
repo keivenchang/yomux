@@ -9,6 +9,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
+from tests.browser_helpers.native_pointer import click_visible_selector
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
 from tests.tmux_runtime import run_isolated_tmux
 
@@ -27,8 +28,39 @@ def click_navigation(browser, control):
     actions.perform()
 
 
+@pytest.fixture
+def terminal_focus_trace(browser):
+    def install():
+        browser.execute_script("""
+          const originalClear=clearFocusedTerminal,originalReconcile=clearFocusForInactiveLayout;
+          const trace=window.__recencyFocusClears=[];
+          const snapshot=()=>({focused:focusedPanelItem,terminal:focusedTerminal,activeSessions:[...activeSessions],
+            domOwner:[...terminals].find(([,terminal])=>terminal.container?.contains(document.activeElement))?.[0],
+            socket:terminals.get(focusedPanelItem)?.socket?.readyState,
+            paneActive:focusedPanelItem?terminalPaneIsActive(focusedPanelItem):false});
+          const observed=(owner,original)=>function(...args){
+            const before=snapshot(),value=original(...args);
+            if(before.focused && !focusedPanelItem){
+              trace.push({owner,before,after:snapshot(),stack:new Error().stack});
+              if(trace.length>32) trace.shift();
+            }
+            return value;
+          };
+          clearFocusedTerminal=observed('clearFocusedTerminal',originalClear);
+          clearFocusForInactiveLayout=observed('clearFocusForInactiveLayout',originalReconcile);
+          window.__recencyRestoreFocusTrace=()=>{
+            clearFocusedTerminal=originalClear;clearFocusForInactiveLayout=originalReconcile;
+            delete window.__recencyRestoreFocusTrace;
+          };
+        """)
+    try:
+        yield install
+    finally:
+        browser.execute_script('window.__recencyRestoreFocusTrace?.()')
+
+
 @pytest.mark.parametrize('automatic', [False, True])
-def test_global_tab_recency_native_navigation_close_and_tmux_exit(browser, isolated_dev_server_factory, request, automatic):
+def test_global_tab_recency_native_navigation_close_and_tmux_exit(browser, isolated_dev_server_factory, request, automatic, terminal_focus_trace):
     server = isolated_dev_server_factory('tab-recency', session_count=3)
     request.addfinalizer(lambda: browser.get('about:blank'))
     sessions = server.tmux.sessions
@@ -58,6 +90,7 @@ def test_global_tab_recency_native_navigation_close_and_tmux_exit(browser, isola
     """, sessions, str(path), automatic)
     assert isinstance(setup, str), setup
     editor = setup
+    terminal_focus_trace()
 
     def click_tab(item):
         selector = '[data-pane-tab="' + item.replace('"', '\\"') + '"]'
@@ -88,7 +121,10 @@ def test_global_tab_recency_native_navigation_close_and_tmux_exit(browser, isola
               const item=arguments[0], panel=panelNodes.get(item), container=terminals.get(item)?.container;
               return {focus:focusedPanelItem,nav:editorNav,dom:document.activeElement?.tagName+' '+document.activeElement?.className,
                 panel:panel?.className,rect:panel?.getBoundingClientRect().toJSON(),container:container?.getBoundingClientRect().toJSON(),
-                terminalPane:document.getElementById('terminal-pane-'+item)?.className};
+                terminalPane:document.getElementById('terminal-pane-'+item)?.className,
+                activeSessions:[...activeSessions],socket:terminals.get(item)?.socket?.readyState,
+                domOwner:[...terminals].find(([,terminal])=>terminal.container?.contains(document.activeElement))?.[0],
+                clears:window.__recencyFocusClears};
             """, item)) from None
         assert browser.execute_script('return focusedPanelItem') == item
 
@@ -138,6 +174,195 @@ def test_global_tab_recency_native_navigation_close_and_tmux_exit(browser, isola
     assert browser.execute_script('return editorNav.stack') == [editor]
 
 
+def test_terminal_refocus_during_native_focusout_preserves_logical_focus(browser, isolated_dev_server_factory, request):
+    server = isolated_dev_server_factory('terminal-refocus')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    session = server.tmux.sessions[0]
+    browser.get(server.base_url + f'/?sessions={session}&layout=left&tabs=left:{session}')
+    wait = WebDriverWait(browser, 10)
+    wait.until(lambda driver: driver.execute_script("""
+      return initialAppShellPainted && terminals.get(arguments[0])?.container?.querySelector('textarea');
+    """, session))
+    browser.execute_script("setTabberMode('advanced');autoFocusEnabled=false")
+    click_visible_selector(browser, f'[data-pane-tab="{session}"]')
+    wait.until(lambda driver: driver.execute_script("""
+      return focusedPanelItem===arguments[0]
+        && terminals.get(arguments[0]).container.contains(document.activeElement);
+    """, session))
+    result = browser.execute_script("""
+      const session=arguments[0],input=terminals.get(session).container.querySelector('textarea');
+      const transitions=[];
+      input.addEventListener('focusout',()=>{
+        transitions.push({phase:'focusout',focused:document.activeElement===input});
+        // A focus owner may restore the native input before the old event finishes bubbling.
+        input.focus({preventScroll:true});
+        transitions.push({phase:'refocus',focused:document.activeElement===input});
+      },{capture:true,once:true});
+      input.blur();
+      return {transitions,domFocused:document.activeElement===input,focused:focusedPanelItem,
+        active:activeItemForSide(slotForItem(session)),navigation:editorNav.focusedItem};
+    """, session)
+    assert result == {
+        'transitions': [{'phase': 'focusout', 'focused': False}, {'phase': 'refocus', 'focused': True}],
+        'domFocused': True, 'focused': session, 'active': session, 'navigation': session,
+    }, result
+    lifecycle = browser.execute_script("""
+      const session=arguments[0],item=terminals.get(session),input=item.container.querySelector('textarea');
+      const snapshot=()=>({domFocused:document.activeElement===input,focused:focusedPanelItem});
+      input.blur();
+      const genuineBlur=snapshot();
+      input.focus({preventScroll:true});
+      clearFocusedTerminal(session);
+      const explicitLifecycle=snapshot();
+      input.blur();input.focus({preventScroll:true});
+      const pane=document.getElementById('terminal-pane-'+session);
+      const priorStyle=pane.getAttribute('style');
+      pane.style.setProperty('display','block','important');
+      pane.classList.remove('active');
+      let inactivePane;
+      try {
+        input.addEventListener('focusout',()=>input.focus({preventScroll:true}),{capture:true,once:true});
+        input.blur();
+        inactivePane=snapshot();
+      } finally {
+        pane.classList.add('active');
+        if(priorStyle===null) pane.removeAttribute('style');else pane.setAttribute('style',priorStyle);
+        input.blur();input.focus({preventScroll:true});
+      }
+      const replacement=document.createElement('div'),replacementInput=document.createElement('textarea');
+      replacement.append(replacementInput);item.container.after(replacement);
+      let retiredGeneration;
+      try {
+        terminals.set(session,{...item,container:replacement});
+        replacementInput.focus({preventScroll:true});
+        retiredGeneration={domFocused:document.activeElement===replacementInput,focused:focusedPanelItem};
+      } finally {
+        terminals.set(session,item);replacement.remove();input.focus({preventScroll:true});
+      }
+      let removedGeneration;
+      try {
+        terminals.delete(session);input.blur();removedGeneration=snapshot();
+      } finally {
+        terminals.set(session,item);input.focus({preventScroll:true});
+      }
+      return {genuineBlur,explicitLifecycle,inactivePane,retiredGeneration,removedGeneration};
+    """, session)
+    assert lifecycle == {
+        'genuineBlur': {'domFocused': False, 'focused': None},
+        'explicitLifecycle': {'domFocused': True, 'focused': None},
+        'inactivePane': {'domFocused': True, 'focused': None},
+        'retiredGeneration': {'domFocused': True, 'focused': session},
+        'removedGeneration': {'domFocused': False, 'focused': None},
+    }, lifecycle
+
+
+@pytest.mark.parametrize('focus_state', ['retained', 'other-pane', 'panel-intent', 'navigation-intent', 'pending-intent'])
+def test_terminal_reconnect_reconciles_retained_native_focus_without_stealing_new_intent(browser, isolated_dev_server_factory, request, focus_state):
+    server = isolated_dev_server_factory('terminal-reconnect-focus', session_count=2)
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    session, other = server.tmux.sessions
+    browser.get(server.base_url + f'/?sessions={session},{other}&layout=left&tabs=left:{session},{other}')
+    setup = browser.execute_async_script("""
+      const [sessions,done]=arguments;
+      (async()=>{
+        await window.__yomuxTestWaitFor(()=>initialAppShellPainted,{timeoutMs:10000});
+        setTabberMode('advanced');autoFocusEnabled=false;
+        const slots=emptyLayoutSlots();
+        slots[layoutTreeKey]=splitNode('row',leafNode('left'),leafNode('right'),50);
+        slots.left=paneStateWithTabs([sessions[0]],sessions[0]);
+        slots.right=paneStateWithTabs([sessions[1]],sessions[1]);
+        applyLayoutSlots(slots,{prune:false});
+        await window.__yomuxTestWaitFor(()=>sessions.every(session=>terminals.get(session)?.socket?.readyState===WebSocket.OPEN),{timeoutMs:10000});
+        return true;
+      })().then(done,error=>done({error:String(error.stack||error)}));
+    """, [session, other])
+    assert setup is True, setup
+    click_visible_selector(browser, f'[data-pane-tab="{session}"]')
+    wait = WebDriverWait(browser, 10)
+    wait.until(lambda driver: driver.execute_script("""
+      return focusedPanelItem===arguments[0] && terminals.get(arguments[0]).container.contains(document.activeElement);
+    """, session))
+    try:
+        browser.execute_script("""
+          const [session,other,focusState]=arguments,originalFetch=window.fetch,originalWebSocket=window.WebSocket;
+          const state=window.__recencyReconnect={originalFetch,originalWebSocket,socket:terminals.get(session).socket,release:null};
+          const snapshot=()=>({focused:focusedPanelItem,
+            native:[...terminals].find(([,item])=>item.container.contains(document.activeElement))?.[0],
+            navigation:editorNav.focusedItem,pending:editorNav.pendingFocus?.item || null,
+            stack:[...editorNav.stack],index:editorNav.index});
+          window.WebSocket=new Proxy(originalWebSocket,{construct(target,args){
+            const socket=Reflect.construct(target,args);
+            if(String(args[0])===wsUrl(session)){
+              socket.addEventListener('open',()=>{
+                if(terminals.get(session)?.socket!==socket) return;
+                if(focusState!=='other-pane'){
+                  clearFocusedTerminal(session);
+                  if(focusState==='panel-intent'){setFocusedPanelItem(other);editorNav.focusedItem=session;}
+                  if(focusState==='navigation-intent') editorNav.focusedItem=other;
+                  if(focusState==='pending-intent') editorNav.pendingFocus={item:other,generation:tabSwitchHighlightGeneration};
+                }
+                state.beforeOpen=snapshot();
+              },{capture:true,once:true});
+              // Register after connectTerminalSocket assigns its production open handler.
+              queueMicrotask(()=>socket.addEventListener('open',()=>{
+                if(terminals.get(session)?.socket!==socket) return;
+                state.afterOpen=snapshot();state.openedSocket=socket;
+              },{once:true}));
+            }
+            return socket;
+          }});
+          let held=false;
+          window.fetch=(input,options)=>{
+            const url=new URL(String(input),location.href);
+            if(!held && url.pathname==='/api/tmux-session-exists' && url.searchParams.get('session')===session){
+              held=true;
+              return new Promise((resolve,reject)=>state.release=()=>{
+                state.release=null;originalFetch(input,options).then(resolve,reject);
+              });
+            }
+            return originalFetch(input,options);
+          };
+          state.socket.close();
+        """, session, other, focus_state)
+        wait.until(lambda driver: driver.execute_script('return !!window.__recencyReconnect.release'))
+        assert browser.execute_script("""
+          return {closed:window.__recencyReconnect.socket.readyState===WebSocket.CLOSED,
+            native:terminals.get(arguments[0]).container.contains(document.activeElement)};
+        """, session) == {'closed': True, 'native': True}
+        if focus_state == 'other-pane':
+            click_visible_selector(browser, f'[data-pane-tab="{other}"]')
+        before = browser.execute_script('return {stack:[...editorNav.stack],index:editorNav.index}')
+        browser.execute_script('window.__recencyReconnect.release()')
+        wait.until(lambda driver: driver.execute_script("""
+          const socket=terminals.get(arguments[0])?.socket;
+          return socket && socket===window.__recencyReconnect.openedSocket && socket.readyState===WebSocket.OPEN
+            && terminals.get(arguments[0]).reconnectAttempt===0;
+        """, session))
+        result = browser.execute_script("""
+          return {before:window.__recencyReconnect.beforeOpen,after:window.__recencyReconnect.afterOpen};
+        """)
+        expected_before = {
+            'focused': other if focus_state in {'other-pane', 'panel-intent'} else None,
+            'native': other if focus_state == 'other-pane' else session,
+            'navigation': other if focus_state in {'other-pane', 'navigation-intent'} else session,
+            'pending': other if focus_state == 'pending-intent' else None,
+            **before,
+        }
+        expected_after = dict(expected_before)
+        if focus_state == 'retained':
+            expected_after['focused'] = session
+        assert result == {'before': expected_before, 'after': expected_after}, result
+    finally:
+        browser.execute_script("""
+          const state=window.__recencyReconnect;
+          if(state){
+            window.fetch=state.originalFetch;window.WebSocket=state.originalWebSocket;
+            state.release?.();delete window.__recencyReconnect;
+          }
+          editorNav.pendingFocus=null;
+        """)
+
+
 def test_normal_tab_recency_reveals_hidden_tabs(browser, isolated_dev_server_factory, request):
     server = isolated_dev_server_factory('normal-tab-recency', session_count=2)
     request.addfinalizer(lambda: browser.get('about:blank'))
@@ -156,9 +381,7 @@ def test_normal_tab_recency_reveals_hidden_tabs(browser, isolated_dev_server_fac
       })().then(done, error => done({error:String(error.stack || error)}));
     """, first)
     assert setup is True, setup
-    row = WebDriverWait(browser, 10).until(lambda driver: next((row for row in driver.find_elements(
-        By.CSS_SELECTOR, f'.file-tree-row[data-tabber-pane-item="{second}"]') if row.is_displayed()), False))
-    row.click()
+    click_visible_selector(browser, f'.file-tree-row[data-tabber-pane-item="{second}"]')
 
     def assert_selection(item):
         WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("""

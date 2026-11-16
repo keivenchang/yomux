@@ -97,7 +97,7 @@ func runGitMetadata(path string, args ...string) (string, bool) {
 	defer cancel()
 	commandArgs := append([]string{"-C", path}, args...)
 	command := exec.CommandContext(ctx, "git", commandArgs...)
-	command.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	command.Env = finder.GitReadEnvironment()
 	output, err := command.Output()
 	if err != nil {
 		return "", false
@@ -1240,6 +1240,7 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 	panes := make([]map[string]any, 0)
 	agents := make([]map[string]any, 0)
 	windows := make(map[string]map[string]any)
+	descriptionTargets := make(map[string]tabberDescriptionTarget)
 	var selected map[string]any
 	for _, line := range strings.Split(strings.Trim(string(output), "\r\n"), "\n") {
 		parts := splitTmuxFields(line)
@@ -1286,14 +1287,11 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 		if resolvedCWD != "" {
 			cwd = resolvedCWD
 		}
-		if len(parts) >= 13 && parts[12] == "" && transcript != "" {
-			if description := tabberConversationDescription(kind, transcript, sessionID); description != "" {
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				raw, saveErr := s.saveTabberDescription(ctx, parts[11], description, false)
-				cancel()
-				if saveErr == nil {
-					tabberDescriptionFields(windows[parts[1]], raw)
-				}
+		if len(parts) >= 13 && transcript != "" {
+			target := tabberDescriptionTarget{kind: kind, path: transcript, sessionID: sessionID, paneIndex: paneIndex, active: active}
+			prior, exists := descriptionTargets[parts[1]]
+			if !exists || target.precedes(prior) {
+				descriptionTargets[parts[1]] = target
 			}
 		}
 		status := "idle"
@@ -1330,7 +1328,12 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 		agents = append(agents, agent)
 	}
 	windowMetadata := make([]map[string]any, 0, len(windows))
-	for _, item := range windows {
+	for index, item := range windows {
+		windowID, _ := item["window_id"].(string)
+		if windowID != "" {
+			target := descriptionTargets[index]
+			s.queueTabberDescription(windowID, target.kind, target.path, target.sessionID)
+		}
 		windowMetadata = append(windowMetadata, item)
 	}
 	sort.SliceStable(windowMetadata, func(i, j int) bool {

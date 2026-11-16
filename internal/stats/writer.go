@@ -30,6 +30,9 @@ const (
 	maxUsageStatementRows = 128
 )
 
+// ErrObservationIdentityConflict distinguishes immutable input from storage failure.
+var ErrObservationIdentityConflict = errors.New("observation event identity conflicts with stored data")
+
 // AppendResult describes the durable changes made by one transaction.
 type AppendResult struct {
 	Generation            int64
@@ -843,7 +846,7 @@ func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, ch
 		// Only fixed validation reasons cross the health transport, never driver
 		// errors containing filesystem paths or transcript contents.
 		switch appendErr.Error() {
-		case "usage atom identity conflicts with stored data", "unavailable spans overlap", "unavailable span overlaps a coverage epoch", "unavailable span identity conflicts with stored data", "observation event identity conflicts with stored data", "usage tombstone does not match stored atom", "coverage epoch identity conflicts with stored data", "coverage epoch overlaps an unavailable span", "coverage epoch end cannot move backward", "coverage epoch start and cadence are immutable":
+		case "usage atom identity conflicts with stored data", "unavailable spans overlap", "unavailable span overlaps a coverage epoch", "unavailable span identity conflicts with stored data", ErrObservationIdentityConflict.Error(), "usage tombstone does not match stored atom", "coverage epoch identity conflicts with stored data", "coverage epoch overlaps an unavailable span", "coverage epoch end cannot move backward", "coverage epoch start and cadence are immutable":
 			detail.Reason = appendErr.Error()
 		}
 		if failedCoverage != nil {
@@ -1013,7 +1016,7 @@ func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, ch
 		} else if err != nil {
 			return rollback(err)
 		} else if oldAt != item.ObservedAt || oldEpoch != item.EpochID || oldGeneration != item.OwnerGeneration || oldPayload != payloadJSON {
-			return rollback(fmt.Errorf("observation event identity conflicts with stored data"))
+			return rollback(ErrObservationIdentityConflict)
 		} else {
 			result.ObservationsDuplicate++
 		}

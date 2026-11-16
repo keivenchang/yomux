@@ -19,6 +19,10 @@ source "$repo_root/tools/startup_common.sh"
 yomux_validate_backend
 binary="$(yomux_go_binary "$repo_root")"
 "$binary" --operator version --root "$repo_root" >/dev/null
+if [[ "${YOMUX_INSTALL_PREPARED:-}" != 1 ]] && ! "$binary" --operator verify-source-assets --root "$repo_root"; then
+  "$binary" --operator setup-assets --root "$repo_root"
+fi
+"$binary" --operator verify-source-assets --root "$repo_root"
 source_root="$("$binary" --operator update-source --root "$source_root")"
 for asset in yomux.js yomux.css; do
   [[ -s "$repo_root/static/$asset" ]] || { printf 'Missing static/%s; run make build\n' "$asset" >&2; exit 2; }
@@ -56,10 +60,11 @@ done
 for script in startup_common.sh product_environment.sh setup-tls.sh; do
   atomic_install_file "$repo_root/tools/$script" "$app/tools/$script"
 done
-for asset in chat-question-rules.json internal_model_pricing.json locale-registry.json model_pricing.json model_pricing.schema.json settings-schema.json; do
+for asset in chat-question-rules.json internal_model_pricing.json browser-assets.json pdfjs-assets.json locale-registry.json model_pricing.json model_pricing.schema.json settings-schema.json; do
   atomic_install_file "$repo_root/assets/runtime/$asset" "$app/assets/runtime/$asset"
 done
 atomic_install_tree "$repo_root/static" "$app/static"
+"$app/yomux-go" --operator verify-assets --root "$app"
 for directory in builtin_skills builtin_context; do
   atomic_install_tree "$repo_root/yomux_lib/yoagent/$directory" "$app/yomux_lib/yoagent/$directory"
 done

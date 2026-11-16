@@ -25,6 +25,89 @@ func TestResolveRunfileFromDirectory(t *testing.T) {
 	}
 }
 
+func TestMaterializeRuntimeTreeCopiesRunfileLeaves(t *testing.T) {
+	source, artifacts, destination := t.TempDir(), t.TempDir(), filepath.Join(t.TempDir(), "runtime")
+	for _, mode := range []os.FileMode{0o444, 0o555} {
+		name := mode.String()
+		artifact := filepath.Join(artifacts, name)
+		if err := os.WriteFile(artifact, []byte(name), mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(source, "nested"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(artifact, filepath.Join(source, "nested", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := materializeRuntimeTree(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []os.FileMode{0o444, 0o555} {
+		name := mode.String()
+		path := filepath.Join(destination, "nested", name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600|mode&0o111 {
+			t.Fatalf("materialized input mode=%v for source mode=%v", info.Mode(), mode)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil || string(content) != name {
+			t.Fatalf("materialized input=%q error=%v, want %q", content, err, name)
+		}
+		if err := os.WriteFile(path, []byte("fixture mutation"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		original, err := os.ReadFile(filepath.Join(artifacts, name))
+		if err != nil || string(original) != name {
+			t.Fatalf("fixture mutated declared artifact: input=%q error=%v", original, err)
+		}
+	}
+}
+
+func TestMaterializeRuntimeTreeRejectsNonFileAliases(t *testing.T) {
+	for _, directory := range []bool{false, true} {
+		t.Run(map[bool]string{false: "missing", true: "directory"}[directory], func(t *testing.T) {
+			source, target := t.TempDir(), filepath.Join(t.TempDir(), "target")
+			if directory {
+				if err := os.Mkdir(target, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink(target, filepath.Join(source, "alias")); err != nil {
+				t.Fatal(err)
+			}
+			if err := materializeRuntimeTree(source, filepath.Join(t.TempDir(), "runtime")); err == nil {
+				t.Fatal("materialized an alias without a regular leaf artifact")
+			}
+		})
+	}
+}
+
+func TestMaterializeRepoRootContainsOnlySelectedInputs(t *testing.T) {
+	relative := "assets/runtime/model_pricing.json"
+	root := MaterializeRepoRoot(t, relative)
+	var files []string
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		if !entry.Type().IsRegular() {
+			t.Errorf("materialized repository contains nonregular input %q: %v", path, entry.Type())
+		}
+		name, err := filepath.Rel(root, path)
+		files = append(files, filepath.ToSlash(name))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0] != relative {
+		t.Fatalf("materialized repository inputs=%v, want only %q", files, relative)
+	}
+}
+
 func TestResolveRunfileFromManifestWithMappedRepositoryAndSpaces(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "runfiles with spaces", "mapped repo", "required input")

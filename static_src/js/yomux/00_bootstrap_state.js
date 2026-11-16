@@ -83,6 +83,7 @@ function capabilityNameForRequest(url, options = {}) {
   let pathname = '';
   try { pathname = new URL(String(url || ''), globalThis.location?.href || 'http://localhost/').pathname; } catch (_) { pathname = String(url || '').split(/[?#]/, 1)[0]; }
   if (pathname === '/api/capabilities' || pathname === '/api/ping' || pathname === '/api/background/status' || pathname === '/api/system-status' || pathname === '/api/system-status/advanced' || pathname === '/api/logs' || pathname === '/api/client-events') return 'core.diagnostics.v1';
+  if (pathname.startsWith('/api/tex/')) return 'finder.preview.v1';
   if (pathname === '/api/settings') return 'core.settings.v1';
   if (pathname === '/api/update-status' || pathname === '/api/self-update' || pathname === '/api/self-update/status') return 'core.updates.v1';
   if (pathname === '/api/watched-prs') return 'core.integrations.v1';
@@ -121,7 +122,6 @@ const statsWriterFence = (() => {
 let sessions = bootstrap.sessions;
 const availableAgents = new Set(bootstrap.availableAgents);
 const terminalCommands = Array.isArray(bootstrap.terminalCommands) ? bootstrap.terminalCommands : [];
-const fullAccessAgentLaunchesEnabled = bootstrap.dangerouslyYolo === true;
 // The exact normal/full-access launch commands per agent for the new-session menu.
 const agentLaunchCommands = bootstrap.agentLaunchCommands || {};
 // per-agent {installed, logged_in} login status (probed + cached server-side). Used to
@@ -396,6 +396,7 @@ function previewRendererStrategy(specification) {
 const PREVIEW_RENDERERS = Object.freeze([
   previewRendererStrategy({id: 'markdown', kind: 'markdown', extensions: ['.md', '.markdown'], textBacked: true, defaultMode: 'preview', language: 'markdown', surfaceClasses: ['markdown-body'], cleanup: cleanupMarkdownPreviewStrategy, signature: markdownPreviewStrategySignature, render: renderMarkdownPreviewStrategy}),
   previewRendererStrategy({id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'preview', language: 'xml', sandbox: true, surfaceClasses: ['html-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: htmlPreviewStrategySignature, render: renderHtmlPreviewStrategy}),
+  previewRendererStrategy({id: 'tex', kind: 'tex', extensions: ['.tex', '.ltx'], textBacked: true, defaultMode: 'preview', language: 'stex', sandbox: true, snapshot: false, surfaceClasses: ['pdf-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: htmlPreviewStrategySignature, render: renderTexPreviewStrategy}),
   previewRendererStrategy({id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, previewOnly: true, defaultMode: 'preview', raw: true, surfaceClasses: ['image-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderImagePreviewStrategy, mimeByExtension: {
     '.png': 'image/png',
     '.apng': 'image/apng',
@@ -460,7 +461,7 @@ const PREVIEW_RENDERERS = Object.freeze([
   }}),
   // Finder exposes Edit, Preview, and Diff as modes of one file tab, so generic text/code files need
   // the existing syntax-highlighted Preview surface too; commit snapshots reuse this same renderer.
-  previewRendererStrategy({id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: true, defaultMode: 'edit', surfaceClasses: ['code-preview-body'], render: renderCodePreviewStrategy, languageByExtension: {
+  previewRendererStrategy({id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.dtx', '.cls', '.sty', '.ins', '.bbl', '.bib', '.bst', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: true, defaultMode: 'edit', surfaceClasses: ['code-preview-body'], render: renderCodePreviewStrategy, languageByExtension: {
     '.txt': 'text',
     '.log': 'text',
     '.trace': 'text',
@@ -468,6 +469,13 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.rst': 'text',
     '.adoc': 'text',
     '.asciidoc': 'text',
+    '.dtx': 'stex',
+    '.cls': 'stex',
+    '.sty': 'stex',
+    '.ins': 'stex',
+    '.bbl': 'stex',
+    '.bib': 'text',
+    '.bst': 'text',
     '.diff': 'diff',
     '.patch': 'diff',
     '.dot': 'text',
@@ -535,6 +543,8 @@ const HIGHLIGHTABLE_EXTENSIONS = {
   '.json': 'json', '.jsonl': 'json', '.ndjson': 'json', '.geojson': 'json', '.ipynb': 'json', '.excalidraw': 'json',
   '.css': 'css', '.scss': 'scss',
   '.rs': 'rust', '.go': 'go', '.c': 'c', '.h': 'c',
+  '.tex': 'stex', '.ltx': 'stex', '.dtx': 'stex', '.cls': 'stex', '.sty': 'stex', '.ins': 'stex', '.bbl': 'stex',
+  '.bib': 'text', '.bst': 'text',
   '.cpp': 'cpp', '.hpp': 'cpp', '.cc': 'cpp',
   '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash',
   '.yaml': 'yaml', '.yml': 'yaml',
@@ -589,7 +599,7 @@ let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
 let diffExpandUnchanged = storageGet('yomux.diffExpandUnchanged') === '1';
 let fileEditorThemeMode = readStoredEditorThemeMode();
 let fileEditorPreviewDisplayMode = readStoredEditorPreviewDisplayMode();
-let fileEditorCursorStyle = 'block';  // C3: default caret is block; saved 'line' choices round-trip via settings
+let fileEditorCursorStyle = 'line';
 let fileEditorCursorColor = 'yellow';  // 'yellow' default; 'theme' uses the editor/terminal scheme cursor
 let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 6;
@@ -739,7 +749,8 @@ const fileExplorerIndexPublishedGeneration = new Map();  // normalized indexed r
 const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
 const fileIndexPartialWarningRoots = new Set();  // warned once per root until it regains full coverage
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
-const tabLastActivatedAt = new Map();  // layout item -> last-activated timestamp (ms) for per-pane LRU tab eviction
+const tabLastActivatedAt = new Map();  // layout item -> last-activated timestamp (ms) for per-pane LRU eviction
+const tabActivationOrder = new Map();  // layout item -> monotonic order for deterministic active-tab fallback
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');  // C6: global default FROM (per-repo fallback)
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');   // C6: global default TO (per-repo fallback)
 let diffRefsByRepo = readStoredDiffRefsByRepo();  // C6: {repoPath: {from, to}} — per-repo overrides
@@ -902,7 +913,6 @@ let workflowTransitionGlowSeconds = initialSetting('performance.workflow_transit
 const latencySamplesMax = 24;
 let toastDurationMs = initialSetting('notifications.toast_duration_ms');
 const toastMaxLines = 3;
-const toastMaxLineChars = 180;
 const toastCoalesceKeyLimit = 64;
 const toastRecentContentWindowMs = 30_000;
 const toastRecentContentLimit = 128;
@@ -1443,7 +1453,11 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     openPopout: item => {
       if (isHistoricalFileEditorItem(item)) return false;
       const path = fileItemPath(item);
-      return Boolean(path && openFilePreviewPopout(path, document.getElementById(panelDomId(item))));
+      if (!path) return false;
+      const state = fileEditorStateForItem(path, item);
+      const renderer = previewRendererForPath(path, state);
+      if (renderer?.textBacked === true || renderer?.id === 'pdf') return openLivePanePopout(item);
+      return openFilePreviewPopout(path, document.getElementById(panelDomId(item)));
     },
     focusSearch,
     className,

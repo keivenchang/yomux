@@ -225,6 +225,8 @@ for (const command of ['h1', 'normal', 'pre', 'number', 'bullet', 'check']) {
   assert.equal(sourceFormat('a | b\n--|--\nx|y', command), 'a | b\n--|--\nx|y', command);
 }
 vm.runInContext(fs.readFileSync(path.join(root, 'static/prosemirror.js'), 'utf8'), sourceContext);
+const markdownPreview = fs.readFileSync(path.join(root, 'static_src/js/yomux/88_markdown_preview.js'), 'utf8');
+vm.runInContext(markdownPreview.slice(markdownPreview.indexOf('function markdownTexMathAt('), markdownPreview.indexOf('function renderTexMathSource(')), sourceContext);
 vm.runInContext(adapter + `\nwindow.formatParser = prosemirrorMarkdownParser(window.YOmuxProseMirror, prosemirrorMarkdownSchema(window.YOmuxProseMirror));`, sourceContext);
 const parser = sourceContext.window.formatParser;
 const referenceShapes = ['[ref][id]\n\n[id]: https://x "title"', '[ref][]\n\n[ref]: https://x', '[ref]\n\n[ref]: https://x'];
@@ -246,6 +248,19 @@ for (const input of ['a | b\n--|--\nx|y', '| a | b |\n| :--- | ---: |\n| x | y |
   }
 }
 vm.runInContext(`window.formatSerializer = prosemirrorMarkdownSerializer(window.YOmuxProseMirror);`, sourceContext);
+for (const source of [
+  '> $$\n> x\n> $$',
+  '- $$\n  x\n  $$',
+  '$$\nx\n> 0\n\ny\n$$',
+  '$a<b>c$',
+  '$$x$$ trailing text',
+]) {
+  const actualSource = source.replaceAll('\\n', '\n');
+  const first = parser.parse(actualSource);
+  const serialized = sourceContext.window.formatSerializer.serialize(first);
+  assert.equal(parser.parse(serialized).eq(first), true, `math round trip: ${actualSource} ${JSON.stringify({first:first.toJSON(), serialized, next:parser.parse(serialized).toJSON()})}`);
+}
+
 for (const input of ['<u>**\`foo\`**</u>', '<mark>\`foo\`</mark>', '<kbd>\`foo\`</kbd>', '<sup>\`foo\`</sup>', '~~\`foo\`~~', '*\`foo\`*', '<u>~~*\`foo\`*~~</u>']) {
   const doc = parser.parse(input);
   let state = sourceContext.window.YOmuxProseMirror.EditorState.create({doc});

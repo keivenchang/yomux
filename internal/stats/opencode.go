@@ -919,6 +919,7 @@ func (d *OpenCodeDatabase) ReadStepFinishPartsForSelections(ctx context.Context,
            SELECT 1
            FROM part AS older
            WHERE older.session_id = newest.session_id
+             AND older.time_updated >= newest.active_since
              AND older.time_updated < ?
              AND older.time_updated < newest.newest_time - ?
              AND ` + openCodeStepFinishPartCandidatePredicate("older") + `
@@ -931,7 +932,7 @@ func (d *OpenCodeDatabase) ReadStepFinishPartsForSelections(ctx context.Context,
   )
 )`
 	boundsNewest := `bounds_newest AS MATERIALIZED (
-  SELECT selected.session_id,
+  SELECT selected.session_id, selected.active_since,
          CASE WHEN selected.cursor_rowid = 0 THEN
            (SELECT MAX(p.time_updated)
             FROM part AS p
@@ -946,7 +947,7 @@ func (d *OpenCodeDatabase) ReadStepFinishPartsForSelections(ctx context.Context,
 		// MAX/older-history probe. The root is marked partial below because this
 		// schema cannot prove that its older history was inspected.
 		boundsNewest = `bounds_newest AS MATERIALIZED (
-  SELECT selected.session_id, NULL AS newest_time
+  SELECT selected.session_id, selected.active_since, NULL AS newest_time
   FROM selected
 )`
 		historyBounds = `older_counts AS MATERIALIZED (

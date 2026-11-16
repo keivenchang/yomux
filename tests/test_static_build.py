@@ -689,6 +689,7 @@ def test_preformatted_text_wrapping_has_one_shared_selector_owner():
         ".finder-move-target",
         ".finder-move-dialog .file-editor-dialog-body",
         ".file-get-info dd",
+        ".tex-preview-instructions",
     )
     selector_group = ",\n".join(selectors[:-1]) + ",\n" + selectors[-1]
     rule = re.search(rf"{re.escape(selector_group)}\s*\{{([^}}]+)\}}", css)

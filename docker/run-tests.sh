@@ -51,10 +51,27 @@ done
 # Accept either the mapped container path or a caller-relative worktree directory. Normalize the
 # result before Docker sees it; otherwise `--workdir ../` becomes `/w/../` and silently escapes the
 # read-only source mount's intended working tree.
+resolve_path() {
+  python3 - "$1" "$2" <<'PY_RESOLVE_PATH'
+from pathlib import Path
+import sys
+print(Path(sys.argv[2]).resolve(strict=sys.argv[1] == "existing"))
+PY_RESOLVE_PATH
+}
+
+path_mode() {
+  python3 - "$1" <<'PY_PATH_MODE'
+from pathlib import Path
+import stat
+import sys
+print(format(stat.S_IMODE(Path(sys.argv[1]).lstat().st_mode), "o"))
+PY_PATH_MODE
+}
+
 normalize_container_workdir() {
   local candidate="$1"
   local normalized
-  normalized="$(realpath -m -- "$candidate")"
+  normalized="$(resolve_path missing "$candidate")"
   case "$normalized" in
     /w|/w/*) printf '%s\n' "$normalized" ;;
     *)
@@ -67,8 +84,8 @@ normalize_container_workdir() {
 case "$workdir" in
   /w|/w/*) workdir="$(normalize_container_workdir "$workdir")" ;;
   /*)
-    host_workdir="$(realpath -e -- "$workdir")"
-    repo_root_real="$(realpath -e -- "$REPO_ROOT")"
+    host_workdir="$(resolve_path existing "$workdir")"
+    repo_root_real="$(resolve_path existing "$REPO_ROOT")"
     if [[ "$host_workdir" == "$repo_root_real" ]]; then
       workdir=/w
     elif [[ "$host_workdir" == "$repo_root_real/"* ]]; then
@@ -89,7 +106,7 @@ esac
 image_lock_root="/tmp/yomux-image-build-$(id -u)"
 [ ! -L "$image_lock_root" ] || { echo "image lock root must not be a symlink" >&2; exit 2; }
 mkdir -p -m 700 "$image_lock_root"
-[ -O "$image_lock_root" ] && [ "$(stat -c %a "$image_lock_root")" = 700 ] || { echo "image lock root must be user-owned and mode 700" >&2; exit 2; }
+[ -O "$image_lock_root" ] && [ "$(path_mode "$image_lock_root")" = 700 ] || { echo "image lock root must be user-owned and mode 700" >&2; exit 2; }
 image_lock_key="$(product_env_fingerprint "$IMAGE")"
 exec {image_build_lock_fd}>"$image_lock_root/$image_lock_key.lock"
 flock -x "$image_build_lock_fd"
@@ -204,7 +221,7 @@ if [ "$(product_env_print BAZEL_CACHE "on")" = on ]; then
   cache_parent="/tmp/yomux-bazel-cache-$(id -u)"
   if [ -L "$cache_parent" ]; then echo "cache parent must not be a symlink" >&2; exit 2; fi
   mkdir -p -m 700 -- "$cache_parent"
-  if [ ! -O "$cache_parent" ] || [ "$(stat -c %a "$cache_parent")" != 700 ]; then
+  if [ ! -O "$cache_parent" ] || [ "$(path_mode "$cache_parent")" != 700 ]; then
     echo "cache parent must be user-owned and mode 700: $cache_parent" >&2; exit 2
   fi
   cache_fs="$(stat -f -c %T "$cache_parent")"
@@ -437,14 +454,14 @@ validate_tmp_directory() {
   while [[ "$candidate" == */ ]]; do
     candidate="${candidate%/}"
   done
-  temporary_base="$(realpath -e -- /tmp)"
+  temporary_base="$(resolve_path existing /tmp)"
   case "$candidate" in
     /tmp/*) lexical_base=/tmp ;;
     "$temporary_base"/*) lexical_base="$temporary_base" ;;
     *) echo "$label must be a child of /tmp: $candidate" >&2; exit 2 ;;
   esac
   local normalized
-  normalized="$(realpath -m -- "$candidate")"
+  normalized="$(resolve_path missing "$candidate")"
   case "$normalized" in
     "$temporary_base"/*) ;;
     *) echo "$label resolves outside /tmp: $normalized" >&2; exit 2 ;;
@@ -462,7 +479,7 @@ validate_tmp_directory() {
     echo "$label must not be a symlink: $candidate" >&2
     exit 2
   fi
-  candidate="$(realpath -e -- "$candidate")"
+  candidate="$(resolve_path existing "$candidate")"
   case "$candidate" in
     "$temporary_base"/*) ;;
     *) echo "$label resolves outside /tmp: $candidate" >&2; exit 2 ;;
@@ -471,7 +488,7 @@ validate_tmp_directory() {
     echo "$label must be owned by the invoking user: $candidate" >&2
     exit 2
   fi
-  chmod 700 -- "$candidate"
+  chmod 700 "$candidate"
 }
 
 # Browser failure evidence must outlive the throwaway container. Mount one host /tmp directory at
@@ -490,9 +507,9 @@ fi
 # host-owned 0700 bind source. The parent created above is 0700 and therefore private to the caller;
 # make only the explicitly mounted leaf writable so the container can preserve browser evidence.
 if [ "$rootless_docker" = 1 ]; then
-  chmod 777 -- "$evidence_dir"
+  chmod 777 "$evidence_dir"
 else
-  chmod 700 -- "$evidence_dir"
+  chmod 700 "$evidence_dir"
 fi
 agent_mounts+=(-v "$evidence_dir:$evidence_dir")
 test_env+=(-e "$(product_env_name E2E_EVIDENCE_DIR)=$evidence_dir")

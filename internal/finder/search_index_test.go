@@ -16,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func TestGoSearchIndexColdStartupAndRestartPreserveOwnedDatabase(t *testing.T) {
@@ -624,7 +626,7 @@ func TestIndexedSearchThroughSymlinkReturnsRequestedPaths(t *testing.T) {
 	t.Setenv("YOMUX_TEST_INDEX_WORKER", "1")
 	previousRunner := execCommand
 	execCommand = func(_ string, args ...string) *exec.Cmd {
-		return exec.Command(os.Args[0], append([]string{"-test.run=^TestSearchIndexV2WorkerHelperProcess$", "--"}, args...)...)
+		return testsupport.GoHelperProcessCommand(t, append([]string{"-test.run=^TestSearchIndexV2WorkerHelperProcess$", "--"}, args...)...)
 	}
 	defer func() { execCommand = previousRunner }()
 

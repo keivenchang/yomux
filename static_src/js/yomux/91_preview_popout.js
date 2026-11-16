@@ -13,6 +13,8 @@ function closeFilePreviewPopout(path) {
   const record = filePreviewPopouts.get(path);
   retireFilePreviewPopoutSnapshotApply(record);
   retireFilePreviewPopoutNavigationWrite(record);
+  const root = filePreviewPopoutDocument(record?.window)?.querySelector?.('[data-preview-root]');
+  if (root) releasePreviewSurfaceResources(root);
   filePreviewPopouts.delete(path);
   const previewWindow = record?.window;
   if (!previewWindow || previewWindow.closed) return false;
@@ -465,6 +467,7 @@ function previewSnapshotDataAttributesHtml(snapshot) {
 
 function applyPreviewSnapshotRoot(root, snapshot) {
   if (!root || !snapshot) return false;
+  releaseRawFileMediaSources(root);
   root.className = snapshot.className;
   for (const name of Array.from(root.getAttributeNames?.() || [])) {
     if (name.startsWith('data-') && name !== 'data-preview-root') root.removeAttribute(name);
@@ -677,6 +680,7 @@ function filePreviewPopoutBodyHtml(path, snapshot) {
 function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
   const doc = previewWindow?.document;
   if (!doc) return false;
+  releaseRawFileMediaSources(doc.querySelector('[data-preview-root]'));
   const written = writePanePopoutDocument(previewWindow, {
     title: t('preview.popout.title', {name: basenameOf(path)}),
     bodyClass: previewPopoutBodyClassName(),
@@ -692,6 +696,11 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
 function updateFilePreviewPopoutControls(path, previewWindow) {
   const doc = previewWindow?.document;
   if (!doc) return;
+  const root = doc.querySelector('[data-preview-root]');
+  if (root && previewKindForPath(path) === 'pdf' && !root.querySelector('.file-editor-pdf-preview')?._rawFileReadyCleanup) {
+    releaseRawFileMediaSources(root);
+    renderPdfPreviewInto(root, path, {item: filePreviewPopouts.get(path)?.item || fileEditorItemFor(path)});
+  }
   doc.body?.setAttribute('style', previewPopoutVariableStyle());
   const themeButton = doc.querySelector('[data-preview-popout-theme]');
   if (themeButton) updateEditorThemeButton(themeButton, {includeVanilla: true});
@@ -743,6 +752,9 @@ function bindFilePreviewPopoutControls(path, previewWindow) {
     scheduleFilePreviewPopoutScrollSync(path, previewWindow, {forceEdges: true, userIntent: true});
   };
   const scroller = filePreviewPopoutScrollElement(previewWindow);
+  const releaseMedia = () => releaseRawFileMediaSources(doc.body);
+  bind(previewWindow, 'beforeunload', releaseMedia);
+  bind(previewWindow, 'pagehide', releaseMedia);
   bind(previewWindow, 'scroll', syncScroll);
   bind(previewWindow, 'wheel', scheduleUserScrollSync);
   bind(previewWindow, 'pointerdown', beginUserScroll('pointer'));
@@ -910,13 +922,16 @@ function writeFilePreviewPopoutWhenReady(path, previewWindow, text) {
 
 function openFilePreviewPopout(path, panel = null) {
   if (panel && fileEditorPanelState(panel)?.historical === true) return false;
-  if (!path || !editorPreviewModeAvailable(path)) return false;
+  if (!path || !editorPreviewModeAvailable(path) || previewRendererForPath(path).snapshot === false) return false;
   const initialState = fileState.get(path);
   if (initialState?.kind === 'text') syncOpenFileContentFromPanels(path, panel);
   const state = fileState.get(path);
   if (!state || !editorPreviewModeAvailable(path, state)) return false;
-  const existing = filePreviewPopouts.get(path)?.window;
+  const item = panel ? fileEditorPanelItem(panel) : fileEditorItemFor(path);
+  const existingRecord = filePreviewPopouts.get(path);
+  const existing = existingRecord?.window;
   if (existing && !existing.closed) {
+    existingRecord.item = item;
     updateFilePreviewPopout(path, state.content || '');
     existing.focus?.();
     return true;
@@ -927,7 +942,7 @@ function openFilePreviewPopout(path, panel = null) {
     return false;
   }
   try {
-    filePreviewPopouts.set(path, {window: previewWindow});
+    filePreviewPopouts.set(path, {window: previewWindow, item});
     writeFilePreviewPopoutWhenReady(path, previewWindow, state.content || '');
     return true;
   } catch (error) {

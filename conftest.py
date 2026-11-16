@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
+import site
 import sys
 import tempfile
 from typing import Any
@@ -22,6 +23,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 from yomux_lib.infra import worktree_writer
 from tools.product_environment import apply_product_environment_assignments
+from tools.browser_runtime import admit_browser_environment
 from tools.product_environment import clear_product_environment_assignments
 from tools.product_environment import product_env
 from tools.product_environment import product_env_name
@@ -56,9 +58,14 @@ def host_local_cache_dir() -> Path:
 def _install_fallback_environment() -> None:
     """Install Phase 1's short, per-process writable namespace."""
 
+    # Fixture HOME changes must not make a later browser replacement rediscover operator state.
+    admit_browser_environment(os.environ)
+
     # The container runner may provide canonical YOMUX_* roots. Unit fixtures
     # intentionally exercise legacy YOLOMUX_* overrides, so clear both halves
     # of each ambient root pair before installing this process's isolated paths.
+    # Child fixtures replace HOME; keep the selected interpreter's installed dependencies visible.
+    os.environ.setdefault("PYTHONUSERBASE", site.getuserbase())
     clear_product_environment_assignments(os.environ,
         "ROOT",
         "CONFIG_DIR",
@@ -114,13 +121,15 @@ def _install_fallback_environment() -> None:
     })
 
 
-# On a Docker-capable host, leave host test state untouched because the hook delegates before
-# collection. Inside the container, retain the Phase 1 protection and its short Unix-socket paths.
-# A host invocation without Docker is a refusal by default: a green host fallback is not evidence
-# for a Dockerized gate. The explicit YOMUX_CHECK_CONTAINER=0 escape hatch remains for small
-# unit-test subprocesses that intentionally exercise the host-only fallback.
+def _native_execution_requested():
+    requested = product_env("CHECK_CONTAINER")
+    return requested == "0" or (requested != "1" and docker_image.resolve_execution("auto") == "native")
+
+
+# macOS uses isolated host paths by default. Linux still refuses unavailable Docker
+# unless native execution was explicitly requested; no failed Docker run falls back.
 _CONTAINER_AVAILABLE, _CONTAINER_REASON = docker_image.container_available(REPO_ROOT)
-if docker_image.running_inside_container() or (not _CONTAINER_AVAILABLE and product_env("CHECK_CONTAINER") == "0"):
+if docker_image.running_inside_container() or (not _CONTAINER_AVAILABLE and _native_execution_requested()):
     _install_fallback_environment()
 
 
@@ -189,7 +198,7 @@ def pytest_cmdline_main(config: pytest.Config) -> int | None:
     if not available:
         if docker_image.running_inside_container():
             return None
-        if product_env("CHECK_CONTAINER") == "0":
+        if _native_execution_requested():
             return None
         print(f"PYTEST REFUSED: Docker is required for this test invocation: {reason}", file=sys.stderr, flush=True)
         return 3

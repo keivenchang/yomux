@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 import pytest
 
 from tests.helpers.browser_contracts import send_native_key as _send_native_key
+from tests.browser_helpers.native_keyboard import native_logical_text
 from tests import latency_calibration
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
 from tests.browser_helpers.browser_layout import WebDriverWait  # noqa: F401
@@ -599,14 +600,31 @@ def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="
             """, first)
         elif mode == "busy":
             browser.execute_script("""
-              const fetch = window.fetch.bind(window);
+              const readJson = apiFetchJson;
+              let holding = true;
               window.__activationHeldMetadata = [];
-              window.fetch = async (...args) => {
-                const response = await fetch(...args);
-                if (String(args[0]).includes('/api/session-metadata')) await new Promise(resolve => window.__activationHeldMetadata.push(resolve));
-                return response;
+              const pendingMetadata = new Set();
+              apiFetchJson = (...args) => {
+                const request = (async () => {
+                  const payload = await readJson(...args);
+                  // Hold application work after the real HTTP request's deadline is retired.
+                  if (holding && String(args[0]).includes('/api/session-metadata')) {
+                    await new Promise(resolve => window.__activationHeldMetadata.push(resolve));
+                  }
+                  return payload;
+                })();
+                if (String(args[0]).includes('/api/session-metadata')) {
+                  pendingMetadata.add(request);
+                  request.then(() => pendingMetadata.delete(request), () => pendingMetadata.delete(request));
+                }
+                return request;
               };
-              window.__activationRestoreFetch = () => { window.fetch = fetch; window.__activationHeldMetadata.splice(0).forEach(resolve => resolve()); };
+              window.__activationRestoreMetadata = async () => {
+                holding = false;
+                apiFetchJson = readJson;
+                window.__activationHeldMetadata.splice(0).forEach(resolve => resolve());
+                await Promise.all([...pendingMetadata]);
+              };
               refreshTranscripts({force:true}); refreshAutoStatuses();
             """)
             WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("return window.__activationHeldMetadata.length > 0;"))
@@ -858,7 +876,14 @@ def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="
     finally:
         if profile:
             browser.execute_cdp_cmd("Profiler.disable", {})
-        browser.execute_script("if (typeof window.__activationProbe?.dispose === 'function') window.__activationProbe.dispose(); window.__activationRestoreFetch?.();")
+        restored = browser.execute_async_script("""
+          const done = arguments[arguments.length - 1];
+          (async () => {
+            if (typeof window.__activationProbe?.dispose === 'function') window.__activationProbe.dispose();
+            await window.__activationRestoreMetadata?.();
+          })().then(() => done(true), error => done({error: String(error?.stack || error)}));
+        """)
+        assert restored is True, restored
         browser.get("about:blank")
 
 
@@ -917,11 +942,13 @@ def test_go_manual_refresh_notifies_remote_terminal_size(browser, isolated_dev_s
           const item = terminals.get(arguments[0]);
           const send = item.socket.send.bind(item.socket);
           window.__manualRefreshResizeMessages = [];
+          window.__manualRefreshScreenMessages = [];
           window.__manualRefreshStarted = false;
           let changedHeightAfterImmediateClaim = false;
           item.socket.send = payload => {
             const message = JSON.parse(payload);
             if (message.type === 'resize') window.__manualRefreshResizeMessages.push(message);
+            if (message.type === 'refresh') window.__manualRefreshScreenMessages.push(message);
             const result = send(payload);
             if (window.__manualRefreshStarted && !changedHeightAfterImmediateClaim
                 && message.type === 'resize' && message.activate === true) {
@@ -935,10 +962,15 @@ def test_go_manual_refresh_notifies_remote_terminal_size(browser, isolated_dev_s
         browser.execute_script("window.__manualRefreshStarted = true;")
         click_visible_selector(browser, "#refreshMeta")
         WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+            "return window.__manualRefreshScreenMessages.some(message => message.reason === 'manual-refresh');"
+        ))
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
             "return window.__manualRefreshResizeMessages.some(message => message.type === 'resize' && message.activate === true && message.rows < arguments[0]);",
             initial["rows"],
         ))
         messages = browser.execute_script("return window.__manualRefreshResizeMessages;")
+        screen_messages = browser.execute_script("return window.__manualRefreshScreenMessages;")
+        assert any(message.get("reason") == "manual-refresh" for message in screen_messages), screen_messages
         assert any(message.get("activate") is True and message["cols"] == initial["cols"] and message["rows"] < initial["rows"] for message in messages), {
             "initial": initial,
             "messages": messages,
@@ -995,24 +1027,35 @@ def test_go_competing_clients_and_rapid_switch_preserve_draft_viewport_and_panel
         browser.execute_script("window.__activationOriginalItem=terminals.get(arguments[0]); window.__activationOriginalPanel=panelNodes.get(arguments[0]);", first)
         # A real shell draft survives switches; submitting it proves the text reached tmux.
         draft = "printf 'activation-draft-preserved\\n'"
-        browser.switch_to.active_element.send_keys(draft)
+        native_logical_text(browser, draft)
         for session in (second, first, second, first):
             select_tab(session)
-        browser.switch_to.active_element.send_keys("\n")
-        WebDriverWait(browser, 10).until(lambda _driver: "activation-draft-preserved" in run_isolated_tmux(
-            runtime.tmux, "capture-pane", "-p", "-t", f"{first}:").stdout.splitlines())
+        native_logical_text(browser, "\n")
+        try:
+            WebDriverWait(browser, 10).until(lambda _driver: "activation-draft-preserved" in run_isolated_tmux(
+                runtime.tmux, "capture-pane", "-p", "-t", f"{first}:").stdout.splitlines())
+        except TimeoutException as error:
+            error.add_note(repr({session: run_isolated_tmux(runtime.tmux, "capture-pane", "-p", "-t", f"{session}:").stdout for session in (first, second)}))
+            error.add_note(repr(browser.execute_script("return {focused:focusedPanelItem,active:document.activeElement?.outerHTML}")))
+            raise
         seeded = run_isolated_tmux(runtime.tmux, "send-keys", "-t", f"{first}:", "seq 1 100", "Enter")
         assert seeded.returncode == 0, seeded.stderr
         WebDriverWait(browser, 10).until(lambda _driver: "100" in run_isolated_tmux(
             runtime.tmux, "capture-pane", "-p", "-t", f"{first}:").stdout.splitlines())
         # tmux owns history in its alternate screen; scroll its real copy-mode viewport.
-        before_scroll = run_isolated_tmux(runtime.tmux, "capture-pane", "-p", "-t", f"{first}:").stdout
         for args in (("copy-mode", "-t", f"{first}:"), ("send-keys", "-t", f"{first}:", "-X", "history-top")):
             result = run_isolated_tmux(runtime.tmux, *args)
             assert result.returncode == 0, result.stderr
-        assert run_isolated_tmux(runtime.tmux, "capture-pane", "-M", "-p", "-t", f"{first}:").stdout != before_scroll
+        def copy_viewport_scrolled(_driver):
+            result = run_isolated_tmux(runtime.tmux, "display-message", "-p", "-t", f"{first}:", "#{pane_in_mode}:#{scroll_position}")
+            assert result.returncode == 0, result.stderr
+            mode, _, offset = result.stdout.strip().partition(':')
+            return mode == '1' and offset.isdigit() and int(offset) > 0
+        # capture-pane -M reads copy mode's backing grid, not its displayed viewport.
+        # Check the real mode offset and the browser's rendered terminal rows instead.
+        WebDriverWait(browser, 10).until(copy_viewport_scrolled)
         WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
-            "const term=terminals.get(arguments[0]).term; return Array.from({length:term.rows},(_,i)=>term.buffer.active.getLine(i)?.translateToString()).join('\\n').includes('activation-draft-preserved');", first))
+            "const term=terminals.get(arguments[0]).term; return Array.from({length:term.rows},(_,i)=>term.buffer.active.getLine(term.buffer.active.viewportY+i)?.translateToString()).join('\\n').includes('activation-draft-preserved');", first))
         browser.execute_script("const term=terminals.get(arguments[0]).term; window.__activationScroll=term.buffer.active.viewportY; window.__activationScreen=Array.from({length:term.rows},(_,i)=>term.buffer.active.getLine(term.buffer.active.viewportY+i)?.translateToString()).join('\\n');", first)
         for session in (second, first):
             select_tab(session)
@@ -1062,7 +1105,7 @@ def test_go_competing_clients_and_rapid_switch_preserve_draft_viewport_and_panel
         WebDriverWait(browser, 20).until(lambda driver: driver.execute_script("const item=terminals.get(arguments[0]); return item !== window.__activationOriginalItem && item?.terminalOutputSeen && item.socket.readyState === WebSocket.OPEN;", first))
         click_visible_selector(browser, f'#term-{first} .xterm-screen')
         assert browser.execute_script("return !window.__retiredActivationCallbackRan && panelNodes.get(arguments[0]) === window.__activationOriginalPanel && document.activeElement === terminals.get(arguments[0]).term.textarea;", first)
-        browser.switch_to.active_element.send_keys("printf 'replacement-input-preserved\\n'\n")
+        native_logical_text(browser, "printf 'replacement-input-preserved\\n'\n")
         WebDriverWait(browser, 10).until(lambda _driver: "replacement-input-preserved" in run_isolated_tmux(
             runtime.tmux, "capture-pane", "-p", "-t", f"{first}:").stdout.splitlines())
         browser.switch_to.window(competitor)

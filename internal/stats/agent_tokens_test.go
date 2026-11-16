@@ -2910,13 +2910,13 @@ func TestOpenCodeCursorProcessCrashMatrixReplaysExactlyOnce(t *testing.T) {
 			statsPath := filepath.Join(root, "stats.sqlite3")
 			cursorPath := filepath.Join(root, "opencode-cursors.json")
 			command := exec.Command(os.Args[0], "-test.run=^TestOpenCodeCursorCrashHelper$")
-			command.Env = testsupport.SyntheticEnvironment(
+			command.Env = testsupport.GoHelperProcessEnvironment(testsupport.SyntheticEnvironment(
 				"YOLOMUX_OPENCODE_CRASH_HELPER=1",
 				"YOLOMUX_OPENCODE_CRASH_STAGE="+stage,
 				"YOLOMUX_OPENCODE_CRASH_DATABASE="+databasePath,
 				"YOLOMUX_OPENCODE_CRASH_STATS="+statsPath,
 				"YOLOMUX_OPENCODE_CRASH_CURSOR="+cursorPath,
-			)
+			))
 			output, err := command.CombinedOutput()
 			if err != nil {
 				t.Fatalf("synthetic OpenCode crash helper failed at %s: %v\n%s", stage, err, output)

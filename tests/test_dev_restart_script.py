@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import select
 import shutil
 import socket
 import subprocess
@@ -241,6 +242,75 @@ def test_boot_refuses_an_existing_listener_before_detached_launch():
     assert result.returncode == 2
     assert f"port {port} already has listener(s)" in result.stderr
     assert "--force" in result.stderr
+
+
+def test_boot_refuses_listener_before_preparing_roots_logs_or_locks(tmp_path):
+    actions = tmp_path / "actions"
+    binary = tmp_path / "operator"
+    binary.write_text(
+        f"#!{fixture_executable('sh')}\n"
+        'printf "%s\\n" "$2" >> "$OPERATOR_ACTIONS"\n'
+        'case "$2" in\n'
+        'version) exit 0 ;;\n'
+        'resolve-product-path) printf "%s\\n" "$7" ;;\n'
+        'validate-roots) exit 0 ;;\n'
+        'listeners) printf "43210\\n" ;;\n'
+        '*) exit 99 ;;\n'
+        'esac\n'
+    )
+    binary.chmod(0o700)
+    root = tmp_path / "root"
+    log_dir = tmp_path / "logs"
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    env = synthetic_test_environment({
+        "HOME": str(tmp_path / "home"),
+        "YOMUX_GO_BINARY": str(binary),
+        "YOMUX_ROOT": str(root),
+        "YOMUX_LOG_DIR": str(log_dir),
+        "TMPDIR": str(runtime),
+        "OPERATOR_ACTIONS": str(actions),
+    })
+    result = subprocess.run(
+        [str(ROOT / "boot.sh"), "--no-dev", "--port", "48123"],
+        cwd=ROOT, env=env, text=True, capture_output=True, timeout=5,
+    )
+    assert result.returncode == 2
+    assert "port 48123 already has listener(s) 43210" in result.stderr
+    assert actions.read_text().splitlines() == [
+        "version", "resolve-product-path", "resolve-product-path", "validate-roots", "listeners",
+    ]
+    assert not root.exists()
+    assert not log_dir.exists()
+    assert list(runtime.iterdir()) == []
+
+
+def test_boot_rechecks_listener_under_restart_lock_before_launch(tmp_path):
+    actions = tmp_path / "actions"
+    script = "\n".join(boot_function_source(name) for name in (
+        "require_port_available", "restart_port",
+    ))
+    script += r'''
+force_start=0
+repo_root=fixture
+go_binary=fixture
+yomux_validate_instance_isolation() { :; }
+log_path_for() { printf '/dev/null'; }
+acquire_port_restart_lock() { printf 'locked\n' >> "$ACTIONS"; }
+port_listener_pids() { printf 'census\n' >> "$ACTIONS"; printf '43210\n'; }
+ensure_log_sink_writable() { :; }
+release_port_restart_lock() { printf 'released\n' >> "$ACTIONS"; }
+build_server_args() { printf 'launched\n' >> "$ACTIONS"; }
+restart_port 48123
+'''
+    result = subprocess.run(
+        [fixture_executable("bash"), "-c", script],
+        env={**os.environ, "ACTIONS": str(actions)},
+        text=True, capture_output=True, timeout=5,
+    )
+    assert result.returncode == 2
+    assert "port 48123 already has listener(s) 43210" in result.stderr
+    assert actions.read_text().splitlines() == ["locked", "census", "released"]
 
 
 def test_boot_surfaces_same_root_duplicate_without_waiting_for_port_timeout():
@@ -500,6 +570,41 @@ def test_a_valid_row_plan_file_is_still_accepted_so_the_refusal_is_not_blanket(t
     assert "invalid row plan" not in result.stderr
 
 
+@pytest.mark.parametrize("capability", ["exact", "wrong-path", "wrong-pid"])
+def test_direct_child_can_only_borrow_its_parents_exact_start_lock(tmp_path, native_binary, capability):
+    script = r'''
+set -eu
+source "$1"
+export YOMUX_START_LOCK_DIR="$2"
+trap yomux_release_start_lock EXIT
+yomux_acquire_start_lock
+inherited_path="$2"
+inherited_pid="$BASHPID"
+case "$3" in
+  wrong-path) inherited_path="$2/wrong" ;;
+  wrong-pid) inherited_pid=1 ;;
+esac
+export YOMUX_INHERITED_START_LOCK_PATH="$inherited_path"
+export YOMUX_INHERITED_START_LOCK_PID="$inherited_pid"
+status=0
+"$BASH" -c '
+source "$1"
+yomux_acquire_start_lock || exit $?
+test -z "${YOMUX_INHERITED_START_LOCK_PATH:-}"
+test -z "${YOMUX_INHERITED_START_LOCK_PID:-}"
+yomux_release_start_lock
+test -f "$2/pid"
+' borrower "$1" "$2" || status=$?
+test -f "$2/pid"
+if [ "$3" = exact ]; then test "$status" -eq 0; else test "$status" -ne 0; fi
+'''
+    environment = synthetic_test_environment({"HOME": str(tmp_path / "home"), "YOMUX_GO_BINARY": str(native_binary)})
+    result = subprocess.run([fixture_executable("bash"), "-c", script, "parent", str(STARTUP_COMMON),
+                             str(tmp_path / "start.lock"), capability], env=environment, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "start.lock").exists()
+
+
 def test_shared_start_lock_rejects_concurrent_launcher_and_releases_cleanly(tmp_path):
     lock_dir = tmp_path / "start.lock"
     holder = subprocess.Popen(
@@ -635,11 +740,11 @@ def test_native_boot_aliases_preserve_launch_and_environment_contract(tmp_path, 
     assert result.returncode == 0, result.stderr
     command = printable_command_text(result.stdout)
     assert str(native_binary) in command
-    assert "--launch --root" in command
+    assert ("--launch --launch-plan-json" if platform.system() == "Darwin" else "--launch --root") in command
     assert "--port 48123" in command
     assert "--host 127.0.0.1" in command
     assert "--backend go" in command
-    assert "--dang" in command
+    assert "--dang" not in command
     assert "TMUX= TMUX_PANE=" in command or "unset TMUX TMUX_PANE" in command
     assert "yomux.py" not in command
     assert "--dev" not in command
@@ -719,7 +824,7 @@ def test_multiple_ports_generate_only_native_launches():
 
 
 @pytest.mark.parametrize("prefix", ["YOMUX", "YOLOMUX"])
-def test_captured_row_plan_survives_poisoned_macos_tmux_environment(tmp_path, native_binary, prefix):
+def test_captured_row_plan_survives_poisoned_macos_caller_environment(tmp_path, native_binary, prefix):
     checkout = tmp_path / "checkout"
     tools = checkout / "tools"
     tools.mkdir(parents=True)
@@ -727,7 +832,7 @@ def test_captured_row_plan_survives_poisoned_macos_tmux_environment(tmp_path, na
         shutil.copy2(ROOT / "tools" / name, tools / name)
     result_path = tmp_path / "environment.bin"
     wrapper = tmp_path / "native-wrapper"
-    wrapper.write_text('#!/bin/bash\nif [[ "${1:-}" == --operator ]]; then exec "$REAL_NATIVE_BINARY" "$@"; fi\n/usr/bin/env -0 > "$ENVIRONMENT_CAPTURE"\n')
+    wrapper.write_text('#!/bin/bash\nif [[ "${1:-}" == --operator ]]; then exec "$REAL_NATIVE_BINARY" "$@"; fi\n/usr/bin/env -0 > "$ENVIRONMENT_CAPTURE"\nprintf ready >&"$TEST_READY_FD"\n')
     wrapper.chmod(0o755)
     with tempfile.TemporaryDirectory(prefix="yomux-row-", dir=short_temp_base()) as instance:
         plan_path = tmp_path / "row.json"
@@ -735,18 +840,26 @@ def test_captured_row_plan_survives_poisoned_macos_tmux_environment(tmp_path, na
         environment = synthetic_test_environment({
             "HOME": str(tmp_path / "home"), "REAL_NATIVE_BINARY": str(native_binary), "ENVIRONMENT_CAPTURE": str(result_path),
             f"{prefix}_ROW_PLAN_FILE": str(plan_path), "YOMUX_GO_BINARY": str(wrapper),
+            f"{prefix}_ROOT": "/stale/root", "TMUX": "foreign-socket", "TMUX_PANE": "%999",
             "YOMUX_CODEX_TRANSCRIPT_ROOT": str(tmp_path / "codex sessions"), "YOMUX_GO_START_REASON": "operator-demand",
         })
         script = r'''set -euo pipefail
 source "$1"
-yomux_macos_server_tmux() {
-  while [[ "$1" != /bin/bash ]]; do shift; done
-  env YOMUX_ROOT=/stale/root YOLOMUX_ROOT=/stale/root YOMUX_ROW_PLAN_FILE=/stale/plan YOLOMUX_ROW_PLAN_FILE=/stale/plan YOMUX_GO_BINARY=/stale/bin YOLOMUX_GO_BINARY=/stale/bin "$@"
-}
 yomux_submit_macos_server "$2" "$3" /bin/bash "$PATH" 48123 "$4" --port 48123 --backend go
 '''
-        result = subprocess.run([fixture_executable("bash"), "-c", script, "submit", str(STARTUP_COMMON), str(checkout), str(wrapper), str(tmp_path / "server.log")], env=environment, text=True, capture_output=True)
-        assert result.returncode == 0, result.stderr
+        ready_read, ready_write = os.pipe()
+        environment["TEST_READY_FD"] = str(ready_write)
+        try:
+            result = subprocess.run([fixture_executable("bash"), "-c", script, "submit", str(STARTUP_COMMON), str(checkout), str(wrapper), str(tmp_path / "server.log")], env=environment, text=True, capture_output=True, timeout=10, pass_fds=(ready_write,))
+            assert result.returncode == 0, result.stderr
+            os.close(ready_write)
+            ready_write = -1
+            assert select.select([ready_read], [], [], 10)[0], (tmp_path / "server.log").read_text()
+            assert os.read(ready_read, 5) == b"ready", (tmp_path / "server.log").read_text()
+        finally:
+            os.close(ready_read)
+            if ready_write >= 0:
+                os.close(ready_write)
         values = dict(entry.split(b"=", 1) for entry in result_path.read_bytes().split(b"\0") if b"=" in entry)
         assert values[b"YOMUX_ROOT"].decode() == instance
         assert b"YOMUX_ROW_PLAN_FILE" not in values
@@ -754,6 +867,8 @@ yomux_submit_macos_server "$2" "$3" /bin/bash "$PATH" 48123 "$4" --port 48123 --
         assert values[b"YOMUX_CODEX_TRANSCRIPT_ROOT"].decode() == str(tmp_path / "codex sessions")
         assert values[b"YOMUX_TMUX_SOCKET"] == b""
         assert values[b"YOMUX_TMUX_ALLOW_DEFAULT_SERVER"] == b"1"
+        assert b"TMUX" not in values
+        assert b"TMUX_PANE" not in values
 
 
 def test_boot_asset_check_uses_only_tracked_vendor_files_without_package_tools(tmp_path, native_binary):

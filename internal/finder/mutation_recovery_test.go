@@ -18,6 +18,98 @@ type recoveryCollisionContext struct {
 	injectionErr           error
 }
 
+func TestPreparedDeletionRejectsReplacementTargets(t *testing.T) {
+	for _, kind := range []string{"directory", "file", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			service, root := newTestService(t, nil)
+			path := filepath.Join(root, "target")
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, "child"), []byte("original"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			deletion, failure := service.PrepareDeletion(context.Background(), path)
+			if failure != nil {
+				t.Fatal(failure)
+			}
+			defer deletion.Close()
+			result, failure := deletion.Delete(context.Background(), false)
+			if failure != nil || result["pending"] != "subtree" {
+				t.Fatalf("bounded delete: %#v %v", result, failure)
+			}
+			preserved := path + "-original"
+			if err := os.Rename(path, preserved); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			switch kind {
+			case "directory":
+				err = os.Mkdir(path, 0o700)
+			case "file":
+				err = os.WriteFile(path, []byte("replacement"), 0o600)
+			case "symlink":
+				err = os.Symlink(preserved, path)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, failure := deletion.Delete(context.Background(), true); failure == nil || failure.Code != "changed_on_disk" {
+				t.Fatalf("replacement was not rejected: %#v", failure)
+			}
+			after, err := os.Lstat(path)
+			if err != nil || !os.SameFile(before, after) {
+				t.Fatalf("replacement changed: %v", err)
+			}
+			if got, err := os.ReadFile(filepath.Join(preserved, "child")); err != nil || string(got) != "original" {
+				t.Fatalf("original generation changed: %q %v", got, err)
+			}
+		})
+	}
+}
+
+func TestPreparedDeletionKeepsPinnedParentAcrossNamespaceReplacement(t *testing.T) {
+	service, root := newTestService(t, nil)
+	parent := filepath.Join(root, "parent")
+	if err := os.MkdirAll(filepath.Join(parent, "target"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "target", "child"), []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deletion, failure := service.PrepareDeletion(context.Background(), filepath.Join(parent, "target"))
+	if failure != nil {
+		t.Fatal(failure)
+	}
+	defer deletion.Close()
+	if result, failure := deletion.Delete(context.Background(), false); failure != nil || result["pending"] != "subtree" {
+		t.Fatalf("bounded delete: %#v %v", result, failure)
+	}
+	if err := os.Rename(parent, parent+"-original"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(parent, "target"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(parent, "target", "child")
+	if err := os.WriteFile(replacement, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, failure := deletion.Delete(context.Background(), true); failure != nil {
+		t.Fatal(failure)
+	}
+	if got, err := os.ReadFile(replacement); err != nil || string(got) != "replacement" {
+		t.Fatalf("replacement parent was consumed: %q %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(parent+"-original", "target")); !os.IsNotExist(err) {
+		t.Fatalf("original pinned target was not removed: %v", err)
+	}
+}
+
 func (c *recoveryCollisionContext) Err() error {
 	if c.quarantine != "" {
 		return context.Canceled

@@ -18,6 +18,7 @@ func TestPermissionFormatting(t *testing.T) {
 	}{
 		{0o644, "-rw-r--r--", 0o644}, {os.ModeDir | 0o755, "drwxr-xr-x", 0o755},
 		{os.ModeSymlink | 0o777, "lrwxrwxrwx", 0o777},
+		{os.ModeSymlink | 0o755, "lrwxr-xr-x", 0o755},
 		{os.ModeSetuid | os.ModeSetgid | os.ModeSticky | 0o640, "-rwSr-S--T", 0o7640},
 		{os.ModeDir | os.ModeSetuid | os.ModeSetgid | os.ModeSticky | 0o777, "drwsrwsrwt", 0o7777},
 	} {
@@ -68,11 +69,15 @@ func TestPermissionMetadataAndIdentity(t *testing.T) {
 	if err := os.Symlink(path+".old", path); err != nil {
 		t.Fatal(err)
 	}
+	nativeLink, err := os.Lstat(path)
+	if err != nil || nativeLink.Mode()&os.ModeSymlink == 0 {
+		t.Fatal(nativeLink, err)
+	}
 	if _, failure = service.Chmod(context.Background(), request, nil); failure == nil {
 		t.Fatal("symlink replacement admitted")
 	}
 	link, failure := service.Info(context.Background(), path)
-	if failure != nil || link["permissions"] != "lrwxrwxrwx" || link["permission_edit_reason"] == "" {
+	if failure != nil || link["permissions"] != permissionString(nativeLink.Mode()) || link["mode"] != numericMode(nativeLink.Mode()) || link["is_symlink"] != true || link["permission_edit_reason"] == "" {
 		t.Fatal(link, failure)
 	}
 	old, err := os.Stat(path + ".old")

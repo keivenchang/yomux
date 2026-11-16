@@ -23,7 +23,6 @@ type nativeServerFlags struct {
 	httpMode          *bool
 	certPath          *string
 	keyPath           *string
-	dangerouslyYolo   *bool
 	searchIndexWorker *bool
 	searchIndexDB     *string
 	showVersion       *bool
@@ -47,10 +46,11 @@ func registerServerFlags(flags *flag.FlagSet) nativeServerFlags {
 	options.httpMode = flags.Bool("http", false, "serve plain HTTP instead of the default HTTPS")
 	options.certPath = flags.String("cert", "", "TLS certificate PEM path")
 	options.keyPath = flags.String("key", "", "TLS private key PEM path")
-	options.dangerouslyYolo = flags.Bool("dangerously-yolo", false, "allow new Claude/Codex sessions to use dangerous bypass flags")
+	// Older managed launchers may still send these flags. Permission selection now belongs to each launch.
+	flags.Bool("dangerously-yolo", false, "retired compatibility input; choose permissions in File -> New")
 	options.searchIndexWorker = flags.Bool("search-index-worker", false, "run the private Finder index worker")
 	options.searchIndexDB = flags.String("index-db", "", "private Finder index database path")
-	flags.BoolVar(options.dangerouslyYolo, "dang", false, "alias for --dangerously-yolo")
+	flags.Bool("dang", false, "retired compatibility input; choose permissions in File -> New")
 	options.showVersion = flags.Bool("version", false, "print version")
 	return options
 }

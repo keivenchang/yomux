@@ -580,7 +580,7 @@ def test_bootstrap_exposes_agent_launch_commands_and_term_always_available():
         match = re.search(r'<script id="yomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
         return json.loads(match.group(1))
     yolo = boot(web.html_page([], "admin", dangerously_yolo=True))
-    assert yolo["dangerouslyYolo"] is True
+    assert "dangerouslyYolo" not in yolo
     assert yolo["agentLaunchCommands"]["claude"] == {
         "normal": "claude",
         "full_access": "claude --dangerously-skip-permissions",
@@ -592,9 +592,9 @@ def test_bootstrap_exposes_agent_launch_commands_and_term_always_available():
     assert "term" in yolo["agentLaunchCommands"]
     assert isinstance(yolo["terminalCommands"], list)
     assert all(isinstance(command, str) for command in yolo["terminalCommands"])
-    # Normal servers retain the commands for server-side validation but do not expose full-access UI.
+    # Retired server-wide permission inputs do not alter the per-launch choices.
     plain = boot(web.html_page([], "admin"))
-    assert plain["dangerouslyYolo"] is False
+    assert "dangerouslyYolo" not in plain
     assert plain["agentLaunchCommands"] == yolo["agentLaunchCommands"]
 
 

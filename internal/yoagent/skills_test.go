@@ -57,7 +57,12 @@ func TestUserSkillFilesPreserveAdmittedExtensions(t *testing.T) {
 func TestUserSkillFilesRejectAmbiguousBareNames(t *testing.T) {
 	config := t.TempDir()
 	for _, extension := range []string{".yaml", ".yml", ".YAML"} {
-		if _, err := WriteUserSkillFile(context.Background(), config, "skill", "local-status"+extension, "name: local-status\ndescription: "+extension); err != nil {
+		name := "local-status"
+		if extension == ".YAML" {
+			// Keep the uppercase-extension fixture distinct on case-insensitive filesystems.
+			name = "uppercase-status"
+		}
+		if _, err := WriteUserSkillFile(context.Background(), config, "skill", name+extension, "name: "+name+"\ndescription: "+extension); err != nil {
 			t.Fatal(err)
 		}
 	}

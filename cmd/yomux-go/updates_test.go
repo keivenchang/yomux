@@ -225,7 +225,7 @@ func TestSelfUpdateRefusesDirtyAndDivergedCheckouts(t *testing.T) {
 }
 
 func TestSelfUpdatePreparesBeforeFastForwardAndLaunchesManagedInstance(t *testing.T) {
-	for _, scenario := range []string{"prepared", "installed", "build-failure", "native-incompatible", "changed-during-build", "artifact-tampered", "checkout-edited"} {
+	for _, scenario := range []string{"prepared", "installed", "build-failure", "native-incompatible", "changed-during-build", "artifact-tampered", "dependency-tampered", "extra-dependency", "checkout-edited"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			gitRun(t, root, "init", "--initial-branch=main")
@@ -254,7 +254,7 @@ func TestSelfUpdatePreparesBeforeFastForwardAndLaunchesManagedInstance(t *testin
 				buildScript += "echo fixture build failure >&2\nexit 1\n"
 			} else {
 				buildScript += "mkdir -p bazel-bin/cmd/yomux-go/yomux-go_\n"
-				buildScript += "cat > bazel-bin/cmd/yomux-go/yomux-go_/yomux-go <<'EOF'\n#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'yomux-go 0.10.7\\n'; exit 0; fi\nif [ \"$1\" = \"--operator\" ]; then printf '0.10.7\\n'; exit 0; fi\nif [ \"$1\" = \"--internal-self-update-supervisor\" ]; then YOMUX_SELF_UPDATE_TEST_WORKER=1 YOMUX_SELF_UPDATE_TEST_SPEC=\"$2\" exec \"$YOMUX_SELF_UPDATE_TEST_EXECUTABLE\" -test.run=^TestSelfUpdateSupervisorSubprocessHelper$; fi\nexit 64\nEOF\n"
+				buildScript += "cat > bazel-bin/cmd/yomux-go/yomux-go_/yomux-go <<'EOF'\n#!/bin/sh\nif [ \"$1\" = --operator ] && [ \"$2\" = setup-assets ]; then exit 82; fi\nif [ \"$1\" = \"--version\" ]; then printf 'yomux-go 0.10.7\\n'; exit 0; fi\nif [ \"$1\" = \"--operator\" ]; then printf '0.10.7\\n'; exit 0; fi\nif [ \"$1\" = \"--internal-self-update-supervisor\" ]; then YOMUX_SELF_UPDATE_TEST_WORKER=1 YOMUX_SELF_UPDATE_TEST_SPEC=\"$2\" exec \"$YOMUX_SELF_UPDATE_TEST_EXECUTABLE\" -test.run=^TestSelfUpdateSupervisorSubprocessHelper$; fi\nexit 64\nEOF\n"
 				buildScript += "chmod 700 bazel-bin/cmd/yomux-go/yomux-go_/yomux-go\n"
 			}
 			if scenario == "native-incompatible" {
@@ -264,7 +264,7 @@ func TestSelfUpdatePreparesBeforeFastForwardAndLaunchesManagedInstance(t *testin
 				buildScript += "printf 'local edit' > \"$YOMUX_UPDATE_TEST_SOURCE/local.txt\"\n"
 			}
 			write("tools/build_go.sh", buildScript, 0o700)
-			write("bazel-bin/tools/staticgen/staticgen_/staticgen", "#!/bin/sh\nset -eu\n[ \"$1\" = --source-root ]\n[ \"$3\" = --output-directory ]\nmkdir -p \"$4\"\nprintf 'new-js\\n' > \"$4/yomux.js\"\nprintf 'new-css\\n' > \"$4/yomux.css\"\n", 0o700)
+			write("bazel-bin/tools/staticgen/staticgen_/staticgen", "#!/bin/sh\nset -eu\n[ \"$1\" = --source-root ]\n[ \"$3\" = --output-directory ]\nmkdir -p \"$4/vendor\" \"$4/fonts\" \"$4/locales\"\nprintf 'new-js\\n' > \"$4/yomux.js\"\nprintf 'new-css\\n' > \"$4/yomux.css\"\nprintf 'dependency\\n' > \"$4/vendor/fixture.js\"\nprintf 'font\\n' > \"$4/fonts/fixture.woff2\"\nprintf '{}\\n' > \"$4/locales/en.json\"\n", 0o700)
 			write("boot.sh", "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$YOMUX_UPDATE_TEST_ARGS\"\nprintf '%s' \"$YOMUX_GO_BINARY\" > \"$YOMUX_UPDATE_TEST_BINARY\"\n", 0o700)
 			write("tools/install.sh", `#!/bin/sh
 set -eu
@@ -272,11 +272,12 @@ if [ "$1" = --help ]; then printf 'Usage: --prefix PREFIX --source-root CHECKOUT
 [ "$1" = --prefix ]
 [ "$3" = --source-root ]
 [ "$4" = "$YOMUX_UPDATE_TEST_SOURCE" ]
+[ "$YOMUX_INSTALL_PREPARED" = 1 ]
 app="$2/lib/yomux"
 mkdir -p "$app/static"
 cp "$YOMUX_GO_BINARY" "$app/yomux-go"
 cp boot.sh "$app/boot.sh"
-cp static/yomux.js static/yomux.css "$app/static/"
+cp -R static/. "$app/static/"
 mkdir -p "$2/bin"
 printf '#!/bin/sh\nexec "%s/yomux-go" "$@"\n' "$app" > "$2/bin/yomux"
 chmod 700 "$2/bin/yomux"
@@ -293,6 +294,7 @@ chmod 700 "$2/bin/yomux"
 			t.Setenv("YOMUX_UPDATE_TEST_ARGS", argsPath)
 			t.Setenv("YOMUX_UPDATE_TEST_BINARY", binaryPath)
 			t.Setenv("YOMUX_SELF_UPDATE_TEST_EXECUTABLE", os.Args[0])
+			t.Setenv("GORACE", testsupport.GoHelperProcessRaceOptions(os.Getenv("GORACE")))
 			t.Setenv("YOMUX_UPDATE_TEST_SOURCE", root)
 			runtimeRoot := root
 			if scenario == "installed" {
@@ -312,7 +314,9 @@ chmod 700 "$2/bin/yomux"
 					if err != nil {
 						t.Fatal(err)
 					}
-					if err := copyAtomic(command, filepath.Join(path, name), 0o700); err != nil {
+					// macOS platform executables must run from their signed location.
+					wrapper := "#!/bin/sh\nexec " + shellQuote(command) + " \"$@\"\n"
+					if err := os.WriteFile(filepath.Join(path, name), []byte(wrapper), 0o700); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -377,9 +381,15 @@ chmod 700 "$2/bin/yomux"
 					t.Fatal(prepareErr)
 				}
 				job.prepared = prepared
-				if scenario == "artifact-tampered" || scenario == "checkout-edited" {
+				if scenario == "artifact-tampered" || scenario == "dependency-tampered" || scenario == "extra-dependency" || scenario == "checkout-edited" {
 					path := filepath.Join(prepared.stage, "static", "yomux.js")
 					want := "artifacts changed"
+					if scenario == "dependency-tampered" {
+						path = filepath.Join(prepared.stage, "static", "vendor", "fixture.js")
+					}
+					if scenario == "extra-dependency" {
+						path = filepath.Join(prepared.stage, "static", "vendor", "unexpected.js")
+					}
 					if scenario == "checkout-edited" {
 						path, want = filepath.Join(root, "local.txt"), "checkout changed"
 					}
@@ -450,7 +460,7 @@ chmod 700 "$2/bin/yomux"
 			if actual := strings.TrimSpace(gitRun(t, root, "rev-parse", "HEAD")); actual != targetSHA {
 				t.Fatalf("activation HEAD = %s, want pinned target %s", actual, targetSHA)
 			}
-			for path, want := range map[string]string{"static/yomux.js": "new-js\n", "static/yomux.css": "new-css\n"} {
+			for path, want := range map[string]string{"static/yomux.js": "new-js\n", "static/yomux.css": "new-css\n", "static/vendor/fixture.js": "dependency\n", "static/fonts/fixture.woff2": "font\n", "static/locales/en.json": "{}\n"} {
 				if data, err := os.ReadFile(filepath.Join(runtimeRoot, path)); err != nil || string(data) != want {
 					t.Fatalf("activated %s = %q, %v; want %q", path, data, err, want)
 				}
@@ -638,10 +648,32 @@ func TestUpdateCheckerPinsManifestAndRecoversOffline(t *testing.T) {
 		t.Fatalf("readiness events: %v", states)
 	}
 	builds := 0
-	checker.prepare = func(_ context.Context, job selfUpdateJob) (*preparedSelfUpdate, error) {
+	checker.prepare = func(ctx context.Context, job selfUpdateJob) (*preparedSelfUpdate, error) {
 		builds++
 		source, installation, err := nativeUpdateSource(installedRoot)
-		return &preparedSelfUpdate{runtimeRoot: installedRoot, root: source, head: strings.TrimSpace(gitRun(t, repo, "rev-parse", "HEAD")), installation: installation, target: job.TargetSHA}, err
+		if err != nil {
+			return nil, err
+		}
+		stage := t.TempDir()
+		binary := filepath.Join(stage, "yomux-go")
+		if err := os.WriteFile(binary, []byte("prepared native executable"), 0o700); err != nil {
+			return nil, err
+		}
+		for name, body := range map[string]string{"yomux.js": "prepared script", "yomux.css": "prepared style", "vendor/dependency.js": "prepared dependency"} {
+			path := filepath.Join(stage, "static", name)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				return nil, err
+			}
+		}
+		hashes, err := preparedUpdateHashes(stage, binary)
+		if err != nil {
+			return nil, err
+		}
+		prepared := &preparedSelfUpdate{runtimeRoot: installedRoot, root: source, head: strings.TrimSpace(gitRun(t, repo, "rev-parse", "HEAD")), installation: installation, target: job.TargetSHA, stage: stage, binary: binary, hashes: hashes}
+		return prepared, validatePreparedUpdate(ctx, prepared)
 	}
 	ready := checker.Check(context.Background())
 	if ready.BuildState != "ready" || ready.BuildError != "" || ready.prepared == nil {
@@ -728,7 +760,7 @@ func TestSelfUpdateSupervisorSubprocessHelper(t *testing.T) {
 	}
 	environment := environmentWithValue(os.Environ(), "YOMUX_SELF_UPDATE_TEST_WORKER", "1")
 	environment = environmentWithValue(environment, "YOMUX_SELF_UPDATE_TEST_SPEC", os.Getenv("YOMUX_SELF_UPDATE_TEST_SPEC"))
-	if err := startDetachedCommand(os.Args[0], []string{"-test.run=^TestSelfUpdateSupervisorSubprocessHelper$"}, environment, os.Getenv("YOMUX_SELF_UPDATE_TEST_LOG")); err != nil {
+	if err := startDetachedCommand(os.Args[0], []string{"-test.run=^TestSelfUpdateSupervisorSubprocessHelper$"}, testsupport.GoHelperProcessEnvironment(environment), os.Getenv("YOMUX_SELF_UPDATE_TEST_LOG")); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -752,11 +784,11 @@ func TestSelfUpdateSupervisorPersistsFailureAfterParentExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	parent := exec.Command(os.Args[0], "-test.run=^TestSelfUpdateSupervisorSubprocessHelper$")
-	parent.Env = testsupport.SyntheticEnvironment(
+	parent.Env = testsupport.GoHelperProcessEnvironment(testsupport.SyntheticEnvironment(
 		"YOMUX_SELF_UPDATE_TEST_PARENT=1",
 		"YOMUX_SELF_UPDATE_TEST_SPEC="+specPath,
 		"YOMUX_SELF_UPDATE_TEST_LOG="+logPath,
-	)
+	))
 	if output, err := parent.CombinedOutput(); err != nil {
 		t.Fatalf("detached supervisor parent failed: %v: %s", err, output)
 	}
@@ -812,11 +844,11 @@ func TestSelfUpdateSupervisorCompletesAfterLauncherReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	parent := exec.Command(os.Args[0], "-test.run=^TestSelfUpdateSupervisorSubprocessHelper$")
-	parent.Env = testsupport.SyntheticEnvironment(
+	parent.Env = testsupport.GoHelperProcessEnvironment(testsupport.SyntheticEnvironment(
 		"YOMUX_SELF_UPDATE_TEST_PARENT=1",
 		"YOMUX_SELF_UPDATE_TEST_SPEC="+specPath,
 		"YOMUX_SELF_UPDATE_TEST_LOG="+logPath,
-	)
+	))
 	if output, err := parent.CombinedOutput(); err != nil {
 		t.Fatalf("detached supervisor parent failed: %v: %s", err, output)
 	}
@@ -939,11 +971,11 @@ func gitRun(t *testing.T, dir string, args ...string) string {
 func TestSelfUpdatePreservesEffectiveLaunchSettings(t *testing.T) {
 	s := &server{port: 48123, host: "127.0.0.1", config: "/private/config", statsPath: "/private/stats.sqlite", tlsCertificate: "/private/cert.pem", tlsKey: "/private/key.pem"}
 	args := s.selfUpdateBootArgs()
-	want := []string{"--force", "--backend", "go", "--port", "48123", "--host", "127.0.0.1", "--config", "/private/config", "--stats", "/private/stats.sqlite", "--no-dang", "--cert", "/private/cert.pem", "--key", "/private/key.pem"}
+	want := []string{"--force", "--backend", "go", "--port", "48123", "--host", "127.0.0.1", "--config", "/private/config", "--stats", "/private/stats.sqlite", "--cert", "/private/cert.pem", "--key", "/private/key.pem"}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("restart %v, want %v", args, want)
 	}
-	s.httpMode, s.dangerouslyYolo = true, true
+	s.httpMode = true
 	args = s.selfUpdateBootArgs()
 	if slices.Contains(args, "--no-dang") || slices.Contains(args, "--cert") || !slices.Contains(args, "--http") {
 		t.Fatalf("HTTP restart changed mode: %v", args)

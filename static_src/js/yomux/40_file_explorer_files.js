@@ -413,6 +413,8 @@ function removeFileTreePathsImmediately(paths = []) {
   if (!deleted.length) return;
   // Child wrappers are siblings of their rows; detach both so yielded renders lose their owner.
   for (const node of document.querySelectorAll('.file-tree-row[data-path], .file-tree-children[data-parent]')) {
+    // Disk absence is a live Finder mutation; Differ retains historical and deleted paths.
+    if (fileTreeRowIsDiffer(node)) continue;
     const path = normalizeDirectoryPath(node.dataset.path || node.dataset.parent || '');
     if (deleted.some(root => path === root || pathIsInsideDirectory(path, root))) node.remove();
   }
@@ -4111,6 +4113,11 @@ function tabberUtilityEntryCompare(left, right) {
   return FILE_TREE_NAME_COLLATOR.compare(leftKey, rightKey);
 }
 
+function tabberEntryPaneItem(entry) {
+  const data = entry?.tabber;
+  return data?.type === 'normal' ? (data.normalPaneItem || '') : (data?.item || '');
+}
+
 function* sortedFileTreeEntrySteps(entries, sortMode, options = {}) {
   const includeHidden = options.includeHidden === true;
   let visible = [];
@@ -4150,11 +4157,17 @@ function fileTreeEntryComparator(sortMode, options = {}) {
   // there is a no-op rather than a second ordering rule.
   const deletedRank = entry => options.deletedLast === true && entry?.deleted === true ? 1 : 0;
   return (left, right) => {
+    if (left.tabber && right.tabber) {
+      const pinRank = Number(tabIsPinned(tabberEntryPaneItem(right))) - Number(tabIsPinned(tabberEntryPaneItem(left)));
+      if (pinRank) return pinRank;
+    }
     if (options.tabberNormalOrder === true) {
       const utilityRank = entry => entry?.tabber?.type === 'tab' ? 1 : 0;
       const rankResult = utilityRank(left) - utilityRank(right);
-      if (rankResult !== 0) return rankResult;
-      if (utilityRank(left) === 1) return tabberUtilityEntryCompare(left, right);
+      if (!tabIsPinned(tabberEntryPaneItem(left))) {
+        if (rankResult !== 0) return rankResult;
+        if (utilityRank(left) === 1) return tabberUtilityEntryCompare(left, right);
+      }
     }
     const deletedResult = deletedRank(left) - deletedRank(right);
     if (deletedResult !== 0) return deletedResult;
@@ -4299,6 +4312,10 @@ function syncFileTreeRowKindClass(row, kind) {
   row.classList.add(nextKindClass);
 }
 
+function fileTreeRowRenameInput(row) {
+  return row.dataset.path === fileTreeRenamePath ? row.querySelector('.file-tree-rename-input') : null;
+}
+
 function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   let icon = row.querySelector(':scope > .file-tree-icon');
   if (!icon) {
@@ -4380,8 +4397,8 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     delete icon.dataset.disclosureExpanded;
     if (icon.textContent !== iconText) icon.textContent = iconText;
   }
-  if (options.preserveNameHtml === true) {
-    // Keep an active session popover attached to its existing name/anchor subtree.
+  if (options.preserveNameHtml === true || fileTreeRowRenameInput(row)) {
+    // Background metadata must retain the editing input, focus and selection as well as popover anchors.
   } else if (options.nameHtml) {
     setInnerHtmlIfChanged(name, options.nameHtml, cleanupDetachedPopoversWithin);
     if (!name.children?.length && name.textContent !== nameText) name.textContent = nameText;
@@ -4742,8 +4759,9 @@ function patchTreeRow(row, model) {
   for (const [key, value] of Object.entries(model.dataset)) setRowDataset(row, key, value);
   if (row.style.paddingLeft !== model.paddingLeft) row.style.paddingLeft = model.paddingLeft;
   setTreeItemAria(row, {selected: model.selected, expandable: model.expandable, expanded: model.expanded});
-  if (row.draggable !== model.draggable) row.draggable = model.draggable;
-  if (!model.draggable) row.removeAttribute('draggable');
+  const draggable = model.draggable && !fileTreeRowRenameInput(row);
+  if (row.draggable !== draggable) row.draggable = draggable;
+  if (!draggable) row.removeAttribute('draggable');
   for (const className of TREE_ROW_MANAGED_CLASSES) row.classList.toggle(className, model.classes[className] === true);
   setAttributeIfChanged(row, 'aria-current', model.current ? 'true' : null);
   applyGitStatusRowClass(row, model.gitClass);
@@ -4943,9 +4961,15 @@ function* renderTreeChildrenSteps(container, parentPath, entries, depth, options
     }
     visible = [...retained, ...remaining.values()];
     if (renderOptions.tabberNormalOrder === true) {
-      const conversations = visible.filter(entry => entry?.tabber?.type !== 'tab');
-      const utilityTabs = visible.filter(entry => entry?.tabber?.type === 'tab').sort(tabberUtilityEntryCompare);
-      visible = [...conversations, ...utilityTabs];
+      const pinned = visible.filter(entry => tabIsPinned(tabberEntryPaneItem(entry)));
+      const unpinned = visible.filter(entry => !tabIsPinned(tabberEntryPaneItem(entry)));
+      const conversations = unpinned.filter(entry => entry?.tabber?.type !== 'tab');
+      const utilityTabs = unpinned.filter(entry => entry?.tabber?.type === 'tab').sort(tabberUtilityEntryCompare);
+      visible = [...pinned, ...conversations, ...utilityTabs];
+    }
+    if (renderOptions.view === 'tabber') {
+      visible = [...visible.filter(entry => tabIsPinned(tabberEntryPaneItem(entry))),
+        ...visible.filter(entry => !tabIsPinned(tabberEntryPaneItem(entry)))];
     }
   }
   const visiblePaths = new Map();
@@ -7062,9 +7086,15 @@ function mergeTabberActivitySessionMetadata(payload) {
   const sessionPayloads = payload?.sessions && typeof payload.sessions === 'object' ? payload.sessions : null;
   const order = Array.isArray(payload?.session_order) ? payload.session_order : null;
   if (!sessionPayloads && !order) return false;
-  const prior = transcriptMetadataState.payload && typeof transcriptMetadataState.payload === 'object'
+  let prior = transcriptMetadataState.payload && typeof transcriptMetadataState.payload === 'object'
     ? transcriptMetadataState.payload
     : {};
+  const nextIdentity = sessionMetadataPayloadIdentity(payload);
+  let previousIdentity = sessionMetadataPayloadIdentity(prior);
+  if (nextIdentity && previousIdentity && nextIdentity.epoch !== previousIdentity.epoch) {
+    prior = {};
+    previousIdentity = null;
+  }
   const priorSessions = prior.sessions && typeof prior.sessions === 'object' ? prior.sessions : {};
   // A session order supplied by the global tmux inventory is authoritative.  Do not retain a
   // disappeared session in the metadata map, because tabberOrderedSessions() also considers map
@@ -7077,10 +7107,20 @@ function mergeTabberActivitySessionMetadata(payload) {
     // When the backend supplies an authoritative global roster, metadata keys outside that
     // roster are stale cross-route enrichments and must not create a synthetic Tabber row.
     if (order && !order.includes(session)) continue;
-    sessions[session] = {...(sessions[session] || {}), ...info};
+    sessions[session] = mergeSessionMetadataDuringLightweightRefresh(info, sessions[session], {nextIdentity, previousIdentity});
   }
   const nextOrder = order || Object.keys(sessions);
-  setTranscriptMetadataPayload({...prior, sessions, session_order: nextOrder}, {invalidateRequest: false});
+  const hasMetadataRows = Object.entries(sessionPayloads || {}).some(([session, info]) =>
+    info && typeof info === 'object' && !Array.isArray(info) && (!order || order.includes(session)));
+  const identity = hasMetadataRows && nextIdentity && (!previousIdentity || nextIdentity.generation >= previousIdentity.generation)
+    ? nextIdentity : previousIdentity;
+  setTranscriptMetadataPayload({...prior, sessions, session_order: nextOrder,
+    ...(identity ? {metadata_identity: identity} : {})}, {invalidateRequest: false});
+  // These rows are the same server-published metadata product as a direct read.
+  // Advance its shared clock so an older in-flight direct read cannot relabel it.
+  if (nextIdentity && hasMetadataRows) {
+    finalizeSessionMetadataOutcome(true, 'activity_metadata_applied', payload);
+  }
   const changed = updateSessionList(nextOrder);
   if (changed) {
     renderSessionButtons();
@@ -7089,15 +7129,21 @@ function mergeTabberActivitySessionMetadata(payload) {
   return changed;
 }
 
-function applyTabberActivityPayload(payload, requestGeneration = 0) {
+function applyTabberActivityPayload(payload, requestGeneration = 0, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
-  const payloadTopologyGeneration = Number(payload.topology_generation || 0);
-  const currentTopologyGeneration = Math.max(Number(tmuxTopologyGeneration || 0), Number(transcriptMetadataState.rosterGeneration || 0));
-  if (!tmuxTopologyPayloadIsCurrent(payload)) return false;
   const hasActivity = payload.activity && typeof payload.activity === 'object';
   const hasTopology = Array.isArray(payload.session_order)
     || (payload.sessions && typeof payload.sessions === 'object');
   if (!hasActivity && !hasTopology) return false;
+  if (Number(requestGeneration) > 0 && requestGeneration < tabberActivityState.appliedGeneration) return false;
+  const identity = sessionMetadataPayloadIdentity(payload);
+  if (options.serverEpochGeneration !== undefined
+      && options.serverEpochGeneration !== clientEventTransportState.epochGeneration
+      && identity?.epoch !== transcriptMetadataState.epoch) return false;
+  if (identity) adoptServerEpoch(identity.epoch);
+  const payloadTopologyGeneration = Number(payload.topology_generation || 0);
+  const currentTopologyGeneration = Math.max(Number(tmuxTopologyGeneration || 0), Number(transcriptMetadataState.rosterGeneration || 0));
+  if (!tmuxTopologyPayloadIsCurrent(payload)) return false;
   // Do not advance the shared roster clock from a response that has no usable activity or
   // topology. Such a placeholder must not poison the generation guard for the next valid read.
   if (Number.isSafeInteger(payloadTopologyGeneration) && payloadTopologyGeneration >= currentTopologyGeneration
@@ -7157,6 +7203,7 @@ async function fetchTabberActivity(options = {}) {
   const requestHours = normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours);
   const rangeIsCurrent = () => requestHours === normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours);
   const requestGeneration = ++tabberActivityState.requestGeneration;
+  const requestOptions = {serverEpochGeneration: clientEventTransportState.epochGeneration};
   const request = (async () => {
     let adoptedStatus = 0;
     let accepted = false;
@@ -7169,7 +7216,7 @@ async function fetchTabberActivity(options = {}) {
       // Python backends on the same one-session-per-row contract.
       params.set('scope', 'all');
       const payload = await apiFetchJson(`/api/activity?${params.toString()}`, {cache: 'no-store'});
-      const applied = rangeIsCurrent() && applyTabberActivityPayload(payload, requestGeneration);
+      const applied = rangeIsCurrent() && applyTabberActivityPayload(payload, requestGeneration, requestOptions);
       accepted = applied;
       // Go owns live agent status in the activity product.  Keep the shared
       // auto-status model in step with every accepted activity refresh, not
@@ -7188,14 +7235,14 @@ async function fetchTabberActivity(options = {}) {
       // when activity collection is temporarily unavailable.
       try {
         const metadata = await apiFetchJson('/api/session-metadata', {cache: 'no-store'});
-        if (rangeIsCurrent()) accepted = applyTabberActivityPayload({...metadata, activity: {}}, requestGeneration);
+        if (rangeIsCurrent()) accepted = applyTabberActivityPayload({...metadata, activity: {}}, requestGeneration, requestOptions);
       } catch (_) {
         // Older Go/compatibility servers may expose the lighter roster through /api/tmux even
         // when their full metadata build is unavailable.  It carries the same authoritative
         // session_order, so preserve one Tabber row per live session instead of clearing the tree.
         try {
           const roster = await apiFetchJson('/api/tmux', {cache: 'no-store'});
-          if (rangeIsCurrent()) accepted = applyTabberActivityPayload({...roster, activity: {}}, requestGeneration);
+          if (rangeIsCurrent()) accepted = applyTabberActivityPayload({...roster, activity: {}}, requestGeneration, requestOptions);
         } catch (_) {
           // Keep the last snapshot; the interval retries without a render-triggered request loop.
         }
@@ -7218,7 +7265,7 @@ async function fetchTabberActivity(options = {}) {
       else if (publish) refreshTabberPanelsForAgentWindowPublication(refreshOptions);
       tabberActivityState.publishedSignature = signature;
     }
-    return true;
+    return accepted;
   })();
   tabberActivityState.request = request;
   return request;
@@ -7326,7 +7373,7 @@ function buildTabberNormalRows() {
         name: tabberSessionPath(session).slice(1), kind: 'file', mtime: tabberRecency(session), sortName: sessionLabel(session) || session,
         tabber: {type: 'normal', session, label: sessionLabel(session) || session, normalPaneItem: session,
           active: visibleItems.has(session), current: focusedItem === session,
-          normalNameHtml: tabberNormalRowNameHtml(session, '', '')},
+          normalNameHtml: tabberNormalRowNameHtml(session, pinnedTabIconHtml(session), '')},
       });
       continue;
     }
@@ -7364,19 +7411,22 @@ function buildTabberNormalRows() {
           normalPaneItem,
           normalWindowView: windowView,
           label: `${visibleSession} ${description}`.trim(),
-          normalNameHtml: tabberNormalRowNameHtml(session, icon, description, windowIdentity),
+          normalNameHtml: tabberNormalRowNameHtml(session, pinnedTabIconHtml(normalPaneItem) + icon, description, windowIdentity),
         },
       });
     }
   }
   for (const item of allTabItems()) {
     if (isTmuxSession(item) || item === tabberItemId || (advanced && isFileExplorerItem(item))) continue;
+    if (!experimentalPaneItemAvailable(item)) continue;
     if (!advanced && [differItemId, chatItemId, yoagentItemId].includes(item)) continue;
     const label = itemLabel(item);
+    const itemPath = gitDiffItemPath(item) || (isFileEditorItem(item) ? fileItemPath(item) : null);
     rows.push({
       name: tabberTabPath(item).slice(1), kind: 'file', mtime: Math.max(Number(tabberLocalItemActivity.get(item) || 0), tabberRecency(item)), sortName: label,
       tabber: {type: 'tab', item, label, icon: '◷', active: visibleItems.has(item), current: focusedItem === item,
-        normalNameHtml: `<span class="tabber-normal-primary">${esc(label)}</span><span class="tabber-normal-description">&nbsp;</span>`},
+        ...(itemPath ? {description: itemPath, descriptionIsPath: true} : {}),
+        normalNameHtml: tabberRowNameHtml(pinnedTabIconHtml(item) + esc(label), itemPath || '')},
     });
   }
   return rows;
@@ -7407,6 +7457,8 @@ function renderTabberTree(groupsEl, options = {}) {
   groupsEl.dataset.tabberMode = advanced ? 'advanced' : 'normal';
   const sortMode = tabberSortMode();
   const previousSort = container.__tabberSortState;
+  const pinSignature = JSON.stringify(rows.filter(entry => tabIsPinned(tabberEntryPaneItem(entry))).map(entry => entry.name).sort());
+  const pinsChanged = previousSort && previousSort.pinSignature !== pinSignature;
   const nowMs = fileTreeRecencyNowMs();
   const activityReady = tabberActivityState.loaded;
   const explicitSort = previousSort && previousSort.mode !== sortMode;
@@ -7415,10 +7467,10 @@ function renderTabberTree(groupsEl, options = {}) {
     || nowMs - previousSort.sortedAt >= 10_000;
   const interactionBlocked = Boolean(previousSort) && (options.preserveDisplayedOrder === true
     || (options.reorder !== true && groupsEl.closest('.file-explorer-panel')?.__tabberPointerInside === true));
-  const preserveDisplayedOrder = !explicitSort && (!sortDue || interactionBlocked);
+  const preserveDisplayedOrder = !pinsChanged && !explicitSort && (!sortDue || interactionBlocked);
   // Dates and status keep consuming fresh activity even when the row positions are retained.
   // Hover defers a due sort without consuming its interval; leaving can apply the latest data.
-  if (!preserveDisplayedOrder) container.__tabberSortState = {mode: sortMode, sortedAt: nowMs, activityReady};
+  if (!preserveDisplayedOrder) container.__tabberSortState = {mode: sortMode, sortedAt: nowMs, activityReady, pinSignature};
   const signature = JSON.stringify([tabberSortMode(), preserveDisplayedOrder, rows.map(entry => {
     const model = tabberTreeRowViewModel(null, `/${entry.name}`, entry, 0, {view: 'tabber'});
     return [model.path, model.kind, model.icon, model.label, model.paddingLeft, model.dataset, model.content, entry.mtime, entry.tabber?.normalSortMtime];
@@ -7589,10 +7641,7 @@ function tabberNativeDragImageForRow(row) {
 
 function tabberRowDragItem(row) {
   if (!tabberIsAdvanced()) return '';
-  const type = row?.dataset?.tabberType || '';
-  if (type === 'normal') return row.dataset.tabberSession || '';
-  if (type === 'tab') return row.dataset.tabberItem || '';
-  return '';
+  return row?.dataset?.paneTab || '';
 }
 
 function tabberRowIsTabDragSource(row) {
@@ -7622,7 +7671,7 @@ function tabberTreeRowViewModel(row, fullPath, entry, depth, options = {}) {
   const icon = expandable ? disclosureTriangleGlyph(expanded) : (data.icon || '');
   const rawLabel = data.label || entry.name;
   const label = compactHomePath(rawLabel);
-  const description = data.description ? compactHomePath(data.description) : '';
+  const description = data.description ? (data.descriptionIsPath === true ? data.description : compactHomePath(data.description)) : '';
   const titleParts = [
     label,
     description && description !== label ? description : '',
@@ -7630,8 +7679,8 @@ function tabberTreeRowViewModel(row, fullPath, entry, depth, options = {}) {
     data.repoRoot && data.repoRoot !== rawLabel ? compactHomePath(data.repoRoot) : '',
   ].filter(Boolean);
   const titleText = titleParts.join('\n');
+  const paneTab = tabberEntryPaneItem(entry);
   const nameHtml = data.normalNameHtml || '';
-  const paneTab = data.type === 'normal' ? (data.session || '') : (data.type === 'tab' ? (data.item || '') : '');
   return TreeRowViewModel({
     path: fullPath,
     kind: entry.kind,

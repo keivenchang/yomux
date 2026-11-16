@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Generate YO!chat's lazy emoji search catalog from pinned Unicode CLDR data."""
+"""Offline Python oracle for the native, pinned Unicode/CLDR emoji catalog."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-import urllib.request
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_PATH = REPO_ROOT / "static_src" / "js" / "emoji" / "emoji_data.js"
+INPUT_PATH = REPO_ROOT / "node_modules" / ".yomux" / "emoji"
 CLDR_VERSION = "47.0.0"
 UNICODE_EMOJI_VERSION = "16.0"
 LOCALES = {
@@ -22,14 +22,19 @@ LOCALES = {
 }
 
 
-def fetch_json(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=60) as response:
-        return json.load(response)
-
-
-def fetch_text(url: str) -> str:
-    with urllib.request.urlopen(url, timeout=60) as response:
-        return response.read().decode("utf-8")
+def pinned_input(name: str) -> bytes:
+    manifest = json.loads((REPO_ROOT / "assets/runtime/browser-assets.json").read_bytes())
+    expected = {path: record["sha256"] for path, record in manifest["files"].items()}
+    for archive in manifest["archives"]:
+        expected.update(archive["files"])
+    path = INPUT_PATH / name
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError as error:
+        raise ValueError("Emoji inputs are not prepared; run make build first") from error
+    if hashlib.sha256(data).hexdigest() != expected[str(path.relative_to(REPO_ROOT))]:
+        raise ValueError(f"Emoji input checksum mismatch: {name}; run make build to repair")
+    return data
 
 
 def emoji_sequence(text: str) -> list[tuple[str, str]]:
@@ -52,23 +57,18 @@ def emoji_sequence(text: str) -> list[tuple[str, str]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=OUTPUT_PATH)
+    parser.add_argument("--output", type=Path, required=True, help="private output file outside Git worktrees")
     args = parser.parse_args()
-    emoji_test = fetch_text(f"https://www.unicode.org/Public/emoji/{UNICODE_EMOJI_VERSION}/emoji-test.txt")
+    args.output = args.output.resolve()
+    if any((parent / ".git").exists() for parent in args.output.parents):
+        parser.error("oracle output must be outside Git worktrees; make build owns checkout publication")
+    emoji_test = pinned_input("emoji-test.data").decode("utf-8")
     glyphs = emoji_sequence(emoji_test)
     annotations: dict[str, dict] = {}
-    for app_locale, cldr_locale in LOCALES.items():
-        url = (
-            f"https://raw.githubusercontent.com/unicode-org/cldr-json/{CLDR_VERSION}/"
-            f"cldr-json/cldr-annotations-full/annotations/{cldr_locale}/annotations.json"
-        )
-        derived_url = (
-            f"https://raw.githubusercontent.com/unicode-org/cldr-json/{CLDR_VERSION}/"
-            f"cldr-json/cldr-annotations-derived-full/annotationsDerived/{cldr_locale}/annotations.json"
-        )
+    for app_locale in LOCALES:
         annotations[app_locale] = {
-            **fetch_json(url)["annotations"]["annotations"],
-            **fetch_json(derived_url)["annotationsDerived"]["annotations"],
+            **json.loads(pinned_input(f"{app_locale}-annotations.json"))["annotations"]["annotations"],
+            **json.loads(pinned_input(f"{app_locale}-annotationsDerived.json"))["annotationsDerived"]["annotations"],
         }
     records = []
     for glyph, category in glyphs:

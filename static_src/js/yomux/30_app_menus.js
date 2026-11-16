@@ -609,9 +609,7 @@ function newTmuxSessionItems() {
         // Do not guess a shell. A terminal launch is valid only when the server supplied an
         // explicit, validated command for the user to choose.
         : null)
-      : (fullAccessAgentLaunchesEnabled
-        ? menuCommandPair(launch(false), launch(true), {className: 'app-menu-command-pair'})
-        : launch(false));
+      : menuCommandPair(launch(false), launch(true), {className: 'app-menu-command-pair'});
   });
 }
 
@@ -750,15 +748,10 @@ function sortTabItemsForMenu(items) {
   ];
 }
 
-function menuPaneItemAvailable(item) {
-  return boolSetting('general.enable_experimental_features', false)
-    || !['chat', 'yoagent', 'info'].includes(tabTypeForItem(item)?.key);
-}
-
 function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   const query = tabsMenuSearchText.trim();
   const allItems = Array.from(new Set([...openItems, ...paneItems(), ...allTabItems()]));
-  const sortedItems = sortTabItemsForMenu(filterTabItemsForSearch(allItems.filter(menuPaneItemAvailable), query));
+  const sortedItems = sortTabItemsForMenu(filterTabItemsForSearch(allItems.filter(experimentalPaneItemAvailable), query));
   const tmuxItems = sortedItems.filter(isTmuxSession);
   const yoloItems = sortedItems.filter(item => !isTmuxSession(item));
   const groupedItems = menuGroups(
@@ -837,7 +830,7 @@ function fileSurfaceMenuItems() {
 function fileMenuPanelCommands() {
   const virtualCommands = FILE_MENU_PANEL_DEFINITIONS
   .filter(({itemId}) => itemId !== fileExplorerItemId)
-    .filter(({itemId}) => menuPaneItemAvailable(itemId))
+    .filter(({itemId}) => experimentalPaneItemAvailable(itemId))
     .filter(({itemId}) => typeof paneItemCapabilityAvailable !== 'function' || paneItemCapabilityAvailable(itemId))
     .map(({itemId}) => fileMenuVirtualCommand(itemId, tabTypeForItem(itemId)?.detail?.() || ''));
   const fileSurfaces = fileSurfaceMenuItems();
@@ -1867,12 +1860,17 @@ function runAppMenuCommand(item) {
     renderSessionButtons({force: true});
   };
   try {
-    Promise.resolve(item.action())
-      .then(refreshMenu)
-      .catch(error => {
-        statusErr(localizedHtml('status.menuCommandFailed', {error}));
-        refreshMenu();
-      });
+    const result = item.action();
+    // Optimistic state changes must reach the open menu while persistence is pending.
+    refreshMenu();
+    if (result && typeof result.then === 'function') {
+      Promise.resolve(result)
+        .then(refreshMenu)
+        .catch(error => {
+          statusErr(localizedHtml('status.menuCommandFailed', {error}));
+          refreshMenu();
+        });
+    }
   } catch (error) {
     statusErr(localizedHtml('status.menuCommandFailed', {error}));
     refreshMenu();

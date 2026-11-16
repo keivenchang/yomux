@@ -1,0 +1,293 @@
+{
+  "archives": [
+    {
+      "version": "xterm-6.0.0",
+      "archive_sha256": "908e66e04af6c8dc6b00dd3b54de088e2e81e5ed866284fd6c2fb3c2d1c7a3f6",
+      "urls": [
+        "https://registry.npmjs.org/@xterm/xterm/-/xterm-6.0.0.tgz"
+      ],
+      "files": {
+        "static/vendor/xterm.js": "14903579ff54664cd72f8e8699e6961a6272c21863ec1c3b118cdc8af5d4a972",
+        "static/vendor/xterm.css": "854a7c0fb70e8b1a083c16797ab827299fb18744f5ad34f227b48337e33293c6"
+      },
+      "members": {
+        "static/vendor/xterm.js": "package/lib/xterm.js",
+        "static/vendor/xterm.css": "package/css/xterm.css"
+      },
+      "normalize_text": []
+    },
+    {
+      "version": "unicode11-0.9.0",
+      "archive_sha256": "b665667792f916873fe946ba98cc98a1a742af08e163fb66e1c0809c120ca42e",
+      "urls": [
+        "https://registry.npmjs.org/@xterm/addon-unicode11/-/addon-unicode11-0.9.0.tgz"
+      ],
+      "files": {
+        "static/vendor/xterm-addon-unicode11.js": "72353b5178e1a7382716df1cfedf8ab070eea655d38995bb9f4f284fe56e2f2b"
+      },
+      "members": {
+        "static/vendor/xterm-addon-unicode11.js": "package/lib/addon-unicode11.js"
+      },
+      "normalize_text": []
+    },
+    {
+      "version": "dockview-6.6.1",
+      "archive_sha256": "483fa65c414c74358e26717a4003b7432a4bd6a7aa49e8181440759c750499a8",
+      "urls": [
+        "https://registry.npmjs.org/dockview-core/-/dockview-core-6.6.1.tgz"
+      ],
+      "files": {
+        "static/vendor/dockview-core.noStyle.js": "d9e2d9f8158d36dc21861cc99e3aebeba2ade83588249030cf0098584feda1c6",
+        "static/vendor/dockview.css": "bd252b0df928e9b8f7dad213484da5dcdae83cb7a371bdf777ca387b8247f05e"
+      },
+      "members": {
+        "static/vendor/dockview-core.noStyle.js": "package/dist/dockview-core.noStyle.js",
+        "static/vendor/dockview.css": "package/dist/styles/dockview.css"
+      },
+      "normalize_text": [
+        "static/vendor/dockview-core.noStyle.js"
+      ]
+    },
+    {
+      "version": "mermaid-11.15.0",
+      "archive_sha256": "155379a1ecc10ad87c20f739d61276b32fe78e08fbd81219134276fd1fc8393c",
+      "urls": [
+        "https://registry.npmjs.org/mermaid/-/mermaid-11.15.0.tgz"
+      ],
+      "files": {
+        "static/vendor/mermaid.min.js": "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de"
+      },
+      "members": {
+        "static/vendor/mermaid.min.js": "package/dist/mermaid.min.js"
+      },
+      "normalize_text": []
+    },
+    {
+      "version": "marked-12.0.2",
+      "archive_sha256": "6cfd2d09c6bce2541558a1547e5f3b9895ed743f0d287536ff2280e318e8a074",
+      "urls": [
+        "https://registry.npmjs.org/marked/-/marked-12.0.2.tgz"
+      ],
+      "files": {
+        "static/vendor/marked.min.js": "15fabce5b65898b32b03f5ed25e9f891a729ad4c0d6d877110a7744aa847a894"
+      },
+      "members": {
+        "static/vendor/marked.min.js": "package/marked.min.js"
+      },
+      "normalize_text": []
+    },
+    {
+      "version": "highlight-11.9.0",
+      "archive_sha256": "62b15dbb4430b9692eb864e99393f4578646da1b25d437fc9e10a79786330dd0",
+      "urls": [
+        "https://registry.npmjs.org/@highlightjs/cdn-assets/-/cdn-assets-11.9.0.tgz"
+      ],
+      "files": {
+        "static/vendor/highlight.min.js": "837a6fa5b0c736b52bbde2b2b6190f305da3fc9ed41681db5321507057b5c846",
+        "static/vendor/highlight-github-dark.min.css": "9f208d022102b1d0c7aebfecd8e42ca7997d5de636649d2b31ea63093d809019"
+      },
+      "members": {
+        "static/vendor/highlight.min.js": "package/highlight.min.js",
+        "static/vendor/highlight-github-dark.min.css": "package/styles/github-dark.min.css"
+      },
+      "normalize_text": []
+    },
+    {
+      "version": "katex-0.16.22",
+      "archive_sha256": "e9e0d167db3175481cbadaff38e8d90b130f6a3ddb451a47e43c577fd511f365",
+      "urls": [
+        "https://registry.npmjs.org/katex/-/katex-0.16.22.tgz"
+      ],
+      "files": {
+        "static/vendor/katex/auto-render.min.js": "bb53eb953394531aae36fdd537065c4244eb8542901a3ce914601d932675b8ac",
+        "static/vendor/katex/LICENSE": "766ccc1f306c885aa45542a9846bbd0a505b27a0374f146778171c2254ce18e3",
+        "static/vendor/katex/katex.min.css": "19095127357ed6d29fe0a63a6b000c913a89f7f1963b765dd3715e97c9852e75",
+        "static/vendor/katex/katex.min.js": "e8d885505949f3a5f4abdd5dd0d53696bd1371ad26ffbf4f310dcd77c8cdae89",
+        "static/vendor/katex/fonts/KaTeX_Caligraphic-Regular.woff2": "5d53e70ad607c2352162dec9e0923fb54ecdafaccbf604cd8dcf7d00facb989b",
+        "static/vendor/katex/fonts/KaTeX_AMS-Regular.woff2": "0cdd387c9590a1a9f9794560022dbb59654a7d86f187aa0c81495ad42d3a7308",
+        "static/vendor/katex/fonts/KaTeX_Math-Italic.woff2": "7af58c5ec8f132a2ddde9027c6d7814decce4d3b822a11192a42a20e2e973264",
+        "static/vendor/katex/fonts/KaTeX_Caligraphic-Bold.woff2": "de7701e42cf1f4cf0b766c03fb27977207eee2f4fd5d76fa82188406da43ea4c",
+        "static/vendor/katex/fonts/KaTeX_Script-Regular.woff2": "036d4e95149b69ff9bcc0cd55771efeb25ffa3947293e69acd78d5ac328c684b",
+        "static/vendor/katex/fonts/KaTeX_Size4-Regular.woff2": "a4af7d414440a1c1790825cfb700cf9cf43b0f2c4b04f0ebc523011ad9853ec0",
+        "static/vendor/katex/fonts/KaTeX_Size2-Regular.woff2": "d04c54219f9eaec6d4d4fd42dfb28785975a4794d6b2fc71e566b9cd6db842dd",
+        "static/vendor/katex/fonts/KaTeX_Fraktur-Bold.woff2": "74444efd593c005e3f4573b44524704c0af0a937fe911cca9e94068d0d140d3f",
+        "static/vendor/katex/fonts/KaTeX_SansSerif-Italic.woff2": "00b26ac825e2095056396e0553b8ac26d3f8ad158c3826e28b4c45b385c4714a",
+        "static/vendor/katex/fonts/KaTeX_Typewriter-Regular.woff2": "71d517d67827787cfabdf186914cc3358eda539e37931941f2b2fd4a21f68c0b",
+        "static/vendor/katex/fonts/KaTeX_Main-BoldItalic.woff2": "99cd42a3c072d918f2f44984a807cf7aa16e13545fd0875fc07c6c65f99e715b",
+        "static/vendor/katex/fonts/KaTeX_Size3-Regular.woff2": "73d591271b1604960cb10bb90fee021670af7297017e0e98480b332d11f51995",
+        "static/vendor/katex/fonts/KaTeX_Fraktur-Regular.woff2": "51814d270d06ff0255dba0799994fa4d8c84d11f09951d47595f4abb1f3602dc",
+        "static/vendor/katex/fonts/KaTeX_Size1-Regular.woff2": "6b47c40166b6dbe21a5dfca7718413f2147fd2399be1ba605d8ad39cedf25dfe",
+        "static/vendor/katex/fonts/KaTeX_Math-BoldItalic.woff2": "dc47344dbb6cb5b655c8460d561f4df5f501b90c804ad3c6cec65fe322351ab1",
+        "static/vendor/katex/fonts/KaTeX_SansSerif-Regular.woff2": "68e8c73ef42afd3ccec58bf0fba302cce448938e7fc020a5e31f8a952eee1342",
+        "static/vendor/katex/fonts/KaTeX_Main-Bold.woff2": "0f60d1b897938ec918c8ce073092411baf9438f6739465693ff18b0f9d20b021",
+        "static/vendor/katex/fonts/KaTeX_Main-Italic.woff2": "97479ca6cce906abc961ecac96faa5f9ca2e61b8e7670d475826bcdee9a7c267",
+        "static/vendor/katex/fonts/KaTeX_SansSerif-Bold.woff2": "e99ae51144bf1232efcc1bfe5add36262c6866b0faab24fa75740e1b98577a62",
+        "static/vendor/katex/fonts/KaTeX_Main-Regular.woff2": "c2342cd8b869e01752a9321dc17213fc40d4d04c79688c1d43f2cf316abd7866"
+      },
+      "members": {
+        "static/vendor/katex/auto-render.min.js": "package/dist/contrib/auto-render.min.js",
+        "static/vendor/katex/LICENSE": "package/LICENSE",
+        "static/vendor/katex/katex.min.css": "package/dist/katex.min.css",
+        "static/vendor/katex/katex.min.js": "package/dist/katex.min.js",
+        "static/vendor/katex/fonts/KaTeX_Caligraphic-Regular.woff2": "package/dist/fonts/KaTeX_Caligraphic-Regular.woff2",
+        "static/vendor/katex/fonts/KaTeX_AMS-Regular.woff2": "package/dist/fonts/KaTeX_AMS-Regular.woff2",
+        "static/vendor/katex/fonts/KaTeX_Math-Italic.woff2": "package/dist/fonts/KaTeX_Math-Italic.woff2",
+        "static/vendor/katex/fonts/KaTeX_Caligraphic-Bold.woff2": "package/dist/fonts/KaTeX_Caligraphic-Bold.woff2",
+        "static/vendor/katex/fonts/KaTeX_Script-Regular.woff2": "package/dist/fonts/KaTeX_Script-Regular.woff2",
+        "static/vendor/katex/fonts/KaTeX_Size4-Regular.woff2": "package/dist/fonts/KaTeX_Size4-Regular.woff2",
+        "static/vendor/katex/fonts/KaTeX_Size2-Regular.woff2": "package/dist/fonts/KaTeX_Size2-Regular.woff2",
+        "static/vendor/katex/fonts/KaTeX_Fraktur-Bold.woff2": "package/dist/fonts/KaTeX_Fraktur-Bold.woff2",
+        "static/vendor/katex/fonts/KaTeX_SansSerif-Italic.woff2": "package/dist/fonts/KaTeX_SansSerif-Italic.woff2",
+        "static/vendor/katex/fonts/KaTeX_Typewriter-Regular.woff2": "package/dist/fonts/KaTeX_Typewriter-Regular.woff2",
+        "static/vendor/katex/fonts/KaTeX_Main-BoldItalic.woff2": "package/dist/fonts/KaTeX_Main-BoldItalic.woff2",
+        "static/vendor/katex/fonts/KaTeX_Size3-Regular.woff2": "package/dist/fonts/KaTeX_Size3-Regular.woff2",
+        "static/vendor/katex/fonts/KaTeX_Fraktur-Regular.woff2": "package/dist/fonts/KaTeX_Fraktur-Regular.woff2",
+        "static/vendor/katex/fonts/KaTeX_Size1-Regular.woff2": "package/dist/fonts/KaTeX_Size1-Regular.woff2",
+        "static/vendor/katex/fonts/KaTeX_Math-BoldItalic.woff2": "package/dist/fonts/KaTeX_Math-BoldItalic.woff2",
+        "static/vendor/katex/fonts/KaTeX_SansSerif-Regular.woff2": "package/dist/fonts/KaTeX_SansSerif-Regular.woff2",
+        "static/vendor/katex/fonts/KaTeX_Main-Bold.woff2": "package/dist/fonts/KaTeX_Main-Bold.woff2",
+        "static/vendor/katex/fonts/KaTeX_Main-Italic.woff2": "package/dist/fonts/KaTeX_Main-Italic.woff2",
+        "static/vendor/katex/fonts/KaTeX_SansSerif-Bold.woff2": "package/dist/fonts/KaTeX_SansSerif-Bold.woff2",
+        "static/vendor/katex/fonts/KaTeX_Main-Regular.woff2": "package/dist/fonts/KaTeX_Main-Regular.woff2"
+      },
+      "normalize_text": []
+    },
+    {
+      "version": "cldr-annotations-full-47.0.0",
+      "archive_sha256": "1d0bca9131d66d3a4ffe91f4150c13484fcf6cb44774c0dd50ca1a1b541310e9",
+      "urls": [
+        "https://registry.npmjs.org/cldr-annotations-full/-/cldr-annotations-full-47.0.0.tgz"
+      ],
+      "files": {
+        "node_modules/.yomux/emoji/ar-annotations.json": "43026e387dfca6044cea21ce0d2e5c4477f39b2def459d671e205dae8dd57f75",
+        "node_modules/.yomux/emoji/de-annotations.json": "1071d9ccbcad11b9c02f05fa5a2d5f42feddb0cb177d20132e40ac988d14c3af",
+        "node_modules/.yomux/emoji/en-annotations.json": "2405d3f2e4c5812a4faf93d965630246269e0177ce907d863c7d6bb197e957c1",
+        "node_modules/.yomux/emoji/es-annotations.json": "1e6fa1a8b9eb4a8b60132609ae2482cf4ad088b9d2590648933b595660f30648",
+        "node_modules/.yomux/emoji/fr-annotations.json": "78b50ed824fd2b68e7cbc3ab92f364407aa285d9f7920785bdb8d3b138d97fef",
+        "node_modules/.yomux/emoji/he-annotations.json": "39ac3b06b2a6e8e4ecb73fce211c44e8665238d3bf2b4440959ab03c2f2cb7b0",
+        "node_modules/.yomux/emoji/hi-annotations.json": "0100b3a659d721aeafc32acdd802a6c72f099c2e6df1419001990b1c6e2e9a3f",
+        "node_modules/.yomux/emoji/it-annotations.json": "a83b02d080127d76ea41042a5dfa18b38366842b8cb70a4a6ed905e53547b0a7",
+        "node_modules/.yomux/emoji/ja-annotations.json": "74419d311241783d9324b1e34cee5f8c7e0bf36f72caf42b016e6345dccc17f1",
+        "node_modules/.yomux/emoji/ko-annotations.json": "821e5eccf540f877ab984c2636d4b128d9d7c948eacc02fb1f504bcaac985638",
+        "node_modules/.yomux/emoji/nl-annotations.json": "1acc1c209e7d67394644ff9a90f73a57475885d9383a70e5215c979ab096a263",
+        "node_modules/.yomux/emoji/pl-annotations.json": "8a15ddb865258457def4acdd9932e96750d174057b9392c41ad4217ee9ed6675",
+        "node_modules/.yomux/emoji/pt-BR-annotations.json": "08103beaa9826074dfff8943f126855fc8a71555a8527e98e2c7b1b5b6407a18",
+        "node_modules/.yomux/emoji/ru-annotations.json": "b4f934ae432c2c8bb6bf4126962dbb02f4810d93bd681c6da018ed9b60a6c170",
+        "node_modules/.yomux/emoji/th-annotations.json": "804396fac4d0d07f61a444f261ee86a85417e2efbeac33fb81068eaeec017731",
+        "node_modules/.yomux/emoji/tr-annotations.json": "98b20c8c852a1ce14b6ebb00eafe175eeba7d6a34da2dd6d03592c9b156de683",
+        "node_modules/.yomux/emoji/vi-annotations.json": "38ff363d538e956c7a55cd65e4c96f9888be58a6502b98ad4638323d33f1471e",
+        "node_modules/.yomux/emoji/zh-Hans-annotations.json": "c57fcb31e7f2ace00343b8578ae30a7856270bb23dc94e5ea02f3858ed875ef2",
+        "node_modules/.yomux/emoji/zh-Hant-annotations.json": "7b5ee72ea09c0adc7ae5f22192e142e7c2465f86cb0b6710737f3201e6dc9f8f",
+        "static/vendor/UNICODE-LICENSE": "b4c0ae8ef04f7059f96ce5bbe0467f9fe6f6d81bbe13517701dfeb961fb4d0b6"
+      },
+      "members": {
+        "node_modules/.yomux/emoji/ar-annotations.json": "package/annotations/ar/annotations.json",
+        "node_modules/.yomux/emoji/de-annotations.json": "package/annotations/de/annotations.json",
+        "node_modules/.yomux/emoji/en-annotations.json": "package/annotations/en/annotations.json",
+        "node_modules/.yomux/emoji/es-annotations.json": "package/annotations/es/annotations.json",
+        "node_modules/.yomux/emoji/fr-annotations.json": "package/annotations/fr/annotations.json",
+        "node_modules/.yomux/emoji/he-annotations.json": "package/annotations/he/annotations.json",
+        "node_modules/.yomux/emoji/hi-annotations.json": "package/annotations/hi/annotations.json",
+        "node_modules/.yomux/emoji/it-annotations.json": "package/annotations/it/annotations.json",
+        "node_modules/.yomux/emoji/ja-annotations.json": "package/annotations/ja/annotations.json",
+        "node_modules/.yomux/emoji/ko-annotations.json": "package/annotations/ko/annotations.json",
+        "node_modules/.yomux/emoji/nl-annotations.json": "package/annotations/nl/annotations.json",
+        "node_modules/.yomux/emoji/pl-annotations.json": "package/annotations/pl/annotations.json",
+        "node_modules/.yomux/emoji/pt-BR-annotations.json": "package/annotations/pt/annotations.json",
+        "node_modules/.yomux/emoji/ru-annotations.json": "package/annotations/ru/annotations.json",
+        "node_modules/.yomux/emoji/th-annotations.json": "package/annotations/th/annotations.json",
+        "node_modules/.yomux/emoji/tr-annotations.json": "package/annotations/tr/annotations.json",
+        "node_modules/.yomux/emoji/vi-annotations.json": "package/annotations/vi/annotations.json",
+        "node_modules/.yomux/emoji/zh-Hans-annotations.json": "package/annotations/zh/annotations.json",
+        "node_modules/.yomux/emoji/zh-Hant-annotations.json": "package/annotations/zh-Hant/annotations.json",
+        "static/vendor/UNICODE-LICENSE": "package/LICENSE"
+      },
+      "normalize_text": []
+    },
+    {
+      "version": "cldr-annotations-derived-full-47.0.0",
+      "archive_sha256": "67ed8a37312daf8754dc9be859d0c616725a62b7b75236ff67f78b87708bea88",
+      "urls": [
+        "https://registry.npmjs.org/cldr-annotations-derived-full/-/cldr-annotations-derived-full-47.0.0.tgz"
+      ],
+      "files": {
+        "node_modules/.yomux/emoji/ar-annotationsDerived.json": "6919d23e1dbd17657142f81c22161a3c646058bba3718a7ee3da2b364159ee45",
+        "node_modules/.yomux/emoji/de-annotationsDerived.json": "5ee716dda7bba385b709752c4ab33cc72da2654a17aa2b809a3941ca3875121f",
+        "node_modules/.yomux/emoji/en-annotationsDerived.json": "8ebc16e27adf6c555c9ce467335cee8fc9416e5d8646a91bd4eacbb450ebee22",
+        "node_modules/.yomux/emoji/es-annotationsDerived.json": "0916ceedfd358fc0c6a04c410f04d21732736638443676da4405c7c17390e97b",
+        "node_modules/.yomux/emoji/fr-annotationsDerived.json": "eeefc967e02b442f7396574111e3b01bd7f5a52447d96b82018ad2289b714089",
+        "node_modules/.yomux/emoji/he-annotationsDerived.json": "957a7b4332fb81c8f540fbc8f7c2b98318d35f84840b2e2c7ccea77e6f1fa37c",
+        "node_modules/.yomux/emoji/hi-annotationsDerived.json": "1834aeea6020804347432b065bc8170998af520dc125abd76455037908e160f9",
+        "node_modules/.yomux/emoji/it-annotationsDerived.json": "b233df8fbbcefddef03bfd627a28f7b9cf1275f12ec2017ce9eaa02d4e639124",
+        "node_modules/.yomux/emoji/ja-annotationsDerived.json": "ecf52ab3589525bc11026af8413a4bd00535d076db478f2ec908b186260defa6",
+        "node_modules/.yomux/emoji/ko-annotationsDerived.json": "7d3b65d246e331106c84455fe38ece5326c88540f6695f240f2f37ff6612beb6",
+        "node_modules/.yomux/emoji/nl-annotationsDerived.json": "4d627808b06b459db7d1dd634ecfd0f7255498553f64f076a2184bfbcfebd329",
+        "node_modules/.yomux/emoji/pl-annotationsDerived.json": "831cc1cbecbc2ced1cf4f9ae2f420560911d949c9cc3fc383614879ad3ec6f2e",
+        "node_modules/.yomux/emoji/pt-BR-annotationsDerived.json": "efe81cd72cf18014ca3407a60d20bd23fd7f2f976bc1c7b824a463b76c4796a9",
+        "node_modules/.yomux/emoji/ru-annotationsDerived.json": "fa6e87c339e1fcb7afa83aa0e905ff94e8202b7b1e3ebf0b2ff00cdfed862b53",
+        "node_modules/.yomux/emoji/th-annotationsDerived.json": "65b9e6634cf51243ce50ebe6c5a80939c7bc5352df99ff88416d8d4d2ef5fffb",
+        "node_modules/.yomux/emoji/tr-annotationsDerived.json": "2cc3da56db500e3fde0c75c0bb6f3da6d1e3105182337bff8cf773d38245b903",
+        "node_modules/.yomux/emoji/vi-annotationsDerived.json": "ec554c35ce639dfcefba481346e95361da58835e9df5ecd616ce6f90196227b0",
+        "node_modules/.yomux/emoji/zh-Hans-annotationsDerived.json": "1c3a4eb778737042aba1e14ff69a4264b22348981e51f0a34b98645d0b29ea1e",
+        "node_modules/.yomux/emoji/zh-Hant-annotationsDerived.json": "99821612862a0595a99c2adffbeb26fb4c5393e20233668d495adf66c0315b2a"
+      },
+      "members": {
+        "node_modules/.yomux/emoji/ar-annotationsDerived.json": "package/annotationsDerived/ar/annotations.json",
+        "node_modules/.yomux/emoji/de-annotationsDerived.json": "package/annotationsDerived/de/annotations.json",
+        "node_modules/.yomux/emoji/en-annotationsDerived.json": "package/annotationsDerived/en/annotations.json",
+        "node_modules/.yomux/emoji/es-annotationsDerived.json": "package/annotationsDerived/es/annotations.json",
+        "node_modules/.yomux/emoji/fr-annotationsDerived.json": "package/annotationsDerived/fr/annotations.json",
+        "node_modules/.yomux/emoji/he-annotationsDerived.json": "package/annotationsDerived/he/annotations.json",
+        "node_modules/.yomux/emoji/hi-annotationsDerived.json": "package/annotationsDerived/hi/annotations.json",
+        "node_modules/.yomux/emoji/it-annotationsDerived.json": "package/annotationsDerived/it/annotations.json",
+        "node_modules/.yomux/emoji/ja-annotationsDerived.json": "package/annotationsDerived/ja/annotations.json",
+        "node_modules/.yomux/emoji/ko-annotationsDerived.json": "package/annotationsDerived/ko/annotations.json",
+        "node_modules/.yomux/emoji/nl-annotationsDerived.json": "package/annotationsDerived/nl/annotations.json",
+        "node_modules/.yomux/emoji/pl-annotationsDerived.json": "package/annotationsDerived/pl/annotations.json",
+        "node_modules/.yomux/emoji/pt-BR-annotationsDerived.json": "package/annotationsDerived/pt/annotations.json",
+        "node_modules/.yomux/emoji/ru-annotationsDerived.json": "package/annotationsDerived/ru/annotations.json",
+        "node_modules/.yomux/emoji/th-annotationsDerived.json": "package/annotationsDerived/th/annotations.json",
+        "node_modules/.yomux/emoji/tr-annotationsDerived.json": "package/annotationsDerived/tr/annotations.json",
+        "node_modules/.yomux/emoji/vi-annotationsDerived.json": "package/annotationsDerived/vi/annotations.json",
+        "node_modules/.yomux/emoji/zh-Hans-annotationsDerived.json": "package/annotationsDerived/zh/annotations.json",
+        "node_modules/.yomux/emoji/zh-Hant-annotationsDerived.json": "package/annotationsDerived/zh-Hant/annotations.json"
+      },
+      "normalize_text": []
+    }
+  ],
+  "files": {
+    "static/fonts/yomux-mono.woff2": {
+      "sha256": "dffd1eb84c3f1e752f256f1a86d2e1aac9005ff4e4f86d9cceb10607faff6282",
+      "urls": [
+        "https://raw.githubusercontent.com/keivenchang/yomux/d66af9171aea1cd39c7ed742c0882b292792014b/static/fonts/yomux-mono.woff2"
+      ]
+    },
+    "static/fonts/yomux-ui.woff2": {
+      "sha256": "ce37cdbd7ffb345ba3c23383827eccd2c325664c5ccce754c205c77a1dd42409",
+      "urls": [
+        "https://raw.githubusercontent.com/keivenchang/yomux/d66af9171aea1cd39c7ed742c0882b292792014b/static/fonts/yomux-ui.woff2"
+      ]
+    },
+    "node_modules/.yomux/emoji/emoji-test.data": {
+      "sha256": "24f0c534e86cf142e2496953e8f0e46a3e702392911eddcd29c6cced85139697",
+      "urls": [
+        "https://www.unicode.org/Public/emoji/16.0/emoji-test.txt"
+      ]
+    }
+  },
+  "bundles": [
+    {
+      "directory": "codemirror",
+      "output": "static/codemirror.js",
+      "sha256": "d7c393b03dc3100cc28eb8c0f1db54a69cd8ed8a7e11187c541ef49bfbc14d1e",
+      "input_sha256": "dceaf3fa9e598309a912516ef67d41859af42cbca2e19d7bd38718f87fb5971f"
+    },
+    {
+      "directory": "prosemirror",
+      "output": "static/prosemirror.js",
+      "sha256": "a43e2bbf7cf139d607e7b82323e0ba48650c4e5d85bc83dc7aee5131577288f1",
+      "input_sha256": "52d99011f04a45e950d14526d5ff5d7b0fbe22fd7c817eefd1b0c04a306c50e5"
+    }
+  ],
+  "emoji_sha256": "1ec68ca7bdbfc16ea6a44a3f47c22a3fb86216bc8e87355b8dfa5386fc70ec63"
+}

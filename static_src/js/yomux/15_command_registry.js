@@ -31,6 +31,8 @@ function commandRoute(specification = {}) {
 }
 
 const COMMAND_ROUTES = Object.freeze({
+  'tex-compiler-install': commandRoute({id: 'tex-compiler-install', method: 'POST', path: '/api/tex/compiler/install', contractClass: 'pending'}),
+  'tex-preview': commandRoute({id: 'tex-preview', method: 'POST', path: '/api/tex/preview', contractClass: 'pending'}),
   'tmux-status-cycle': commandRoute({id: 'tmux-status-cycle', method: 'POST', path: '/api/tmux-status', contractClass: 'pending'}),
   'terminal-upload': commandRoute({id: 'terminal-upload', method: 'POST', path: '/api/upload', contractClass: 'pending'}),
   'editor-upload': commandRoute({id: 'editor-upload', method: 'POST', path: '/api/upload', contractClass: 'pending'}),
@@ -473,7 +475,9 @@ function dispatchCommand(route, params = {}, source = null) {
         ? await descriptor.applyResult(result, params)
         : result;
     } catch (error) {
-      failure = error;
+      // An explicitly retired owner still receives cancellation, but it is not a failed user action.
+      failure = requestOptions.signal?.aborted && params.internalOptions?.abortRetirementReason
+        && error?.name === 'AbortError' ? null : error;
       if (descriptor.id === 'watch-roots-sync') error.message = `Finder watch registration: ${error.message}`;
       if (typeof descriptor.rollback === 'function') descriptor.rollback(undo, params, error);
       throw error;

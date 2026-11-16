@@ -264,10 +264,19 @@ def _prepare_go_collector_sources(root: Path) -> tuple[Path, Path, Path]:
     )
     database = root / "opencode.db"
     make_opencode_database(database, int(now * 1000))
-    interpreter = root / "opencode"
-    shutil.copy(Path(sys.executable), interpreter)
-    interpreter.chmod(0o700)
-    return home, database, interpreter
+    # Relocating standalone Python loses its adjacent standard library. The
+    # shared mock identity handler preserves argv[0] without copying Python.
+    return home, database, Path(sys.executable)
+
+
+def test_go_collector_sources_retain_the_admitted_python(tmp_path):
+    home, database, interpreter = _prepare_go_collector_sources(tmp_path)
+    assert interpreter.samefile(sys.executable)
+    assert not (tmp_path / "opencode").exists()
+    assert (home / "claude" / "projects" / "live.jsonl").is_file()
+    assert (home / "codex" / "sessions" / "rollout-live.jsonl").is_file()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT id FROM session").fetchall() == [("ses-live",)]
 
 _STATS_ROUTE_INSTRUMENTATION = r"""
 (() => {
@@ -362,6 +371,39 @@ def _assert_native_stats_range_journey(browser, terminal_session):
     """
     timings = {}
     touch_active = False
+    browser.execute_script("""
+      const trace = [];
+      const state = () => {
+        const slider = document.querySelector('[data-js-debug-graph] [data-js-debug-range-slider]');
+        const rect = slider?.getBoundingClientRect();
+        return {owner: Boolean(jsDebugGraphRangeSliderInteraction), connected: slider?.isConnected,
+          active: document.activeElement === slider, disabled: slider?.disabled, value: slider?.value,
+          rect: rect && {left:rect.left, top:rect.top, width:rect.width, height:rect.height},
+          viewport:{width:innerWidth,height:innerHeight}};
+      };
+      const append = record => { if (trace.length < 128) trace.push(record); };
+      const listeners = [];
+      for (const type of ['pointerdown','pointermove','pointerup','pointercancel','lostpointercapture',
+                          'touchstart','touchmove','touchend','touchcancel','input','change','focusout','blur']) {
+        for (const capture of [true, false]) {
+          const listener = event => append({type, capture, trusted:event.isTrusted,
+            target:event.target?.outerHTML?.slice(0,300), pointerId:event.pointerId,
+            defaultPrevented:event.defaultPrevented, state:state()});
+          document.addEventListener(type, listener, capture);
+          listeners.push([type,listener,capture]);
+        }
+      }
+      const complete = completeDebugGraphRangeSliderInteraction;
+      completeDebugGraphRangeSliderInteraction = (...args) => {
+        append({type:'complete', event:args[1]?.type, commit:args[2], state:state(), stack:new Error().stack});
+        return complete(...args);
+      };
+      window.__nativeStatsRangeTrace = {trace, state, dispose:() => {
+        completeDebugGraphRangeSliderInteraction = complete;
+        for (const args of listeners) document.removeEventListener(...args);
+        delete window.__nativeStatsRangeTrace;
+      }};
+    """)
     try:
         browser.execute_script("setDebugGraphRange(300)")
         WebDriverWait(browser, 15, poll_frequency=0.05).until(lambda driver: driver.execute_script(snapshot_script)["generationRange"] == 300)
@@ -372,12 +414,20 @@ def _assert_native_stats_range_journey(browser, terminal_session):
               slider.scrollIntoView({block: 'center'});
               const rect = slider.getBoundingClientRect();
               const index = debugGraphAvailableRangeOptions().findIndex(option => option.seconds === 3600);
-              return {x: rect.left + 8, y: rect.top + rect.height / 2, endX: rect.left + 8 + (rect.width - 16) * index / Number(slider.max)};
+              const x = rect.left + 8, y = rect.top + rect.height / 2;
+              const endX = rect.left + 8 + (rect.width - 16) * index / Number(slider.max);
+              return {x, y, endX, index, max:slider.max,
+                state:window.__nativeStatsRangeTrace.state(),
+                startHit:document.elementFromPoint(x,y)?.outerHTML?.slice(0,400),
+                endHit:document.elementFromPoint(endX,y)?.outerHTML?.slice(0,400)};
             """)
             browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": coordinates["x"], "y": coordinates["y"]}]})
             touch_active = True
             browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [{"x": coordinates["endX"], "y": coordinates["y"]}]})
             held = browser.execute_script(snapshot_script)
+            if not held["owner"] or held["label"] != "1h":
+                diagnostic = browser.execute_script("return {trace:window.__nativeStatsRangeTrace.trace, state:window.__nativeStatsRangeTrace.state()};")
+                print("Native stats touch diagnostic: " + json.dumps({"coordinates": coordinates, "held": held, "diagnostic": diagnostic}, sort_keys=True))
             assert held["owner"] and held["label"] == "1h", held
             assert held["range"] == held["generationRange"] == held["selection"]["range_seconds"] == 300, held
             started = time.monotonic()
@@ -411,9 +461,12 @@ def _assert_native_stats_range_journey(browser, terminal_session):
         print(f"Native stats range timings: {json.dumps(timings, sort_keys=True)}")
         return timings
     finally:
-        if touch_active:
-            browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchCancel", "touchPoints": []})
-        browser.execute_script("setDebugGraphRange(arguments[0].range); setDebugGraphResolutionOverride(arguments[0].resolution); jsDebugGraphZoomDomain = arguments[0].zoom; refreshDebugGraphSurfaces();", original)
+        run_fixture_cleanup_phases("native stats range", ([
+            ("touch cancellation", lambda: browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchCancel", "touchPoints": []}))
+        ] if touch_active else []) + [
+            ("graph selection", lambda: browser.execute_script("setDebugGraphRange(arguments[0].range); setDebugGraphResolutionOverride(arguments[0].resolution); jsDebugGraphZoomDomain = arguments[0].zoom; refreshDebugGraphSurfaces();", original)),
+            ("gesture trace", lambda: browser.execute_script("window.__nativeStatsRangeTrace?.dispose();")),
+        ])
 
 
 def test_client_timings_share_plot_with_independent_milliseconds_and_seconds_axes(browser, tmp_path):
@@ -587,7 +640,7 @@ def test_stats_area_legend_key_is_a_thick_block(browser, tmp_path):
 
 
 def _retire_stats_runtime(browser, port_lease, process, server_log, tmux_runtime, *,
-                          script_timeout=None, script_id=None, all_windows=False):
+                          script_timeout=None, script_id=None, all_windows=True):
     def retire_page(handle):
         if handle is not None:
             browser.switch_to.window(handle)
@@ -617,8 +670,7 @@ def _retire_stats_runtime(browser, port_lease, process, server_log, tmux_runtime
     if script_timeout is not None:
         phases.append(("script timeout", lambda: browser.set_script_timeout(script_timeout)))
     if script_id is not None:
-        phases.append(("browser instrumentation", lambda: browser.execute_cdp_cmd(
-            "Page.removeScriptToEvaluateOnNewDocument", {"identifier": script_id})))
+        phases.append(("browser instrumentation", lambda: remove_browser_new_document_script(browser, script_id)))
     phases.extend([
         ("browser pages", retire_pages),
         ("port lease", port_lease.close),
@@ -1230,16 +1282,60 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
         _retire_stats_runtime(browser, port_lease, process, server_log, tmux_runtime)
 
 
+def _expected_disk_mounts_from_df(listing: str) -> list[dict]:
+    mounts = []
+    for line in listing.splitlines()[1:]:
+        match = re.match(r"^.+\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+%|-|N/A|NA|\?)\s+(/.*)$", line)
+        if not match:
+            continue
+        blocks_text, used_text, available_text, capacity_text, mountpoint = match.groups()
+        valid_usage = (
+            all(re.fullmatch(r"[0-9]+", value) for value in (blocks_text, used_text, available_text))
+            and re.fullmatch(r"[0-9]+%", capacity_text) is not None
+            and int(capacity_text[:-1]) <= 100
+        )
+        high_use = False
+        if valid_usage:
+            blocks, used, available = map(int, (blocks_text, used_text, available_text))
+            max_uint64 = (1 << 64) - 1
+            valid_usage = (
+                0 < blocks <= max_uint64
+                and used <= blocks and available <= blocks
+                and 0 < used + available <= max_uint64 // 1024
+            )
+            # df rounds Capacity upward and reports 100% for zero-capacity
+            # automounts; those mounts belong in inventory without usage.
+            high_use = valid_usage and used * 100 > (used + available) * 80
+        mounts.append({"mountpoint": mountpoint, "highUse": high_use, "inventoryOnly": not valid_usage})
+    return mounts
+
+
+def test_expected_disk_mounts_preserve_inventory_without_invented_usage():
+    listing = "Filesystem 1024-blocks Used Available Capacity Mounted on\n" + "\n".join((
+        "map auto_home 0 0 0 100% /System/Volumes/Data/home",
+        "/dev/rounded 10000 8000 2000 80% /rounded",
+        "/dev/high 10000 8001 1999 81% /high",
+        "server:/export name 1000 850 150 85% /Volumes/My Data",
+        "/dev/unavailable 1000 850 N/A N/A /unavailable",
+        "/dev/unavailable-capacity 1000 850 150 N/A /unavailable-capacity",
+        "/dev/invalid-capacity 1000 850 150 101% /invalid-capacity",
+    ))
+    assert _expected_disk_mounts_from_df(listing) == [
+        {"mountpoint": "/System/Volumes/Data/home", "highUse": False, "inventoryOnly": True},
+        {"mountpoint": "/rounded", "highUse": False, "inventoryOnly": False},
+        {"mountpoint": "/high", "highUse": True, "inventoryOnly": False},
+        {"mountpoint": "/Volumes/My Data", "highUse": True, "inventoryOnly": False},
+        {"mountpoint": "/unavailable", "highUse": False, "inventoryOnly": True},
+        {"mountpoint": "/unavailable-capacity", "highUse": False, "inventoryOnly": True},
+        {"mountpoint": "/invalid-capacity", "highUse": False, "inventoryOnly": True},
+    ]
+
+
 def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_path, monkeypatch, request):
     """Prove collector -> SQLite -> lifecycle -> SSE -> unchanged UI in one fixture."""
     source_root = Path(__file__).resolve().parents[1]
     df_listing = subprocess.run(["df", "-kP"], check=True, capture_output=True, text=True).stdout
-    expected_disk_mounts = []
-    for line in df_listing.splitlines()[1:]:
-        match = re.match(r"^.+\s+(\d+)\s+\d+\s+\d+\s+(\d+)%\s+(.+)$", line)
-        if not match:
-            continue
-        expected_disk_mounts.append({"mountpoint": match.group(3), "highUse": int(match.group(2)) > 80})
+    expected_disk_mounts = _expected_disk_mounts_from_df(df_listing)
     private_source_root = tmp_path / "source-root"
     for relative in ("static", "tools", "yomux_lib", "assets"):
         shutil.copytree(source_root / relative, private_source_root / relative)
@@ -1265,7 +1361,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
             f"exec 3<{shlex.quote(str(home / 'codex' / 'sessions' / 'rollout-live.jsonl'))}; "
             f"exec -a codex {shlex.quote(sys.executable)} {shlex.quote(str(source_root / 'tools/mockers/codex.py'))} --mock"
         ),
-        f"{prefix}-opencode": f"exec -a opencode {opencode_interpreter} {source_root / 'tools/mockers/opencode.py'} --mock --session ses-live",
+        f"{prefix}-opencode": f"exec -a opencode {shlex.quote(str(opencode_interpreter))} {shlex.quote(str(source_root / 'tools/mockers/opencode.py'))} --mock --session ses-live",
     }
     tmux_runtime = start_isolated_tmux_runtime(
         monkeypatch,
@@ -1346,9 +1442,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
             lambda driver: driver.current_url.split("?", 1)[0].rstrip("/") == base_url
         )
         request.node._yomux_skip_reused_browser_diagnostic = True
-        stats_stream_script_id = browser.execute_cdp_cmd(
-            "Page.addScriptToEvaluateOnNewDocument",
-            {"source": """
+        stats_stream_script_id = register_browser_new_document_script(browser, """
               const NativeEventSource = window.EventSource;
               Object.defineProperty(window, '__yomuxStatsStreams', {value: [], configurable: true});
               window.EventSource = class extends NativeEventSource {
@@ -1363,8 +1457,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
                   }
                 }
               };
-            """},
-        )["identifier"]
+            """)
         sessions = ",".join(tmux_runtime.sessions)
         browser.get(f"{base_url}/?sessions={sessions},debug&layout=left&tabs=left:{tmux_runtime.sessions[0]},__debug__*&debug=1&stats_only=1")
         WebDriverWait(browser, 15, poll_frequency=0.05).until(
@@ -1465,6 +1558,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
         disk_legend_mounts = sorted(label.removesuffix(f" ({int(label.rsplit('(', 1)[1][:-2])}%)") if label.endswith(")") and "%" in label else label for label in disk_legend)
         assert disk_legend_mounts == sorted(item["mountpoint"] for item in result["expectedDiskMounts"]), result
         assert all(any(label.startswith(f"{item['mountpoint']} (") and label.endswith("%)") for label in disk_legend) for item in result["expectedDiskMounts"] if item["highUse"]), result
+        assert all(item["mountpoint"] in disk_legend for item in result["expectedDiskMounts"] if item["inventoryOnly"]), result
         browser.set_script_timeout(150)
         history_retry = browser.execute_async_script(
             r"""
@@ -1634,7 +1728,7 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
         login_form.find_element(By.NAME, "password").send_keys("fixture-only-password")
         login_form.find_element(By.CSS_SELECTOR, "button[type=submit]").click()
         WebDriverWait(browser, 15, poll_frequency=0.05).until(lambda driver: driver.current_url.split("?", 1)[0].rstrip("/") == base_url)
-        script_id = browser.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": """
+        script_id = register_browser_new_document_script(browser, """
           const NativeEventSource = window.EventSource;
           Object.defineProperty(window, '__goLifecycleEvents', {value: [], configurable: true});
           Object.defineProperty(window, '__goLifecycleYoloEvents', {value: [], configurable: true});
@@ -1663,7 +1757,7 @@ def test_go_codex_completion_acknowledges_through_live_activity_and_client_event
             }
             return response;
           };
-        """})["identifier"]
+        """)
         def open_advanced_session_view():
             browser.get(f"{base_url}/?sessions={codex_session}&layout=left&tabs=left:{codex_session}")
             WebDriverWait(browser, 20).until(lambda driver: driver.execute_script("return typeof tabberIsAdvanced === 'function' && tabberIsAdvanced()"))
@@ -1931,22 +2025,82 @@ def _assert_go_refill_browser_journey(browser, tmp_path, home, opencode_database
 
     original = browser.current_window_handle
     url = browser.current_url
-    browser.switch_to.new_window("tab")
-    second = browser.current_window_handle
-    browser.get(url)
-    wait.until(lambda driver: driver.find_elements(By.CSS_SELECTOR, refill_selector))
-    browser.switch_to.window(original)
+    controller_key = f"yomux-refill-response-{tmp_path.name}-{time.time_ns()}"
+    controller_source = r"""
+      (() => {
+        const key = __CONTROLLER_KEY__;
+        const nativeFetch = window.fetch.bind(window);
+        let retired = false;
+        const wrapper = async (input, init = {}) => {
+          const path = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
+          const method = String(init.method || input?.method || 'GET').toUpperCase();
+          const control = JSON.parse(localStorage.getItem(key) || 'null');
+          if (path === '/api/stats-refill' && method === 'GET' && control?.held && control.running) {
+            return new Response(control.running, {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          const response = await nativeFetch(input, init);
+          if (!retired && path === '/api/stats-refill' && method === 'POST' && response.status === 202) {
+            const running = await response.clone().text();
+            const current = JSON.parse(localStorage.getItem(key) || 'null');
+            if (!retired && current?.held && !current.running) {
+              current.running = running;
+              localStorage.setItem(key, JSON.stringify(current));
+            }
+          }
+          return response;
+        };
+        window.fetch = wrapper;
+        window[key] = () => {
+          retired = true;
+          if (window.fetch === wrapper) window.fetch = nativeFetch;
+          localStorage.removeItem(key);
+          delete window[key];
+        };
+      })();
+    """.replace('__CONTROLLER_KEY__', json.dumps(controller_key))
+    captured_response_script = """
+      const control = JSON.parse(localStorage.getItem(arguments[0]) || 'null');
+      return control?.running ? JSON.parse(control.running) : false;
+    """
+    scripts = []
+    second = None
+    moved = []
 
-    # The fixture-owned writer exposes running/reattachment, then injects
-    # the existing bounded SQLite busy failure without changing scheduling.
-    with sqlite3.connect(tmp_path / "stats.sqlite3", timeout=1) as blocker:
-        blocker.execute("BEGIN IMMEDIATE")
+    def install_controller():
+        target = browser.current_window_handle
+        identifier = register_browser_new_document_script(browser, controller_source)
+        scripts.append((target, identifier))
+
+    def remove_controller(target):
+        browser.switch_to.window(target)
+        browser.execute_script("if (location.origin === new URL(arguments[1]).origin) { window[arguments[0]]?.(); localStorage.removeItem(arguments[0]); }", controller_key, url)
+
+    def close_second():
+        if second is not None and second in browser.window_handles:
+            browser.switch_to.window(second)
+            browser.close()
+
+    try:
+        browser.execute_script("localStorage.setItem(arguments[0], JSON.stringify({held:true, running:null}));", controller_key)
+        install_controller()
+        browser.execute_script(controller_source)
+        browser.switch_to.new_window("tab")
+        second = browser.current_window_handle
+        install_controller()
+        browser.get(url)
+        wait.until(lambda driver: driver.find_elements(By.CSS_SELECTOR, refill_selector))
+        browser.switch_to.window(original)
+        # Replay the real accepted response to hold browser pending/reattachment state.
+        # Go tests own backend singleton timing and publication rollback. Missing historical
+        # sources exercise a real failure without mutating the live stats database schema.
+        for path in (home / "claude" / "projects", home / "codex" / "sessions", opencode_database):
+            saved = path.with_name(path.name + ".refill-saved")
+            path.rename(saved)
+            moved.append((path, saved))
         browser.find_element(By.CSS_SELECTOR, refill_selector).click()
         browser.execute_script("window.__refillBeforeSubmit = document.querySelector(arguments[0]);", refill_selector)
         confirm_refill()
         wait.until(lambda driver: driver.find_elements(By.CSS_SELECTOR, '[data-js-debug-chart="agentTokens"] [data-stats-refill-wait]'))
-        # Status changes replace the control. Observe its current state in the
-        # same browser task rather than retaining a node across WebDriver calls.
         refill_control = browser.execute_script("""
             const previous = window.__refillBeforeSubmit;
             delete window.__refillBeforeSubmit;
@@ -1955,39 +2109,25 @@ def _assert_go_refill_browser_journey(browser, tmp_path, home, opencode_database
         """, refill_selector)
         assert refill_control == {"previousDetached": True, "present": True, "disabled": True}, refill_control
         assert browser.find_elements(By.CSS_SELECTOR, '[data-js-debug-chart="activity"] svg')
-        running = browser.execute_async_script("const done=arguments[0]; fetch('/api/stats-refill', {method:'POST'}).then(r=>r.json()).then(done);")
+        # Submitting paints optimistically; only the captured native 202 publishes an operation ID.
+        running = wait.until(lambda driver: driver.execute_script(captured_response_script, controller_key))
         assert running["state"] == "running", running
         assert running["window_end"] - running["window_start"] == 86400
         browser.switch_to.window(second)
-        wait.until(lambda _driver: status_contains("Refilling agent history") or status_contains("Couldn’t refill agent history. Your previous data is unchanged."))
+        wait.until(lambda _driver: status_contains("Refilling agent history"))
         attached = browser.execute_async_script("const done=arguments[0]; fetch('/api/stats-refill').then(r=>r.json()).then(done);")
-        assert attached["operation_id"] == running["operation_id"], attached
-        # Begin navigation while running; the same job subsequently fails
-        # its bounded writer wait, and the new page must retain that outcome.
+        assert attached["state"] == "running" and attached["operation_id"] == running["operation_id"], attached
+        browser.refresh()
+        wait.until(lambda _driver: status_contains("Refilling agent history"))
+        reattached = browser.execute_async_script("const done=arguments[0]; fetch('/api/stats-refill').then(r=>r.json()).then(done);")
+        assert reattached["state"] == "running" and reattached["operation_id"] == running["operation_id"], reattached
+        browser.execute_script("const control=JSON.parse(localStorage.getItem(arguments[0])); control.held=false; localStorage.setItem(arguments[0], JSON.stringify(control));", controller_key)
+        wait_for_status("Couldn’t refill agent history. Your previous data is unchanged.")
+        reloaded = browser.execute_async_script("const done=arguments[0]; fetch('/api/stats-refill').then(r=>r.json()).then(done);")
+        assert reloaded["state"] == "failed" and reloaded["operation_id"] == running["operation_id"], reloaded
         browser.refresh()
         wait_for_status("Couldn’t refill agent history. Your previous data is unchanged.")
-        blocker.rollback()
-    reloaded = browser.execute_async_script("const done=arguments[0]; fetch('/api/stats-refill').then(r=>r.json()).then(done);")
-    assert reloaded["operation_id"] == running["operation_id"], reloaded
-    browser.refresh()
-    wait_for_status("Couldn’t refill agent history. Your previous data is unchanged.")
-    browser.close()
-    browser.switch_to.window(original)
-    wait_for_status("Couldn’t refill agent history. Your previous data is unchanged.")
-    browser.find_element(By.CSS_SELECTOR, refill_selector).click()
-    confirm_refill()
-    wait_for_status("Agent history refilled.")
-
-    # All sources unavailable is a pre-publication failure. Reopening and
-    # retrying use the same native confirmation, then restore fixture roots.
-    moved = []
-    try:
-        for path in (home / "claude" / "projects", home / "codex" / "sessions", opencode_database):
-            saved = path.with_name(path.name + ".refill-saved")
-            path.rename(saved)
-            moved.append((path, saved))
-        browser.find_element(By.CSS_SELECTOR, refill_selector).click()
-        confirm_refill()
+        browser.switch_to.window(original)
         wait_for_status("Couldn’t refill agent history. Your previous data is unchanged.")
         retry = next(button for button in browser.find_elements(By.CSS_SELECTOR, refill_selector) if button.text == "Try again")
         retry.click()
@@ -1998,12 +2138,17 @@ def _assert_go_refill_browser_journey(browser, tmp_path, home, opencode_database
         confirm_refill()
         wait_for_status("Agent history refilled.")
     finally:
-        for path, saved in moved:
-            saved.rename(path)
-        if second in browser.window_handles:
-            browser.switch_to.window(second)
-            browser.close()
-            browser.switch_to.window(original)
+        run_fixture_cleanup_phases("refill browser journey", [
+            ("source root", lambda path=path, saved=saved: saved.rename(path)) for path, saved in moved
+        ] + [
+            ("response controller", lambda target=target: remove_controller(target)) for target, _identifier in scripts
+        ] + [
+            ("document script", lambda target=target, identifier=identifier: remove_browser_new_document_script(browser, identifier, window_handle=target))
+            for target, identifier in scripts
+        ] + [
+            ("second tab", close_second),
+            ("original tab", lambda: browser.switch_to.window(original)),
+        ])
 
 
 def _go_server_is_ready(port: int) -> bool:

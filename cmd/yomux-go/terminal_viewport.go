@@ -16,6 +16,8 @@ type terminalViewportPane struct {
 	width, height, scroll, x, y   int
 }
 
+const terminalResizeConvergenceTimeout = time.Second
+
 func (s *server) terminalViewportInventory(ctx context.Context, target string) ([]terminalViewportPane, error) {
 	const format = "#{pane_id}\t#{window_id}\t#{pane_mode}\t#{pane_width}\t#{pane_height}\t#{scroll_position}\t#{copy_cursor_x}\t#{copy_cursor_y}\t#{pid}:#{start_time}"
 	out, err := s.tmuxCommandContext(ctx, "list-panes", "-t", target, "-F", format).Output()
@@ -52,7 +54,7 @@ func (s *server) awaitTerminalClientSize(ctx context.Context, tty, window string
 	if tty == "" {
 		return nil
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, time.Second)
+	waitCtx, cancel := context.WithTimeout(ctx, terminalResizeConvergenceTimeout)
 	defer cancel()
 	for waitCtx.Err() == nil {
 		out, err := s.tmuxCommandContext(waitCtx, "list-clients", "-F", "#{client_tty}\t#{client_width}\t#{client_height}\t#{window_id}\t#{window_width}\t#{window_height}\t#{status}").Output()
@@ -90,7 +92,7 @@ func (s *server) awaitTerminalClientSize(ctx context.Context, tty, window string
 
 // tmux owns copy-mode reflow. Repositioning its cursor here can overwrite input
 // from another YOmux server or a native tmux client, which cannot be fenced locally.
-func (s *server) resizeTerminalNative(ctx context.Context, session, tty string, cols, rows int, resize func(int, int) error, authority bool) error {
+func (s *server) resizeTerminalNative(ctx context.Context, session, tty string, cols, rows int, resize func(int, int) error, authority bool, claims ...string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -108,7 +110,9 @@ func (s *server) resizeTerminalNative(ctx context.Context, session, tty string, 
 		return err
 	}
 	if authority {
-		s.claimResizeAuthority(ctx, session, tty, cols, rows)
+		if err := s.claimResizeAuthority(ctx, session, tty, cols, rows, claims...); err != nil {
+			return err
+		}
 		if len(panes) > 0 {
 			return s.awaitTerminalClientSize(ctx, tty, panes[0].window, cols, rows)
 		}

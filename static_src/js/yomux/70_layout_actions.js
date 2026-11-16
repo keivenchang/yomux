@@ -14,7 +14,7 @@ function layoutWithoutItemFromSlots(item, slots = layoutSlots, options = {}) {
     const tabs = paneTabs(side, slots).filter(value => value !== item);
     next[side] = !tabs.length && (side === preserveEmptySlot || (preserveRemovedSlot && hadItem))
       ? emptyPlaceholderPaneState(paneRoleForSlot(side, slots))
-      : paneStateWithTabs(tabs, active === item ? null : active, paneRoleForSlot(side, slots));
+      : paneStateWithTabs(tabs, active, paneRoleForSlot(side, slots));
   }
   return next;
 }
@@ -135,10 +135,37 @@ function appendUniqueItems(target, items) {
   return target;
 }
 
-// Per-pane tab cap (LRU eviction). Records when a tab was last activated so the oldest UNUSED tab
-// can auto-close once a pane grows past appearance.max_tabs_per_pane.
+// Keep activation order for active-tab fallback and per-pane LRU eviction. A sequence avoids ties
+// when the user switches tabs more than once during the same clock millisecond.
+let tabActivationSequence = 0;
+
 function recordTabActivation(item) {
-  if (isLayoutItem(item)) tabLastActivatedAt.set(item, Date.now());
+  if (!isLayoutItem(item)) return;
+  tabLastActivatedAt.set(item, Date.now());
+  tabActivationOrder.set(item, ++tabActivationSequence);
+}
+
+function restoreTabActivationHistory(history) {
+  let sequence = 0;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const item = history[index];
+    tabLastActivatedAt.set(item, ++sequence);
+    tabActivationOrder.set(item, sequence);
+  }
+  tabActivationSequence = sequence;
+}
+
+function mostRecentlyActivatedTab(tabs) {
+  let latest = null;
+  let latestOrder = -1;
+  for (const item of tabs) {
+    const order = tabActivationOrder.get(item) || 0;
+    if (order > latestOrder) {
+      latest = item;
+      latestOrder = order;
+    }
+  }
+  return latest;
 }
 
 function maxTabsPerPane() {
@@ -264,7 +291,10 @@ function nextNarrowPaneFrameItem(item, slots = layoutSlots) {
   const slot = slotForItem(item, slots);
   if (!slot) return null;
   const remaining = paneTabs(slot, slots).filter(value => value !== item);
-  return remaining.find(value => !isFileExplorerItem(value)) || remaining[0] || null;
+  return mostRecentlyActivatedTab(remaining.filter(value => !isFileExplorerItem(value)))
+    || remaining.find(value => !isFileExplorerItem(value))
+    || remaining[0]
+    || null;
 }
 
 function canPaneExpand(item, slots = layoutSlots) {
@@ -2486,6 +2516,7 @@ function clearSessionUiState(session) {
   terminalAppClipboardText.delete(session);
   pasteCounters.delete(session);
   tabLastActivatedAt.delete(session);
+  tabActivationOrder.delete(session);
 }
 
 function stopSessionUi(session, commit = null) {
@@ -2508,6 +2539,7 @@ function replaceSessionMetadataEntries(replacements) {
     // carry the per-pane LRU timestamp across a session rename too, or the renamed tab's
     // eviction ordering glitches (it reads as never-activated).
     tabLastActivatedAt,
+    tabActivationOrder,
   ]) {
     rekeyMapEntries(map, replacements);
   }

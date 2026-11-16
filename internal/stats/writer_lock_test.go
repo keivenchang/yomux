@@ -58,7 +58,7 @@ func TestWriterLeaseCrossProcessOwnership(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
 	command := exec.Command(os.Args[0], "-test.run=^TestWriterLeaseCrossProcessOwnership$")
-	command.Env = testsupport.SyntheticEnvironment("YOMUX_WRITER_LEASE_HELPER=1", "YOMUX_WRITER_LEASE_PATH="+path)
+	command.Env = testsupport.GoHelperProcessEnvironment(testsupport.SyntheticEnvironment("YOMUX_WRITER_LEASE_HELPER=1", "YOMUX_WRITER_LEASE_PATH="+path))
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +122,7 @@ func TestWriterPreflightReadsSchemaCommittedInWALAfterCrash(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "stats-v9.sqlite3")
 	command := exec.Command(os.Args[0], "-test.run=^TestWriterPreflightReadsSchemaCommittedInWALAfterCrash$")
-	command.Env = testsupport.SyntheticEnvironment("YOMUX_WRITER_CRASH_HELPER=1", "YOMUX_WRITER_CRASH_PATH="+path)
+	command.Env = testsupport.GoHelperProcessEnvironment(testsupport.SyntheticEnvironment("YOMUX_WRITER_CRASH_HELPER=1", "YOMUX_WRITER_CRASH_PATH="+path))
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

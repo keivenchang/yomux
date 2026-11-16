@@ -189,6 +189,8 @@ def test_r6_process_group_oracle_reports_a_zombie_only_group_as_dead():
             os.killpg(group_id, 0)
         except ProcessLookupError:
             raw_killpg_alive = False
+        except PermissionError:
+            pass  # Darwin reports an unreaped process group as present but unsignalable.
         assert raw_killpg_alive is True
 
         # Green for the shared predicate: a zombie-only group is not surviving.

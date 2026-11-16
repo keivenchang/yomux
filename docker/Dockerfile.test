@@ -70,16 +70,31 @@ RUN pip install --no-cache-dir \
 ENV CHROME_BIN=/usr/bin/chromium \
     CHROMEDRIVER_BIN=/usr/bin/chromedriver
 
-# Keep the pinned npm artifacts as a test-only provenance fixture for the tracked vendor bytes.
+# Keep the pinned npm artifacts as a test-only provenance fixture for browser source pins.
 COPY package.json package-lock.json /opt/xterm/
 RUN cd /opt/xterm && npm ci --ignore-scripts --no-audit --no-fund --omit=dev \
  && test -f /opt/xterm/node_modules/@xterm/xterm/lib/xterm.js \
  && test -f /opt/xterm/node_modules/@xterm/xterm/css/xterm.css \
  && test -f /opt/xterm/node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js
-COPY static/vendor/xterm.js static/vendor/xterm.css static/vendor/xterm-addon-unicode11.js /opt/yomux-xterm-vendor/
-RUN cmp /opt/yomux-xterm-vendor/xterm.js /opt/xterm/node_modules/@xterm/xterm/lib/xterm.js \
- && cmp /opt/yomux-xterm-vendor/xterm.css /opt/xterm/node_modules/@xterm/xterm/css/xterm.css \
- && cmp /opt/yomux-xterm-vendor/xterm-addon-unicode11.js /opt/xterm/node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js
+COPY assets/runtime/browser-assets.json /opt/yomux-browser-assets.json
+RUN python3 - <<'PY_VERIFY'
+import hashlib
+import json
+from pathlib import Path
+manifest = json.loads(Path("/opt/yomux-browser-assets.json").read_bytes())
+pins = {path: record["sha256"] for path, record in manifest.get("files", {}).items()}
+for archive in manifest.get("archives", []):
+    pins.update(archive["files"])
+paths = {
+    "xterm.js": "@xterm/xterm/lib/xterm.js",
+    "xterm.css": "@xterm/xterm/css/xterm.css",
+    "xterm-addon-unicode11.js": "@xterm/addon-unicode11/lib/addon-unicode11.js",
+}
+for name, relative in paths.items():
+    actual = hashlib.sha256((Path("/opt/xterm/node_modules") / relative).read_bytes()).hexdigest()
+    if actual != pins["static/vendor/" + name]:
+        raise ValueError("xterm asset checksum mismatch: " + name)
+PY_VERIFY
 
 # Inputs were acquired and verified by tools/docker_image.py before image construction.
 # This layer has no network path and contains no checkout sources or product build outputs.

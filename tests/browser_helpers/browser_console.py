@@ -71,28 +71,42 @@ def assert_only_expected_browser_http_error(
 ) -> dict[str, Any]:
     """Consume one deliberate HTTP error while rejecting every other browser failure."""
 
-    entries = read_browser_console_log(driver)
-    failure_entries = _browser_console_failures(entries)
+    failure_entries = []
     matches = []
-    for entry in failure_entries:
-        message = str(entry.get("message") or "")
-        url_text = message.split(" - Failed to load resource:", 1)[0]
-        parsed = urlsplit(url_text)
-        actual_query = {key: values[-1] for key, values in parse_qs(parsed.query).items() if values}
-        if (
-            str(entry.get("level") or "").upper() == "SEVERE"
-            and str(entry.get("source") or "") == "network"
-            and parsed.path == path
-            and actual_query == dict(query)
-            and f"status of {int(status)}" in message
-        ):
-            matches.append(entry)
-    unexpected = [entry for entry in failure_entries if entry not in matches]
-    if len(matches) != 1 or unexpected:
+    unexpected = []
+
+    def observe(_driver):
+        nonlocal matches, unexpected
+        failure_entries.extend(_browser_console_failures(read_browser_console_log(_driver)))
+        matches = []
+        for entry in failure_entries:
+            message = str(entry.get("message") or "")
+            url_text = message.split(" - Failed to load resource:", 1)[0]
+            parsed = urlsplit(url_text)
+            actual_query = {key: values[-1] for key, values in parse_qs(parsed.query).items() if values}
+            if (
+                str(entry.get("level") or "").upper() == "SEVERE"
+                and str(entry.get("source") or "") == "network"
+                and parsed.path == path
+                and actual_query == dict(query)
+                and f"status of {int(status)}" in message
+            ):
+                matches.append(entry)
+        unexpected = [entry for entry in failure_entries if entry not in matches]
+        if len(matches) > 1 or unexpected:
+            raise AssertionError(
+                "expected exactly one matching browser HTTP error: "
+                f"{json.dumps({'matches': matches, 'unexpected': unexpected}, sort_keys=True)}"
+            )
+        return bool(matches)
+
+    try:
+        WebDriverWait(driver, BROWSER_JOURNEY_OBSERVATION_SECONDS, poll_frequency=BROWSER_JOURNEY_POLL_SECONDS).until(observe)
+    except TimeoutException as error:
         raise AssertionError(
             "expected exactly one matching browser HTTP error: "
             f"{json.dumps({'matches': matches, 'unexpected': unexpected}, sort_keys=True)}"
-        )
+        ) from error
     return matches[0]
 
 

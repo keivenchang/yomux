@@ -17,7 +17,7 @@ import (
 )
 
 func TestNativeBuiltinSettingsSkillPreservesClarificationGuard(t *testing.T) {
-	s := &server{root: testsupport.RepoRoot(t), config: t.TempDir()}
+	s := &server{root: testsupport.MaterializeRepoRoot(t, "yomux_lib/yoagent"), config: t.TempDir()}
 	response := httptest.NewRecorder()
 	s.yoagentSkills(response, httptest.NewRequest(http.MethodGet, "/api/yoagent/skills", nil))
 	var payload struct {
@@ -41,7 +41,7 @@ func TestNativeBuiltinSettingsSkillPreservesClarificationGuard(t *testing.T) {
 			return
 		}
 	}
-	t.Fatal("builtin settings-operator skill missing")
+	t.Fatalf("builtin settings-operator skill missing: root=%q response=%d %s", s.root, response.Code, response.Body.String())
 }
 
 func TestNativeYOAgentSkillFileRoutesReadWriteAndDelete(t *testing.T) {

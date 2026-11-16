@@ -1,6 +1,50 @@
 const {assert, fs, vm, test, testAsync, loadYomux, runSuites} = require('./browser_helpers/layout_test_helper');
 const {runEditorPreviewSuite} = require('./browser_helpers/editor_preview_suite');
 
+test('full metadata at the boot revision arrives without reverting settings', () => {
+  const schema = JSON.parse(fs.readFileSync('assets/runtime/settings-schema.json', 'utf8'));
+  const api = loadYomux('', undefined, undefined, undefined, undefined, {
+    settingsPayload: {mtime_ns: 1, defaults: schema.DEFAULT_SETTINGS, settings: {}},
+  });
+  const applied = api.applySettingsPayloadForTest({mtime_ns: 1, settings: {appearance: {editor_cursor_style: 'block'}},
+    catalog: {'tabber.codex_model': {choice_metadata: schema.YOAGENT_CODEX_MODEL_CATALOG}},
+    choices: schema.SETTING_PAYLOAD_CHOICE_ORDER});
+  assert.equal(applied, false);
+  assert.equal(api.fileEditorCursorStyleForTest(), 'line');
+  const html = api.preferencesPanelHtmlForTest('', []);
+  const choices = [...html.matchAll(/<input\b[^>]*data-setting-path="tabber\.codex_effort"[^>]*>/g)]
+    .map(match => match[0].match(/\bvalue="([^"]+)"/)[1]);
+  assert.deepEqual(choices, schema.YOAGENT_CODEX_MODEL_CATALOG['gpt-6-luna'].effort_options);
+});
+
+test('Codex effort controls and model changes share the catalog across contexts', () => {
+  const schema = JSON.parse(fs.readFileSync('assets/runtime/settings-schema.json', 'utf8'));
+  const api = loadYomux();
+  let revision = 300;
+  for (const section of ['yoagent', 'tabber']) for (const model of ['gpt-6-luna', 'gpt-6-astra']) {
+    api.applySettingsPayloadForTest({mtime_ns: revision++, defaults: schema.DEFAULT_SETTINGS,
+      settings: {[section]: {codex_model: model}},
+      catalog: {[`${section}.codex_model`]: {choice_metadata: schema.YOAGENT_CODEX_MODEL_CATALOG}}}, {initial: true});
+    const html = api.preferencesPanelHtmlForTest('', []);
+    const choices = [...html.matchAll(/<input\b[^>]*>/g)]
+      .filter(match => match[0].includes(`data-setting-path="${section}.codex_effort"`))
+      .map(match => match[0].match(/\bvalue="([^"]+)"/)[1]);
+    assert.deepEqual(choices, schema.YOAGENT_CODEX_MODEL_CATALOG[model].effort_options);
+    const patch = api.settingPatchForPathForTest(`${section}.codex_model`, model);
+    assert.equal(patch[section].codex_effort, schema.YOAGENT_CODEX_MODEL_CATALOG[model].default_effort);
+  }
+});
+
+test('new editors use line cursors while explicit block preferences persist', () => {
+  const schema = JSON.parse(fs.readFileSync('assets/runtime/settings-schema.json', 'utf8'));
+  assert.equal(schema.DEFAULT_SETTINGS.appearance.editor_cursor_style, 'line');
+  const api = loadYomux();
+  api.applySettingsPayloadForTest({mtime_ns: 100, defaults: schema.DEFAULT_SETTINGS, settings: {appearance: {editor_cursor_style: 'block'}}}, {initial: true});
+  assert.equal(api.fileEditorCursorStyleForTest(), 'block');
+  api.applySettingsPayloadForTest({mtime_ns: 101, defaults: schema.DEFAULT_SETTINGS, settings: {appearance: {}}}, {force: true});
+  assert.equal(api.fileEditorCursorStyleForTest(), 'line');
+});
+
 test('repeated blocked renders preserve the bounded status pulse', () => {
   const api = loadYomux();
   api.setWorkflowTransitionGlowSecondsForTest(5);
@@ -182,6 +226,35 @@ runSuites([async () => {
     assert.equal(state.original, 'old disk');
     assert.equal(state.dirty, true);
     assert.equal(state.externalMissing, true);
+  });
+  await testAsync('emoji catalog retries failed and incomplete loads without duplicating concurrent requests', async () => {
+    const source = fs.readFileSync('static_src/js/yomux/82_chat_panel.js', 'utf8');
+    const code = source.slice(source.indexOf('function loadChatEmojiCatalog()'), source.indexOf('function chatRecentEmoji()'));
+    const scripts = [];
+    const context = {
+      chatState: {emojiCatalogPromise: null}, t: key => key,
+      document: {createElement: () => ({}), head: {appendChild: script => scripts.push(script)}},
+    };
+    vm.createContext(context);
+    vm.runInContext(code, context);
+    const first = context.loadChatEmojiCatalog();
+    assert.equal(context.loadChatEmojiCatalog(), first, 'concurrent callers share one pending acquisition');
+    const failed = assert.rejects(first, /common.requestFailed/);
+    scripts[0].onerror();
+    await failed;
+    const incomplete = context.loadChatEmojiCatalog();
+    assert.equal(scripts.length, 2, 'a transport failure permits a fresh request');
+    const missing = assert.rejects(incomplete, /common.requestFailed/);
+    scripts[1].onload();
+    await missing;
+    const recovered = context.loadChatEmojiCatalog();
+    assert.equal(scripts.length, 3, 'a script missing its catalog also permits recovery');
+    const catalog = [{emoji: '😀', names: {en: 'grinning face'}, keywords: {en: ['smile']}}];
+    context.YOMUX_EMOJI_DATA = catalog;
+    scripts[2].onload();
+    assert.equal(await recovered, catalog, 'recovery publishes the actual installed catalog');
+    assert.equal(await context.loadChatEmojiCatalog(), catalog);
+    assert.equal(scripts.length, 3, 'a complete catalog is reused without another request');
   });
   await testAsync('chat search closure and empty queries retire pending reads', async () => {
     const source = fs.readFileSync('static_src/js/yomux/82_chat_panel.js', 'utf8');

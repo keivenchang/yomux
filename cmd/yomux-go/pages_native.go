@@ -301,9 +301,12 @@ func (s *server) renderNativeHome(r *http.Request, user authUser, topology goTmu
 	for _, agent := range []string{"claude", "codex", "term"} {
 		launches[agent] = map[string]string{"normal": goAgentCommand(agent, "", false), "full_access": goAgentCommand(agent, "", true)}
 	}
+	// Empty tmux snapshots can carry a nil slice. Bootstrap consumers require
+	// arrays on first paint, before metadata polling can supply another roster.
+	sessions := append([]string{}, topology.sessions...)
 	bootstrap := map[string]any{
-		"sessions": topology.sessions, "recentSessions": topology.sessions, "tmuxTopology": map[string]any{"generation": topology.generation, "epoch": s.metadataEpoch()},
-		"dev": false, "dangerouslyYolo": s.dangerouslyYolo, "terminalOnly": false, "statsOnly": queryTrue(r.URL.Query().Get("stats_only")), "capabilities": s.capabilities.Snapshot(),
+		"sessions": sessions, "recentSessions": sessions, "tmuxTopology": map[string]any{"generation": topology.generation, "epoch": s.metadataEpoch()},
+		"dev": false, "terminalOnly": false, "statsOnly": queryTrue(r.URL.Query().Get("stats_only")), "capabilities": s.capabilities.Snapshot(),
 		"sessionMutationsAllowed": user.role == "admin", "availableAgents": available, "terminalCommands": pageTerminalCommands(), "agentLaunchCommands": launches, "agentAuth": agents,
 		"accessRole": user.role, "authUsername": user.username, "homePath": home, "repoRoot": s.root, "maxSessionTabs": maxYomuxSessionTabs,
 		"filesystemBatchLimits": map[string]int{"maxRequests": finder.MaxBatchRequests, "triggerCountLimit": finder.MaxBatchRequests},

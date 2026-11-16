@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import ctypes
+import json
 import sys
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -40,9 +41,13 @@ UNMEASURED_LIMIT = -1
 # ceiling of 128 instances is shared with every long-lived agent this uid runs,
 # and the gate alone creates roughly one watch daemon plus two browser instances
 # per xdist worker across three concurrent lanes.
-REQUIRED_MAX_USER_INSTANCES = 1024
-REQUIRED_MAX_USER_WATCHES = 1_048_576
-REQUIRED_MAX_QUEUED_EVENTS = 65_536
+RUNTIME_LIMITS_PATH = Path(__file__).resolve().parents[2] / "cmd/yomux-go/runtime_limits.json"
+_INOTIFY_RECOMMENDATIONS = json.loads(RUNTIME_LIMITS_PATH.read_text(encoding="utf-8"))["inotify"]
+if set(_INOTIFY_RECOMMENDATIONS) != {"max_user_instances", "max_user_watches", "max_queued_events"} or any(type(value) is not int or value <= 0 for value in _INOTIFY_RECOMMENDATIONS.values()):
+    raise ValueError(f"Invalid inotify recommendations in {RUNTIME_LIMITS_PATH}")
+REQUIRED_MAX_USER_INSTANCES = _INOTIFY_RECOMMENDATIONS["max_user_instances"]
+REQUIRED_MAX_USER_WATCHES = _INOTIFY_RECOMMENDATIONS["max_user_watches"]
+REQUIRED_MAX_QUEUED_EVENTS = _INOTIFY_RECOMMENDATIONS["max_queued_events"]
 # Headroom the gate must still have after the ambient, non-gate holders are
 # counted. A ceiling that is high enough on paper is not capacity if other
 # processes have already consumed it.

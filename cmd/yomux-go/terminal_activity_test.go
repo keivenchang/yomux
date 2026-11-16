@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/keivenchang/yomux/internal/stats"
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func TestTerminalInputActivityClassification(t *testing.T) {
@@ -163,7 +164,7 @@ func TestTerminalTmuxScrollTargetsPaneBeforeCopyModeCommand(t *testing.T) {
 func TestTerminalTmuxScrollWorksWithMouseEnabledOrDisabled(t *testing.T) {
 	for _, mouse := range []string{"off", "on"} {
 		t.Run(mouse, func(t *testing.T) {
-			socket := filepath.Join(t.TempDir(), "tmux.sock")
+			socket := filepath.Join(testsupport.ShortTempDir(t), "tmux.sock")
 			t.Setenv("YOMUX_TMUX_SOCKET", socket)
 			t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
 			s := &server{ignoreSizeChecked: true}

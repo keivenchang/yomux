@@ -39,11 +39,32 @@ if str(_SCRIPT_SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_SOURCE_ROOT))
 
 from tests.browser_helpers.webdriver_lease import WebDriverLease
+from tests.browser_helpers.native_keyboard import native_document_end, native_logical_text
 from tools.product_environment import product_env, product_env_name, require_product_env
+from tools.browser_runtime import resolve_browser_executables
 from tools.instance_isolation import synthetic_test_environment as isolated_test_environment
 from tools.instance_isolation import normalize_yomux_environment
 from tools.tmux_paths import short_tmux_socket_path
 from tools.tabber_browser_journey import isolated_attention_journey, normal_multiwindow_journey, normal_tabber_journey
+
+
+def focus_native_text_editor_end(driver, path):
+    """Toolbar actions own focus until the current editor is explicitly re-entered."""
+    content = driver.execute_script("return fileEditorPanelsForPath(arguments[0])[0]?._cmView?.contentDOM;", str(path))
+    if content is None:
+        raise SystemExit("Go Phase 6 current TextEdit content DOM is missing")
+    content.click()
+    native_document_end(driver)
+    focus = driver.execute_script("""
+      const view = fileEditorPanelsForPath(arguments[0])[0]?._cmView;
+      return {connected: Boolean(view?.contentDOM?.isConnected), focused: view?.hasFocus === true,
+        activeIsContent: document.activeElement === view?.contentDOM,
+        anchor: view?.state.selection.main.anchor, head: view?.state.selection.main.head,
+        length: view?.state.doc.length, activeClass: document.activeElement?.className || ''};
+    """, str(path))
+    if not (focus['connected'] and focus['focused'] and focus['activeIsContent']
+            and focus['anchor'] == focus['head'] == focus['length']):
+        raise SystemExit(f"Go Phase 6 current TextEdit focus/caret precondition failed: {focus}")
 
 
 def sha256_bytes(payload: bytes) -> str:
@@ -142,6 +163,97 @@ def tabber_reload_trace_source(session: str) -> str:
           markRow();
         })();
     """.replace("__TARGET_SESSION__", json.dumps(session))
+
+
+def resource_request_observer_source() -> str:
+    """Own native request timing records independently of the page's bounded buffer."""
+    return r"""(() => {
+      const entries = [];
+      const startedAt = performance.now();
+      const collect = records => entries.push(...records.filter(entry => entry.startTime >= startedAt));
+      const observer = new PerformanceObserver(list => collect(list.getEntries()));
+      observer.observe({type: 'resource', buffered: false});
+      return {
+        entries() { collect(observer.takeRecords()); return [...entries]; },
+        retire() { collect(observer.takeRecords()); observer.disconnect(); },
+      };
+    })"""
+
+
+def git_stats_done_hold_source() -> str:
+    """Observe superseded candidates until one complete real done frame can be held."""
+    return r"""(originalFetch => {
+      const readers = new Set();
+      let retired = false;
+      const state = {intercepted: false, doneHeldOpen: false, firstRequestUrl: '', heldRequestUrl: '', streamText: ''};
+      return {state, async retire() {
+        retired = true;
+        const pending = [...readers];
+        readers.clear();
+        await Promise.all(pending.map(async record => {
+          record.cancelled = true;
+          try { await record.reader.cancel('held stats fixture retired'); }
+          finally { record.reader.releaseLock(); }
+        }));
+      }, async fetch(input, init) {
+        const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+        if (!retired && !state.firstRequestUrl && url.pathname === '/api/fs/git-history-stats-stream') {
+          state.firstRequestUrl = url.href;
+        }
+        const response = await originalFetch(input, init);
+        if (retired || url.pathname !== '/api/fs/git-history-stats-stream' || state.doneHeldOpen || !response.body) return response;
+        state.intercepted = true;
+        const record = {reader: response.body.getReader(), cancelled: false, held: false};
+        readers.add(record);
+        const heldBody = new ReadableStream({
+          start(controller) {
+            (async () => {
+              const decoder = new TextDecoder();
+              let eventTail = '';
+              try {
+                while (true) {
+                  const result = await record.reader.read();
+                  if (record.cancelled) return;
+                  if (result.done) { controller.close(); return; }
+                  const text = decoder.decode(result.value, {stream: true});
+                  state.streamText = (state.streamText + text).slice(-1000);
+                  eventTail += text;
+                  let doneFrame = false;
+                  let boundary;
+                  while ((boundary = /\r?\n\r?\n/.exec(eventTail)) !== null) {
+                    const frame = eventTail.slice(0, boundary.index);
+                    eventTail = eventTail.slice(boundary.index + boundary[0].length);
+                    if (frame.split(/\r?\n/).some(line => /^event: ?done$/.test(line))) doneFrame = true;
+                  }
+                  const hold = doneFrame && !state.doneHeldOpen;
+                  if (hold) {
+                    record.held = true;
+                    state.doneHeldOpen = true;
+                    state.heldRequestUrl = url.href;
+                  }
+                  controller.enqueue(result.value);
+                  if (hold) return;
+                }
+              } catch (error) {
+                if (!record.cancelled) controller.error(error);
+              } finally {
+                if (!record.held || record.cancelled) {
+                  readers.delete(record);
+                  record.reader.releaseLock();
+                }
+              }
+            })();
+          },
+          async cancel(reason) {
+            record.cancelled = true;
+            readers.delete(record);
+            try { await record.reader.cancel(reason); }
+            finally { record.reader.releaseLock(); }
+          },
+        });
+        return new Response(heldBody, {status: response.status, statusText: response.statusText, headers: response.headers});
+      }};
+    })"""
 
 
 def main(binary: str) -> None:
@@ -412,7 +524,12 @@ exec /bin/sleep 300
             log_tails = []
             for log_path in server_log_paths:
                 try:
-                    log_tails.append(f"{log_path.name}: {log_path.read_text(encoding='utf-8', errors='replace')[-4000:]!r}")
+                    text = log_path.read_text(encoding='utf-8', errors='replace')
+                    log_tails.append(f"{log_path.name}: {text[-4000:]!r}")
+                    if 'goroutine ' in text:
+                        handlers = [block for block in text.split('\n\n')
+                                    if 'goroutine ' in block and ('net/http' in block or 'crypto/tls' in block)]
+                        log_tails.append('HTTP goroutines: ' + '\n\n'.join(handlers)[:24000])
                 except OSError as error:
                     log_tails.append(f"{log_path.name}: read failed: {error}")
             return f"server={process_state}; logs={log_tails!r}"
@@ -440,37 +557,54 @@ exec /bin/sleep 300
 
         try:
             options = Options()
-            chrome_binary = os.environ.get("CHROME_BIN") or shutil.which("chromium") or shutil.which("google-chrome")
-            if not chrome_binary:
-                raise SystemExit("Chromium or Google Chrome is unavailable")
+            browser_tools = resolve_browser_executables()
+            chrome_binary = browser_tools.chrome
             options.binary_location = chrome_binary
             for arg in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--ignore-certificate-errors", "--window-size=1200,800"):
                 options.add_argument(arg)
-            driver_path = os.environ.get("CHROMEDRIVER_BIN") or shutil.which("chromedriver")
+            driver_path = browser_tools.chromedriver
             served_bundle_hashes = {}
             for asset, expected in expected_bundle_hashes.items():
                 asset_url = f"https://127.0.0.1:{port}/static/{asset}"
+                probe = {'phase': 'open', 'received_bytes': 0}
+                started = time.monotonic()
                 try:
                     with urllib.request.urlopen(
                         asset_url,
                         context=ssl._create_unverified_context(),
                         timeout=5,
                     ) as response:
-                        served = response.read()
+                        probe.update(phase='read', status=response.status,
+                                     content_length=response.headers.get('Content-Length'),
+                                     headers_ms=round((time.monotonic() - started) * 1000, 3))
+                        chunks = []
+                        while chunk := response.read(65536):
+                            if not chunks:
+                                probe['first_chunk_ms'] = round((time.monotonic() - started) * 1000, 3)
+                            chunks.append(chunk)
+                            probe['received_bytes'] += len(chunk)
+                        served = b''.join(chunks)
+                        probe.update(phase='complete', elapsed_ms=round((time.monotonic() - started) * 1000, 3))
                 except (OSError, urllib.error.URLError, TimeoutError) as error:
+                    probe['elapsed_ms'] = round((time.monotonic() - started) * 1000, 3)
+                    # Dump only this fixture's owned child before normal failure cleanup.
+                    if proc is not None and proc.poll() is None:
+                        try:
+                            proc.send_signal(signal.SIGQUIT)
+                            proc.wait(timeout=5)
+                        except (OSError, subprocess.TimeoutExpired) as dump_error:
+                            probe['stack_dump_error'] = str(dump_error)
                     raise SystemExit(
-                        f"served bundle request failed for {asset_url}: {error}; {server_diagnostic()}"
+                        f"served bundle request failed for {asset_url}: {error}; probe={probe}; {server_diagnostic()}"
                     ) from error
+                print(f"served bundle response: {asset} probe={probe}", flush=True)
                 actual = sha256_bytes(served)
                 if actual != expected:
                     raise SystemExit(
                         f"served {asset} hash mismatch: expected {expected}, got {actual}"
                     )
                 served_bundle_hashes[asset] = actual
-            if driver_path:
-                driver = webdriver.Chrome(service=Service(executable_path=driver_path), options=options)
-            else:
-                driver = webdriver.Chrome(options=options)
+            driver = webdriver.Chrome(service=Service(executable_path=driver_path), options=options)
             driver_lease = WebDriverLease.from_driver(driver)
             try:
                 driver.get(f"https://127.0.0.1:{port}/login")
@@ -602,20 +736,38 @@ exec /bin/sleep 300
                 # tmux window. The focused browser client must take authority, otherwise
                 # `window-size largest` leaves tmux at the larger sibling dimensions even though
                 # xterm itself resized locally.
-                resize_fence = driver.execute_async_script("""
-                  const done = arguments[arguments.length - 1];
-                  const item = terminals.get(arguments[0]);
-                  const txn = 7110001;
-                  const listener = event => {
-                    if (typeof event.data !== 'string') return;
-                    let payload; try {payload = JSON.parse(event.data);} catch (_) {return;}
-                    if (payload.type !== 'refresh-ack' || payload.txn !== txn) return;
-                    item.socket.removeEventListener('message', listener);
-                    done({ok: true});
-                  };
-                  item.socket.addEventListener('message', listener);
-                  item.socket.send(JSON.stringify({type: 'refresh', txn}));
-                """, session)
+                try:
+                    resize_fence = driver.execute_async_script("""
+                      const done = arguments[arguments.length - 1];
+                      const item = terminals.get(arguments[0]);
+                      const txn = 7110001;
+                      const listener = event => {
+                        if (typeof event.data !== 'string') return;
+                        let payload; try {payload = JSON.parse(event.data);} catch (_) {return;}
+                        if (payload.type !== 'refresh-ack' || payload.txn !== txn) return;
+                        item.socket.removeEventListener('message', listener);
+                        done({ok: true});
+                      };
+                      item.socket.addEventListener('message', listener);
+                      item.socket.send(JSON.stringify({type: 'refresh', txn}));
+                    """, session)
+                except Exception as error:
+                    tmux_diagnostics = {}
+                    for label, args in {
+                        "clients": ("list-clients", "-F", "#{client_name} #{session_name} #{window_width}x#{window_height} #{client_flags}"),
+                        "windows": ("list-windows", "-t", f"={session}:", "-F", "#{window_index} #{window_width}x#{window_height} #{window_flags}"),
+                        "session": ("display-message", "-t", f"={session}:", "-p", "#{session_name} #{window_width}x#{window_height} #{pane_tty}"),
+                    }.items():
+                        result = subprocess.run((*tmux, *args), check=False, capture_output=True, text=True)
+                        tmux_diagnostics[label] = {
+                            "exit": result.returncode,
+                            "stdout": result.stdout[-4000:],
+                            "stderr": result.stderr[-4000:],
+                        }
+                    raise SystemExit(
+                        f"Go Chromium refresh ack timed out for session {session}: {error}; "
+                        f"{server_diagnostic()}; tmux={tmux_diagnostics!r}"
+                    ) from error
                 assert resize_fence.get('ok'), resize_fence
                 secondary_master, secondary_slave = pty.openpty()
                 set_pty_dimensions(secondary_slave, 70, 220)
@@ -766,21 +918,21 @@ exec /bin/sleep 300
                     "codex",
                     "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
                 }
-                def read_recorded_commands():
+                def read_recorded_commands(start_line=0):
                     if not launch_record.exists():
                         return set()
                     commands = set()
-                    for line in launch_record.read_text(encoding="utf-8").splitlines():
+                    for line in launch_record.read_text(encoding="utf-8").splitlines()[start_line:]:
                         executable, separator, arguments = line.partition(" ")
                         if separator:
                             commands.add(" ".join((Path(executable).name, arguments.strip())).strip())
                     return commands
 
-                def wait_for_recorded_command(command):
+                def wait_for_recorded_command(command, start_line=0):
                     launch_deadline = time.time() + 5
                     observed = set()
                     while time.time() < launch_deadline:
-                        observed = read_recorded_commands()
+                        observed = read_recorded_commands(start_line)
                         if command in observed:
                             return observed
                         time.sleep(0.05)
@@ -1159,12 +1311,10 @@ exec /bin/sleep 300
                 """, str(source_file), str(markdown_file), source_original, markdown_original)
                 if editor.get('error') or editor.get('sourceText') != source_original or editor.get('sourcePanel') is not True:
                     raise SystemExit(f"Go Phase 6 TextEdit open failed: {editor}")
-                source_element = driver.find_element("css selector", f'.file-editor-panel[data-file-path="{source_file}"] .cm-content')
-                source_element.click()
+                focus_native_text_editor_end(driver, source_file)
                 driver.execute_script("fileEditorAutosaveEnabled = false;")
                 native_suffix = "// native TextEdit input"
-                for character in native_suffix:
-                    source_element.send_keys(character)
+                native_logical_text(driver, native_suffix)
                 try:
                     WebDriverWait(driver, 12).until(
                         lambda current: current.execute_script(
@@ -1272,8 +1422,8 @@ exec /bin/sleep 300
                 if source_file.read_text(encoding="utf-8") != expected_saved_text:
                     raise SystemExit("Go Phase 6 TextEdit disk content did not match the native editor input")
                 local_conflict_suffix = "\n// local unsaved conflict"
-                for character in local_conflict_suffix:
-                    source_element.send_keys(character)
+                focus_native_text_editor_end(driver, source_file)
+                native_logical_text(driver, local_conflict_suffix)
                 try:
                     WebDriverWait(driver, 12).until(
                         lambda current: current.execute_script(
@@ -1290,7 +1440,15 @@ exec /bin/sleep 300
                         )
                     )
                 except TimeoutException as error:
-                    raise SystemExit("Go Phase 6 local unsaved conflict input did not reach file state") from error
+                    diagnostics = driver.execute_script("""
+                      const path = arguments[0], panel = fileEditorPanelsForPath(path)[0];
+                      const view = panel?._cmView, state = fileState.get(path);
+                      return {text:view?.state.doc.toString(), stateContent:state?.content,
+                        dirty:state?.dirty, focused:view?.hasFocus, activeIsContent:document.activeElement === view?.contentDOM,
+                        anchor:view?.state.selection.main.anchor, head:view?.state.selection.main.head,
+                        activeClass:document.activeElement?.className || ''};
+                    """, str(source_file))
+                    raise SystemExit(f"Go Phase 6 local unsaved conflict input did not reach file state: {diagnostics}") from error
                 source_file.write_text("external replacement\n", encoding="utf-8")
                 conflict = driver.execute_async_script(
                     """
@@ -1784,46 +1942,21 @@ exec /bin/sleep 300
                       poll();
                     });
                     const row = path => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${CSS.escape(path)}"]`);
+                    let restoreStatsFetch = async () => {};
+                    let requestObserver = null;
                     (async () => {
                       const gitRow = row(gitRoot);
                       if (!gitRow) throw new Error('Finder Git repository row is missing');
                       const gitDiffButton = await waitFor(() => Array.from(document.querySelectorAll('.file-context-menu button')).find(button => button.textContent.trim() === 'ΔShow Diff'), 'context-menu Diff action');
                       if (!gitDiffButton || gitDiffButton.disabled) throw new Error('Finder Git repository Diff action is missing or disabled');
                       const originalFetch = window.fetch.bind(window);
-                      let heldStatsResponse = false;
-                      window.fetch = async (input, init) => {
-                        const response = await originalFetch(input, init);
-                        const url = new URL(typeof input === 'string' ? input : input.url, location.href);
-                        if (url.pathname !== '/api/fs/git-history-stats-stream' || heldStatsResponse || !response.body) return response;
-                        heldStatsResponse = true;
-                        window.__yomuxGoStatsHeldRequestUrl = url.href;
-                        const sourceReader = response.body.getReader();
-                        let eventTail = '';
-                        let statsStreamText = '';
-                        const heldBody = new ReadableStream({
-                          start(controller) {
-                            (async () => {
-                              const decoder = new TextDecoder();
-                              while (true) {
-                                const result = await sourceReader.read();
-                                if (result.done) { controller.close(); return; }
-                                const text = decoder.decode(result.value, {stream: true});
-                                statsStreamText = (statsStreamText + text).slice(-1000);
-                                eventTail += text;
-                                window.__yomuxGoStatsStreamText = statsStreamText;
-                                controller.enqueue(result.value);
-                                if (eventTail.includes('event: done')) {
-                                  window.__yomuxGoStatsDoneHeldOpen = true;
-                                  return;
-                                }
-                                eventTail = eventTail.slice(-128);
-                              }
-                            })().catch(error => controller.error(error));
-                          },
-                          cancel(reason) { return sourceReader.cancel(reason); },
-                        });
-                        return new Response(heldBody, {status: response.status, statusText: response.statusText, headers: response.headers});
+                      const statsHold = (__GIT_STATS_DONE_HOLD__)(originalFetch);
+                      window.fetch = statsHold.fetch;
+                      restoreStatsFetch = async () => {
+                        window.fetch = originalFetch;
+                        await statsHold.retire();
                       };
+                      requestObserver = (__RESOURCE_REQUEST_OBSERVER__)();
                       const historyListStartedAt = performance.now();
                       gitDiffButton.click();
                       const gitDiffItem = gitDiffItemFor(gitRoot);
@@ -1846,7 +1979,7 @@ exec /bin/sleep 300
                             commits: historyState.commits?.length || 0,
                           } : null,
                           panel: panelNodes.get(gitDiffItem)?.outerHTML?.slice(0, 2000) || '',
-                          gitHistoryRequests: performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.includes('/api/fs/git-history')),
+                          gitHistoryRequests: requestObserver.entries().map(entry => entry.name).filter(name => name.includes('/api/fs/git-history')),
                         })}`, {cause: error});
                       }
                       const historyListReadyMs = performance.now() - historyListStartedAt;
@@ -1871,40 +2004,43 @@ exec /bin/sleep 300
                             commits: historyState.commits?.slice(0, 3).map(commit => ({sha: commit.sha, files: commit.files, added: commit.added, removed: commit.removed, binary_files: commit.binary_files})),
                           } : null,
                           topRow: topCommit?.outerHTML || '',
-                          statsRequests: performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.includes('/api/fs/git-history-stats-stream')),
+                          statsRequests: requestObserver.entries().map(entry => entry.name).filter(name => name.includes('/api/fs/git-history-stats-stream')),
                         })}`, {cause: error});
                       }
                       let doneCompletion;
                       try {
                         doneCompletion = await waitFor(() => {
                           const historyState = gitDiffTabState.get(gitDiffItem);
-                          return window.__yomuxGoStatsDoneHeldOpen === true && historyState?.statsStage >= 1 && !historyState.statsLoading
+                          return statsHold.state.doneHeldOpen === true && historyState?.statsStage >= 1 && !historyState.statsLoading
                             ? {statsStage: historyState.statsStage, statsLoading: historyState.statsLoading}
                             : null;
                         }, 'Git stats done event completion while response stays open');
                       } catch (error) {
                         const historyState = gitDiffTabState.get(gitDiffItem);
                         throw new Error(`${error.message}: ${JSON.stringify({
-                          heldStatsResponse,
-                          doneEventResponseHeldOpen: window.__yomuxGoStatsDoneHeldOpen === true,
-                          statsStreamText: window.__yomuxGoStatsStreamText || '',
+                          heldStatsResponse: statsHold.state.intercepted,
+                          doneEventResponseHeldOpen: statsHold.state.doneHeldOpen === true,
+                          statsStreamText: statsHold.state.streamText,
                           state: historyState ? {statsLoading: historyState.statsLoading, statsStage: historyState.statsStage, statsError: historyState.statsError, commits: historyState.commits?.slice(0, 2)} : null,
-                          statsRequests: performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.includes('/api/fs/git-history-stats-stream')),
+                          statsRequests: requestObserver.entries().map(entry => entry.name).filter(name => name.includes('/api/fs/git-history-stats-stream')),
                         })}`, {cause: error});
                       }
-                      window.fetch = originalFetch;
-                      const statsRequests = performance.getEntriesByType('resource')
+                      await restoreStatsFetch();
+                      const heldStatsRequestUrl = statsHold.state.heldRequestUrl;
+                      await waitFor(() => requestObserver.entries().some(entry => entry.name === heldStatsRequestUrl), 'native held Git stats request observation');
+                      const requestEntries = requestObserver.entries();
+                      const statsRequests = requestEntries
                         .map(entry => entry.name)
                         .filter(name => name.includes('/api/fs/git-history-stats-stream'));
-                      const historyRequests = performance.getEntriesByType('resource')
+                      const historyRequests = requestEntries
                         .map(entry => entry.name)
                         .filter(name => name.includes('/api/fs/git-history?'));
                       const historyRequest = historyRequests.length ? new URL(historyRequests[0], location.href) : null;
                       const historyRequestEntry = historyRequests.length
-                        ? performance.getEntriesByName(historyRequests[0]).at(-1)
+                        ? requestEntries.filter(entry => entry.name === historyRequests[0]).at(-1)
                         : null;
-                      const heldStatsRequestUrl = window.__yomuxGoStatsHeldRequestUrl || '';
                       const heldStatsRequest = heldStatsRequestUrl ? new URL(heldStatsRequestUrl, location.href) : null;
+                      const firstStatsRequest = new URL(statsHold.state.firstRequestUrl, location.href);
                       topCommit.click();
                       const topDetail = await waitFor(() => {
                         const detail = gitDiffTabState.get(gitDiffItem)?.commitRecords?.get(gitHead)?.detail;
@@ -1921,12 +2057,15 @@ exec /bin/sleep 300
                         historyRequestMs: historyRequestEntry?.duration ?? null,
                         topStats,
                         doneCompletion,
-                        doneEventResponseHeldOpen: window.__yomuxGoStatsDoneHeldOpen === true,
+                        doneEventResponseHeldOpen: statsHold.state.doneHeldOpen === true,
+                        initialStatsBatchSizes: firstStatsRequest.searchParams.get('batch_sizes') || '',
+                        heldStatsRequestUrl,
+                        heldStatsRequestObserved: statsRequests.includes(heldStatsRequestUrl),
                         heldStatsBatchSizes: heldStatsRequest?.searchParams.get('batch_sizes') || '',
                         detailFiles: topDetail.files.map(file => file.path),
                         detailRendered: Boolean(renderedTopDetail),
                       };
-                      if (!gitHistory.nativeSuppressed || !gitHistory.active || gitHistory.head !== gitHead || gitHistory.commits < 2 || gitHistory.historyListReadyMs >= 500 || !historyRequest || !gitHistory.topStats || !gitHistory.doneEventResponseHeldOpen || gitHistory.doneCompletion?.statsStage < 1 || gitHistory.doneCompletion?.statsLoading !== false || gitHistory.heldStatsBatchSizes !== '1' || !gitHistory.detailFiles.length || !gitHistory.detailRendered) throw new Error('Finder Git repository Diff tab contract mismatch: ' + JSON.stringify(gitHistory));
+                      if (!gitHistory.nativeSuppressed || !gitHistory.active || gitHistory.head !== gitHead || gitHistory.commits < 2 || gitHistory.historyListReadyMs >= 500 || !historyRequest || !gitHistory.topStats || !gitHistory.doneEventResponseHeldOpen || gitHistory.doneCompletion?.statsStage < 1 || gitHistory.doneCompletion?.statsLoading !== false || gitHistory.initialStatsBatchSizes !== '1' || !gitHistory.heldStatsRequestObserved || !gitHistory.heldStatsBatchSizes || !gitHistory.detailFiles.length || !gitHistory.detailRendered) throw new Error('Finder Git repository Diff tab contract mismatch: ' + JSON.stringify(gitHistory));
                       const removable = row(root + '/ui-remove-me.txt');
                       if (!removable) throw new Error('Finder delete fixture row is missing');
                       const originalConfirm = window.confirm;
@@ -1945,10 +2084,15 @@ exec /bin/sleep 300
                         return null;
                       }, 'Finder delete filesystem convergence');
                       if (deletedInfoStatus !== 404) throw new Error(`Finder delete did not remove the file: ${deletedInfoStatus}`);
+                      requestObserver.retire();
                       done({initial: setup.initial, expanded: setup.expanded, reexpanded: setup.reexpanded, initialRepo: setup.initialRepo, repoEnriched: setup.repoEnriched, gitHistory, deletedViaFinder: true});
-                    })().catch(error => done({error: String(error?.stack || error)}));
-                """, str(finder_root), str(git_root), git_head, finder_setup)
-                if finder_ui.get('error') or finder_ui.get('initial', {}).get('panel') is not True or finder_ui.get('expanded', {}).get('needle') is not True or finder_ui.get('reexpanded', {}).get('needle') is not True or finder_ui.get('repoEnriched') is not True or finder_ui.get('gitHistory', {}).get('nativeSuppressed') is not True or finder_ui.get('gitHistory', {}).get('active') is not True or finder_ui.get('gitHistory', {}).get('head') != git_head or finder_ui.get('gitHistory', {}).get('commits', 0) < 2 or finder_ui.get('gitHistory', {}).get('historyListReadyMs', 500) >= 500 or not finder_ui.get('gitHistory', {}).get('topStats') or finder_ui.get('gitHistory', {}).get('heldStatsBatchSizes') != '1' or not finder_ui.get('gitHistory', {}).get('detailFiles') or finder_ui.get('gitHistory', {}).get('detailRendered') is not True or finder_ui.get('deletedViaFinder') is not True:
+                    })().catch(async error => {
+                      try { await restoreStatsFetch(); }
+                      finally { requestObserver?.retire(); }
+                      done({error: String(error?.stack || error)});
+                    });
+                """.replace("__GIT_STATS_DONE_HOLD__", git_stats_done_hold_source()).replace("__RESOURCE_REQUEST_OBSERVER__", resource_request_observer_source()), str(finder_root), str(git_root), git_head, finder_setup)
+                if finder_ui.get('error') or finder_ui.get('initial', {}).get('panel') is not True or finder_ui.get('expanded', {}).get('needle') is not True or finder_ui.get('reexpanded', {}).get('needle') is not True or finder_ui.get('repoEnriched') is not True or finder_ui.get('gitHistory', {}).get('nativeSuppressed') is not True or finder_ui.get('gitHistory', {}).get('active') is not True or finder_ui.get('gitHistory', {}).get('head') != git_head or finder_ui.get('gitHistory', {}).get('commits', 0) < 2 or finder_ui.get('gitHistory', {}).get('historyListReadyMs', 500) >= 500 or not finder_ui.get('gitHistory', {}).get('topStats') or finder_ui.get('gitHistory', {}).get('initialStatsBatchSizes') != '1' or finder_ui.get('gitHistory', {}).get('heldStatsRequestObserved') is not True or not finder_ui.get('gitHistory', {}).get('detailFiles') or finder_ui.get('gitHistory', {}).get('detailRendered') is not True or finder_ui.get('deletedViaFinder') is not True:
                     raise SystemExit(f"Go Phase 4/5 Finder UI Chromium E2E failed: {finder_ui}")
                 print(f"Go browser Git history readiness: {json.dumps(finder_ui['gitHistory'], sort_keys=True)}")
                 git_views = driver.execute_async_script("""
@@ -2165,55 +2309,51 @@ exec /bin/sleep 300
                     ("new Claude (dangerously auto approve)", "claude --dangerously-skip-permissions"),
                     ("new Codex (dangerously auto approve)", "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"),
                 )
-                for label, command in ui_launch_cases:
-                    click_result = driver.execute_script("""
-                        const label = arguments[0];
-                        const wrapper = document.querySelector('[data-app-menu="file"]');
-                        if (!wrapper) return {error: 'File menu is not rendered'};
-                        const button = wrapper.querySelector(':scope > .app-menu-button');
-                        if (!button) return {error: 'File menu button is not rendered'};
-                        button.click();
-                        const normalize = node => (node.querySelector('.app-menu-label')?.textContent || node.textContent || '').replace(/\\s+/g, ' ').trim();
-                        const target = Array.from(wrapper.querySelectorAll(':scope > .app-menu-popover .app-menu-command')).find(node => normalize(node) === label);
-                        if (!target) return {error: `File menu command not found: ${label}`, labels: Array.from(wrapper.querySelectorAll(':scope > .app-menu-popover .app-menu-command')).map(normalize)};
-                        target.click();
-                        return {clicked: label};
-                    """, label)
-                    if click_result.get("error"):
-                        raise SystemExit(f"Go File menu -> New Chromium contract failed: {click_result}")
-                    recorded = wait_for_recorded_command(command)
+                def launch_from_file_menu():
+                    for label, command in ui_launch_cases:
+                        start_line = len(launch_record.read_text(encoding="utf-8").splitlines())
+                        click_result = driver.execute_script("""
+                            const label = arguments[0];
+                            const wrapper = document.querySelector('[data-app-menu="file"]');
+                            if (!wrapper) return {error: 'File menu is not rendered'};
+                            const button = wrapper.querySelector(':scope > .app-menu-button');
+                            if (!button) return {error: 'File menu button is not rendered'};
+                            button.click();
+                            const normalize = node => (node.querySelector('.app-menu-label')?.textContent || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                            const target = Array.from(wrapper.querySelectorAll(':scope > .app-menu-popover .app-menu-command')).find(node => normalize(node) === label);
+                            if (!target) return {error: `File menu command not found: ${label}`, labels: Array.from(wrapper.querySelectorAll(':scope > .app-menu-popover .app-menu-command')).map(normalize)};
+                            target.click();
+                            return {clicked: label};
+                        """, label)
+                        if click_result.get("error"):
+                            raise SystemExit(f"Go File menu -> New Chromium contract failed: {click_result}")
+                        wait_for_recorded_command(command, start_line)
+                    return read_recorded_commands()
+
+                recorded = launch_from_file_menu()
                 if not expected_launch_commands.issubset(recorded):
                     raise SystemExit(f"Go File -> New launch arguments did not reach fixture processes: {sorted(recorded)!r}")
                 stop_server(force=True)
                 proc = start_server(dangerously_yolo=False)
                 driver.get(f"https://127.0.0.1:{port}/?sessions={session}&layout=left&tabs=left:{session}")
-                deadline = time.time() + 10
-                while time.time() < deadline:
-                    if driver.find_elements("css selector", '[data-app-menu="file"] > .app-menu-button'):
-                        break
-                    time.sleep(0.1)
-                non_yolo_contract = driver.execute_async_script("""
-                    const done = arguments[arguments.length - 1];
-                    const session = arguments[0];
-                    (async () => {
-                      try {
-                        const response = await fetch('/api/create-session?agent=codex&dangerously_yolo=1&session=' + encodeURIComponent(session + '-denied'), {method: 'POST', cache: 'no-store', credentials: 'same-origin'});
-                        const body = await response.json();
-                        const bootstrap = JSON.parse((document.getElementById('yomux-bootstrap') || document.getElementById('yolomux-bootstrap'))?.textContent || '{}');
-                        const wrapper = document.querySelector('[data-app-menu="file"]');
-                        const button = wrapper?.querySelector(':scope > .app-menu-button');
-                        button?.click();
-                        const normalize = node => (node.querySelector('.app-menu-label')?.textContent || node.textContent || '').replace(/\\s+/g, ' ').trim();
-                        const labels = Array.from(wrapper?.querySelectorAll(':scope > .app-menu-popover .app-menu-command') || []).map(normalize);
-                        done({status: response.status, body, dangerouslyYolo: bootstrap.dangerouslyYolo, labels});
-                      } catch (error) {
-                        done({error: String(error?.stack || error)});
-                      }
-                    })();
-                """, session)
-                forbiddenMessage = "full-access agent launches require YOmux --dangerously-yolo"
-                if (non_yolo_contract.get("error") or non_yolo_contract.get("status") != 403 or non_yolo_contract.get("body", {}).get("error") != forbiddenMessage or non_yolo_contract.get("dangerouslyYolo") is not False or any("dangerously" in label for label in non_yolo_contract.get("labels", []))):
-                    raise SystemExit(f"Go non-dangerous launch contract failed: {non_yolo_contract}")
+                WebDriverWait(driver, 10).until(lambda current_driver: current_driver.execute_script("""
+                    return typeof newTmuxSessionItems === 'function'
+                      && !!document.querySelector('[data-app-menu="file"] > .app-menu-button');
+                """))
+                launch_contract = driver.execute_script("""
+                    if (typeof newTmuxSessionItems !== 'function') return {error: 'launch menu is not ready'};
+                    const bootstrap = JSON.parse(document.getElementById('yomux-bootstrap').textContent);
+                    const wrapper = document.querySelector('[data-app-menu="file"]');
+                    wrapper.querySelector(':scope > .app-menu-button').click();
+                    const labels = Array.from(wrapper.querySelectorAll('.app-menu-command')).map(node =>
+                      (node.querySelector('.app-menu-label')?.textContent || node.textContent || '').trim());
+                    wrapper.querySelector(':scope > .app-menu-button').click();
+                    return {legacySwitchPresent: Object.hasOwn(bootstrap, 'dangerouslyYolo'), labels};
+                """)
+                if launch_contract.get("error") or launch_contract.get("legacySwitchPresent") or not all(label in launch_contract.get("labels", []) for label, _command in ui_launch_cases):
+                    raise SystemExit(f"Go per-launch choices after restart failed: {launch_contract}")
+                launch_from_file_menu()
+                driver.get(f"https://127.0.0.1:{port}/?sessions={session}&layout=left&tabs=left:{session}")
 
                 def selected_tmux_window():
                     return subprocess.check_output(
@@ -2221,21 +2361,58 @@ exec /bin/sleep 300
                         text=True,
                     ).strip()
 
-                window_click = WebDriverWait(driver, 10).until(
-                    lambda current_driver: current_driver.execute_script(
-                        """
-                        const session = arguments[0];
-                        const button = Array.from(document.querySelectorAll('.panel-detail-row [data-window-index="1"]'))
-                          .find(candidate => candidate.getAttribute('data-window-session') === session
-                            && candidate.isConnected
-                            && candidate.getClientRects().length > 0);
-                        if (!button) return false;
-                        button.click();
-                        return {clicked: true, label: button.textContent.trim()};
-                        """,
-                        session,
+                try:
+                    window_click = WebDriverWait(driver, 10).until(
+                        lambda current_driver: current_driver.execute_script(
+                            """
+                            const session = arguments[0];
+                            const button = Array.from(document.querySelectorAll('.panel-detail-row [data-window-index="1"]'))
+                              .find(candidate => candidate.getAttribute('data-window-session') === session
+                                && candidate.isConnected
+                                && candidate.getClientRects().length > 0);
+                            if (!button) return false;
+                            button.click();
+                            return {clicked: true, label: button.textContent.trim()};
+                            """,
+                            session,
+                        )
                     )
-                )
+                except TimeoutException:
+                    diagnostics = driver.execute_script("""
+                      const session=arguments[0], panel=document.getElementById('panel-' + session);
+                      const describe = node => {
+                        const rect=node.getBoundingClientRect(), style=getComputedStyle(node);
+                        return {tag:node.tagName, classes:node.className, session:node.dataset.windowSession,
+                          index:node.dataset.windowIndex, text:node.textContent?.trim(), connected:node.isConnected,
+                          hidden:node.hidden, rect:rect.toJSON(), display:style.display, visibility:style.visibility,
+                          panel:node.closest('.panel')?.id || node.closest('[data-layout-item]')?.dataset.layoutItem,
+                          detailRow:Boolean(node.closest('.panel-detail-row')), html:node.outerHTML.slice(0,600)};
+                      };
+                      return {url:location.href, readyState:document.readyState,
+                        loginPresent:Boolean(document.querySelector('input[name="username"]')),
+                        requested:session, panel:panel ? {id:panel.id, classes:panel.className,
+                          hidden:panel.hidden, rect:panel.getBoundingClientRect().toJSON(),
+                          details:panel.querySelector('.panel-detail-row')?.outerHTML.slice(0,1600)} : null,
+                        windowButtons:[...document.querySelectorAll('[data-window-index]')].map(describe),
+                        detailToggles:[...document.querySelectorAll('[data-detail-toggle]')].map(node=>({
+                          item:node.dataset.detailToggle, pressed:node.getAttribute('aria-pressed'), title:node.title})),
+                        panels:[...document.querySelectorAll('[id^="panel-"]')].map(node=>({id:node.id,
+                          classes:node.className, visible:Boolean(node.getClientRects().length)})),
+                        mode:typeof tabberMode === 'undefined' ? null : tabberMode,
+                        selections:typeof tabberNormalSelections === 'undefined' ? null : [...tabberNormalSelections],
+                        activeItems:typeof activePaneItems === 'function' ? activePaneItems() : null,
+                        layout:typeof layoutSlotsSignature === 'function' ? layoutSlotsSignature(layoutSlots) : null,
+                        metadata:typeof transcriptMetadataState === 'undefined' ? null : transcriptMetadataState.payload.sessions?.[session],
+                        signalWindows:typeof tmuxSignalWindowsForSession === 'function' ? tmuxSignalWindowsForSession(session) : null,
+                        terminal:typeof terminals === 'undefined' ? null : {present:terminals.has(session),
+                          socket:terminals.get(session)?.socket?.readyState, connected:terminals.get(session)?.container?.isConnected},
+                        status:document.getElementById('status')?.textContent || ''};
+                    """, session)
+                    diagnostics['tmuxWindows'] = subprocess.check_output(
+                        (*tmux, 'list-windows', '-t', '=' + session, '-F', '#{window_index}\t#{window_id}\t#{window_name}\t#{window_active}'), text=True)
+                    diagnostics['serverExit'] = proc.poll()
+                    print('Go late tmux window-click diagnostic: ' + json.dumps(diagnostics, sort_keys=True), flush=True)
+                    raise
                 window_switch = None
                 window_switch_deadline = time.time() + 8
                 while time.time() < window_switch_deadline:
@@ -2268,7 +2445,7 @@ exec /bin/sleep 300
                     roster_options.add_argument(arg)
                 roster_driver = webdriver.Chrome(
                     service=Service(executable_path=driver_path), options=roster_options,
-                ) if driver_path else webdriver.Chrome(options=roster_options)
+                )
                 roster_lease = WebDriverLease.from_driver(roster_driver)
                 try:
                     roster_driver.get(f"https://127.0.0.1:{port}/login")
@@ -2314,9 +2491,8 @@ exec /bin/sleep 300
                         if (!source?.url) return [];
                         return new URL(source.url, location.href).searchParams.get('channels')?.split(',') || [];
                     """)
-                    # Fresh Normal installs display Tabber, which owns transcript demand.
-                    roster_tabber_visible = roster_driver.execute_script("return activePaneItems().includes(tabberItemId);")
-                    if "core" not in roster_channels or ("transcripts" in roster_channels) != roster_tabber_visible:
+                    # The terminal consumes metadata even when Tabber is absent.
+                    if not {"core", "transcripts"}.issubset(roster_channels):
                         raise SystemExit(
                             f"Go roster-exit E2E has the wrong client-event demand: {roster_channels}"
                         )

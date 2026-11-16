@@ -55,8 +55,14 @@ def go_test_server_binary(source_root: Path) -> Path:
         return binary
 
     environment = dict(os.environ)
+    environment.update(GOPROXY="off", GOSUMDB="off", GOWORK="off", GOTOOLCHAIN="local")
+    module_cache = environment.get("GOMODCACHE")
+    if not module_cache:
+        image_seed = Path("/opt/yomux-go-mod-cache")
+        module_cache = str(image_seed) if image_seed.is_dir() else subprocess.check_output(
+            ["go", "env", "GOMODCACHE"], cwd=source_root, env=environment, text=True).strip()
     environment.update({
-        "GOMODCACHE": os.environ.get("GOMODCACHE", "/opt/yomux-go-mod-cache"),
+        "GOMODCACHE": module_cache,
         "GOPROXY": "off",
         "GOSUMDB": "off",
         "GOWORK": "off",

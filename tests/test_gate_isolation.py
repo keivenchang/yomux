@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """O7 regression-gate guards for writable-root isolation."""
 
+import ast
 import copy
 import ctypes
 import ctypes.util
@@ -182,6 +183,24 @@ def test_browser_runtime_paths_override_inherited_canonical_roots(monkeypatch, t
         assert "inherited" not in resolved.parts
     finally:
         browser_layout.cleanup_isolated_browser_runtime_paths(paths)
+
+
+def test_gate_runtime_paths_ignore_deep_run_root_for_product_sockets(monkeypatch, tmp_path, request):
+    deep_root = tmp_path / ("long-run-root-" + "x" * 96)
+    deep_root.mkdir()
+    with pytest.raises(browser_layout.common.YomuxRootError, match="too deep for product socket"):
+        browser_layout.common.resolve_yomux_roots({"YOMUX_ROOT": str(deep_root)})
+    gate_harness_module.patch_isolated_product_environment(
+        monkeypatch, {"YOMUX_TEST_ROOT": str(deep_root)},
+    )
+    paths = request.getfixturevalue("gate_runtime_paths")
+    assert not paths.root.is_relative_to(deep_root)
+    roots = browser_layout.common.resolve_yomux_roots()
+    assert roots.root == paths.root.resolve()
+    sockets = browser_layout.common.runtime_socket_candidates(roots)
+    assert sockets
+    assert all(len(os.fsencode(str(path))) <= browser_layout.common.LOCAL_RPC_SOCKET_PATH_BYTES for path in sockets)
+    assert_writable_paths_beneath(paths.root, resolved_gate_writable_paths(paths))
 
 
 def test_gate_runtime_paths_and_imported_constants_are_fixture_owned(gate_runtime_paths):
@@ -443,6 +462,25 @@ def test_minimal_fixture_finite_work_reaches_gate_retirement_and_cleanup(monkeyp
     ]
 
 
+def test_browser_visual_profile_uses_explicit_viewport_instead_of_native_window():
+    calls = []
+    driver = SimpleNamespace(
+        get_window_size=lambda: {"width": 500, "height": 700},
+        execute_cdp_cmd=lambda method, arguments: calls.append((method, arguments)),
+        execute_script=lambda *_args: {"theme": "light", "dpr": 1},
+    )
+    browser_layout.set_browser_visual_profile(driver, theme="light", viewport=(390, 700))
+    assert calls == [("Emulation.setDeviceMetricsOverride", {
+        "width": 390, "height": 700, "deviceScaleFactor": 1.0, "mobile": False,
+    })]
+
+
+@pytest.mark.parametrize("viewport", [(0, 700), (390, -1)])
+def test_browser_visual_profile_rejects_invalid_viewport(viewport):
+    with pytest.raises(ValueError, match="dimensions must be positive"):
+        browser_layout.set_browser_visual_profile(SimpleNamespace(), viewport=viewport)
+
+
 class BrowserLogDriver:
     def __init__(self, entries):
         self.entries = list(entries)
@@ -506,6 +544,44 @@ def test_exact_browser_http_error_consumer_rejects_an_unrelated_warning():
             status=409,
             query={"item": "one"},
         )
+
+
+@pytest.mark.parametrize("batches, succeeds", [
+    ([[], [browser_log_entry("INFO", "console-api", "ready")], [browser_log_entry("SEVERE", "network", "http://127.0.0.1/api/fixture?item=one - Failed to load resource: status of 409")]], True),
+    ([[browser_log_entry("WARNING", "console-api", "unrelated")], [browser_log_entry("SEVERE", "network", "http://127.0.0.1/api/fixture?item=one - Failed to load resource: status of 409")]], False),
+    ([[browser_log_entry("SEVERE", "network", "http://127.0.0.1/api/fixture?item=one - Failed to load resource: status of 409")] * 2], False),
+    ([[], []], False),
+])
+def test_exact_browser_http_error_waits_for_delivery_without_losing_failures(monkeypatch, batches, succeeds):
+    class BatchedDriver:
+        def __init__(self):
+            self.batches = iter(batches)
+
+        def get_log(self, kind):
+            assert kind == "browser"
+            return next(self.batches, [])
+
+    class ImmediateWait:
+        def __init__(self, driver, timeout, poll_frequency):
+            self.driver = driver
+
+        def until(self, predicate):
+            for _ in batches:
+                if predicate(self.driver):
+                    return True
+            raise browser_console.TimeoutException("fixture exhausted")
+
+    monkeypatch.setattr(browser_console, "WebDriverWait", ImmediateWait)
+    driver = BatchedDriver()
+    if succeeds:
+        assert browser_console.assert_only_expected_browser_http_error(
+            driver, path="/api/fixture", status=409, query={"item": "one"},
+        )["source"] == "network"
+    else:
+        with pytest.raises(AssertionError, match="matching browser HTTP error"):
+            browser_console.assert_only_expected_browser_http_error(
+                driver, path="/api/fixture", status=409, query={"item": "one"},
+            )
 
 
 def test_exact_browser_network_error_consumer_rejects_an_unrelated_warning():
@@ -1539,17 +1615,18 @@ def test_fixture_connection_retirement_wakes_idle_keep_alive_owner():
     owner_started = threading.Event()
 
     def own_connection():
-        with activity.condition:
-            activity.connections.add(server_connection)
-            activity.condition.notify_all()
-        owner_started.set()
-        try:
-            server_connection.recv(1)
-        finally:
-            server_connection.close()
+        with server_connection.makefile("rb", buffering=0) as reader:
             with activity.condition:
-                activity.connections.discard(server_connection)
+                activity.connections.add(server_connection)
                 activity.condition.notify_all()
+            owner_started.set()
+            try:
+                assert reader.read(1) == b""
+            finally:
+                server_connection.close()
+                with activity.condition:
+                    activity.connections.discard(server_connection)
+                    activity.condition.notify_all()
 
     owner = threading.Thread(target=own_connection, daemon=True)
     owner.start()
@@ -1713,6 +1790,7 @@ def test_preseal_accepted_connection_entering_after_seal_is_refused_without_fals
 
 def test_fixture_connection_retirement_waits_for_handler_exit_after_socket_close():
     close_observed = threading.Event()
+    reader_ready = threading.Event()
     handler_release = threading.Event()
     handler_threads = []
 
@@ -1741,9 +1819,12 @@ def test_fixture_connection_retirement_waits_for_handler_exit_after_socket_close
             handler_threads.append(thread)
 
         def finish_request(self, request_socket, _client_address):
-            assert request_socket.recv(1) == b""
-            close_observed.set()
-            handler_release.wait()
+            # A real HTTP handler owns a stream until it exits, even after socket.close().
+            with request_socket.makefile("rb", buffering=0) as reader:
+                reader_ready.set()
+                assert reader.read(1) == b""
+                close_observed.set()
+                handler_release.wait()
 
         def shutdown_request(self, request_socket):
             request_socket.close()
@@ -1761,8 +1842,9 @@ def test_fixture_connection_retirement_waits_for_handler_exit_after_socket_close
             retirement_errors.append(error)
 
     retirement = threading.Thread(target=retire, daemon=True)
-    retirement.start()
     try:
+        assert reader_ready.wait(timeout=1)
+        retirement.start()
         assert close_observed.wait(timeout=1)
         retirement.join(timeout=1)
         assert not retirement.is_alive()
@@ -4271,8 +4353,8 @@ def test_browser_boot_route_registry_has_one_handler_and_matches_gate_contract()
         browser_layout.BROWSER_BOOT_PRESETS["default"]
     )
 
-    assert len(browser_layout.BROWSER_BOOT_ROUTES) == 35
-    assert len({route.path for route in browser_layout.BROWSER_BOOT_ROUTES}) == 35
+    assert len(browser_layout.BROWSER_BOOT_ROUTES) == 36
+    assert len({route.path for route in browser_layout.BROWSER_BOOT_ROUTES}) == 36
     for route in browser_layout.BROWSER_BOOT_ROUTES:
         assert fixture.count(f"url.pathname === '{route.path}'") == 1
         assert json.dumps(route.path) in fixture
@@ -4297,6 +4379,49 @@ def test_browser_boot_route_validation_rejects_missing_and_duplicate_handlers():
         browser_layout.validate_browser_boot_routes(
             complete + f"\nurl.pathname === '{routes[0].path}'"
         )
+
+
+def test_browser_bootstrap_contract_inventory_never_evaluates_operator_providers(monkeypatch):
+    bootstrap = browser_layout.build_browser_bootstrap(browser_layout.BROWSER_BOOT_PRESETS["default"])
+
+    def unexpected_probe(*_args, **_kwargs):
+        raise AssertionError("bootstrap key inventory must not evaluate operator providers")
+
+    for name in (
+        "html_page", "settings_payload", "bootstrap_locale", "yomux_version_metadata",
+        "available_agent_commands", "available_terminal_commands", "agent_command",
+        "bootstrap_agent_auth_status", "filesystem_batch_limits_payload", "cpu_topology",
+        "yomux_client_revision", "yomux_dev_bundle_revision", "yomux_commit_sha",
+        "yomux_commit_time_pt", "yomux_commit_count", "bootstrap_settings_payload",
+        "normalized_activity_summary_bootstrap", "activity_summary_bootstrap",
+        "locale_registry_payload", "bootstrap_locale_catalogs", "rules_status", "static_asset_url",
+    ):
+        monkeypatch.setattr(browser_layout.web, name, unexpected_probe)
+    assert browser_layout.browser_boot_production_contract_errors(bootstrap) == ()
+    without_sessions = dict(bootstrap)
+    del without_sessions["sessions"]
+    assert browser_layout.browser_boot_production_contract_errors(without_sessions) == ("missing:sessions",)
+
+
+@pytest.mark.parametrize("source", [
+    "def another_page():\n    bootstrap = {}\n",
+    "def html_page():\n    bootstrap = {}\ndef html_page():\n    bootstrap = {}\n",
+    "def html_page():\n    bootstrap = provider()\n",
+    "def html_page():\n    bootstrap = {'same':1, 'same':2}\n",
+    "def html_page():\n    bootstrap = {**provider()}\n",
+    "def html_page():\n    bootstrap = {provider():1}\n",
+    "def html_page():\n    if condition:\n        bootstrap = {}\n",
+    "def html_page():\n    bootstrap = {}\n    bootstrap = {}\n",
+    "def html_page():\n    bootstrap = {}\n    bootstrap['later'] = 1\n",
+    "def html_page():\n    bootstrap = {}\n    bootstrap.update(provider())\n",
+    "def html_page():\n    bootstrap = {}\n    alias = bootstrap\n",
+])
+def test_browser_bootstrap_contract_inventory_refuses_ambiguous_source(monkeypatch, tmp_path, source):
+    owner = tmp_path / "bootstrap_owner.py"
+    owner.write_text(source, encoding="utf-8")
+    monkeypatch.setattr(browser_layout.web, "__file__", str(owner))
+    with pytest.raises(AssertionError, match="production bootstrap inventory"):
+        browser_layout.browser_boot_production_contract_errors({})
 
 
 def test_browser_bootstrap_represents_or_names_every_production_key():
@@ -4676,9 +4801,213 @@ def test_browser_profile_cleanup_continues_after_secondary_diagnostic_failure(mo
     monkeypatch.setattr(browser_layout, "read_browser_console_log", lambda _driver: ())
     with pytest.raises(AssertionError, match="secondary diagnostic canary"):
         browser_layout._reset_reused_browser_state(driver, retired_origin="http://fixture")
-    assert calls == ["windows", "scripts", "Storage.clearDataForOrigin", "cookies", "Browser.resetPermissions",
+    assert calls == ["scripts", "windows", "Storage.clearDataForOrigin", "cookies", "Browser.resetPermissions",
                      "Browser.setDownloadBehavior", "Emulation.setCPUThrottlingRate", "Emulation.clearDeviceMetricsOverride",
                      "Emulation.setEmulatedMedia", "about:blank", "focus", "size"]
+
+
+@pytest.mark.parametrize("failed_target", [None, "primary", "secondary"])
+def test_browser_document_script_registry_removes_on_own_target_and_preserves_failed_records(failed_target):
+    class Driver:
+        current_window_handle = "primary"
+        window_handles = ["primary", "secondary"]
+
+        def __init__(self):
+            self.scripts = set()
+            self.removed = []
+            self.switch_to = SimpleNamespace(window=self.select)
+
+        def select(self, handle):
+            self.current_window_handle = handle
+
+        def execute_cdp_cmd(self, command, payload):
+            owner = (self.current_window_handle, "same-target-local-id")
+            if command == "Page.addScriptToEvaluateOnNewDocument":
+                self.scripts.add(owner)
+                return {"identifier": owner[1]}
+            assert command == "Page.removeScriptToEvaluateOnNewDocument"
+            assert payload == {"identifier": owner[1]}
+            if self.current_window_handle == failed_target:
+                raise RuntimeError("target removal canary")
+            assert owner in self.scripts, "wrong-target removal or duplicate cleanup"
+            self.scripts.remove(owner)
+            self.removed.append(owner)
+
+    driver = Driver()
+    identifier = browser_layout.register_browser_new_document_script(driver, "primary preload")
+    driver.select("secondary")
+    assert browser_layout.register_browser_new_document_script(driver, "secondary preload") == identifier
+    with pytest.raises(AssertionError, match="expected one target owner"):
+        browser_layout.remove_browser_new_document_script(driver, identifier)
+    if failed_target is None:
+        browser_layout.remove_browser_test_new_document_scripts(driver)
+    else:
+        with pytest.raises(RuntimeError, match="target removal canary"):
+            browser_layout.remove_browser_test_new_document_scripts(driver)
+    assert driver.current_window_handle == "secondary"
+    expected = {(failed_target, identifier)} if failed_target else set()
+    assert driver.scripts == expected
+    assert set(driver._yomux_test_script_ids) == expected
+    assert set(driver.removed) == {("primary", identifier), ("secondary", identifier)} - expected
+
+
+def test_browser_document_script_registry_retires_closed_target_without_cdp_removal():
+    calls = []
+
+    class Driver:
+        current_window_handle = "secondary"
+        window_handles = ["primary", "secondary"]
+
+        def execute_cdp_cmd(self, command, _payload):
+            assert command == "Page.addScriptToEvaluateOnNewDocument"
+            calls.append(("add", self.current_window_handle))
+            return {"identifier": "secondary-preload"}
+
+        def close(self):
+            calls.append(("close", self.current_window_handle))
+            self.window_handles = ["primary"]
+            self.current_window_handle = "primary"
+
+    driver = Driver()
+    browser_layout.register_browser_new_document_script(driver, "secondary preload")
+    driver.close()
+    browser_layout.remove_browser_test_new_document_scripts(driver)
+    assert driver._yomux_test_script_ids == []
+    assert calls == [("add", "secondary"), ("close", "secondary")]
+
+
+def test_stats_runtime_retires_every_target_before_server_after_page_failure():
+    events = []
+
+    class Browser:
+        current_window_handle = "secondary"
+        current_url = "http://fixture"
+        window_handles = ["primary", "secondary"]
+
+        def __init__(self):
+            self.switch_to = SimpleNamespace(window=self.select)
+
+        def select(self, target):
+            self.current_window_handle = target
+
+        def get(self, url):
+            assert url == "about:blank"
+            events.append(("retire", self.current_window_handle))
+            self.current_url = url
+            if self.current_window_handle == "primary":
+                raise AssertionError("original retirement canary")
+
+    class Process:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            events.append(("server", "terminate"))
+
+        def wait(self, timeout):
+            events.append(("server", "wait"))
+
+    class Wait:
+        def __init__(self, driver, *_args, **_kwargs):
+            self.driver = driver
+
+        def until(self, predicate):
+            assert predicate(self.driver)
+
+    source = Path(__file__).with_name("test_browser_stats_widen.py").read_text()
+    function = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "_retire_stats_runtime")
+    scope = dict(browser_layout.__dict__, WebDriverWait=Wait,
+                 stop_isolated_tmux_runtime=lambda _runtime: events.append(("tmux", "stop")))
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "stats-runtime-cleanup", "exec"), scope)
+    with pytest.raises(AssertionError, match="original retirement canary"):
+        scope["_retire_stats_runtime"](Browser(), SimpleNamespace(close=lambda: None), Process(), None, object())
+    assert events == [("retire", "primary"), ("retire", "secondary"),
+                      ("server", "terminate"), ("server", "wait"), ("tmux", "stop")]
+
+
+@pytest.mark.parametrize("stage", ["headers", "body"])
+@pytest.mark.parametrize("transition", ["dispose", "release", "publish"])
+def test_refill_response_controller_fences_late_post_completion(stage, transition):
+    source = Path(__file__).with_name("test_browser_stats_widen.py").read_text()
+    owner = next(node for node in ast.parse(source).body
+                 if isinstance(node, ast.FunctionDef) and node.name == "_assert_go_refill_browser_journey")
+    assignment = next(node for node in owner.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "controller_source" for target in node.targets))
+    controller = ast.literal_eval(assignment.value.func.value).replace("__CONTROLLER_KEY__", json.dumps("fixture-control"))
+    readiness_assignment = next(node for node in owner.body if isinstance(node, ast.Assign)
+                                and any(isinstance(target, ast.Name) and target.id == "captured_response_script" for target in node.targets))
+    readiness_source = ast.literal_eval(readiness_assignment.value)
+    running_assignment = next(node for node in ast.walk(owner) if isinstance(node, ast.Assign)
+                              and any(isinstance(target, ast.Name) and target.id == "running" for target in node.targets))
+    assert isinstance(running_assignment.value, ast.Call) and running_assignment.value.func.attr == "until"
+    assert any(isinstance(node, ast.Name) and node.id == "captured_response_script"
+               for node in ast.walk(running_assignment.value.args[0]))
+    runner = r"""
+      const assert = require('node:assert/strict');
+      const [source, readinessSource, stage, transition] = process.argv.slice(1);
+      const deferred = () => {
+        let resolve;
+        const promise = new Promise(done => { resolve = done; });
+        return {promise, resolve};
+      };
+      const watchdog = setTimeout(() => { throw new Error('refill response barrier did not complete'); }, 5000);
+      (async () => {
+        const headers = deferred(), body = deferred(), readingBody = deferred();
+        const key = 'fixture-control';
+        const storage = new Map([[key, JSON.stringify({held:true, running:null})]]);
+        globalThis.window = globalThis;
+        globalThis.location = new URL('http://fixture/');
+        globalThis.localStorage = {
+          getItem:name => storage.get(name) ?? null,
+          setItem:(name,value) => storage.set(name,value),
+          removeItem:name => storage.delete(name),
+        };
+        globalThis.fetch = () => headers.promise;
+        new Function(source)();
+        const readiness = () => new Function(readinessSource).call(window, key);
+        const wrappedFetch = window.fetch;
+        const response = {status:202, clone:() => ({text:() => {
+          readingBody.resolve();
+          return body.promise;
+        }})};
+        const pending = wrappedFetch('/api/stats-refill', {method:'POST'});
+        if (stage === 'body') {
+          headers.resolve(response);
+          await readingBody.promise;
+        }
+        assert.equal(readiness(), false, 'optimistic pending UI cannot publish an operation while native response headers/body are held');
+        if (transition === 'dispose') window[key]();
+        if (transition === 'release') {
+          const current = JSON.parse(localStorage.getItem(key));
+          current.held = false;
+          localStorage.setItem(key, JSON.stringify(current));
+        }
+        const acceptedBody = JSON.stringify({state:'running', operation_id:'actual-accepted-id'});
+        headers.resolve(response);
+        body.resolve(acceptedBody);
+        assert.equal(await pending, response, 'native accepted response is always preserved');
+        if (transition === 'dispose') {
+          assert.equal(readiness(), false);
+          assert.equal(localStorage.getItem(key), null, 'late response cannot resurrect retired controller');
+          assert.notEqual(window.fetch, wrappedFetch, 'dispose restores the previous fetch owner');
+        } else {
+          const current = JSON.parse(localStorage.getItem(key));
+          assert.equal(current.held, transition === 'publish', 'late body cannot undo explicit release');
+          assert.equal(current.running, transition === 'publish' ? acceptedBody : null);
+          if (transition === 'publish') {
+            assert.deepEqual(readiness(), JSON.parse(acceptedBody), 'readiness publishes the exact native 202 operation only after capture');
+            const replay = await wrappedFetch('/api/stats-refill');
+            assert.equal(await replay.text(), acceptedBody, 'pending GET replays exact native accepted bytes');
+          }
+          window[key]();
+          assert.equal(localStorage.getItem(key), null);
+        }
+      })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => clearTimeout(watchdog));
+    """
+    result = subprocess.run(["node", "-e", runner, controller, readiness_source, stage, transition],
+                            capture_output=True, text=True, timeout=10, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("failure", ["capture", "missing", "malformed", "duplicate", "console", "close"])

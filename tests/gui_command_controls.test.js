@@ -501,6 +501,18 @@ async function run() {
   assert.equal(await retryBatch, true);
   assert.equal([...records.values()].reduce((count, record) => count + record.pendingEventStateChanges.length, 0), 0);
 
+  h = harness();
+  const signal = {aborted: false};
+  h.context.signal = signal;
+  const retired = h.run(`dispatchCommand(COMMAND_ROUTES['tex-preview'], {
+    requestOptions: {signal}, internalOptions: {abortRetirementReason: 'tex_preview_replaced'}
+  })`);
+  signal.aborted = true;
+  h.requests[0].reject(Object.assign(new Error('superseded'), {name: 'AbortError'}));
+  await assert.rejects(retired, /superseded/);
+  assert.equal(h.toasts.length, 0, 'expected preview retirement cannot show a failure notice');
+  assert.equal(h.body.children.length, 0, 'retirement releases pending status');
+
   console.log('gui command controls suite: passed');
 }
 

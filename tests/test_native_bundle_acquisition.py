@@ -91,6 +91,12 @@ def xterm_archives(tmp_path, monkeypatch):
             "integrity": "sha512-" + base64.b64encode(hashlib.sha512(content.getvalue()).digest()).decode()}
     (source / "package.json").write_text(json.dumps({"dependencies": packages[""]["dependencies"]}))
     (source / "package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": packages}))
+    runtime = source / "assets/runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "browser-assets.json").write_bytes(json.dumps({"files": {
+        "static/vendor/" + name: {"sha256": hashlib.sha256(body).hexdigest()}
+        for name, body in expected.items()
+    }}).encode())
     monkeypatch.setattr(native_bundle_acquire, "ROOT", source)
     monkeypatch.setattr(native_bundle_acquire, "SOURCE_LAYOUTS", {})
     monkeypatch.setattr(native_bundle_acquire.urllib.request, "urlopen", lambda url, **kwargs: io.BytesIO(responses[url]))
@@ -115,6 +121,16 @@ def test_xterm_preparation_refuses_archive_that_differs_from_npm_integrity(xterm
     with pytest.raises(ValueError, match="differs from npm lock integrity"):
         native_bundle_acquire.prepare_xterm_fixture(payload, stage, lock_helper)
     assert not (payload / "xterm/node_modules").exists()
+
+
+def test_xterm_preparation_refuses_valid_npm_archive_with_different_source_pin(xterm_archives):
+    payload, stage, lock_helper, _responses, _expected = xterm_archives
+    path = native_bundle_acquire.ROOT / "assets/runtime/browser-assets.json"
+    manifest = json.loads(path.read_bytes())
+    manifest["files"]["static/vendor/xterm.js"]["sha256"] = "0" * 64
+    path.write_bytes(json.dumps(manifest).encode())
+    with pytest.raises(ValueError, match="differs from pinned vendor asset"):
+        native_bundle_acquire.prepare_xterm_fixture(payload, stage, lock_helper)
 
 
 def test_xterm_preparation_cannot_modify_a_published_bundle(xterm_archives):

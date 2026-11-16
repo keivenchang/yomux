@@ -37,25 +37,33 @@ def cdp_release(browser, point):
 
 def wait_for_visible_selector(browser, selector):
     return WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            const node = [...document.querySelectorAll(arguments[0])].find(candidate => {
-              const rect = candidate.getBoundingClientRect();
-              const style = getComputedStyle(candidate);
-              return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
-            });
-            if (!node) return false;
-            node.scrollIntoView?.({block: 'center', inline: 'center'});
-            const rect = node.getBoundingClientRect();
-            return {
-              x: Math.round(rect.left + rect.width / 2),
-              y: Math.round(rect.top + rect.height / 2),
-              width: Math.round(rect.width),
-              height: Math.round(rect.height),
-            };
-            """,
-            selector,
-        )
+        lambda driver: _visible_browser_target_point(driver, selector=selector)
+    )
+
+
+def _visible_browser_target_point(browser, *, panel_id=None, selector=None):
+    return browser.execute_script(
+        """
+        const candidates = arguments[0]
+          ? [document.getElementById(arguments[0])].filter(Boolean)
+          : [...document.querySelectorAll(arguments[1])];
+        const node = candidates.find(candidate => {
+          const rect = candidate.getBoundingClientRect();
+          const style = getComputedStyle(candidate);
+          return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+        });
+        if (!node) return false;
+        if (!arguments[0]) node.scrollIntoView?.({block: 'center', inline: 'center'});
+        const rect = node.getBoundingClientRect();
+        return {
+          x: Math.round(rect.left + rect.width / 2),
+          y: Math.round(rect.top + rect.height / 2),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        };
+        """,
+        panel_id,
+        selector,
     )
 
 
@@ -98,10 +106,6 @@ def _assert_browser_point_hits_target(browser, point, *, panel_id=None, selector
 def _cdp_click_point(browser, point):
     browser.execute_cdp_cmd(
         "Input.dispatchMouseEvent",
-        {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"},
-    )
-    browser.execute_cdp_cmd(
-        "Input.dispatchMouseEvent",
         {
             "type": "mousePressed",
             "x": point["x"],
@@ -124,7 +128,40 @@ def _cdp_click_point(browser, point):
     )
 
 
+def _click_browser_target(browser, point, *, panel_id=None, selector=None):
+    _assert_browser_point_hits_target(browser, point, panel_id=panel_id, selector=selector)
+    browser.execute_cdp_cmd(
+        "Input.dispatchMouseEvent",
+        {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"},
+    )
+    # Hover can rebuild or reorder a live tree. Resolve its semantic target
+    # after that transition, before committing the trusted press.
+    settle_native_frames(browser)
+    point = _visible_browser_target_point(browser, panel_id=panel_id, selector=selector)
+    assert point, f"browser click target disappeared after hover: {panel_id or selector}"
+    _assert_browser_point_hits_target(browser, point, panel_id=panel_id, selector=selector)
+    _cdp_click_point(browser, point)
+
+
 def click_visible_selector(browser, selector):
     point = wait_for_visible_selector(browser, selector)
-    _assert_browser_point_hits_target(browser, point, selector=selector)
-    _cdp_click_point(browser, point)
+    _click_browser_target(browser, point, selector=selector)
+
+
+def terminal_menu_action(driver, point, label):
+    for event in ('mousePressed', 'mouseReleased'):
+        driver.execute_cdp_cmd('Input.dispatchMouseEvent', {
+            'type': event, 'x': point['x'], 'y': point['y'], 'button': 'right', 'clickCount': 1,
+        })
+    item = driver.execute_script("""
+      const buttons=[...document.querySelectorAll('.terminal-context-menu button')];
+      const button=buttons.find(node=>node.textContent.startsWith(arguments[0]));
+      if(!button)return {labels:buttons.map(node=>node.textContent)};
+      const rect=button.getBoundingClientRect(),x=rect.left+rect.width/2,y=rect.top+rect.height/2;
+      return {x,y,interactable:button.contains(document.elementFromPoint(x,y))};
+    """, label)
+    assert item.get('interactable'), {'action':label,'point':point,'item':item}
+    for event in ('mousePressed', 'mouseReleased'):
+        driver.execute_cdp_cmd('Input.dispatchMouseEvent', {
+            'type':event,'x':item['x'],'y':item['y'],'button':'left','clickCount':1,
+        })

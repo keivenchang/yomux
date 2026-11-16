@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException
 from selenium.common.exceptions import WebDriverException
 
@@ -18,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tests.browser_helpers.webdriver_lease import WebDriverLease
+from tools.browser_runtime import resolve_browser_executables
 from yomux_lib.live_browser_soak import evidence_failed
 from yomux_lib.live_browser_soak import record_failure
 from yomux_lib.live_browser_soak import run_soak
@@ -89,13 +91,15 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.clean_soak_artifact is not None:
             raise ValueError("--clean-soak-artifact only applies to --negative-browser-error-probe")
+        browser_tools = resolve_browser_executables()
         options = webdriver.ChromeOptions()
+        options.binary_location = browser_tools.chrome
         options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--ignore-certificate-errors")
         options.set_capability("acceptInsecureCerts", True)
-        driver = webdriver.Chrome(options=options)
+        driver = webdriver.Chrome(service=Service(executable_path=browser_tools.chromedriver), options=options)
         driver.set_page_load_timeout(30)
         driver.set_script_timeout(30)
         phase = "runtime"

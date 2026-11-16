@@ -1,12 +1,12 @@
 {
-  "source_commit": "cf0be86a89df87b7b43d9c2d25979ccf96353d55",
+  "source_commit": "6d10b23a174c71e5b27b5a490230ea06b7d0ca0c",
   "defaults": {
     "appearance": {
       "active_color": "green",
       "date_time_hour_cycle": "24",
       "editor_color_scheme": "dark",
       "editor_cursor_color": "yellow",
-      "editor_cursor_style": "block",
+      "editor_cursor_style": "line",
       "editor_dark_color_scheme": "dark",
       "editor_font_size": 14,
       "editor_light_color_scheme": "yomux-light",
@@ -190,6 +190,12 @@
       "dry_run": false,
       "prompt_source": "hybrid",
       "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+    },
+    "tabber": {
+      "automatic_descriptions": true,
+      "codex_effort": "low",
+      "codex_model": "gpt-6-luna",
+      "description_interval_minutes": 10
     }
   },
   "catalog": {
@@ -415,8 +421,8 @@
         "block",
         "line"
       ],
-      "current": "block",
-      "default": "block",
+      "current": "line",
+      "default": "line",
       "description": "line | block. Cursor shape for TextEditor and ViewEditor.",
       "empty_allowed": false,
       "gui": {
@@ -4613,6 +4619,237 @@
         "section_locale_key": "pref.section.experimental",
         "visible": true
       }
+    },
+    "tabber.automatic_descriptions": {
+      "accepted_choices": [],
+      "aliases": {},
+      "choice_labels": {},
+      "choice_metadata": {},
+      "choices": [],
+      "current": true,
+      "default": true,
+      "description": "Generate short descriptions from changed recent transcripts. Nonempty manual descriptions are protected; clearing one restores automatic naming.",
+      "empty_allowed": false,
+      "gui": {
+        "section": "General",
+        "section_locale_key": "pref.section.general",
+        "visible": true
+      },
+      "hidden_choices": [],
+      "key": "automatic_descriptions",
+      "label": "Automatic descriptions",
+      "limits": null,
+      "list_limit": null,
+      "live_apply": "live",
+      "locale_keys": {
+        "description": "pref.tabber.automatic_descriptions.help",
+        "label": "pref.tabber.automatic_descriptions.label"
+      },
+      "path": "tabber.automatic_descriptions",
+      "read_role": "readonly",
+      "requires_confirmation": false,
+      "section": "tabber",
+      "sensitivity": "normal",
+      "type": "boolean",
+      "units": "",
+      "write_role": "admin"
+    },
+    "tabber.codex_effort": {
+      "accepted_choices": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "aliases": {},
+      "choice_labels": {},
+      "choice_metadata": {},
+      "choices": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "current": "low",
+      "default": "low",
+      "description": "Reasoning effort for automatic Tabber descriptions.",
+      "empty_allowed": false,
+      "gui": {
+        "section": "General",
+        "section_locale_key": "pref.section.general",
+        "visible": true
+      },
+      "hidden_choices": [],
+      "key": "codex_effort",
+      "label": "Codex effort",
+      "limits": null,
+      "list_limit": null,
+      "live_apply": "live",
+      "locale_keys": {
+        "description": "pref.tabber.codex_effort.help",
+        "label": "pref.tabber.codex_effort.label"
+      },
+      "path": "tabber.codex_effort",
+      "read_role": "readonly",
+      "requires_confirmation": false,
+      "section": "tabber",
+      "sensitivity": "normal",
+      "type": "string",
+      "units": "",
+      "write_role": "admin"
+    },
+    "tabber.codex_model": {
+      "accepted_choices": [
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-sol"
+      ],
+      "aliases": {},
+      "choice_labels": {
+        "gpt-5.6-sol": "GPT-5.6-Sol",
+        "gpt-6-astra": "GPT-6-Astra",
+        "gpt-6-luna": "GPT-6-Luna",
+        "gpt-6-sol": "GPT-6-Sol",
+        "gpt-6.1-sol": "GPT-6.1-Sol"
+      },
+      "choice_metadata": {
+        "gpt-5.6-sol": {
+          "default_effort": "medium",
+          "display_name": "GPT-5.6-Sol",
+          "effort_options": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ]
+        },
+        "gpt-6-astra": {
+          "default_effort": "low",
+          "display_name": "GPT-6-Astra",
+          "effort_options": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ]
+        },
+        "gpt-6-luna": {
+          "default_effort": "medium",
+          "display_name": "GPT-6-Luna",
+          "effort_options": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        "gpt-6-sol": {
+          "default_effort": "medium",
+          "display_name": "GPT-6-Sol",
+          "effort_options": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ]
+        },
+        "gpt-6.1-sol": {
+          "default_effort": "medium",
+          "display_name": "GPT-6.1-Sol",
+          "effort_options": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ]
+        }
+      },
+      "choices": [
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-sol"
+      ],
+      "current": "gpt-6-luna",
+      "default": "gpt-6-luna",
+      "description": "Codex model for automatic Tabber descriptions.",
+      "empty_allowed": false,
+      "gui": {
+        "section": "General",
+        "section_locale_key": "pref.section.general",
+        "visible": true
+      },
+      "hidden_choices": [],
+      "key": "codex_model",
+      "label": "Codex model",
+      "limits": null,
+      "list_limit": null,
+      "live_apply": "live",
+      "locale_keys": {
+        "description": "pref.tabber.codex_model.help",
+        "label": "pref.tabber.codex_model.label"
+      },
+      "path": "tabber.codex_model",
+      "read_role": "readonly",
+      "requires_confirmation": false,
+      "section": "tabber",
+      "sensitivity": "normal",
+      "type": "string",
+      "units": "",
+      "write_role": "admin"
+    },
+    "tabber.description_interval_minutes": {
+      "accepted_choices": [],
+      "aliases": {},
+      "choice_labels": {},
+      "choice_metadata": {},
+      "choices": [],
+      "current": 10,
+      "default": 10,
+      "description": "Minimum minutes between automatic description attempts for one physical tmux window.",
+      "empty_allowed": false,
+      "gui": {
+        "section": "General",
+        "section_locale_key": "pref.section.general",
+        "visible": true
+      },
+      "hidden_choices": [],
+      "key": "description_interval_minutes",
+      "label": "Description interval minutes",
+      "limits": {
+        "max": 60,
+        "min": 5
+      },
+      "list_limit": null,
+      "live_apply": "live",
+      "locale_keys": {
+        "description": "pref.tabber.description_interval_minutes.help",
+        "label": "pref.tabber.description_interval_minutes.label"
+      },
+      "path": "tabber.description_interval_minutes",
+      "read_role": "readonly",
+      "requires_confirmation": false,
+      "section": "tabber",
+      "sensitivity": "normal",
+      "type": "integer",
+      "units": "",
+      "write_role": "admin"
     }
   },
   "cases": [
@@ -4624,7 +4861,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -4808,6 +5045,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": []
@@ -4825,7 +5068,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -5009,6 +5252,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": [
@@ -5029,7 +5278,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -5213,6 +5462,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": []
@@ -5231,7 +5486,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -5415,6 +5670,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": []
@@ -5433,7 +5694,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -5617,6 +5878,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": []
@@ -5633,7 +5900,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -5817,6 +6084,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": []
@@ -5833,7 +6106,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -6017,6 +6290,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": []
@@ -6034,7 +6313,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -6218,6 +6497,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": []
@@ -6240,7 +6525,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -6423,6 +6708,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": [
@@ -6445,7 +6736,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -6628,6 +6919,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": [
@@ -6649,7 +6946,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -6833,6 +7130,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": [
@@ -6857,7 +7160,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -7042,6 +7345,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": [
@@ -7061,7 +7370,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -7245,6 +7554,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": [
@@ -7270,7 +7585,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -7457,6 +7772,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": [
@@ -7477,7 +7798,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -7661,6 +7982,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": [
@@ -7683,7 +8010,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -7867,6 +8194,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": [
@@ -7887,7 +8220,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -8071,6 +8404,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": []
@@ -8087,7 +8426,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -8271,6 +8610,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": [
@@ -8289,7 +8634,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -8473,6 +8818,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": []
@@ -8489,7 +8840,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -8673,6 +9024,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": [
@@ -8691,7 +9048,7 @@
           "date_time_hour_cycle": "24",
           "editor_color_scheme": "dark",
           "editor_cursor_color": "yellow",
-          "editor_cursor_style": "block",
+          "editor_cursor_style": "line",
           "editor_dark_color_scheme": "dark",
           "editor_font_size": 14,
           "editor_light_color_scheme": "yomux-light",
@@ -8875,6 +9232,12 @@
           "dry_run": false,
           "prompt_source": "hybrid",
           "rule_file_path": "~/.config/yomux/yolo-rules.yaml"
+        },
+        "tabber": {
+          "automatic_descriptions": true,
+          "codex_effort": "low",
+          "codex_model": "gpt-6-luna",
+          "description_interval_minutes": 10
         }
       },
       "coerced": [

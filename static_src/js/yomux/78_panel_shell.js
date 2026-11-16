@@ -1868,10 +1868,23 @@ function sessionMetadataIncarnationMatches(nextInfo, previousInfo) {
   return typeof nextIdentity === 'string' && nextIdentity === previousIdentity;
 }
 
-function mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousInfo) {
-  if (!sessionMetadataIsLightweight(nextInfo)
-      || !previousInfo || typeof previousInfo !== 'object'
+function mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousInfo, options = {}) {
+  const nextIdentity = options.nextIdentity;
+  const previousIdentity = sessionMetadataPayloadIdentity(previousInfo) || options.previousIdentity;
+  // Root payloads can combine rows from different builds. Retain each row's
+  // actual provenance through both the direct and activity metadata paths.
+  if (nextIdentity && nextInfo && typeof nextInfo === 'object') nextInfo = {...nextInfo, metadata_identity: nextIdentity};
+  if (!previousInfo || typeof previousInfo !== 'object'
       || !sessionMetadataIncarnationMatches(nextInfo, previousInfo)) return nextInfo;
+  if (nextIdentity && previousIdentity) {
+    if (nextIdentity.epoch !== previousIdentity.epoch) return nextInfo;
+    if (nextIdentity.generation < previousIdentity.generation) return previousInfo;
+  }
+  // An acknowledged mutation can precede the build that publishes its new
+  // details. Activity still brings useful roster/recency data during that gap.
+  if (nextIdentity?.epoch === transcriptMetadataState.epoch
+      && nextIdentity.generation < transcriptMetadataState.mutationGeneration) return previousInfo;
+  if (!sessionMetadataIsLightweight(nextInfo)) return nextInfo;
   const preservePublishedDetails = nextInfo.work_graph?.loading === true
     && typeof nextInfo.session_identity === 'string'
     && nextInfo.session_identity === previousInfo.session_identity;
@@ -1882,6 +1895,7 @@ function mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousInfo) {
       selected_pane: Object.prototype.hasOwnProperty.call(previousInfo, 'selected_pane') ? previousInfo.selected_pane : nextInfo.selected_pane,
       agents: Array.isArray(previousInfo.agents) ? previousInfo.agents : nextInfo.agents,
       window_metadata: Array.isArray(previousInfo.window_metadata) ? previousInfo.window_metadata : nextInfo.window_metadata,
+      ...(previousIdentity ? {metadata_identity: previousIdentity} : {}),
     } : {}),
     work_graph: previousInfo.work_graph || nextInfo.work_graph,
     metadata_loading: true,
@@ -1891,9 +1905,10 @@ function mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousInfo) {
 function transcriptPayloadWithPriorSessionMetadata(payload, previousPayload = transcriptMetadataState.payload) {
   if (!payload || typeof payload !== 'object' || !(payload.sessions && typeof payload.sessions === 'object')) return payload;
   const previousSessions = previousPayload?.sessions && typeof previousPayload.sessions === 'object' ? previousPayload.sessions : {};
+  const identities = {nextIdentity: sessionMetadataPayloadIdentity(payload), previousIdentity: sessionMetadataPayloadIdentity(previousPayload)};
   let nextSessions = null;
   for (const [session, nextInfo] of Object.entries(payload.sessions)) {
-    const merged = mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousSessions[session]);
+    const merged = mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousSessions[session], identities);
     if (merged === nextInfo) continue;
     if (!nextSessions) nextSessions = {...payload.sessions};
     nextSessions[session] = merged;

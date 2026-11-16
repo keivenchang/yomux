@@ -340,9 +340,8 @@
   --popover-hide-delay: 120ms;
   --popover-edge-gap: 1vw;
   --popover-max-inline-size: calc(100vw - var(--popover-edge-gap) - var(--popover-edge-gap));
+  --context-menu-max-inline-size: min(60ch, var(--popover-max-inline-size));
   --context-menu-direction-count: 4;
-  --context-menu-action-column-count: calc(var(--context-menu-direction-count) + 1);
-  --context-menu-compact-inline-size: min(calc(var(--touch-target-min-size) * var(--context-menu-action-column-count)), var(--popover-max-inline-size));
   --context-menu-max-block-size: var(--app-menu-max-block-size);
   --dialog-compact-inline-size: 80ch;
   --dialog-standard-inline-size: 112ch;
@@ -1470,7 +1469,8 @@ body.editor-theme-light {
 .finder-move-source,
 .finder-move-target,
 .finder-move-dialog .file-editor-dialog-body,
-.file-get-info dd {
+.file-get-info dd,
+.tex-preview-instructions {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1649,6 +1649,7 @@ body.editor-theme-light {
 .file-explorer-panel-meta,
 .js-debug-logs-toolbar,
 .js-debug-log-levels,
+.pdf-preview-body > .file-editor-preview-fallback,
 .js-debug-log-meta {
   display: flex;
   align-items: center;
@@ -1698,7 +1699,8 @@ body.editor-theme-light {
 }
 .js-debug-summary,
 .js-debug-actions,
-.yoagent-job-controls {
+.yoagent-job-controls,
+.tex-preview-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-6);

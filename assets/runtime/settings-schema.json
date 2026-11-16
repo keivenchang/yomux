@@ -25,7 +25,7 @@
       "editor_color_scheme": "dark",
       "editor_dark_color_scheme": "dark",
       "editor_light_color_scheme": "yomux-light",
-      "editor_cursor_style": "block",
+      "editor_cursor_style": "line",
       "editor_cursor_color": "yellow",
       "file_explorer_font_size": 12,
       "tab_width": 172,
@@ -189,6 +189,12 @@
       "rule_file_path": "~/.config/yomux/yolo-rules.yaml",
       "dry_run": false,
       "prompt_source": "hybrid"
+    },
+    "tabber": {
+      "automatic_descriptions": true,
+      "codex_model": "gpt-6-luna",
+      "codex_effort": "low",
+      "description_interval_minutes": 10
     }
   },
   "LEGACY_YOAGENT_DEFAULTS": {
@@ -403,6 +409,10 @@
     "editor.cursor_blink_delay_ms": [
       0,
       2000
+    ],
+    "tabber.description_interval_minutes": [
+      5,
+      60
     ]
   },
   "STRING_ALLOW_EMPTY": [],
@@ -637,6 +647,21 @@
     "yolo.prompt_source": [
       "hybrid",
       "pane"
+    ],
+    "tabber.codex_model": [
+      "gpt-5.6-sol",
+      "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
+      "gpt-6.1-sol"
+    ],
+    "tabber.codex_effort": [
+      "high",
+      "low",
+      "medium",
+      "xhigh",
+      "max",
+      "ultra"
     ]
   },
   "SETTING_PAYLOAD_CHOICE_ORDER": {
@@ -787,6 +812,21 @@
       "gpt-6-sol",
       "gpt-6-luna",
       "gpt-5.6-sol"
+    ],
+    "tabber.codex_model": [
+      "gpt-6.1-sol",
+      "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
+      "gpt-5.6-sol"
+    ],
+    "tabber.codex_effort": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
     ]
   },
   "SETTING_HIDDEN_CHOICES": {
@@ -901,7 +941,11 @@
     "yolo.dry_run": "true/false. Log rule decisions without acting.",
     "yolo.prompt_source": "pane | hybrid. pane uses visible tmux detection only; hybrid lets recent transcript JSONL rescue prompt type/command only when a selectable prompt is visible.",
     "editor.cursor_blink_delay_ms": "Milliseconds between cursor blink phases for TextEditor, ViewEditor, and cursor examples. 0 keeps the cursor static. Default 600.",
-    "general.enable_experimental_features": "Show YO!chat, YO!agent, and YO!info in File and Tabs."
+    "general.enable_experimental_features": "Show YO!chat, YO!agent, and YO!info in File and Tabs.",
+    "tabber.automatic_descriptions": "Generate short descriptions from changed recent transcripts. Nonempty manual descriptions are protected; clearing one restores automatic naming.",
+    "tabber.codex_model": "Codex model for automatic Tabber descriptions.",
+    "tabber.codex_effort": "Reasoning effort for automatic Tabber descriptions.",
+    "tabber.description_interval_minutes": "Minimum minutes between automatic description attempts for one physical tmux window."
   },
   "SETTING_GUI_SECTIONS": {
     "general.language": "General",
@@ -997,7 +1041,11 @@
     "yoagent.intro": "YO!agent",
     "yoagent.format": "YO!agent",
     "editor.cursor_blink_delay_ms": "Editor options",
-    "general.enable_experimental_features": "Experimental"
+    "general.enable_experimental_features": "Experimental",
+    "tabber.automatic_descriptions": "General",
+    "tabber.codex_model": "General",
+    "tabber.codex_effort": "General",
+    "tabber.description_interval_minutes": "General"
   },
   "SETTING_GUI_SECTION_LOCALE_KEYS": {
     "Appearance": "pref.section.sizes",

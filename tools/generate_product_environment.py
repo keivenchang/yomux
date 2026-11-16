@@ -22,7 +22,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--sync-installed", action="store_true", help="refresh the installed shared launcher owner")
+    parser.add_argument("--check-installed", action="store_true", help="also audit the user-installed launcher owner")
     args = parser.parse_args()
+    args.check = args.check or args.check_installed
     namespace = json.loads((ROOT / "tools/product_namespace.json").read_text())
     path = ROOT / "tools/product_environment.sh"
     installed_path = Path.home() / "dev/ai-config/agents/skills/yomux-dev-start/scripts/environment.sh"
@@ -38,7 +40,7 @@ def main() -> int:
         if expected != source:
             print("product environment shell namespace is stale; run tools/generate_product_environment.py")
             return 1
-        if installed_path.exists() and installed_path.read_text() != source:
+        if args.check_installed and installed_path.exists() and installed_path.read_text() != source:
             print("installed launcher owner is stale; run tools/generate_product_environment.py --sync-installed")
             return 1
     else:

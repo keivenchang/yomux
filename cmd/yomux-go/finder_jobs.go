@@ -230,11 +230,19 @@ func (s *server) enqueueFinderJSONWithScheduler(w http.ResponseWriter, ctx conte
 	jsonResponse(w, http.StatusAccepted, record.Receipt)
 }
 
+type pendingFinderDeletion struct{ deletion *finder.Deletion }
+
 func (s *server) enqueueFinderDelete(w http.ResponseWriter, ctx context.Context, path string, recursive bool) {
 	if s.finderJobs == nil || s.events == nil {
-		payload, finderErr := s.finder.Delete(ctx, path, recursive)
+		deletion, finderErr := s.finder.PrepareDeletion(ctx, path)
+		if finderErr != nil {
+			finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
+			return
+		}
+		defer deletion.Close()
+		payload, finderErr := deletion.Delete(ctx, recursive)
 		if finderErr == nil && !recursive && payload["pending"] == "subtree" {
-			payload, finderErr = s.finder.Delete(ctx, path, true)
+			payload, finderErr = deletion.Delete(ctx, true)
 		}
 		finderHTTPJSON(w, finderRequestIDForHTTP(), payload, finderErr)
 		return
@@ -258,7 +266,21 @@ func (s *server) enqueueFinderDelete(w http.ResponseWriter, ctx context.Context,
 		return
 	}
 	result, err := scheduler.Submit(jobContext, id, func(ctx context.Context) (any, error) {
-		payload, finderErr := s.finder.Delete(ctx, path, recursive)
+		deletion, finderErr := s.finder.PrepareDeletion(ctx, path)
+		if finderErr != nil {
+			return finderErr, nil
+		}
+		transferred := false
+		defer func() {
+			if !transferred {
+				deletion.Close()
+			}
+		}()
+		payload, finderErr := deletion.Delete(ctx, recursive)
+		if finderErr == nil && payload["pending"] == "subtree" {
+			transferred = true
+			return pendingFinderDeletion{deletion}, nil
+		}
 		if finderErr != nil {
 			return finderErr, nil
 		}
@@ -271,7 +293,12 @@ func (s *server) enqueueFinderDelete(w http.ResponseWriter, ctx context.Context,
 		jsonResponse(w, http.StatusServiceUnavailable, failure)
 		return
 	}
-	if !s.startFinderCompletion(w, id, cancel, func() { s.finishFinderDeleteOperation(id, requestID, path, result, jobContext, cancel) }) {
+	if !s.startFinderCompletion(w, id, cancel, func() { s.finishFinderDeleteOperation(id, requestID, result, jobContext, cancel) }) {
+		// Admission can close after submit. Retire the canceled worker before
+		// releasing any descriptor it transfers through its result.
+		if pending, ok := (<-result).Value.(pendingFinderDeletion); ok {
+			pending.deletion.Close()
+		}
 		return
 	}
 	record := s.operationRecord(id)
@@ -282,7 +309,7 @@ func (s *server) enqueueFinderDelete(w http.ResponseWriter, ctx context.Context,
 	jsonResponse(w, http.StatusAccepted, record.Receipt)
 }
 
-func (s *server) finishFinderDeleteOperation(id, requestID, path string, result <-chan work.Result, ctx context.Context, cancel context.CancelFunc) {
+func (s *server) finishFinderDeleteOperation(id, requestID string, result <-chan work.Result, ctx context.Context, cancel context.CancelFunc) {
 	defer cancel()
 	completed := <-result
 	if completed.Err != nil {
@@ -295,20 +322,15 @@ func (s *server) finishFinderDeleteOperation(id, requestID, path string, result 
 		_, _ = s.terminalizeOperation(id, payload, status)
 		return
 	}
-	payload, ok := completed.Value.(map[string]any)
-	if !ok {
-		failure, status := finderJSONCompletion(requestID, work.Result{Err: errors.New("finder delete returned an invalid result")})
-		_, _ = s.terminalizeOperation(id, failure, status)
-		return
-	}
-	if payload["pending"] == "subtree" {
+	if pending, ok := completed.Value.(pendingFinderDeletion); ok {
+		defer pending.deletion.Close()
 		if s.finderBulkJobs == nil {
 			failure := finderJobFailure(work.ErrClosed)
 			_, _ = s.terminalizeOperation(id, failure, http.StatusServiceUnavailable)
 			return
 		}
 		bulkResult, err := s.finderBulkJobs.Submit(ctx, id, func(ctx context.Context) (any, error) {
-			payload, finderErr := s.finder.Delete(ctx, path, true)
+			payload, finderErr := pending.deletion.Delete(ctx, true)
 			if finderErr != nil {
 				return finderErr, nil
 			}

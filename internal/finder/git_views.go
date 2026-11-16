@@ -30,6 +30,12 @@ const gitViewTimeout = 30 * time.Second
 var gitRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$`)
 var blamePR = regexp.MustCompile(`\(#([0-9]+)\)`)
 
+// GitReadEnvironment keeps repository reads independent of operator configuration
+// and ambient repository redirection, including during noninteractive startup.
+func GitReadEnvironment() []string {
+	return gitCommandEnvironment()
+}
+
 func gitCommandEnvironment() []string {
 	environment := make([]string, 0, len(os.Environ())+9)
 	for _, entry := range os.Environ() {

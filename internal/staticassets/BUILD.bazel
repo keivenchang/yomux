@@ -8,6 +8,7 @@ go_library(
     srcs = [
         "build.go",
         "validate.go",
+        "vendor.go",
     ],
     importpath = "github.com/keivenchang/yomux/internal/staticassets",
     visibility = ["//:__subpackages__"],
@@ -20,10 +21,16 @@ go_library(
 
 go_test_pair(
     name = "staticassets",
-    srcs = ["build_test.go"],
+    srcs = [
+        "build_test.go",
+        "vendor_test.go",
+    ],
     data = ["//:static_builder_test_inputs"],
     embed = [":staticassets_lib"],
-    deps = ["@rules_go//go/runfiles"],
+    deps = [
+        "//internal/atomicfile:atomicfile_lib",
+        "@rules_go//go/runfiles",
+    ],
 )
 
 filegroup(
