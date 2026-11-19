@@ -4405,6 +4405,7 @@ function setFocusedTerminalMeasured(session, options = {}) {
   if (previousItem !== session && !dockviewLayoutActive()) capturePaneViewStateForItemIfPresent(previousItem);
   focusedTerminal = session;
   focusedPanelItem = session;
+  scheduleVisibleTerminalResizeAuthority();
   rememberActivePaneItem(session);
   clearPendingFileEditorFocusExcept(session);
   if (isTmuxSession(session)) lastFocusedTmuxSession = session;
@@ -4473,6 +4474,7 @@ function setFocusedPanelItem(item, options = {}) {
   if (previousItem !== item && !dockviewLayoutActive()) capturePaneViewStateForItemIfPresent(previousItem);
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
+  if (!isTmuxSession(item)) clearTerminalResizeAuthorityFocus();
   rememberActivePaneItem(item);
   dismissNotificationsForTarget(item);
   clearPendingFileEditorFocusExcept(item);
@@ -8310,7 +8312,7 @@ function showTabContextMenu(item, x, y, options = {}) {
   closeFileContextMenu();
   closeOtherSessionPopovers(null);
   const menu = document.createElement('div');
-  menu.className = `terminal-context-menu session-context-menu context-menu-icon-rows${options.presentation === 'sheet' ? ' tab-action-sheet' : ''}`;
+  menu.className = `terminal-context-menu session-context-menu context-menu-icon-rows${isFileEditorItem(item) ? ' file-context-menu' : ''}${options.presentation === 'sheet' ? ' tab-action-sheet' : ''}`;
   menu.setAttribute('role', 'menu');
   const refreshPosition = () => positionContextMenu(menu, x, y);
   const appendDescription = () => {
@@ -8356,6 +8358,9 @@ function showTabContextMenu(item, x, y, options = {}) {
     }
     if (options.descriptionWindow == null) appendContextMenuSeparator(menu);
     appendTabActionCommands(menu, item, options);
+    if (isFileEditorItem(item) && options.descriptionWindow == null) {
+      appendOpenFileTabContextMenuActions(menu, item, refreshPosition);
+    }
     refreshPosition();
   };
   renderActions();

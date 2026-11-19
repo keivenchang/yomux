@@ -341,7 +341,7 @@ func TestGoYoloApprovalUsesRulesAndVerifiesSubmission(t *testing.T) {
 	if err := store.set("codex-session", true, "socket\t$1\t100\t10"); err != nil {
 		t.Fatal(err)
 	}
-	visible := "Would you like to run the following command?\n\n$ touch /tmp/yolo-fixture\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for commands that start with `touch /tmp/yolo-fixture` (p)\n  3. No, and tell Codex what to do differently (esc)\n\nPress enter to confirm or esc to cancel"
+	visible := "Would you like to run the following command?\n\nEnvironment: local\n\n$ touch /tmp/yolo-fixture\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for commands that start with `touch /tmp/yolo-fixture` (p)\n  3. No, and tell Codex what to do differently (esc)\n\nPress enter to confirm or esc to cancel"
 	state := "needs-input"
 	sends := make([]string, 0, 3)
 	processIdentity := goYoloTestProcessID(99, "fixture")
@@ -444,6 +444,14 @@ func TestGoYoloApprovalDryRunAndAmbiguousPromptSendNoInput(t *testing.T) {
 	}
 	if yolo.ClassifyPrompt(visible+"\nCompleted successfully", "").Actionable {
 		t.Fatal("stale approval menu followed by successful output remained actionable")
+	}
+	multiline := strings.Replace(visible, "$ touch /tmp/yolo-fixture", "Environment: local\n$ bash -c 'printf hello\nprintf world'", 1)
+	prompt = yolo.ClassifyPrompt(multiline, "")
+	if err := s.goYoloApprovalCycle(context.Background(), "codex-session", "%1", "identity", map[string]any{}, prompt); err != nil {
+		t.Fatal(err)
+	}
+	if sends != 0 || store.lastAction["codex-session"] != "left prompt for manual approval: multiline Codex command" {
+		t.Fatalf("multiline prompt sent %d keys and reported %q", sends, store.lastAction["codex-session"])
 	}
 }
 
@@ -925,6 +933,7 @@ func TestGoYoloWorkerStatusPreservesSuspendedAndDryRunStates(t *testing.T) {
 		state  string
 	}{
 		{action: "suspended: fresh status unavailable", state: "suspended"},
+		{action: "left prompt for manual approval: multiline Codex command", state: "manual-approval"},
 		{action: "dry-run: would submit continue", state: "dry-run"},
 		{action: "capacity recovery submission sent; agent response not yet confirmed", state: "awaiting-confirmation"},
 		{action: "submitted continue", state: "watching"},

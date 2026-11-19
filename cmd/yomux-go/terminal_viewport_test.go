@@ -324,3 +324,125 @@ func TestTerminalResizeDoesNotOverwriteAnotherServersNavigation(t *testing.T) {
 		t.Fatalf("foreign input overwritten: wanted=%+v after=%+v err=%v", navigated, after, err)
 	}
 }
+
+func TestTerminalResizeWindowSwitchBeforeIOCTLDoesNotResizeDestination(t *testing.T) {
+	runtime, err := testsupport.MkdirShortTemp("tv-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtime) })
+	socket := filepath.Join(runtime, "tmux.sock")
+	t.Setenv("YOMUX_TMUX_SOCKET", socket)
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	s := &server{ignoreSizeChecked: true, ignoreSizeSupported: true}
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := s.tmuxCommand(args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("private tmux %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("-f", os.DevNull, "new-session", "-d", "-s", "source", "-x", "80", "-y", "24", "exec cat")
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+	run("new-window", "-d", "-t", "=source:", "exec cat")
+	run("new-session", "-d", "-s", "alias", "-t", "source")
+	run("select-window", "-t", "=alias:1")
+	run("set-option", "-g", "status", "off")
+	for _, target := range []string{"=source:0", "=source:1"} {
+		run("set-option", "-w", "-t", target, "window-size", "largest")
+	}
+	attach := func(session string, cols, rows int) (*ptyPair, *exec.Cmd) {
+		t.Helper()
+		pair, err := openPTY(rows, cols)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(pair.close)
+		clientCtx, cancelClient := context.WithCancel(context.Background())
+		client := s.tmuxCommandContext(clientCtx, "attach-session", "-f", "ignore-size", "-t", s.exactTarget(session))
+		client.SysProcAttr = terminalProcessAttributes()
+		client.Env = append(client.Env, "TERM=xterm-256color")
+		client.Stdin, client.Stdout, client.Stderr = pair.slave, pair.slave, pair.slave
+		if err := client.Start(); err != nil {
+			cancelClient()
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { cancelClient(); _ = client.Wait() })
+		go func() { _, _ = io.Copy(io.Discard, pair.master) }()
+		waitFixtureCondition(t, "attached "+session, time.Second, func() bool {
+			return strings.Contains(run("list-clients", "-F", "#{client_tty}"), pair.tty)
+		})
+		return pair, client
+	}
+	source, sourceClient := attach("source", 80, 24)
+	destination, _ := attach("alias", 100, 40)
+	sourceToken, err := newTerminalResizeClaim()
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationToken, err := newTerminalResizeClaim()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceWindow := run("display-message", "-p", "-t", "=source:", "#{window_id}")
+	destinationWindow := run("display-message", "-p", "-t", "=alias:", "#{window_id}")
+	if sourceWindow == destinationWindow {
+		t.Fatal("fixture did not select independent linked-session windows")
+	}
+	for _, owner := range []struct {
+		session       string
+		pair          *ptyPair
+		cols, rows    int
+		token, window string
+	}{
+		{"source", source, 80, 24, sourceToken, sourceWindow},
+		{"alias", destination, 100, 40, destinationToken, destinationWindow},
+	} {
+		if err := s.claimResizeAuthority(context.Background(), owner.session, owner.pair.tty, owner.cols, owner.rows,
+			terminalAuthorityClaim{token: owner.token, window: owner.window}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFixtureCondition(t, "destination owner dimensions", time.Second, func() bool {
+		return run("display-message", "-p", "-t", "=alias:", "#{window_width} #{window_height}") == "100 40"
+	})
+	var result terminalAuthorityResult
+	called, fenced := false, false
+	err = s.resizeTerminalNative(context.Background(), "source", source.tty, 150, 60, func(rows, cols int) error {
+		called = true
+		for _, line := range strings.Split(run("list-clients", "-F", "#{client_tty}\t#{client_flags}"), "\n") {
+			fields := strings.Split(line, "\t")
+			if len(fields) == 2 && fields[0] == source.tty {
+				fenced = strings.Contains(fields[1], "ignore-size")
+			}
+		}
+		// Move after the production census and immediately before the stale PTY write.
+		run("select-window", "-t", "=source:1")
+		if err := source.resize(rows, cols); err != nil {
+			return err
+		}
+		return sourceClient.Process.Signal(syscall.SIGWINCH)
+	}, true, terminalAuthorityClaim{token: sourceToken, window: sourceWindow, result: &result, continuing: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("fixture did not exercise the pre-ioctl window switch")
+	}
+	waitFixtureCondition(t, "stale client consumed PTY dimensions", time.Second, func() bool {
+		return strings.Contains(run("list-clients", "-F", "#{client_tty}\t#{client_width}\t#{client_height}"), source.tty+"\t150\t60")
+	})
+	if got := run("display-message", "-p", "-t", "=alias:", "#{window_width} #{window_height}"); got != "100 40" {
+		t.Fatalf("stale resize crossed the physical-window boundary: got=%s expected=100 40 fenced=%v", got, fenced)
+	}
+	if !fenced {
+		t.Fatal("private client still participated in sizing during the PTY mutation")
+	}
+	if result.window != "" {
+		t.Fatalf("stale resize published ownership of %s", result.window)
+	}
+	if got := run("show-options", "-wv", "-t", destinationWindow, "@yomux_resize_authority"); got != destinationToken {
+		t.Fatalf("stale resize replaced the destination owner: %s", got)
+	}
+}

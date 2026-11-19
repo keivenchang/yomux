@@ -92,7 +92,7 @@ func (s *server) awaitTerminalClientSize(ctx context.Context, tty, window string
 
 // tmux owns copy-mode reflow. Repositioning its cursor here can overwrite input
 // from another YOmux server or a native tmux client, which cannot be fenced locally.
-func (s *server) resizeTerminalNative(ctx context.Context, session, tty string, cols, rows int, resize func(int, int) error, authority bool, claims ...string) error {
+func (s *server) resizeTerminalNative(ctx context.Context, session, tty string, cols, rows int, resize func(int, int) error, authority bool, claims ...terminalAuthorityClaim) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -103,6 +103,32 @@ func (s *server) resizeTerminalNative(ctx context.Context, session, tty string, 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if len(claims) > 0 && claims[0].window != "" && len(panes) > 0 && panes[0].window != claims[0].window {
+		return nil
+	}
+	if authority && tty != "" && s.supportsIgnoreSize(ctx) {
+		if len(claims) == 0 {
+			token, err := newTerminalResizeClaim()
+			if err != nil {
+				return err
+			}
+			claims = []terminalAuthorityClaim{{token: token}}
+		}
+		if claims[0].window == "" && len(panes) > 0 {
+			claims[0].window = panes[0].window
+		}
+		var prepared terminalAuthorityResult
+		preparation := claims[0]
+		preparation.appearance, preparation.result, preparation.prepare = nil, &prepared, true
+		// ioctl follows a tmux-side exclusion, so select-window cannot redirect
+		// stale PTY dimensions into another browser's newly claimed window.
+		if err := s.claimResizeAuthority(ctx, session, tty, cols, rows, preparation); err != nil {
+			return err
+		}
+		if prepared.window == "" {
+			return nil
+		}
+	}
 	if err := resize(rows, cols); err != nil {
 		return err
 	}
@@ -112,6 +138,9 @@ func (s *server) resizeTerminalNative(ctx context.Context, session, tty string, 
 	if authority {
 		if err := s.claimResizeAuthority(ctx, session, tty, cols, rows, claims...); err != nil {
 			return err
+		}
+		if len(claims) > 0 && claims[0].result != nil && claims[0].result.window == "" {
+			return nil
 		}
 		if len(panes) > 0 {
 			return s.awaitTerminalClientSize(ctx, tty, panes[0].window, cols, rows)

@@ -2074,7 +2074,7 @@ globalThis.__layoutTestApi = {
   commandPaletteMatches,
   openFileQuickOpen,
   testElementForId(id) { return document.getElementById(id); },
-  registerTerminalForTest(session, term, socket = {readyState: WebSocket.OPEN}) {
+  registerTerminalForTest(session, term, socket = {readyState: WebSocket.OPEN, send() {}}) {
     const item = {term, socket, container: document.getElementById('terminal-pane-' + session), sessionLifecycleToken: tmuxSessionLifecycleToken(session)};
     terminals.set(session, item);
     return item;
@@ -2492,6 +2492,10 @@ globalThis.__layoutTestApi = {
   terminalThemeForGlobalTheme,
   terminalRenderThemeForGlobalTheme,
   terminalThemeForSession,
+  terminalFocusAppearance,
+  terminalCursorColorsForSession,
+  installTerminalCursorOutput,
+  setBadConnectionCursorState,
   terminalMinimumContrastRatio,
   setFileEditorCursorColorForTest(value) { fileEditorCursorColor = normalizeEditorCursorColor(value); },
   setFocusedPanelItemValueForTest(value) { focusedPanelItem = value; },

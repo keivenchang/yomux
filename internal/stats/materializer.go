@@ -923,13 +923,16 @@ func addObservation(b *MaterializedBucket, o Observation) bool {
 		}
 	case "browser":
 		kind, _ := p["kind"].(string)
+		endpoint, _ := p["endpoint"].(string)
 		if kind == "api" || kind == "sse" {
 			add("browser_"+kind+"_per_second", "rate_average_sources", 1)
 		}
 		if v, ok := num("latency_ms"); ok {
 			add("browser_latency_ms", "average_sources", v)
 			// Retain the legacy mixed series for historical readers. New charts use typed measurements.
-			if name := map[string]string{"heartbeat": "browser_ping_rtt_ms", "api": "browser_api_duration_ms", "sse": "browser_sse_publication_age_ms"}[kind]; name != "" && (kind != "heartbeat" || v > 0) {
+			// Keep the ping endpoint out of non-ping HTTP latency. It remains in API request counts,
+			// and its dedicated heartbeat observation supplies the ping RTT series.
+			if name := map[string]string{"heartbeat": "browser_ping_rtt_ms", "api": "browser_api_duration_ms", "sse": "browser_sse_publication_age_ms"}[kind]; name != "" && (kind != "heartbeat" || v > 0) && !(kind == "api" && endpoint == "/api/ping") {
 				add(name, "average_sources", v)
 			}
 			m := map[string]string{"finder_usable": "browser_finder_usable_ms", "interaction": "browser_input_latency_ms", "operation_wait": "browser_operation_wait_ms", "long_task": "browser_long_task_ms"}

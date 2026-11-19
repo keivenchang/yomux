@@ -53,16 +53,17 @@ let passed = 0;
 let failed = 0;
 const pending = [];
 
-test('client timings share one chart with a separate seconds axis for SSE age', () => {
+test('client timings show ping and non-ping latency on one millisecond axis', () => {
   const start = source.indexOf('const jsDebugGraphChartGroups =');
   const end = source.indexOf('const jsDebugGraphChartControlItems', start);
   const context = {jsDebugStatsFamilyManifest: {agent_status: {cadenceSeconds: 1}},
     jsDebugAgentStatusSeriesKeys: [], jsDebugAgentStatusLegendSeriesKeys: [], jsDebugGraphAgentTokenBucketSeconds: 60};
   vm.runInNewContext(`${source.slice(start, end)}; result = jsDebugGraphChartGroups.filter(group =>
-    group.series.some(key => ['latency', 'apiDuration', 'sseAge'].includes(key)));`, context);
+    group.series.some(key => ['latency', 'apiDuration'].includes(key)));`, context);
   assert.equal(context.result.length, 1);
-  assert.deepEqual([...context.result[0].series].sort(), ['apiDuration', 'latency', 'sseAge']);
-  assert.equal(context.result[0].secondaryUnit, 'seconds');
+  assert.deepEqual([...context.result[0].series].sort(), ['apiDuration', 'latency']);
+  assert.equal(context.result[0].secondaryUnit, undefined);
+  assert.equal(context.result[0].timingUnits, true);
 });
 
 test('timing axes never borrow the millisecond scale', () => {
@@ -1312,7 +1313,7 @@ test('chart legends distinguish filled area keys from thin line keys', () => {
   assert.match(context.result[0], /<span class="js-debug-legend-area"/);
   assert.doesNotMatch(context.result[0], /<svg/);
   assert.match(context.result[1], /<svg class="js-debug-legend-line"/);
-  assert.match(sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale'), /debugGraphLegendHtml\(renderedLegendSeries, \{kind: group\.kind, timingUnits: Boolean\(group\.secondaryUnit\)\}\)/);
+  assert.match(sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale'), /debugGraphLegendHtml\(renderedLegendSeries, \{kind: group\.kind, timingUnits: Boolean\(group\.timingUnits \|\| group\.secondaryUnit\)\}\)/);
   assert.match(css, /\.js-debug-legend-area\s*\{[^}]*width:\s*18px[^}]*height:\s*6px/);
 });
 

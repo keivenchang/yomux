@@ -4033,6 +4033,13 @@ async function runLayoutRestoreSuite() {
     assert.match(queuedQuestionLeading, /session-tab-status-and-markers[\s\S]*session-tab-queued-question[^>]*>ASK</, '#7: queued Codex questions place red ASK in the leading status group');
     assert.ok(queuedQuestionLeading.indexOf('agent-window-status-dot') < queuedQuestionLeading.indexOf('ASK'), '#7: ASK follows the status circle');
     assert.ok(queuedQuestionTab.indexOf('ASK') < queuedQuestionTab.indexOf('session-button-prefix'), '#7: ASK appears before the session title text');
+    api.setAutoApproveStateForTest('5', {
+      enabled: true,
+      worker_state: 'manual-approval',
+      last_action: 'left prompt for manual approval: multiline Codex command',
+    });
+    const manualApprovalTab = api.tmuxPaneTabHtml('5', queuedQuestionInfo, {key: 'needs-approval', label: 'Needs approval', reason: 'approval is waiting'}, true);
+    assert.match(manualApprovalTab, /session-yolo-marker active[^>]*title="YOLO on here for 5; left prompt for manual approval: multiline Codex command"/, 'enabled YO marker explains the Go worker’s manual approval status');
     const noQueuedQuestionTab = api.tmuxPaneTabHtml('5', {agents: [{kind: 'codex', state: 'working'}]}, {key: 'working', label: 'Working', reason: 'agent is working'}, false);
     assert.equal(noQueuedQuestionTab.includes('ASK'), false, '#7: working Codex panes without a queued question keep the normal title');
     for (const [key, label, marker] of [['blocked', 'Blocked', 'BLK'], ['tests-running', 'Tests running', 'TEST'], ['disconnected', 'Disconnected', 'OFF'], ['yolo-approval', 'YOLO pending approval', 'YOLO?']]) {

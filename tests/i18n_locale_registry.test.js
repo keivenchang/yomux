@@ -254,7 +254,7 @@ async function runI18nLocaleRegistrySuite() {
   });
   await testAsync('locale registry normalizes locales and relocalizes global chrome', async () => {
   const api = context.api;
-  assert.equal(englishCatalog['app.latencyTitle'], 'Browser ↔ YOmux round-trip latency (ms)', 'latency hover explains browser round-trip units');
+  assert.equal(englishCatalog['app.latencyTitle'], 'Ping', 'latency hover uses the current Ping label');
   assert.deepEqual([...api.i18nSupportedLocales()], ['en', 'he', 'pt-BR']);
   assert.deepEqual(
     [...api.i18nLocaleChoices()].map(choice => [choice.value, choice.label]),

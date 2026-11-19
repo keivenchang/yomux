@@ -49,6 +49,7 @@ type Prompt struct {
 	Question       bool
 	Supported      bool
 	Actionable     bool
+	ManualApproval bool
 	Reason         string
 }
 
@@ -136,6 +137,14 @@ func ClassifyPrompt(visibleText, fullPaneText string) Prompt {
 			return prompt
 		}
 		prompt.RuleInput = prompt.Command
+		if candidate.agent == AgentCodex && strings.Contains(prompt.Command, "\n") {
+			// Tmux joins its own wraps with -J, but Codex can also wrap.
+			// The capture cannot distinguish those wraps from shell newlines.
+			prompt.ManualApproval = true
+			prompt.Reason = "multiline Codex command"
+			prompt.Hash = promptHash(candidate.agent, candidate.type_, candidate.text, prompt.RuleInput, options)
+			return prompt
+		}
 	}
 	prompt.Hash = promptHash(candidate.agent, candidate.type_, candidate.text, prompt.RuleInput, options)
 	prompt.Actionable = prompt.Supported && prompt.Approval && selected > 0
@@ -158,6 +167,7 @@ func hasCodexShellConfirmationFooter(lines []string, promptIndex int) bool {
 func codexShellPromptHasBoundaryBeforeOptions(lines []string, promptIndex int) bool {
 	seenCommand := false
 	seenReason := false
+	seenEnvironment := false
 	for index := promptIndex + 1; index < len(lines); index++ {
 		rawLine := lines[index]
 		line := strings.TrimSpace(rawLine)
@@ -167,6 +177,9 @@ func codexShellPromptHasBoundaryBeforeOptions(lines []string, promptIndex int) b
 		if line == "" {
 			continue
 		}
+		if isPromptFooter(line) {
+			return true
+		}
 		if strings.HasPrefix(line, "$ ") {
 			if seenCommand {
 				return true
@@ -174,11 +187,20 @@ func codexShellPromptHasBoundaryBeforeOptions(lines []string, promptIndex int) b
 			seenCommand = true
 			continue
 		}
+		if !seenCommand && !seenReason && !seenEnvironment && line == "Environment: local" {
+			seenEnvironment = true
+			continue
+		}
 		if !seenCommand && strings.HasPrefix(strings.ToLower(line), "reason:") {
 			seenReason = true
 			continue
 		}
 		if !seenCommand && seenReason && strings.TrimLeft(rawLine, " \t") != rawLine {
+			continue
+		}
+		if seenCommand && seenEnvironment {
+			// Keep multiline commands visible as manual approvals. The
+			// classifier will never authorize input for these rows.
 			continue
 		}
 		// Codex captures join terminal wraps. Unknown rows before the choices are
@@ -381,7 +403,7 @@ func commandForPrompt(lines []string, candidate *promptCandidate) string {
 						parts = append(parts, continuation)
 					}
 				}
-				return strings.Join(parts, " ")
+				return strings.Join(parts, "\n")
 			}
 			if optionPromptRE.MatchString(lines[index]) {
 				break

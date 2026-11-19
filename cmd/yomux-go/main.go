@@ -425,7 +425,7 @@ type ptyPair struct {
 	master         *os.File
 	slave          *os.File
 	tty            string
-	requestControl func(cols, rows, txn int, authority ...bool)
+	requestControl func(cols, rows, txn int, options ...terminalControlOptions)
 }
 
 // Ownership renewal must reconcile tmux even when the local PTY size is stable.
@@ -4999,6 +4999,11 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 	// tmux can publish a session PATH while its spawn path still uses the
 	// existing server PATH. Set the actual process environment at exec too.
 	launchScript := "PATH=" + shellQuote(runtimePath) + " exec " + command
+	if agent == "codex" {
+		// A tmux server can inherit NO_COLOR from its launcher. Codex renders
+		// its interactive TUI without ANSI colors when that variable is set.
+		launchScript = "unset NO_COLOR; " + launchScript
+	}
 	output, err := s.tmuxCommand("new-session", "-d", "-s", name, "-e", "TERM=xterm-256color", "-e", "PATH="+runtimePath, "-c", cwd, launchScript).CombinedOutput()
 	if err != nil {
 		diagnostic := strings.TrimSpace(string(output))
@@ -5606,13 +5611,15 @@ func (s *server) refreshTmuxClientScreen(ctx context.Context, session string) er
 	return nil
 }
 
-func (s *server) claimResizeAuthority(ctx context.Context, session, activeClient string, cols, rows int, claims ...string) error {
+func (s *server) claimResizeAuthority(ctx context.Context, session, activeClient string, cols, rows int, claims ...terminalAuthorityClaim) error {
 	if activeClient == "" || !s.supportsIgnoreSize(ctx) {
 		return nil
 	}
 	claim := ""
+	var appearance *terminalAppearance
 	if len(claims) > 0 {
-		claim = claims[0]
+		claim = claims[0].token
+		appearance = claims[0].appearance
 	} else {
 		var err error
 		claim, err = newTerminalResizeClaim()
@@ -5623,18 +5630,40 @@ func (s *server) claimResizeAuthority(ctx context.Context, session, activeClient
 	if !validTerminalResizeClaim(claim) {
 		return fmt.Errorf("terminal resize authority has no receipt token")
 	}
-	format := "#{client_tty}\t#{client_session}\t#{client_width}\t#{client_height}\t#{window_id}\t#{client_pid}\t#{client_created}"
 	waitCtx, cancel := context.WithTimeout(ctx, terminalResizeConvergenceTimeout)
 	defer cancel()
 	for {
-		out, err := s.tmuxCommandContext(waitCtx, "list-clients", "-F", format).Output()
+		out, err := s.tmuxCommandContext(waitCtx, "list-clients", "-F", terminalResizeClientFormat).Output()
 		if err != nil {
 			return err
 		}
 		clients := terminalResizeClients(out)
 		for _, client := range clients {
 			if client.tty == activeClient {
-				return s.tmuxCommandContext(waitCtx, terminalResizeClaimArgs(clients, client, cols, rows, claim)...).Run()
+				if len(claims) > 0 && claims[0].window != "" && claims[0].window != client.window {
+					return nil
+				}
+				if appearance.valid() {
+					styles, err := s.terminalAppearanceStyles(waitCtx, client.window)
+					if err != nil {
+						return err
+					}
+					copy := *appearance
+					copy.styles = styles
+					appearance = &copy
+				}
+				arguments := terminalResizeClaimArgs(clients, client, cols, rows, claim, len(claims) > 0 && claims[0].continuing, appearance)
+				if len(claims) > 0 && claims[0].prepare {
+					arguments = terminalResizePrepareArgs(client, claim, claims[0].continuing)
+				}
+				output, err := s.tmuxCommandContext(waitCtx, arguments...).CombinedOutput()
+				if err != nil {
+					return fmt.Errorf("tmux attention claim: %w: %s", err, strings.TrimSpace(string(output)))
+				}
+				if len(claims) > 0 && claims[0].result != nil && strings.TrimSpace(string(output)) == claim {
+					claims[0].result.window = client.window
+				}
+				return nil
 			}
 		}
 		if err := waitCtx.Err(); err != nil {
@@ -5645,27 +5674,55 @@ func (s *server) claimResizeAuthority(ctx context.Context, session, activeClient
 
 // Terminal controls share the connection's lifetime and latest resize owner. A
 // slow tmux client must never hold the goroutine delivering keyboard bytes.
-func (s *server) startTerminalControls(conn *wsConn, session, tty, initialClaim string, initialClaimError error, resize ...func(int, int) error) (func(int, int, int, ...bool), func()) {
+func (s *server) startTerminalControls(conn *wsConn, session, tty, initialClaim string, initialClaimError error, resize ...func(int, int) error) (func(int, int, int, ...terminalControlOptions), func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	wake := make(chan struct{}, 1)
 	done := make(chan struct{})
 	var mu sync.Mutex
 	var cols, rows, txn, generation int
 	var claim, pendingResize, pendingRedraw bool
-	var claimToken string
+	var pendingClaim terminalAuthorityClaim
+	var publishReceipt bool
 	var claimError error
 	var activeCancel context.CancelFunc
-	request := func(nextCols, nextRows, nextTxn int, authority ...bool) {
+	request := func(nextCols, nextRows, nextTxn int, options ...terminalControlOptions) {
 		mu.Lock()
 		if nextCols > 0 && nextRows > 0 {
 			cols, rows, pendingResize = nextCols, nextRows, true
-			claim = len(authority) == 0 || authority[0]
-			claimToken = initialClaim
-			claimError = initialClaimError
+			publishReceipt = len(options) > 0 && options[0].publishReceipt
+			if len(options) == 0 || !options[0].passive {
+				pendingClaim.continuing = false
+			} else if pendingClaim.token == "" {
+				pendingClaim.continuing = true
+			}
+			claim = len(options) == 0 || options[0].authority
+			if len(options) > 0 && options[0].passive && pendingClaim.token == "" && options[0].resume.valid() {
+				pendingClaim.token, pendingClaim.window = options[0].resume.Token, options[0].resume.Window
+			}
+			if len(options) == 0 {
+				pendingClaim.appearance = nil
+				pendingClaim.window = ""
+			} else if !options[0].passive {
+				pendingClaim.appearance = options[0].appearance
+				pendingClaim.window = ""
+				if pendingClaim.appearance != nil {
+					pendingClaim.window = pendingClaim.appearance.Window
+				}
+			}
+			if initialClaim != "" || initialClaimError != nil {
+				pendingClaim.token = initialClaim
+				claimError = initialClaimError
+			} else if len(options) == 0 || !options[0].passive {
+				pendingClaim.token = ""
+				claimError = nil
+			}
 			initialClaim = ""
 			initialClaimError = nil
-			if claim && claimToken == "" && claimError == nil {
-				claimToken, claimError = newTerminalResizeClaim()
+			if claim && pendingClaim.token == "" && claimError == nil && (len(options) == 0 || !options[0].passive) {
+				pendingClaim.token, claimError = newTerminalResizeClaim()
+			}
+			if pendingClaim.token == "" {
+				claim = false
 			}
 		}
 		if nextTxn > 0 {
@@ -5696,8 +5753,11 @@ func (s *server) startTerminalControls(conn *wsConn, session, tty, initialClaim 
 			default:
 			}
 			currentCols, currentRows, currentTxn, currentGeneration, currentClaim, currentResize, currentRedraw := cols, rows, txn, generation, claim, pendingResize, pendingRedraw
-			currentClaimToken := claimToken
+			currentAuthority := pendingClaim
 			currentClaimError := claimError
+			currentPublishReceipt := publishReceipt
+			var currentResult terminalAuthorityResult
+			currentAuthority.result = &currentResult
 			commandCtx, commandCancel := context.WithCancel(ctx)
 			activeCancel = commandCancel
 			mu.Unlock()
@@ -5705,7 +5765,7 @@ func (s *server) startTerminalControls(conn *wsConn, session, tty, initialClaim 
 			if currentClaimError != nil {
 				controlErr = currentClaimError
 			} else if currentResize && len(resize) > 0 {
-				controlErr = s.resizeTerminalNative(commandCtx, session, tty, currentCols, currentRows, resize[0], currentClaim, currentClaimToken)
+				controlErr = s.resizeTerminalNative(commandCtx, session, tty, currentCols, currentRows, resize[0], currentClaim, currentAuthority)
 				if currentRedraw {
 					redrawErr = s.refreshTmuxClientScreen(commandCtx, session)
 					controlErr = errors.Join(controlErr, redrawErr)
@@ -5714,9 +5774,15 @@ func (s *server) startTerminalControls(conn *wsConn, session, tty, initialClaim 
 				redrawErr = s.refreshTmuxClientScreen(commandCtx, session)
 				controlErr = redrawErr
 			} else if currentClaim && tty != "" && s.supportsIgnoreSize(commandCtx) {
-				controlErr = s.claimResizeAuthority(commandCtx, session, tty, currentCols, currentRows, currentClaimToken)
+				controlErr = s.claimResizeAuthority(commandCtx, session, tty, currentCols, currentRows, currentAuthority)
 			} else {
 				controlErr = s.tmuxCommandContext(commandCtx, "refresh-client", "-t", s.exactTarget(session)).Run()
+			}
+			if commandCtx.Err() == nil && controlErr == nil && currentClaim && currentResult.window != "" && currentPublishReceipt {
+				payload, err := json.Marshal(map[string]any{"type": "resize-owner", "token": currentAuthority.token, "window_id": currentResult.window})
+				if err == nil {
+					_ = conn.frame(1, payload)
+				}
 			}
 			if commandCtx.Err() == nil && currentClaimError == nil && redrawErr == nil && currentRedraw && currentTxn > 0 {
 				payload, _ := json.Marshal(map[string]any{"type": "refresh-ack", "txn": currentTxn})
@@ -5728,8 +5794,8 @@ func (s *server) startTerminalControls(conn *wsConn, session, tty, initialClaim 
 			mu.Lock()
 			if generation == currentGeneration {
 				claim, pendingResize, pendingRedraw, txn, activeCancel = false, false, false, 0, nil
-				claimToken = ""
 				claimError = nil
+				pendingClaim.acknowledge(currentResult)
 			}
 			mu.Unlock()
 			commandCancel()
@@ -5815,6 +5881,9 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 	initialClaim := ""
 	var initialClaimError error
 	initialAuthority := false
+	var initialAppearance *terminalAppearance
+	var initialResume *terminalResizeReceipt
+	var initialPublishReceipt bool
 	buffered := conn.reader
 	if buffered == nil {
 		buffered = bufio.NewReader(conn)
@@ -5842,17 +5911,30 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 			continue
 		}
 		var message struct {
-			Type       string `json:"type"`
-			Rows       int    `json:"rows"`
-			Cols       int    `json:"cols"`
-			Foreground *bool  `json:"foreground"`
+			Type       string                 `json:"type"`
+			Rows       int                    `json:"rows"`
+			Cols       int                    `json:"cols"`
+			Foreground *bool                  `json:"foreground"`
+			Appearance *terminalAppearance    `json:"appearance"`
+			FocusClaim *bool                  `json:"focus_claim"`
+			Owner      *terminalResizeReceipt `json:"owner"`
 		}
 		if json.Unmarshal(payload, &message) == nil && message.Type == "resize" {
+			initialPublishReceipt = message.FocusClaim != nil
 			if message.Foreground == nil || *message.Foreground {
 				rows = clampDimension(message.Rows, 2, 300, rows)
 				cols = clampDimension(message.Cols, 20, 500, cols)
-				initialAuthority = true
-				initialClaim, initialClaimError = newTerminalResizeClaim()
+				initialAuthority = !readonly && (message.FocusClaim == nil || *message.FocusClaim)
+				if !readonly && message.FocusClaim != nil && !*message.FocusClaim && message.Owner.valid() {
+					initialResume = message.Owner
+					initialAuthority = true
+				}
+				if initialAuthority && initialResume == nil && message.Appearance.valid() {
+					initialAppearance = message.Appearance
+				}
+				if initialAuthority && initialResume == nil {
+					initialClaim, initialClaimError = newTerminalResizeClaim()
+				}
 			}
 			break
 		}
@@ -5943,7 +6025,7 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 			}
 		}
 	}()
-	requestControl(cols, rows, 0, initialAuthority)
+	requestControl(cols, rows, 0, terminalControlOptions{authority: initialAuthority, appearance: initialAppearance, passive: initialResume != nil, resume: initialResume, publishReceipt: initialPublishReceipt})
 	for _, payload := range pending {
 		s.handleMessage(pty.master, pty, cmd, conn, session, clientID, payload, !readonly, ctx)
 	}
@@ -5983,16 +6065,19 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 		Page   bool   `json:"page"`
 		Global bool   `json:"global"`
 
-		Data       string `json:"data"`
-		UserInput  *bool  `json:"user_input"`
-		Rows       int    `json:"rows"`
-		Cols       int    `json:"cols"`
-		Txn        int    `json:"txn"`
-		Direction  string `json:"direction"`
-		Lines      int    `json:"lines"`
-		Reason     string `json:"reason"`
-		Foreground *bool  `json:"foreground"`
-		Activate   bool   `json:"activate"`
+		Data       string                 `json:"data"`
+		UserInput  *bool                  `json:"user_input"`
+		Rows       int                    `json:"rows"`
+		Cols       int                    `json:"cols"`
+		Txn        int                    `json:"txn"`
+		Direction  string                 `json:"direction"`
+		Lines      int                    `json:"lines"`
+		Reason     string                 `json:"reason"`
+		Foreground *bool                  `json:"foreground"`
+		Activate   bool                   `json:"activate"`
+		Appearance *terminalAppearance    `json:"appearance"`
+		FocusClaim *bool                  `json:"focus_claim"`
+		Owner      *terminalResizeReceipt `json:"owner"`
 	}
 	if err := json.Unmarshal(payload, &msg); err != nil {
 		var control struct {
@@ -6000,6 +6085,10 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 		}
 		if json.Unmarshal(payload, &control) == nil && control.Type == "application-scroll" {
 			s.rejectApplicationScroll(conn, session, err)
+			return
+		}
+		if control.Type == "resize" {
+			slog.Warn("invalid terminal resize control", "session", session, "error", err)
 			return
 		}
 		if writable {
@@ -6024,7 +6113,11 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 		if msg.Rows > 0 && msg.Cols > 0 {
 			rows := clampDimension(msg.Rows, 2, 300, 36)
 			cols := clampDimension(msg.Cols, 20, 500, 120)
-			pty.requestControl(cols, rows, 0, msg.Activate || msg.Foreground != nil && *msg.Foreground)
+			appearance := msg.Appearance
+			if !msg.Activate || !appearance.valid() {
+				appearance = nil
+			}
+			pty.requestControl(cols, rows, 0, terminalControlOptions{authority: msg.Activate || msg.Foreground != nil && *msg.Foreground, appearance: appearance, passive: msg.FocusClaim != nil && !*msg.FocusClaim, resume: msg.Owner, publishReceipt: msg.FocusClaim != nil})
 		}
 	case "application-scroll":
 		if err := s.applicationScroll(ctx, session, msg.Pane, msg.Direction, msg.Count, msg.Column, msg.Row, msg.Page, msg.Global); err != nil {

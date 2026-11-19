@@ -1513,7 +1513,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/Single-clicks route through the shared tree controller[\s\S]{0,680}scope\.ownEvent\('tree-click', panel, 'click', event => \{[\s\S]*?const row = event\.target\.closest\('\.file-tree-row\[data-path\]'\)[\s\S]*?differTreeInteractionController\.handleClick\(event, panel, \{row\}\)/.test(changedFilesSource), 'Differ click selection routes through the shared tree controller');
     assert.ok(/selectFromClick\(row, id, event\)[\s\S]{0,180}updateFileTreeSelectionFromClick\(row, id \|\| differTreeRowPath\(row\), event\)/.test(changedFilesSource), 'Differ shared controller selection routes through the Finder selection parent');
     assert.equal(/Open file in editor|Open file in diff/.test(changedFilesSource), false, 'Differ file context menu no longer hardcodes the old labels');
-    assert.ok(/function renderFileTreeContextMenu\([\s\S]*?const actionContext = \{fullPath, entry, selectedPaths, infos, primaryInfo: infos\[0\] \|\| null, menuState\};[\s\S]*?for \(const action of openInNewTabActions\)[\s\S]*?typeof action\.label === 'function'[\s\S]*?appendContextMenuButton\(menu, label \|\| t\('contextmenu\.openNewTab'\)[\s\S]*?appendContextMenuButton\(menu, t\(multiple \? 'contextmenu\.copyRelativePaths' : 'contextmenu\.copyRelativePath'\)/.test(fileExplorerSource), 'Finder/Differ file context menu lists localized Open actions first and resolves dynamic Open labels before localized Copy actions');
+    assert.ok(/function renderFileTreeContextMenu\([\s\S]*?const actionContext = \{fullPath, entry, selectedPaths, infos, primaryInfo: infos\[0\] \|\| null, menuState\};[\s\S]*?for \(const action of openInNewTabActions\)[\s\S]*?typeof action\.label === 'function'[\s\S]*?appendButton\(label \|\| t\('contextmenu\.openNewTab'\)[\s\S]*?appendButton\(t\(multiple \? 'contextmenu\.copyRelativePaths' : 'contextmenu\.copyRelativePath'\)/.test(fileExplorerSource), 'Finder/Differ file context menu lists localized Open actions first and resolves dynamic Open labels before localized Copy actions');
     assert.ok(/function showFileTreeContextMenu\([\s\S]*?renderFileTreeContextMenu\(menu, row, fullPath, entry, selectedPaths, \[\], pendingRelativeCopyEntries, options\);[\s\S]*?fileContextMenu\.open\(menu, x, y\);[\s\S]*?void refreshFileTreeContextMenu\(menu, row, fullPath, entry, selectedPaths, options\);/.test(fileExplorerSource), 'Finder context menus paint before deferred path metadata refreshes their actions');
     assert.equal(changedFilesSource.includes('contextmenu.openDifferent'), false, 'Differ file context menu no longer uses dynamic different-editor labels');
     assert.ok(/async function deleteFileTreePath[\s\S]*refreshVisibleSessionFilesSurfaces\(\{silent: true, force: true\}\)/.test(changedFilesSource), 'shared delete refreshes both Finder working-tree and Differ comparison records');
@@ -3476,6 +3476,34 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.terminalThemeForGlobalTheme('dark').selectionForeground, '#071327', 'light terminal selection forces readable selected text');
   });
 
+  test('terminal construction and OSC reset keep the normal default through connection overlays', () => {
+    const stateApi = loadYomux('', []);
+    const session = 'cursor-construction';
+    stateApi.setGlobalThemeModeForTest('dark');
+    stateApi.setTerminalThemeModeForTest('dark');
+    stateApi.setFocusedPanelItemValueForTest(session);
+    const normal = stateApi.terminalCursorColorsForSession(session, undefined, {connection: false}).cursor;
+    stateApi.setBadConnectionCursorState(true);
+    const handlers = new Map();
+    const term = {options: {theme: stateApi.terminalThemeForSession(session)}, parser: {registerOscHandler: (code, callback) => handlers.set(code, callback)}};
+    const bad = term.options.theme.cursor;
+    assert.notEqual(bad, normal);
+    const item = stateApi.registerTerminalForTest(session, term);
+    stateApi.installTerminalCursorOutput(session, item);
+    assert.equal(item.terminalCursorResetDefault, normal, 'temporary failure paint is never the reset baseline');
+    stateApi.setBadConnectionCursorState(false);
+    handlers.get(12)('#a1b2c3');
+    stateApi.setBadConnectionCursorState(false);
+    assert.equal(term.options.theme.cursor, '#a1b2c3');
+    assert.equal(handlers.get(112)(''), true);
+    assert.equal(term.options.theme.cursor, normal, 'reset retires the application override');
+    stateApi.setBadConnectionCursorState(true);
+    handlers.get(112)('');
+    assert.equal(term.options.theme.cursor, bad, 'reset keeps the temporary failure indicator visible');
+    stateApi.setBadConnectionCursorState(false);
+    assert.equal(term.options.theme.cursor, normal, 'recovery restores the underlying reset');
+  });
+
   test('cross-surface host state 14: a light terminal preserves dark-tuned 24-bit hierarchy before its paint transform', () => {
     // The display stays white, while xterm measures and stores colors against the dark source theme.
     assert.equal(api.terminalMinimumContrastRatio('dark'), 4.5, '#32: light terminal raises the minimum contrast ratio');
@@ -3497,6 +3525,10 @@ async function runCrossSurfaceStateSuite() {
     const focusedLightTheme = api.terminalThemeForSession('light-cursor-focused', lightRenderTheme);
     const unfocusedLightTheme = api.terminalThemeForSession('light-cursor-unfocused', lightRenderTheme);
     assert.equal(focusedLightTheme.cursor, '#9a6700', 'focused light terminal uses the configured light cursor color');
+    const lightAppearance = api.terminalFocusAppearance();
+    assert.equal(lightAppearance.status_bg, '#5f9800', 'focus status colors use the light Global theme palette');
+    assert.equal(lightAppearance.status_fg, '#071000');
+    assert.equal(lightAppearance.cursor, '#9a6700', 'focus payload uses the resolved light terminal cursor');
     assert.equal(focusedLightTheme.cursorAccent, '#ffffff', 'focused light terminal keeps readable cursor glyph text');
     assert.equal(unfocusedLightTheme.cursor, '#0f172a', 'unfocused light terminal uses the visible light outline color');
     assert.equal(unfocusedLightTheme.cursorAccent, '#ffffff', 'unfocused light terminal keeps the complete light cursor pair');
@@ -5723,7 +5755,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/function sendRemoteResize\(session, options = \{\}\)[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*foreground:\s*true[\s\S]*message\.activate = true[\s\S]*message\.client = browserClientId/.test(source), 'terminal resize frames carry explicit foreground authority and browser identity');
     assert.ok(/function claimVisibleTerminalResizeAuthority\(reason = '', options = \{\}\)[\s\S]*visibleTerminalResizeAuthorityEntries\(\)[\s\S]*fitTerminal\(session, \{claim: true\}\)/.test(source), 'browser activation claims every visible xterm pane through the shared fit path');
     assert.ok(/function installTerminalResizeAuthorityHandlers\(\)[\s\S]*window\.addEventListener\('focus'[\s\S]*document\.addEventListener\('visibilitychange'/.test(source), 'browser focus/visibility activates visible xterm resize authority');
-    assert.ok(/window\.addEventListener\('pointerdown', event => \{[\s\S]*scheduleVisibleTerminalResizeAuthority\(\)/.test(source), 'pointer authority has a separate coalescing owner from Finder generations');
+    assert.ok(!/window\.addEventListener\('pointerdown', event => \{[\s\S]*?scheduleVisibleTerminalResizeAuthority\(\)/.test(source.slice(source.indexOf('function installTerminalResizeAuthorityHandlers('), source.indexOf('function fitTerminal('))), 'routine pointer clicks cannot claim colors');
     assert.ok(/function scheduleRemoteResize\(session,[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*item\.resizeTimer = null/.test(source), 'hidden/background tabs cancel pending terminal resize timers instead of shrinking tmux later');
     const authorityApi = loadYomux('', ['1', '2', '3']);
     const authoritySlots = authorityApi.emptyLayoutSlots();
@@ -5761,7 +5793,8 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(authoritySends.length, 2, 'same browser surface does not keep re-sending unchanged visible terminal authority');
     authorityApi.processTerminalSocketFrameForTest('1', 'first attached frame');
     assert.equal(authoritySends.length, 3, 'first PTY output repeats authority after tmux has registered the attach client');
-    assert.equal(authoritySends[2].message.activate, true, 'post-attach authority claim is explicit');
+    assert.equal(authoritySends[2].message.focus_claim, false, 'post-attach dimensions never repeat appearance');
+    assert.equal(authoritySends[2].message.appearance, undefined, 'post-attach dimensions carry no colors');
     authorityApi.processTerminalSocketFrameForTest('1', 'second attached frame');
     assert.equal(authoritySends.length, 3, 'post-attach authority claim runs once per socket');
     const hiddenAuthorityPane = authorityApi.testElementForId('terminal-pane-2');

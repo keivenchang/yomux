@@ -283,9 +283,24 @@ function prosemirrorMarkdownParser(api, schema) {
       const listItemTokens = [];
       const listTokens = [];
       let detailsDepth = 0;
-      for (const token of tokens || []) {
+      for (let index = 0; index < (tokens || []).length; index += 1) {
+        const token = tokens[index];
         const html = String(token.content || '').trim();
         const tokenLine = Array.isArray(token.map) ? Number(token.map[0]) + 1 : sourceLine;
+        if (token.type === 'html_inline' && /^<code(?:\s[^>]*)?>$/i.test(html)) {
+          const closeIndex = tokens.findIndex((candidate, candidateIndex) => candidateIndex > index
+            && candidate.type === 'html_inline' && /^<\/code\s*>$/i.test(String(candidate.content || '').trim()));
+          if (closeIndex > index) {
+            const content = tokens.slice(index + 1, closeIndex).map(child => {
+              if (child.type === 'text' || child.type === 'code_inline' || child.type === 'html_inline') return child.content;
+              if (child.type === 'softbreak' || child.type === 'hardbreak') return '\n';
+              return child.markup || child.content || '';
+            }).join('');
+            normalized.push({...token, type: 'code_inline', tag: 'code', nesting: 0, content, markup: ''});
+            index = closeIndex;
+            continue;
+          }
+        }
         if (token.type === 'bullet_list_open' || token.type === 'ordered_list_open') listTokens.push(token);
         if (token.type === 'list_item_open') {
           listItemDepth += 1;
@@ -501,7 +516,7 @@ function prosemirrorImageWidth(value) {
   return /^[1-9]\d*$/.test(width) ? width : null;
 }
 
-const PROSEMIRROR_SAFE_HTML_TAGS = new Set(['u', 'strong', 'em', 's', 'mark', 'kbd', 'sup', 'br', 'img', 'details', 'summary']);
+const PROSEMIRROR_SAFE_HTML_TAGS = new Set(['u', 'strong', 'em', 's', 'mark', 'kbd', 'sup', 'code', 'br', 'img', 'details', 'summary']);
 const PROSEMIRROR_KNOWN_HTML_TAGS = new Set([
   'a', 'abbr', 'address', 'article', 'aside', 'audio', 'b', 'bdi', 'bdo', 'blockquote', 'body', 'button',
   'caption', 'cite', 'code', 'col', 'colgroup', 'data', 'datalist', 'dd', 'del', 'div', 'dl', 'dt', 'em',

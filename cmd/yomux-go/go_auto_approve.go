@@ -31,10 +31,11 @@ import (
 )
 
 const (
-	goYoloPollInterval       = 500 * time.Millisecond
-	goYoloCapacityRetryDelay = 10 * time.Second
-	goYoloApprovalRetryDelay = 3 * time.Second
-	goYoloCaptureTimeout     = 2 * time.Second
+	goYoloPollInterval         = 500 * time.Millisecond
+	goYoloCapacityRetryDelay   = 10 * time.Second
+	goYoloApprovalRetryDelay   = 3 * time.Second
+	goYoloCaptureTimeout       = 2 * time.Second
+	goYoloManualApprovalAction = "left prompt for manual approval"
 )
 
 var goComposerPromptLine = regexp.MustCompile(`^\s*[❯›>](.*)$`)
@@ -1285,7 +1286,8 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 		if s.yolo.recoverSuspended(session) {
 			s.publishGoYoloState(session)
 		}
-		if prompt := yolo.ClassifyPrompt(visible, ""); state != "blocked" && prompt.Actionable && strings.EqualFold(string(prompt.Agent), kind) {
+		prompt := yolo.ClassifyPrompt(visible, "")
+		if (prompt.ManualApproval || state != "blocked" && prompt.Actionable) && strings.EqualFold(string(prompt.Agent), kind) {
 			s.yolo.mu.Lock()
 			delete(s.yolo.capacityRecovery, key)
 			delete(s.yolo.lastSent, key)
@@ -1465,6 +1467,10 @@ func goYoloActionOption(prompt yolo.Prompt, action yolo.Action) int {
 }
 
 func (s *server) goYoloApprovalCycle(ctx context.Context, session, target, expectedIdentity string, agent map[string]any, prompt yolo.Prompt) error {
+	if prompt.ManualApproval {
+		s.recordGoYoloStatus(session, goYoloManualApprovalAction+": "+prompt.Reason, "", false, false)
+		return nil
+	}
 	key := session + "\x00" + target
 	s.yolo.mu.Lock()
 	lastHash := s.yolo.lastPrompt[key]
@@ -1498,7 +1504,7 @@ func (s *server) goYoloApprovalCycle(ctx context.Context, session, target, expec
 		return nil
 	}
 	if decision.Action != yolo.Approve && decision.Action != yolo.Decline {
-		action := "manual approval required"
+		action := goYoloManualApprovalAction
 		if decision.Action == yolo.Block {
 			action = "blocked approval prompt"
 		}
@@ -1950,6 +1956,8 @@ func (s *server) goYoloSessionPayload(session string, projections ...*goAgentWin
 		if action := s.yolo.lastAction[session]; action != "" {
 			payload["last_action"] = action
 			switch {
+			case strings.HasPrefix(action, goYoloManualApprovalAction+":"):
+				payload["worker_state"] = "manual-approval"
 			case strings.HasPrefix(action, "dry-run:"):
 				payload["worker_state"] = "dry-run"
 			case strings.HasPrefix(action, "suspended:"):

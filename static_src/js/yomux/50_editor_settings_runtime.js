@@ -1012,13 +1012,41 @@ function terminalThemeWithBadConnectionCursor(theme) {
   return {...theme, cursor: badConnectionTerminalCursorColor(), cursorAccent: BAD_CONNECTION_CURSOR_ACCENT};
 }
 
-function terminalCursorColorsForSession(session, baseTheme = terminalRenderThemeForGlobalTheme()) {
-  if (badConnectionCursorStateActive()) return terminalThemeWithBadConnectionCursor({});
+function terminalCursorColorsForSession(session, baseTheme = terminalRenderThemeForGlobalTheme(), options = {}) {
+  if (options.connection !== false && badConnectionCursorStateActive()) return terminalThemeWithBadConnectionCursor({});
   const displayTheme = resolvedTerminalThemeMode() === 'light' ? terminalThemeForGlobalTheme() : baseTheme;
+  const item = terminals.get(session);
   return {
-    cursor: session === focusedPanelItem ? activeTerminalCursorColorForTheme() : displayTheme.cursor,
+    cursor: item?.terminalCursorOutputSeen ? (item.terminalOutputCursorColor || displayTheme.cursor) : (session === focusedPanelItem ? activeTerminalCursorColorForTheme() : displayTheme.cursor),
     cursorAccent: displayTheme.cursorAccent,
   };
+}
+
+function terminalFocusAppearance(session) {
+  const palette = uiColorVisualPreset(initialSetting('appearance.active_color', 'green'), resolvedGlobalThemeMode() === 'light');
+  return {status_fg: palette.text, status_bg: palette.accent, cursor: activeTerminalCursorColorForTheme(), window_id: session ? terminalFocusWindowId(session) : ''};
+}
+
+function installTerminalCursorOutput(session, item) {
+  if (!item.term.parser?.registerOscHandler) return;
+  item.terminalCursorResetDefault = terminalCursorColorsForSession(session, terminalRenderThemeForGlobalTheme(), {connection: false}).cursor;
+  item.term.parser.registerOscHandler(12, data => {
+    if (data === '?') return false;
+    const rgb = /^rgb:([\da-f]{1,4})\/([\da-f]{1,4})\/([\da-f]{1,4})$/i.exec(data);
+    const color = rgb ? '#' + rgb.slice(1).map(value => Math.round(parseInt(value, 16) * 255 / (16 ** value.length - 1)).toString(16).padStart(2, '0')).join('') : data;
+    if (!/^#[\da-f]{6}$/i.test(color)) return false;
+    item.terminalCursorOutputSeen = true;
+    item.terminalOutputCursorColor = color;
+    return badConnectionCursorStateActive();
+  });
+  item.term.parser.registerOscHandler(112, () => {
+    item.terminalCursorOutputSeen = true;
+    item.terminalOutputCursorColor = item.terminalCursorResetDefault;
+    if (!badConnectionCursorStateActive()) {
+      item.term.options.theme = {...item.term.options.theme, cursor: item.terminalCursorResetDefault};
+    }
+    return true;
+  });
 }
 
 function setBadConnectionCursorState(active) {
@@ -1235,8 +1263,7 @@ function installGlobalThemeMediaListener() {
   globalThemeMediaListenerInstalled = true;
 }
 
-// The ACTIVE pane's terminal gets the configured cursor color so it's obvious which terminal you're
-// typing into; every other terminal keeps its theme's default cursor color.
+// Before tmux supplies its cursor, the local theme provides the initial cursor.
 
 function terminalThemeForSession(session, baseTheme) {
   const theme = baseTheme || terminalRenderThemeForGlobalTheme();

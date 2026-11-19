@@ -12203,6 +12203,18 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
     assert result["activityFetches"] >= 1, result
     assert result["errors"] == []
     assert result["rejections"] == []
+    browser.execute_script("""
+      autoApproveStates.set('1', {
+        target: '1', enabled: true,
+        worker_state: 'manual-approval',
+        last_action: 'left prompt for manual approval: multiline Codex command',
+      });
+      renderAutoApproveStatusSurfaces({changedSessions: ['1'], sessionsChanged: false});
+    """)
+    manual_reason = WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+        "return document.querySelector('[data-yolo-session=\"1\"]')?.getAttribute('title')?.includes('left prompt for manual approval: multiline Codex command')"
+    ))
+    assert manual_reason is True
 
 
 def test_live_runtime_fake_client_event_source_guards_initial_ready_but_keeps_reconnect_ready(browser, tmp_path):

@@ -1242,6 +1242,66 @@ def test_dockview_editor_and_differ_tabs_close_from_right_click_menu(browser, tm
     assert result["editorClosed"] is True, result
 
 
+def test_dockview_editor_tab_menu_uses_finder_actions_and_delete_closes_tab(browser, tmp_path):
+    path = "/home/test/yolomux.dev/TAB-CONTEXT-MENU.md"
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        fs_entries={"/home/test/yolomux.dev": [{"name": "TAB-CONTEXT-MENU.md", "kind": "file"}]},
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const path = arguments[0];
+        const waitFor = window.__yomuxTestWaitFor;
+        const originalFetch = window.fetch.bind(window);
+        const originalConfirm = window.confirm;
+        window.confirm = () => true;
+        window.fetch = async (input, init = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/read') {
+            return new Response(JSON.stringify({path, content: '# Context menu\\n', size: 14, mtime: 1, mtime_ns: 1, realpath: path, file_id: 'tab-context:1', git_tracked: false, git_history: [], git_has_history: false}), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          if (url.pathname === '/api/fs/delete') {
+            return new Response(JSON.stringify({path: JSON.parse(init.body || '{}').path}), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          return originalFetch(input, init);
+        };
+        (async () => {
+          const item = await openFileInEditor(path, {name: 'TAB-CONTEXT-MENU.md'}, {userInitiated: true});
+          const selector = `.dockview-pane-tab[data-pane-tab="${CSS.escape(item)}"]`;
+          let tab = await waitFor(() => document.querySelector(selector), {description: 'editor tab rendered'});
+          const rect = tab.getBoundingClientRect();
+          const event = new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.bottom});
+          tab.dispatchEvent(event);
+          const menu = await waitFor(() => document.querySelector('.session-context-menu'), {description: 'editor tab menu opened'});
+          const labels = [...menu.querySelectorAll('button')].map(button => button.textContent.trim());
+          const required = ['Get Info', 'Rename', 'Copy relative path', 'Copy full path', 'Copy image', 'Download', 'Delete'];
+          const deleteButton = [...menu.querySelectorAll('button')].find(button => button.textContent.trim() === 'Delete');
+          if (!deleteButton) throw new Error(`Editor tab Delete action missing: ${JSON.stringify(labels)}`);
+          deleteButton.click();
+          await waitFor(() => !itemInLayout(item) && !document.querySelector(selector), {description: 'deleted editor tab closed'});
+          window.fetch = originalFetch;
+          window.confirm = originalConfirm;
+          done({prevented: event.defaultPrevented, labels, required, closed: !itemInLayout(item), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        })().catch(error => {
+          window.fetch = originalFetch;
+          window.confirm = originalConfirm;
+          done({error: String(error && error.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        });
+        """,
+        path,
+    )
+    assert result.get("error") is None, result
+    assert result["prevented"] is True, result
+    assert all(label in result["labels"] for label in result["required"]), result
+    assert not any("Edit in new tab" in label or "Preview in new tab" in label or "index" in label.lower() for label in result["labels"]), result
+    assert result["closed"] is True, result
+    assert result["errors"] == [] and result["rejections"] == [], result
+
+
 def test_dockview_empty_pane_close_removes_only_selected_placeholder(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
     wait_for_dockview(browser, min_tabs=1)

@@ -868,7 +868,9 @@ def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="
             nodeid=f"go-activation-{mode}", label=f"activation-{mode}",
             payload={"samples": samples, "summary": summary, "maxima": maxima, "counts": counts, "cold_navigation_and_terminals_ready_seconds": cold_connection_seconds, "cold_warmup_seconds": cold_seconds, "metadata_tab_strip_refreshes": metadata_tab_strip_refreshes, "metadata_tabber_tree_refreshes": metadata_tabber_tree_refreshes})
         print({"go_activation_p95_ms": summary, "maxima": maxima, "counts": counts, "mode": mode, "cold_navigation_and_terminals_ready_seconds": cold_connection_seconds, "cold_warmup_seconds": cold_seconds, "metadata_tab_strip_refreshes": metadata_tab_strip_refreshes, "metadata_tabber_tree_refreshes": metadata_tabber_tree_refreshes, "samples": samples, "trace": str(trace_path)})
-        assert all(s["resizes"] == 1 for s in samples), samples
+        assert all(s["resizes"] == 1 for s in tab_samples), tab_samples
+        assert all(s["resizes"] == 0 for s in body_samples), body_samples
+        assert all(message.get("focus_claim") is True and "appearance" in message for sample in tab_samples for message in sample["resizeMessages"]), tab_samples
         assert all(s["refreshes"] == 0 for s in samples if s["body"]), samples
         assert all(s["refreshes"] <= 1 for s in samples if not s["body"]), samples
         assert browser.execute_script("return focusedTerminal === arguments[0] && document.activeElement === terminals.get(arguments[0]).term.textarea;", session)
@@ -965,13 +967,15 @@ def test_go_manual_refresh_notifies_remote_terminal_size(browser, isolated_dev_s
             "return window.__manualRefreshScreenMessages.some(message => message.reason === 'manual-refresh');"
         ))
         WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
-            "return window.__manualRefreshResizeMessages.some(message => message.type === 'resize' && message.activate === true && message.rows < arguments[0]);",
+            "return window.__manualRefreshResizeMessages.some(message => message.type === 'resize' && message.focus_claim === false && message.rows < arguments[0]);",
             initial["rows"],
         ))
         messages = browser.execute_script("return window.__manualRefreshResizeMessages;")
         screen_messages = browser.execute_script("return window.__manualRefreshScreenMessages;")
         assert any(message.get("reason") == "manual-refresh" for message in screen_messages), screen_messages
-        assert any(message.get("activate") is True and message["cols"] == initial["cols"] and message["rows"] < initial["rows"] for message in messages), {
+        assert sum(message.get("focus_claim") is True for message in messages) == 1, messages
+        assert all("appearance" not in message for message in messages if message.get("focus_claim") is False), messages
+        assert any(message.get("focus_claim") is False and message["cols"] == initial["cols"] and message["rows"] < initial["rows"] for message in messages), {
             "initial": initial,
             "messages": messages,
         }

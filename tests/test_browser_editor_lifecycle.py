@@ -1311,7 +1311,7 @@ def test_vieweditor_cursor_color_updates_live_without_recreating_editor(browser,
           const terminal=terminals.get(window.__cursorTerminal);
           const rgb=[1,3,5].map(start=>parseInt(arguments[0].slice(start,start+2),16));
           return focusedPanelItem===window.__cursorTerminal && document.activeElement===terminal.term.textarea
-            && terminal.term.options.theme.cursor===arguments[0]
+            && terminal.term._core._themeService.colors.cursor.css===arguments[0]
             && getComputedStyle(terminal.container.querySelector('.xterm-viewport'),'::-webkit-scrollbar-thumb').backgroundColor===`rgba(${rgb.join(', ')}, 0.88)`;
         """, expected))
         after = browser.execute_script("""
@@ -1330,7 +1330,7 @@ def test_vieweditor_cursor_color_updates_live_without_recreating_editor(browser,
         _click_editor_preference(browser, setting, value)
     browser.execute_script('return terminals.get(window.__cursorTerminal).container').click()
     WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("""
-      return terminals.get(window.__cursorTerminal).term.options.theme.cursor===arguments[0]
+      return terminals.get(window.__cursorTerminal).term._core._themeService.colors.cursor.css===arguments[0]
         && getComputedStyle(window.__cursorView.dom).caretColor===arguments[1];
     """, '#66ffff' if opposite == 'dark' else '#0e7490',
        'rgb(14, 116, 144)' if theme == 'light' else 'rgb(102, 255, 255)'))

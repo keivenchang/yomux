@@ -910,9 +910,13 @@ function yoloMarkerHtml(session, auto, options = {}) {
     ? ` data-auto-session="${esc(session)}" data-action="pane-tab-auto-approve"`
     : '';
   const stateText = auto ? t('yolo.state.onHere') : (locked ? t('yolo.state.onElsewhere') : t('state.off'));
-  const title = options.toggle && readOnlyMode
+  const stateTitle = options.toggle && readOnlyMode
     ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
     : (options.toggle ? t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)}) : t('yolo.title', {state: stateText}));
+  const manualApproval = auto && (payload?.worker_state === 'manual-approval' || payload?.last_action_key === 'yolo.status.manualBash')
+    ? structuredMessageText(payload, 'last_action')
+    : '';
+  const title = `${stateTitle}${manualApproval ? t('yolo.actionSuffix', {action: manualApproval}) : ''}`;
   return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr} title="${esc(title)}" aria-label="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 

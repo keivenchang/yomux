@@ -951,8 +951,17 @@ function debugGraphTerseBytesText(bytes) {
   return `${number >= 100 ? number.toFixed(0) : number.toFixed(1)}B`;
 }
 
-function debugGraphAxisValueText(value, unit) {
+function debugGraphAxisValueText(value, unit, groupKey = '') {
   const number = Number(value);
+  const logicalCpus = groupKey === 'cpu' && unit === 'percent' && typeof cpuTopology !== 'undefined'
+    ? Math.max(0, Number(cpuTopology.logicalCpus) || 0)
+    : 0;
+  if (logicalCpus > 0 && Number.isFinite(number) && number >= 0) {
+    const cpuCount = logicalCpus * number / 100;
+    const cpuText = String(Number(cpuCount.toFixed(1)));
+    const percentText = String(Number((number >= 100 ? number.toFixed(0) : number.toFixed(1))));
+    return `${cpuText}CPU/${percentText}%`;
+  }
   if (!Number.isFinite(number) || number <= 0) {
     if (unit === 'count') return '0';
     if (unit === 'countPerSecond') return '0';
@@ -2769,7 +2778,7 @@ function debugGraphIntegerAxisHtml(group, max) {
         : value === 0
           ? ` data-js-debug-axis-zero="${esc(group.key)}"`
           : '';
-      return `<span data-js-debug-axis-tick="${esc(group.key)}" data-js-debug-axis-value="${esc(value)}"${marker}${debugGraphAxisTickStyle(value, axisMax)}>${esc(debugGraphAxisValueText(value, group.unit))}</span>`;
+      return `<span data-js-debug-axis-tick="${esc(group.key)}" data-js-debug-axis-value="${esc(value)}"${marker}${debugGraphAxisTickStyle(value, axisMax)}>${esc(debugGraphAxisValueText(value, group.unit, group.key))}</span>`;
     }).join('')}
   </div>`;
 }
@@ -2818,16 +2827,16 @@ function debugGraphAxisHtml(group, max) {
   if (scale?.mode === 'broken-linear') {
     const threshold = Math.min(positionMax, Number(scale.threshold) || positionMax);
     return `<div class="js-debug-y-axis js-debug-y-axis--broken" data-js-debug-axis="${esc(group.key)}" data-js-debug-axis-break="${esc(threshold)}">
-      <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax, scale)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
-      <span data-js-debug-axis-break-label="${esc(group.key)}"${debugGraphAxisTickStyle(threshold, positionMax, scale)}>${esc(debugGraphAxisValueText(threshold, group.unit))}</span>
-      <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(threshold / 2, positionMax, scale)}>${esc(debugGraphAxisValueText(threshold / 2, group.unit))}</span>
-      <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, scale)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
+      <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax, scale)}>${esc(debugGraphAxisValueText(axisMax, group.unit, group.key))}</span>
+      <span data-js-debug-axis-break-label="${esc(group.key)}"${debugGraphAxisTickStyle(threshold, positionMax, scale)}>${esc(debugGraphAxisValueText(threshold, group.unit, group.key))}</span>
+      <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(threshold / 2, positionMax, scale)}>${esc(debugGraphAxisValueText(threshold / 2, group.unit, group.key))}</span>
+      <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, scale)}>${esc(debugGraphAxisValueText(0, group.unit, group.key))}</span>
     </div>`;
   }
   return `<div class="js-debug-y-axis${group.axisSide === 'right' ? ' js-debug-y-axis-right' : ''}" data-js-debug-axis="${esc(group.key)}"${group.color ? debugGraphSeriesStyleAttr(group) : ''}>
-    <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax, scale)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
-    <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(scale === true ? Math.expm1(Math.log1p(positionMax) / 2) : positionMax / 2, positionMax, scale)}>${esc(debugGraphAxisValueText(scale === true ? Math.expm1(Math.log1p(axisMax) / 2) : axisMax / 2, group.unit))}</span>
-    <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, scale)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
+    <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax, scale)}>${esc(debugGraphAxisValueText(axisMax, group.unit, group.key))}</span>
+    <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(scale === true ? Math.expm1(Math.log1p(positionMax) / 2) : positionMax / 2, positionMax, scale)}>${esc(debugGraphAxisValueText(scale === true ? Math.expm1(Math.log1p(axisMax) / 2) : axisMax / 2, group.unit, group.key))}</span>
+    <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, scale)}>${esc(debugGraphAxisValueText(0, group.unit, group.key))}</span>
   </div>`;
 }
 
@@ -3154,12 +3163,12 @@ function debugGraphHoverDetailAtTime(chart, timestamp, event) {
       seriesKey: series.key,
     };
   }
-  if (data?.group?.key === 'cpu' || data?.group?.secondaryUnit || data?.group?.hostMetric === 'diskUsage') {
+  if (data?.group?.key === 'cpu' || data?.group?.timingUnits || data?.group?.secondaryUnit || data?.group?.hostMetric === 'diskUsage') {
     const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
     const series = debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, data.group.key);
     if (index >= 0 && series && (!Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true)) {
       return {
-        text: `${series.label}: ${debugGraphValueText(series.values?.[index], data.group.secondaryUnit ? (series.unit === data.group.secondaryUnit ? series.unit : data.group.unit) : 'percent')}`,
+        text: `${series.label}: ${debugGraphValueText(series.values?.[index], data.group.timingUnits ? series.unit : (data.group.secondaryUnit ? (series.unit === data.group.secondaryUnit ? series.unit : data.group.unit) : 'percent'))}`,
         ...(data.group.hostMetric === 'diskUsage' ? {critical: debugGraphSeriesNeedsAttention(series, series.values?.[index])} : {}),
         seriesKey: series.key,
       };
@@ -3179,9 +3188,9 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
     : data.group.key === 'activity'
     ? data.groupSeries.filter(item => item.key !== 'idleAgents')
     : data.groupSeries;
-  if (data.group.secondaryUnit) return series
+  if (data.group.timingUnits || data.group.secondaryUnit) return series
     .filter(item => !Array.isArray(item.hasDataValues) || item.hasDataValues[index] === true)
-    .map(item => `${item.label}: ${debugGraphValueText(item.values?.[index], item.unit === data.group.secondaryUnit ? item.unit : data.group.unit)}`)
+    .map(item => `${item.label}: ${debugGraphValueText(item.values?.[index], data.group.timingUnits ? item.unit : (item.unit === data.group.secondaryUnit ? item.unit : data.group.unit))}`)
     .join(' · ') || debugGraphValueText(0, data.group.unit);
   const values = series
     .filter(item => !Array.isArray(item.hasDataValues) || item.hasDataValues[index] === true)
@@ -3575,7 +3584,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
         ${options.closable === false ? '' : `<button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>`}
       </div>
       ${group.key === 'activity' ? debugGraphLiveAgentWindowDetailHtml(group.key) : ''}
-      ${chartUnavailable ? '' : debugGraphLegendHtml(renderedLegendSeries, {kind: group.kind, timingUnits: Boolean(group.secondaryUnit)})}
+      ${chartUnavailable ? '' : debugGraphLegendHtml(renderedLegendSeries, {kind: group.kind, timingUnits: Boolean(group.timingUnits || group.secondaryUnit)})}
       ${group.macMemoryCard === true ? debugGraphMacMemoryDetailsHtml(buckets) : ''}
     </div>
     ${chartUnavailable ? `<div class="js-debug-chart-unavailable"${gpuUnavailable ? ` data-js-debug-gpu-unavailable="${esc(group.key)}"` : ' data-js-debug-agent-billable-unavailable'}>${esc(chartUnavailableText)}</div>` : `<div class="js-debug-chart-body${group.secondaryUnit ? ' js-debug-chart-body--dual-axis' : ''}">

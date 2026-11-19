@@ -212,7 +212,16 @@ function fileContextMenuIcon(name) {
 
 function renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, infos, relativeCopyEntries, options = {}) {
   if (!menu) return;
-  menu.replaceChildren();
+  if (options.append !== true) menu.replaceChildren();
+  const closeMenu = options.closeMenu || closeFileContextMenu;
+  const appendButton = (label, action, buttonOptions = {}) => appendContextMenuButton(menu, label, action, closeMenu, {
+    ...buttonOptions,
+    className: [buttonOptions.className || '', options.actionClass || ''].filter(Boolean).join(' '),
+  });
+  const appendSeparator = () => {
+    const separator = appendContextMenuSeparator(menu);
+    if (options.separatorClass) separator.classList.add(options.separatorClass);
+  };
   const relativePaths = relativeCopyEntries.filter(item => item?.available).map(item => item.text);
   const menuState = fileContextMenuState(entry, selectedPaths, relativeCopyEntries);
   const multiple = selectedPaths.length > 1;
@@ -220,7 +229,7 @@ function renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, in
     ? options.openInNewTab
     : () => openFileInAdditionalEditorTab(fullPath, entry, {userInitiated: true});
   const actionContext = {fullPath, entry, selectedPaths, infos, primaryInfo: infos[0] || null, menuState};
-  const openInNewTabActions = Array.isArray(options.openInNewTabActions) && options.openInNewTabActions.length
+  const openInNewTabActions = options.includeOpenInNewTabActions === false ? [] : Array.isArray(options.openInNewTabActions) && options.openInNewTabActions.length
     ? options.openInNewTabActions
     : options.surface === 'finder'
       ? finderOpenInNewTabActionsForContext(actionContext)
@@ -228,30 +237,77 @@ function renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, in
   for (const action of openInNewTabActions) {
     const label = typeof action.label === 'function' ? action.label(actionContext) : action.label;
     const disabledReason = action.disabledReason || '';
-    appendContextMenuButton(menu, label || t('contextmenu.openNewTab'), action.action, closeFileContextMenu, {
+    appendButton(label || t('contextmenu.openNewTab'), action.action, {
       disabled: action.disabled ?? menuState.openInNewTabDisabled,
       title: disabledReason,
       ariaLabel: disabledReason ? `${label}. ${disabledReason}` : label,
       iconHtml: fileContextMenuIcon(action.mode || 'open'),
     });
   }
-  if (openInNewTabActions.length) appendContextMenuSeparator(menu);
-  appendContextMenuButton(menu, t('finder.info.title'), () => showFileGetInfo(fullPath), closeFileContextMenu, {iconHtml: fileContextMenuIcon('info')});
-  appendContextMenuButton(menu, t('common.rename'), () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled, iconHtml: fileContextMenuIcon('rename')});
+  if (openInNewTabActions.length) appendSeparator();
+  appendButton(t('finder.info.title'), () => showFileGetInfo(fullPath), {iconHtml: fileContextMenuIcon('info')});
+  appendButton(t('common.rename'), options.renameAction || (() => beginFileTreeRename(row, selectedPaths[0], entry)), {disabled: menuState.renameDisabled, iconHtml: fileContextMenuIcon('rename')});
   if (entry?.kind === 'dir') {
-    appendContextMenuButton(menu, t('contextmenu.zipDownload'), () => triggerFolderZipDownload(fullPath), closeFileContextMenu, {disabled: menuState.zipDownloadDisabled, iconHtml: fileContextMenuIcon('archive')});
+    appendButton(t('contextmenu.zipDownload'), () => triggerFolderZipDownload(fullPath), {disabled: menuState.zipDownloadDisabled, iconHtml: fileContextMenuIcon('archive')});
   }
-  appendContextMenuSeparator(menu);
-  appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyRelativePaths' : 'contextmenu.copyRelativePath'), button => copyFilePath(relativePaths.join('\n'), 'relative', {button}), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled, iconHtml: fileContextMenuIcon('copy')});
-  appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyFullPaths' : 'contextmenu.copyFullPath'), button => copyFilePath(selectedPaths.join('\n'), 'path', {button}), closeFileContextMenu, {iconHtml: fileContextMenuIcon('copy')});
-  appendContextMenuButton(menu, t('contextmenu.copyImage'), button => copyImageFileToClipboard(selectedPaths[0], {button}), closeFileContextMenu, {disabled: menuState.copyImageDisabled, iconHtml: fileContextMenuIcon('image')});
-  appendContextMenuButton(menu, t('common.download'), () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled, iconHtml: fileContextMenuIcon('download')});
-  if (menuState.indexAction) {
-    appendContextMenuSeparator(menu);
-    appendContextMenuButton(menu, t(menuState.indexAction.labelKey), () => applyFileExplorerIndexContextAction(fullPath, menuState.indexAction), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, iconHtml: fileContextMenuIcon('index')});
+  appendSeparator();
+  appendButton(t(multiple ? 'contextmenu.copyRelativePaths' : 'contextmenu.copyRelativePath'), button => copyFilePath(relativePaths.join('\n'), 'relative', {button}), {disabled: menuState.copyRelativeDisabled, iconHtml: fileContextMenuIcon('copy')});
+  appendButton(t(multiple ? 'contextmenu.copyFullPaths' : 'contextmenu.copyFullPath'), button => copyFilePath(selectedPaths.join('\n'), 'path', {button}), {iconHtml: fileContextMenuIcon('copy')});
+  appendButton(t('contextmenu.copyImage'), button => copyImageFileToClipboard(selectedPaths[0], {button}), {disabled: menuState.copyImageDisabled, iconHtml: fileContextMenuIcon('image')});
+  appendButton(t('common.download'), () => triggerFileDownload(fullPath), {disabled: menuState.downloadDisabled, iconHtml: fileContextMenuIcon('download')});
+  if (menuState.indexAction && options.includeIndexAction !== false) {
+    appendSeparator();
+    appendButton(t(menuState.indexAction.labelKey), () => applyFileExplorerIndexContextAction(fullPath, menuState.indexAction), {disabled: menuState.indexToggleDisabled, iconHtml: fileContextMenuIcon('index')});
   }
-  appendContextMenuSeparator(menu);
-  appendContextMenuButton(menu, t(multiple ? 'contextmenu.deleteSelected' : 'contextmenu.delete'), () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled, iconHtml: fileContextMenuIcon('delete')});
+  appendSeparator();
+  appendButton(t(multiple ? 'contextmenu.deleteSelected' : 'contextmenu.delete'), options.deleteAction || (() => deleteFileTreePath(fullPath, entry, selectedPaths)), {disabled: menuState.deleteDisabled, iconHtml: fileContextMenuIcon('delete')});
+}
+
+function appendOpenFileTabContextMenuActions(menu, item, refreshPosition) {
+  const fullPath = fileItemPath(item);
+  if (!menu || !fullPath) return;
+  const row = document.querySelector(`.file-tree-row[data-path="${cssEscape(fullPath)}"]`);
+  const entry = fileTreeEntryFromRow(fullPath) || {kind: 'file', name: basenameOf(fullPath)};
+  menu.dataset.fileContextItem = item;
+  let rendered = false;
+  const removeActions = () => menu.querySelectorAll('.file-tab-context-action, .file-tab-context-separator').forEach(node => node.remove());
+  const renameAction = () => {
+    const currentRow = document.querySelector(`.file-tree-row[data-path="${cssEscape(fullPath)}"]`);
+    const currentEntry = fileTreeEntryFromRow(fullPath) || entry;
+    if (currentRow) {
+      beginFileTreeRename(currentRow, fullPath, currentEntry);
+      return;
+    }
+    const currentName = currentEntry.name || basenameOf(fullPath);
+    const nextName = window.prompt(t('common.renameNamed', {name: currentName}), currentName);
+    if (nextName !== null) void renameFileTreePath(fullPath, currentEntry, nextName);
+  };
+  const render = (infos = [], relativeCopyEntries = [{available: false, text: '', reason: 'pending'}]) => {
+    if (menu.dataset.fileContextItem !== item || (rendered && !menu.isConnected)) return;
+    removeActions();
+    const section = appendContextMenuSeparator(menu);
+    section.classList.add('file-tab-context-separator');
+    renderFileTreeContextMenu(menu, row, fullPath, entry, [fullPath], infos, relativeCopyEntries, {
+      append: true,
+      includeOpenInNewTabActions: false,
+      includeIndexAction: false,
+      closeMenu: closeSessionContextMenu,
+      actionClass: 'file-tab-context-action',
+      separatorClass: 'file-tab-context-separator',
+      renameAction,
+      deleteAction: () => deleteFileTreePath(fullPath, entry, [fullPath], {closeOpenEditorItem: item}),
+    });
+    refreshPosition();
+    rendered = true;
+  };
+  render();
+  void Promise.all([fetchFilePathInfo(fullPath, {user: true, immediate: true}).catch(error => {
+    console.warn('fs info failed', fullPath, error);
+    return null;
+  })]).then(async infos => {
+    const relativeCopyEntries = await fileTreeRelativeCopyEntries(row, [fullPath], infos, {relativePathMode: 'finder'});
+    render(infos, relativeCopyEntries);
+  });
 }
 
 async function refreshFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, options = {}) {
@@ -885,7 +941,7 @@ function bindFileExplorerHeaderActions(container = document) {
   });
 }
 
-async function deleteFileTreePath(fullPath, entry, paths = null) {
+async function deleteFileTreePath(fullPath, entry, paths = null, options = {}) {
   if (readOnlyMode) {
     statusErr(localizedHtml('status.readOnlyDeleteFiles'));
     return;
@@ -899,6 +955,12 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
   });
   if (!window.confirm(confirmText)) return;
   if (!await confirmLargeDirectoryDeletes(deletePaths, fullPath, entry)) return;
+  const closeItem = options.closeOpenEditorItem;
+  const closePath = closeItem && isFileEditorItem(closeItem) ? fileItemPath(closeItem) : '';
+  if (closePath && deletePaths.includes(closePath) && fileEditorStateForItem(closePath, closeItem)?.dirty) {
+    const closedState = await confirmDirtyFileClose(closePath, panelNodes.get(closeItem));
+    if (!closedState) return;
+  }
   try {
     const deleteRequests = deletePaths.map(path => apiFetchJson('/api/fs/delete', {
         method: 'POST',
@@ -916,6 +978,10 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     const deletedPaths = deletePaths.filter((path, index) => results[index].status === 'fulfilled');
     for (const path of Array.from(fileState.keys())) {
       if (!deletedPaths.some(deletedPath => path === deletedPath || path.startsWith(`${deletedPath}/`))) continue;
+      if (closePath === path) {
+        await removeOpenFile(path, {confirmDirty: false, render: false, item: closeItem});
+        if (!fileState.has(path)) continue;
+      }
       syncOpenFileContentFromPanels(path);
       if (fileState.get(path)?.dirty) markOpenFileMissing(path);
       else removeOpenFile(path, {confirmDirty: false, render: false});

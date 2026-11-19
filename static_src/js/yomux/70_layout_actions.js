@@ -2933,18 +2933,27 @@ function terminalCanPublishRemoteSize() {
 }
 
 let lastTerminalResizeAuthoritySignature = '';
+let lastTerminalResizeAuthoritySessions = new Set();
+let lastTerminalResizeAuthorityFocused = '';
 let terminalResizeAuthorityHandlersInstalled = false;
 let terminalResizeAuthorityFrame = 0;
 let terminalResizeAuthoritySettleTimer = 0;
+let terminalAppearanceForceClaim = false;
 
-function scheduleVisibleTerminalResizeAuthority() {
+function clearTerminalResizeAuthorityFocus() {
+  lastTerminalResizeAuthorityFocused = '';
+}
+
+function scheduleVisibleTerminalResizeAuthority(reason = 'activation') {
+  terminalAppearanceForceClaim ||= reason === 'focus' || reason === 'refresh';
   if (terminalResizeAuthorityFrame) return;
-  // Pointer, pane focus, and Dockview activation converge after the first paint.
-  // Finder generations must never cancel tmux ownership recovery on a body click.
+  // Browser focus and Dockview activation from one interaction share a claim.
+  // Finder generations must not cancel this ownership transition.
   terminalResizeAuthorityFrame = requestAnimationFrame(() => {
     terminalResizeAuthorityFrame = requestAnimationFrame(() => {
       terminalResizeAuthorityFrame = 0;
-      claimVisibleTerminalResizeAuthority('interaction', {force: true});
+      claimVisibleTerminalResizeAuthority('interaction', {force: terminalAppearanceForceClaim});
+      terminalAppearanceForceClaim = false;
     });
   });
 }
@@ -2953,31 +2962,46 @@ function scheduleSettledTerminalResizeAuthority() {
   if (terminalResizeAuthoritySettleTimer) clearTimeout(terminalResizeAuthoritySettleTimer);
   terminalResizeAuthoritySettleTimer = setTimeout(() => {
     terminalResizeAuthoritySettleTimer = 0;
-    claimVisibleTerminalResizeAuthority('settled-viewport');
+    for (const {session} of visibleTerminalResizeAuthorityEntries()) fitTerminal(session, {force: true});
   }, nativeAppViewportSettleDelayMs);
+}
+
+function terminalFocusWindowId(session) {
+  return String(tabberViewSessions.get(session)?.windowId
+    || activeTmuxSignalWindowForSession(session)?.window_id || '');
 }
 
 function visibleTerminalResizeAuthorityEntries() {
   if (!terminalCanPublishRemoteSize()) return [];
   return activeSessions
     .filter(isTmuxSession)
-    .map(session => ({session, item: terminals.get(session)}))
-    .filter(entry => entry.item?.term && entry.item?.socket?.readyState === WebSocket.OPEN && terminalIsVisible(entry.session, entry.item.container));
+    .map(session => ({session, item: terminals.get(session), windowId: terminalFocusWindowId(session)}))
+    .filter(entry => entry.item?.term && terminalIsVisible(entry.session, entry.item.container));
 }
 
 function terminalResizeAuthoritySignature(entries) {
   return entries
-    .map(({session, item}) => `${session}:${terminalFitSignature(estimateTerminalSize(item.container, item.term))}`)
+    .map(({session}) => session)
     .join('|');
 }
 
 function claimVisibleTerminalResizeAuthority(reason = '', options = {}) {
   const entries = visibleTerminalResizeAuthorityEntries();
-  if (!entries.length) return;
   const signature = terminalResizeAuthoritySignature(entries);
-  if (options.force !== true && signature === lastTerminalResizeAuthoritySignature) return;
+  const focused = entries.some(entry => entry.session === focusedPanelItem) ? focusedPanelItem : lastTerminalResizeAuthorityFocused;
+  if (options.force !== true && signature === lastTerminalResizeAuthoritySignature && focused === lastTerminalResizeAuthorityFocused) return;
+  const claim = options.force === true || entries.some(entry => !lastTerminalResizeAuthoritySessions.has(entry.session))
+    || Boolean(focused && focused !== lastTerminalResizeAuthorityFocused);
   lastTerminalResizeAuthoritySignature = signature;
-  for (const {session} of entries) {
+  lastTerminalResizeAuthoritySessions = new Set(entries.map(entry => entry.session));
+  lastTerminalResizeAuthorityFocused = entries.length ? focused : '';
+  if (!claim) return;
+  const windows = new Map();
+  for (const entry of entries) {
+    const key = entry.windowId || entry.session;
+    if (!windows.has(key) || entry.session === focusedPanelItem) windows.set(key, entry);
+  }
+  for (const {session} of windows.values()) {
     fitTerminal(session, {claim: true});
   }
 }
@@ -2985,18 +3009,9 @@ function claimVisibleTerminalResizeAuthority(reason = '', options = {}) {
 function installTerminalResizeAuthorityHandlers() {
   if (terminalResizeAuthorityHandlersInstalled) return;
   terminalResizeAuthorityHandlersInstalled = true;
-  window.addEventListener('focus', () => scheduleVisibleTerminalResizeAuthority());
-  // Another YOmux server can change tmux's shared ignore-size flags without changing this
-  // browser's local dimensions. Every foreground pointer transition must therefore cross the
-  // socket instead of trusting lastTerminalResizeAuthoritySignature.
-  window.addEventListener('pointerdown', event => {
-    // Tab release commits activation through the same owner; renewing while the tab is held
-    // would claim the previous pane and renew the destination twice across a slow click.
-    if (event.target?.closest?.('[data-pane-tab], [data-tabber-session]')) return;
-    scheduleVisibleTerminalResizeAuthority();
-  }, {capture: true});
+  window.addEventListener('focus', () => scheduleVisibleTerminalResizeAuthority('focus'));
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') scheduleVisibleTerminalResizeAuthority();
+    if (document.visibilityState === 'visible') scheduleVisibleTerminalResizeAuthority('focus');
   });
 }
 
@@ -3022,9 +3037,16 @@ function fitTerminal(session, options = {}) {
 function sendRemoteResize(session, options = {}) {
   if (!terminalCanPublishRemoteSize()) return false;
   const item = terminals.get(session);
-  if (!item?.term || item?.socket?.readyState !== WebSocket.OPEN) return false;
-  const message = {type: 'resize', cols: item.term.cols, rows: item.term.rows, foreground: true};
-  if (options.activate === true) message.activate = true;
+  if (!item?.term) return false;
+  if (!readOnlyMode && options.activate === true) item.pendingAppearanceClaim = true;
+  if (item.socket?.readyState !== WebSocket.OPEN) return false;
+  const claim = !readOnlyMode && item.pendingAppearanceClaim === true;
+  const message = {type: 'resize', cols: item.term.cols, rows: item.term.rows, foreground: true, focus_claim: claim};
+  if (claim) {
+    message.activate = true;
+    message.appearance = terminalFocusAppearance(session);
+  }
+  if (!readOnlyMode && !claim && item.resizeOwner) message.owner = item.resizeOwner;
   if (browserClientId) message.client = browserClientId;
   if (item.resizeTimer) {
     clearTimeout(item.resizeTimer);
@@ -3032,6 +3054,7 @@ function sendRemoteResize(session, options = {}) {
     item.resizeTimer = null;
   }
   item.socket.send(JSON.stringify(message));
+  item.pendingAppearanceClaim = false;
   item.remoteResizePending = false;
   return true;
 }

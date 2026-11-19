@@ -46,6 +46,7 @@ refresh-client|if-shell)
     read release < "$TERMINAL_CONTROL_FIXTURE/release"
   fi
   : > "$TERMINAL_CONTROL_FIXTURE/completed"
+  printf '%s\n' "$TERMINAL_CONTROL_CLAIM"
   ;;
 attach-session)
   if [ -f "$TERMINAL_CONTROL_FIXTURE/attach-fail" ]; then exit 7; fi
@@ -66,7 +67,26 @@ esac
 	t.Setenv("PATH", root+":"+os.Getenv("PATH"))
 	t.Setenv("YOLOMUX_TMUX_SOCKET", "")
 	t.Setenv("TERMINAL_CONTROL_FIXTURE", root)
-	return &server{ignoreSizeChecked: true, ignoreSizeSupported: true, children: make(map[*exec.Cmd]struct{})}, root
+	s := &server{ignoreSizeChecked: true, ignoreSizeSupported: true, children: make(map[*exec.Cmd]struct{})}
+	s.tmuxCommandContextFn = func(ctx context.Context, args ...string) *exec.Cmd {
+		command := tmuxcmd.Command(ctx, tmuxcmd.Args(args...)[1:]...)
+		token := ""
+		for _, argument := range args {
+			for offset := 0; offset+52 <= len(argument); offset++ {
+				candidate := argument[offset : offset+52]
+				if validTerminalResizeClaim(candidate) {
+					token = candidate
+					break
+				}
+			}
+			if token != "" {
+				break
+			}
+		}
+		command.Env = append(command.Env, "TERMINAL_CONTROL_CLAIM="+token)
+		return command
+	}
+	return s, root
 }
 
 func TestTerminalPTYDescriptorsDoNotLeakIntoUnrelatedChildren(t *testing.T) {
@@ -122,13 +142,13 @@ func waitFixtureCondition(t *testing.T, description string, timeout time.Duratio
 	}
 }
 
-func terminalBridgeConnection(t *testing.T, s *server) net.Conn {
+func terminalBridgeConnection(t *testing.T, s *server, readonly ...bool) net.Conn {
 	t.Helper()
 	serverSide, clientSide := net.Pipe()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.bridge(&wsConn{Conn: serverSide}, "fixture", false, "")
+		s.bridge(&wsConn{Conn: serverSide}, "fixture", len(readonly) > 0 && readonly[0], "")
 	}()
 	t.Cleanup(func() {
 		_ = clientSide.Close()
@@ -165,6 +185,37 @@ func TestTerminalInitialResizeStartsAttachWithoutWaitingForInput(t *testing.T) {
 			t.Fatal(err)
 		}
 		output.Write(payload)
+	}
+}
+
+func TestTerminalReadonlyInitialDimensionsDoNotGrantAuthority(t *testing.T) {
+	s, root := terminalControlFixture(t)
+	connection := terminalBridgeConnection(t, s, true)
+	if err := writeFrame(connection, 1, []byte(`{"type":"resize","rows":24,"cols":87,"foreground":true,"focus_claim":false}`)); err != nil {
+		t.Fatal(err)
+	}
+	waitTerminalControlFile(t, filepath.Join(root, "attached"), 2*time.Second)
+	dimensions, err := os.ReadFile(filepath.Join(root, "dimensions"))
+	if err != nil || strings.TrimSpace(string(dimensions)) != "24 87" {
+		t.Fatalf("readonly initial PTY dimensions: %q error=%v", dimensions, err)
+	}
+	if err := writeFrame(connection, 1, []byte(`{"type":"refresh","txn":702}`)); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(connection)
+	_ = connection.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		_, payload, err := readFrame(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(payload), `"txn":702`) {
+			break
+		}
+	}
+	commands, err := os.ReadFile(filepath.Join(root, "commands"))
+	if err != nil || strings.Contains(string(commands), "@yomux_resize_authority") || strings.Contains(string(commands), "cursor-colour") {
+		t.Fatalf("readonly initial sizing claimed authority: %s error=%v", commands, err)
 	}
 }
 
@@ -284,7 +335,7 @@ func TestTerminalRefreshDuringResizeStillRedrawsTheTmuxClientScreen(t *testing.T
 	defer clientSide.Close()
 	request, stop := s.startTerminalControls(&wsConn{Conn: serverSide}, "fixture", "/dev/active", "", nil)
 	defer stop()
-	request(120, 36, 0, true)
+	request(120, 36, 0, terminalControlOptions{authority: true})
 	waitTerminalControlFile(t, filepath.Join(root, "held"), 2*time.Second)
 	request(0, 0, 17)
 	_ = clientSide.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -307,7 +358,7 @@ func TestTerminalRefreshAcknowledgesRedrawWhenPendingResizeFails(t *testing.T) {
 		return errors.New("fixture resize failure")
 	})
 	defer stop()
-	request(120, 36, 17, true)
+	request(120, 36, 17, terminalControlOptions{authority: true})
 	_ = clientSide.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, payload, err := readFrame(bufio.NewReader(clientSide))
 	if err != nil || string(payload) != `{"txn":17,"type":"refresh-ack"}` {
@@ -318,6 +369,79 @@ func TestTerminalRefreshAcknowledgesRedrawWhenPendingResizeFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFixtureClientsRedrawn(t, commands)
+}
+
+func TestTerminalAppearanceValidationAndWritePermissions(t *testing.T) {
+	s := &server{}
+	var input bytes.Buffer
+	var controls []terminalControlOptions
+	pair := &ptyPair{requestControl: func(cols, rows, txn int, options ...terminalControlOptions) { controls = append(controls, options[0]) }}
+	payload := []byte(`{"type":"resize","cols":120,"rows":36,"foreground":true,"activate":true,"focus_claim":true,"appearance":{"status_fg":"#ffffff","status_bg":"#0000ff","cursor":"#66ffff"}}`)
+	s.handleMessage(&input, pair, nil, nil, "fixture", "", payload, false)
+	if len(controls) != 0 || input.Len() != 0 {
+		t.Fatal("readonly viewer mutated terminal")
+	}
+	s.handleMessage(&input, pair, nil, nil, "fixture", "", payload, true)
+	if len(controls) != 1 || !controls[0].appearance.valid() || controls[0].passive {
+		t.Fatal("valid appearance claim rejected")
+	}
+	malformed := bytes.Replace(payload, []byte(`"cursor":"#66ffff"`), []byte(`"cursor":42`), 1)
+	s.handleMessage(&input, pair, nil, nil, "fixture", "", malformed, true)
+	if len(controls) != 1 || input.Len() != 0 {
+		t.Fatal("invalid typed resize became terminal input")
+	}
+	invalid := bytes.Replace(payload, []byte("#66ffff"), []byte("#nothex"), 1)
+	s.handleMessage(&input, pair, nil, nil, "fixture", "", invalid, true)
+	if len(controls) != 2 || controls[1].appearance != nil {
+		t.Fatal("invalid color reached tmux")
+	}
+}
+
+func TestTerminalClaimPublicationKeepsAppearanceUntilAccepted(t *testing.T) {
+	token, err := newTerminalResizeClaim()
+	if err != nil {
+		t.Fatal(err)
+	}
+	colors := &terminalAppearance{StatusForeground: "#ffffff", StatusBackground: "#0000ff", Cursor: "#66ffff"}
+	claim := terminalAuthorityClaim{token: token, appearance: colors, window: "@1"}
+	claim.acknowledge(terminalAuthorityResult{})
+	if claim.appearance != colors || claim.continuing || claim.token != token {
+		t.Fatal("failed publication discarded fresh claim")
+	}
+	active := terminalResizeClient{tty: "/dev/active", window: "@1", pid: "123", created: "1"}
+	if !strings.Contains(terminalResizeClaimCondition(active, claim.token, claim.continuing), "#{>=:") {
+		t.Fatal("future passive dimensions cannot retry unpublished focus")
+	}
+	claim.acknowledge(terminalAuthorityResult{window: "@1"})
+	if claim.appearance != nil || !claim.continuing || claim.token != token {
+		t.Fatal("accepted publication failed to retire one-time appearance")
+	}
+	if strings.Contains(terminalResizeClaimCondition(active, claim.token, claim.continuing), "#{>=:") {
+		t.Fatal("published continuation can renew authority")
+	}
+}
+
+func TestTerminalPendingFocusSurvivesPassiveResize(t *testing.T) {
+	s, root := terminalControlFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "hold"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+	request, stop := s.startTerminalControls(&wsConn{Conn: serverSide}, "fixture", "/dev/active", "", nil)
+	defer stop()
+	request(120, 36, 0, terminalControlOptions{authority: true})
+	waitTerminalControlFile(t, filepath.Join(root, "held"), time.Second)
+	request(100, 30, 0, terminalControlOptions{authority: true, passive: true})
+	waitTerminalControlFile(t, filepath.Join(root, "completed"), time.Second)
+	commands, err := os.ReadFile(filepath.Join(root, "commands"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(commands)), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[1], "#{>=:") {
+		t.Fatalf("passive dimensions discarded pending focus: %s", commands)
+	}
 }
 
 func TestTerminalHeldControlsLeaveKeyboardDeliveryAvailable(t *testing.T) {
@@ -417,7 +541,10 @@ func TestTerminalLegacyInitialResizePreservesAuthority(t *testing.T) {
 	if err := writeFrame(connection, 1, []byte(`{"type":"resize","rows":42,"cols":132}`)); err != nil {
 		t.Fatal(err)
 	}
-	waitTerminalControlFile(t, filepath.Join(root, "completed"), 2*time.Second)
+	waitFixtureCondition(t, "legacy resize authority published", 2*time.Second, func() bool {
+		commands, err := os.ReadFile(filepath.Join(root, "commands"))
+		return err == nil && strings.Contains(string(commands), "@yomux_resize_authority")
+	})
 	commands, err := os.ReadFile(filepath.Join(root, "commands"))
 	if err != nil || !strings.Contains(string(commands), "@yomux_resize_authority") {
 		t.Fatalf("legacy initial resize lost foreground authority: %s %v", commands, err)
@@ -495,7 +622,7 @@ func TestTerminalFailedAttachRetiresBridgeBeforeClientRegistration(t *testing.T)
 }
 
 func TestTerminalNewerClientClaimRetiresOlderExternalMutation(t *testing.T) {
-	for _, scope := range []string{"same-session", "linked-session", "departed-client", "adjacent-tickets"} {
+	for _, scope := range []string{"same-session", "linked-session", "departed-client", "adjacent-tickets", "older-smaller"} {
 		t.Run(scope, func(t *testing.T) {
 			root, err := testsupport.MkdirShortTemp("ta-")
 			if err != nil {
@@ -522,6 +649,7 @@ func TestTerminalNewerClientClaimRetiresOlderExternalMutation(t *testing.T) {
 			run("new-session", "-d", "-s", "alias", "-t", "source")
 			run("set-option", "-g", "status", "off")
 			run("set-option", "-t", "=source:", "window-size", "largest")
+			pairs := map[string]*ptyPair{}
 			attach := func(session string, cols, rows int, ignored bool) string {
 				t.Helper()
 				pair, err := openPTY(rows, cols)
@@ -547,9 +675,17 @@ func TestTerminalNewerClientClaimRetiresOlderExternalMutation(t *testing.T) {
 				waitFixtureCondition(t, "private authority client attached", 2*time.Second, func() bool {
 					return strings.Contains(run("list-clients", "-F", "#{client_tty}"), pair.tty)
 				})
+				pairs[pair.tty] = pair
 				return pair.tty
 			}
-			olderTTY := attach("source", 120, 36, true)
+			olderCols, olderRows := 120, 36
+			if scope == "older-smaller" {
+				olderCols, olderRows = 40, 8
+			}
+			olderTTY := attach("source", olderCols, olderRows, true)
+			if scope == "older-smaller" {
+				run("refresh-client", "-t", olderTTY, "-f", "!ignore-size")
+			}
 			newerSession := "source"
 			if scope == "linked-session" {
 				newerSession = "alias"
@@ -592,11 +728,22 @@ func TestTerminalNewerClientClaimRetiresOlderExternalMutation(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			olderDone := make(chan error, 1)
-			var olderClaims, newerClaims []string
+			olderToken, err := newTerminalResizeClaim()
+			if err != nil {
+				t.Fatal(err)
+			}
+			newerToken, err := newTerminalResizeClaim()
+			if err != nil {
+				t.Fatal(err)
+			}
+			yellow := &terminalAppearance{StatusForeground: "#000000", StatusBackground: "#ffff00", Cursor: "#ffff00"}
+			blue := &terminalAppearance{StatusForeground: "#ffffff", StatusBackground: "#0000ff", Cursor: "#0000ff"}
+			olderClaims := []terminalAuthorityClaim{{token: olderToken, appearance: yellow}}
+			newerClaims := []terminalAuthorityClaim{{token: newerToken, appearance: blue}}
 			if scope == "adjacent-tickets" {
 				// Adjacent values beyond float64 precision must remain distinct in tmux.
-				olderClaims = []string{fmt.Sprintf("%020d-%010d-%020d", int64(9007199254740992), 1, 1)}
-				newerClaims = []string{fmt.Sprintf("%020d-%010d-%020d", int64(9007199254740993), 1, 1)}
+				olderClaims = []terminalAuthorityClaim{{token: fmt.Sprintf("%020d-%010d-%020d", int64(9007199254740992), 1, 1), appearance: yellow}}
+				newerClaims = []terminalAuthorityClaim{{token: fmt.Sprintf("%020d-%010d-%020d", int64(9007199254740993), 1, 1), appearance: blue}}
 			}
 			go func() { olderDone <- s.claimResizeAuthority(ctx, "source", olderTTY, 120, 36, olderClaims...) }()
 			waitTerminalControlFile(t, held, 2*time.Second)
@@ -607,6 +754,39 @@ func TestTerminalNewerClientClaimRetiresOlderExternalMutation(t *testing.T) {
 			newer := &server{ignoreSizeChecked: true, ignoreSizeSupported: true}
 			if err := newer.claimResizeAuthority(ctx, newerSession, newerTTY, 59, 10, newerClaims...); err != nil {
 				t.Fatal(err)
+			}
+			for _, session := range []string{"source", "alias"} {
+				got := run("display-message", "-p", "-t", "="+session+":", "#{E:status-style}")
+				if !strings.HasSuffix(got, "fg=#ffffff,bg=#0000ff") {
+					t.Fatalf("%s status style: %q", session, got)
+				}
+			}
+			if got := run("show-options", "-wv", "-t", "=source:", "cursor-colour"); got != "#0000ff" {
+				t.Fatalf("cursor: %s", got)
+			}
+			if scope == "same-session" {
+				clients := terminalResizeClients([]byte(run("list-clients", "-F", terminalResizeClientFormat)))
+				var active terminalResizeClient
+				for _, client := range clients {
+					if client.tty == newerTTY {
+						active = client
+					}
+				}
+				if active.tty == "" {
+					t.Fatal("newer private client missing")
+				}
+				for _, attempt := range []struct {
+					token      string
+					continuing bool
+				}{
+					{olderClaims[0].token, false},
+					{strings.Repeat("9", 20) + "-" + strings.Repeat("9", 10) + "-" + strings.Repeat("9", 20), true},
+				} {
+					output, err := tmuxcmd.Command(ctx, tmuxcmd.Args(terminalResizePrepareArgs(active, attempt.token, attempt.continuing)...)[1:]...).CombinedOutput()
+					if err != nil || len(output) != 0 {
+						t.Fatalf("stale or forged preparation disabled winning client: %s %v", output, err)
+					}
+				}
 			}
 			before := run("list-clients", "-F", "#{client_tty}\t#{client_flags}")
 			if _, err := release.WriteString("release\n"); err != nil {
@@ -629,9 +809,176 @@ func TestTerminalNewerClientClaimRetiresOlderExternalMutation(t *testing.T) {
 			if !strings.Contains(flags(olderTTY), "ignore-size") || strings.Contains(flags(newerTTY), "ignore-size") || strings.Contains(flags(unrelatedTTY), "ignore-size") {
 				t.Fatalf("stale/shared-window claim changed foreground or unrelated ownership: before=%s after=%s", before, after)
 			}
+			if got := run("show-options", "-wv", "-t", "=source:", "cursor-colour"); got != "#0000ff" {
+				t.Fatalf("stale claim overwrote cursor: %s", got)
+			}
+			if scope == "older-smaller" {
+				if err := pairs[olderTTY].resize(60, 150); err != nil {
+					t.Fatal(err)
+				}
+				waitFixtureCondition(t, "older passive dimensions received", time.Second, func() bool {
+					return strings.Contains(run("list-clients", "-F", "#{client_tty}:#{client_width}"), olderTTY+":150")
+				})
+				if got := run("display-message", "-p", "-t", "=source:", "#{window_width} #{window_height}"); got != "59 10" {
+					t.Fatalf("older passive resize stole dimensions: %s", got)
+				}
+			}
+			// Native changes survive repeated dimensions from the same accepted claim.
+			run("set-option", "-w", "-t", "=source:", "cursor-colour", "#123456")
+			run("set-option", "-t", "=source:", "status-style", "fg=#654321,bg=#123456")
+			if err := newer.claimResizeAuthority(ctx, newerSession, newerTTY, 59, 10, newerClaims...); err != nil {
+				t.Fatal(err)
+			}
+			if got := run("show-options", "-wv", "-t", "=source:", "cursor-colour"); got != "#123456" {
+				t.Fatalf("duplicate claim overwrote native cursor: %s", got)
+			}
+			if got := run("display-message", "-p", "-t", "=source:", "#{E:status-style}"); got != "fg=#654321,bg=#123456" {
+				t.Fatalf("duplicate claim overwrote native status: %s", got)
+			}
+			for _, option := range terminalStatusOptions[1:] {
+				if got := run("display-message", "-p", "-t", "=source:", "#{E:"+option+"}"); strings.Contains(got, "bg=#0000ff") {
+					t.Fatalf("native general style left %s enforcing the claim: %s", option, got)
+				}
+			}
+			run("new-window", "-d", "-t", "=source:", "-n", "unclaimed", "/bin/cat")
+			run("select-window", "-t", "=alias:1")
+			if got := run("display-message", "-p", "-t", "=alias:", "#{E:status-style}"); got != "bg=green,fg=black" {
+				t.Fatalf("color spread to unclaimed window: %q", got)
+			}
+			run("select-window", "-t", "=alias:0")
 			waitFixtureCondition(t, "new foreground window geometry", 2*time.Second, func() bool {
 				return run("display-message", "-p", "-t", "=source:", "#{window_width} #{window_height}") == "59 10"
 			})
+			if scope == "same-session" {
+				reconnected := attach("source", 90, 20, true)
+				receipt := terminalAuthorityClaim{token: newerClaims[0].token, window: run("display-message", "-p", "-t", "=source:", "#{window_id}"), continuing: true}
+				if err := newer.claimResizeAuthority(ctx, "source", reconnected, 90, 20, receipt); err != nil {
+					t.Fatal(err)
+				}
+				waitFixtureCondition(t, "reconnected owner size", time.Second, func() bool {
+					return run("display-message", "-p", "-t", "=source:", "#{window_width} #{window_height}") == "90 20"
+				})
+				if got := run("show-options", "-wv", "-t", "=source:", "cursor-colour"); got != "#123456" {
+					t.Fatalf("resume reapplied colors: %s", got)
+				}
+				forged := receipt
+				forged.token = strings.Repeat("9", 20) + "-" + strings.Repeat("9", 10) + "-" + strings.Repeat("9", 20)
+				if err := newer.claimResizeAuthority(ctx, "source", olderTTY, 150, 60, forged); err != nil {
+					t.Fatal(err)
+				}
+				if got := run("show-options", "-wv", "-t", "=source:", "@yomux_resize_authority"); got != receipt.token {
+					t.Fatalf("forged resume acquired authority: %s", got)
+				}
+				// Independent windows share inherited owners. A native write must
+				// survive another window's next claim, including section-only writes.
+				run("select-window", "-t", "=alias:1")
+				otherTTY := attach("alias", 70, 15, true)
+				claim := func(session, tty string, colors *terminalAppearance) {
+					t.Helper()
+					token, err := newTerminalResizeClaim()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := newer.claimResizeAuthority(context.Background(), session, tty, 70, 15, terminalAuthorityClaim{token: token, appearance: colors}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for _, option := range terminalStatusOptions {
+					run("set-option", "-u", "-t", "=source:", "status-style")
+					run("set-option", "-g", "status-style", "fg=white,bg=green")
+					globalArgs := []string{"set-option", "-g"}
+					localArgs := []string{"show-options", "-qv", "-t", "=alias:1"}
+					if strings.HasPrefix(option, "window-") {
+						globalArgs = append(globalArgs, "-w")
+						localArgs = append(localArgs, "-w")
+					}
+					claim("source", newerTTY, yellow)
+					claim("alias", otherTTY, blue)
+					if got := run(append(localArgs, option)...); got != "" {
+						t.Fatalf("%s inheritance was shadowed locally: %s", option, got)
+					}
+					run(append(globalArgs, option, "fg=white,bg=red")...)
+					claim("source", newerTTY, yellow)
+					if got := run("display-message", "-p", "-t", "=alias:1", "#{E:"+option+"}"); got != "fg=white,bg=red" {
+						t.Fatalf("another window's focus resurrected %s: %s", option, got)
+					}
+					run(append(globalArgs, option, "fg=white,bg=green")...)
+					if got := run("display-message", "-p", "-t", "=alias:1", "#{E:"+option+"}"); got != "fg=white,bg=green" {
+						t.Fatalf("returning to a prior native value resurrected %s: %s", option, got)
+					}
+				}
+				// Both first claims may inventory the same unwrapped global owner.
+				// Their separate physical windows must both retain their own colors.
+				for _, option := range terminalStatusOptions {
+					args := []string{"set-option", "-g"}
+					if strings.HasPrefix(option, "window-") {
+						args = append(args, "-w")
+					}
+					run(append(args, option, "fg=white,bg=green")...)
+				}
+				clients := terminalResizeClients([]byte(run("list-clients", "-F", terminalResizeClientFormat)))
+				var commands [][]string
+				for _, request := range []struct {
+					tty    string
+					colors terminalAppearance
+				}{{newerTTY, *yellow}, {otherTTY, *blue}} {
+					for _, active := range clients {
+						if active.tty != request.tty {
+							continue
+						}
+						styles, err := newer.terminalAppearanceStyles(context.Background(), active.window)
+						if err != nil {
+							t.Fatal(err)
+						}
+						request.colors.styles = styles
+						token, err := newTerminalResizeClaim()
+						if err != nil {
+							t.Fatal(err)
+						}
+						commands = append(commands, terminalResizeClaimArgs(clients, active, 70, 15, token, false, &request.colors))
+					}
+				}
+				if len(commands) != 2 {
+					t.Fatal("concurrent ownership fixture lost its clients")
+				}
+				for _, command := range commands {
+					run(command...)
+				}
+				for target, color := range map[string]string{"=source:0": "bg=#ffff00", "=alias:1": "bg=#0000ff"} {
+					for _, option := range terminalStatusOptions {
+						if got := run("display-message", "-p", "-t", target, "#{E:"+option+"}"); !strings.HasSuffix(got, color) {
+							t.Fatalf("concurrent owner lost %s %s color: %s", target, option, got)
+						}
+					}
+				}
+				run("select-window", "-t", "=alias:0")
+				run("set-option", "-t", "=source:", "status-style", "bold,fg=white,bg=green")
+				run("set-option", "-t", "=source:", "status-left-style", "underscore,fg=white,bg=green")
+				run("set-option", "-w", "-t", "=source:0", "window-status-current-style", "italics,fg=white,bg=green")
+				claim("source", newerTTY, yellow)
+				for _, target := range []string{"=source:0", "=alias:0"} {
+					for _, option := range terminalStatusOptions {
+						if got := run("display-message", "-p", "-t", target, "#{E:"+option+"}"); !strings.HasSuffix(got, "bg=#ffff00") {
+							t.Fatalf("linked view lost local/global %s owner: %s %s", option, target, got)
+						}
+					}
+				}
+				run("set-option", "-t", "=source:", "status-style", "fg=white,bg=red")
+				for _, option := range terminalStatusOptions[1:] {
+					if got := run("display-message", "-p", "-t", "=source:0", "#{E:"+option+"}"); strings.Contains(got, "bg=#ffff00") {
+						t.Fatalf("local general release left %s enforcing yellow: %s", option, got)
+					}
+				}
+				run("set-option", "-g", "status-style", "fg=white,bg=blue")
+				run("select-window", "-t", "=alias:1")
+				claim("alias", otherTTY, blue)
+				run("select-window", "-t", "=alias:0")
+				for target, expected := range map[string]string{"=source:0": "fg=white,bg=red", "=alias:0": "fg=white,bg=blue"} {
+					if got := run("display-message", "-p", "-t", target, "#{E:status-style}"); got != expected {
+						t.Fatalf("another window changed %s native local/global style: %s", target, got)
+					}
+				}
+			}
 		})
 	}
 }
@@ -644,6 +991,11 @@ func TestTerminalResizeClaimAndClientInputsAreBounded(t *testing.T) {
 	second, err := newTerminalResizeClaim()
 	if err != nil || !validTerminalResizeClaim(first) || !validTerminalResizeClaim(second) || second <= first {
 		t.Fatalf("shared clock tokens are invalid or unordered: %q %q %v", first, second, err)
+	}
+	for _, color := range []string{"", "red", "#fff", "#123456;kill-server", "#{pid}", "#12345g"} {
+		if (&terminalAppearance{StatusForeground: color, StatusBackground: "#000000", Cursor: "#ffffff"}).valid() {
+			t.Fatalf("invalid appearance admitted: %q", color)
+		}
 	}
 	for _, input := range []string{"", "#{window_id}", strings.Repeat("9", 52), first + "; kill-server"} {
 		if validTerminalResizeClaim(input) {
@@ -679,7 +1031,7 @@ func TestTerminalControlsCancelSupersededSizeAndAcknowledgeLatestRefresh(t *test
 	defer stop()
 	request(120, 36, 0)
 	waitTerminalControlFile(t, filepath.Join(root, "held"), 2*time.Second)
-	// A larger latest viewport no longer needs to ignore the other 180x40 client.
+	// The latest viewport retains sole resize ownership even when another client is smaller.
 	request(200, 60, 9)
 	_ = clientSide.SetReadDeadline(time.Now().Add(2 * time.Second))
 	opcode, payload, err := readFrame(bufio.NewReader(clientSide))
@@ -704,7 +1056,7 @@ func TestTerminalUnchangedOwnershipReconcilesWithoutSIGWINCH(t *testing.T) {
 	}
 	defer pair.close()
 	controls := 0
-	pair.requestControl = func(cols, rows, txn int, authority ...bool) {
+	pair.requestControl = func(cols, rows, txn int, options ...terminalControlOptions) {
 		if cols != 120 || rows != 36 || txn != 0 {
 			t.Fatalf("ownership dimensions: %d %d %d", cols, rows, txn)
 		}

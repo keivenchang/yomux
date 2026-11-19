@@ -548,7 +548,7 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', descKey: 'debug.graph.chart.gpuUtil.desc', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
   {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', descKey: 'debug.graph.chart.gpuMemory.desc', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
   {key: 'systemDisk', labelKey: 'debug.graph.chart.systemDisk', descKey: 'debug.graph.chart.systemDisk.desc', series: [], unit: 'percent', fixedMax: 100, kind: 'line', hostMetric: 'diskUsage'},
-  {key: 'latency', labelKey: 'debug.graph.chart.clientTimings', descKey: 'debug.graph.chart.latency.desc', series: ['latency', 'apiDuration', 'sseAge'], unit: 'milliseconds', secondaryUnit: 'seconds', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'latency', labelKey: 'debug.graph.chart.clientTimings', descKey: 'debug.graph.chart.latency.desc', series: ['latency', 'apiDuration'], unit: 'milliseconds', timingUnits: true, disconnectedOverlay: true, noDataOverlay: true},
   {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', descKey: 'debug.graph.chart.clientApiSse.desc', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', descKey: 'debug.graph.chart.clientBandwidth.desc', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
 ]);
@@ -2682,7 +2682,9 @@ function jsDebugCurrentObservationFromEvent(entry) {
     code_revision: String(event.observationCodeRevision || jsDebugCodeRevision()),
     browser_family: String(event.observationBrowserFamily || jsDebugBrowserFamily()),
   };
-  const latency = Number(event.type === 'sse' ? event.receiveLatencyMs : event.durationMs);
+  const endpoint = event.type === 'api' ? jsDebugEndpointText(event.endpoint || event.url) : '';
+  const isPingRequest = event.type === 'api' && endpoint === '/api/ping';
+  const latency = Number(event.type === 'sse' ? event.receiveLatencyMs : (isPingRequest ? NaN : event.durationMs));
   if (Number.isFinite(latency) && latency >= 0) payload.latency_ms = latency;
   const bytes = event.type === 'api'
     ? Number(event.requestBytes || 0) + Number(event.responseBytes || 0)
@@ -2695,7 +2697,7 @@ function jsDebugCurrentObservationFromEvent(entry) {
     if (event.serverEpoch) payload.server_epoch = String(event.serverEpoch).slice(0, 128);
   }
   if (event.type === 'api') {
-    payload.endpoint = jsDebugEndpointText(event.endpoint || event.url);
+    payload.endpoint = endpoint;
     payload.method = String(event.method || 'GET').toUpperCase().slice(0, 16);
     if (event.requestId) payload.request_id = String(event.requestId).slice(0, 128);
     if (event.serverRequestId) payload.server_request_id = String(event.serverRequestId).slice(0, 128);

@@ -90,18 +90,21 @@ func TestGoSearchIndexSymlinkAliasesShareOneRoot(t *testing.T) {
 	}
 	defer func() { _ = store.db.Close() }()
 	engine := newSearchIndexEngine(store)
-	if _, err := engine.handle(indexRequest{Action: "ensure", Root: aliasOne, Identity: fileID(info), MaxFiles: 10, MaxBytes: DefaultIndexBytes}); err != nil {
-		t.Fatal(err)
-	}
 	canonicalRoot, err := CanonicalIndexRoot(aliasOne)
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine.mu.Lock()
-	buildDone := engine.buildDone[canonicalRoot]
-	engine.mu.Unlock()
-	if buildDone == nil {
-		t.Fatal("symlink ensure did not schedule a root build")
+	buildDone := make(chan struct{})
+	var completion sync.Once
+	// Subscribe before ensure: a fast worker can retire its in-flight channel
+	// before the caller reads the build registry.
+	engine.onComplete = func(status map[string]any) {
+		if status["root"] == canonicalRoot {
+			completion.Do(func() { close(buildDone) })
+		}
+	}
+	if _, err := engine.handle(indexRequest{Action: "ensure", Root: aliasOne, Identity: fileID(info), MaxFiles: 10, MaxBytes: DefaultIndexBytes}); err != nil {
+		t.Fatal(err)
 	}
 	select {
 	case <-buildDone:

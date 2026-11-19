@@ -469,12 +469,12 @@ def _assert_native_stats_range_journey(browser, terminal_session):
         ])
 
 
-def test_client_timings_share_plot_with_independent_milliseconds_and_seconds_axes(browser, tmp_path):
+def test_client_timings_plot_ping_and_non_ping_latency_without_sse_age(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug&layout=left&tabs=left:__debug__")
     WebDriverWait(browser, 8).until(lambda driver: driver.execute_script("return typeof debugGraphChartHtml === 'function' && typeof debugGraphSeriesData === 'function'"))
     try:
         result = browser.execute_script("""
-          const groups=jsDebugGraphChartGroups.filter(group=>group.series.some(key=>['latency','apiDuration','sseAge'].includes(key)));
+          const groups=jsDebugGraphChartGroups.filter(group=>group.series.some(key=>['latency','apiDuration'].includes(key)));
           if(groups.length!==1) return {groupCount:groups.length};
           const now=Date.now(), buckets=[0,1].map(index=>{
             const bucket=debugGraphNewBucket(now-120000+index*60000,60000);
@@ -488,33 +488,26 @@ def test_client_timings_share_plot_with_independent_milliseconds_and_seconds_axe
           const host=document.createElement('div');host.id='timing-axis-fixture';host.style.cssText='width:700px;height:350px';
           host.innerHTML=debugGraphChartHtml({...groups[0],noDataOverlay:false,disconnectedOverlay:false},debugGraphSeriesData(buckets),{startMs:now-120000,endMs:now},buckets);
           document.body.append(host);
-          const chart=host.querySelector('[data-js-debug-chart]'), svg=chart.querySelector('svg.js-debug-line-chart');
+          const chart=host.querySelector('[data-js-debug-chart]');
           const axes=[...chart.querySelectorAll('.js-debug-y-axis')];
-          const rect=node=>{const r=node.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom}};
           const series=jsDebugGraphHoverChartData.get('latency').groupSeries;
-          const sse=series.find(row=>row.metricKey==='sseAge'),api=series.find(row=>row.metricKey==='apiDuration');
-          const sseLine=chart.querySelector(`[data-js-debug-series="${sse.key}"]`);
-          const point=sseLine.points.getItem(sseLine.points.numberOfItems-1), box=svg.getBoundingClientRect();
-          const nearest=debugGraphHoverDetailAtTime(chart,buckets[1].startMs,{clientY:box.top+point.y/jsDebugGraphGeometry.height*box.height}).text;
+          const ping=series.find(row=>row.metricKey==='latency'),api=series.find(row=>row.metricKey==='apiDuration');
           const hover=row=>debugGraphHoverDetailAtTime(chart,buckets[1].startMs,{target:{closest:()=>({dataset:{jsDebugSeries:row.key}})}}).text;
-          return {groupCount:groups.length,left:axes[0].textContent,right:axes[1]?.textContent,
-            leftRect:rect(axes[0]),rightRect:rect(axes[1]),plot:rect(svg),
-            primaryMax:Number(chart.dataset.jsDebugChartAxisMax),secondaryMax:Number(chart.dataset.jsDebugChartSecondaryMax),
-            sseValue:sse.values[1],nearest,sseHover:hover(sse),apiHover:hover(api),
-            axisColor:getComputedStyle(axes[1]).color,sseColor:getComputedStyle(sseLine).stroke,
+          return {groupCount:groups.length,axisCount:axes.length,left:axes[0].textContent,
+            primaryMax:Number(chart.dataset.jsDebugChartAxisMax),hasSecondaryAxis:Boolean(chart.dataset.jsDebugChartSecondaryUnit),
+            pingHover:hover(ping),apiHover:hover(api),
             legend:[...chart.querySelectorAll('[data-js-debug-legend] > span')].map(node=>node.textContent),
             colors:[...chart.querySelectorAll('polyline')].map(node=>getComputedStyle(node).stroke),
-            lineCount:chart.querySelectorAll('polyline').length};
+            lineCount:chart.querySelectorAll('polyline').length,
+            seriesKeys:series.map(row=>row.metricKey)};
         """)
-        assert result["axisColor"] == result["sseColor"], result
-        assert len(result["legend"]) == 3 and sum(label.endswith(" (ms)") for label in result["legend"]) == 2 and sum(label.endswith(" (s)") for label in result["legend"]) == 1, result
         assert result["groupCount"] == 1, result
-        assert "ms" in result["left"] and "s" in result["right"] and "ms" not in result["right"], result
-        assert result["leftRect"]["right"] <= result["plot"]["left"] and result["rightRect"]["left"] >= result["plot"]["right"], result
-        assert result["primaryMax"] == 100 and result["secondaryMax"] == 200, result
-        assert result["sseValue"] == 120 and "120 s" in result["sseHover"] and "100 ms" in result["apiHover"], result
-        assert "120 s" in result["nearest"], result
-        assert result["lineCount"] == 3 and len(set(result["colors"])) == 3, result
+        assert result["axisCount"] == 1 and "ms" in result["left"] and not result["hasSecondaryAxis"], result
+        assert result["primaryMax"] == 100, result
+        assert len(result["legend"]) == 2 and all(label.endswith(" (ms)") for label in result["legend"]), result
+        assert result["seriesKeys"] == ["apiDuration", "latency"], result
+        assert "100 ms" in result["apiHover"] and "20.0 ms" in result["pingHover"], result
+        assert result["lineCount"] == 2 and len(set(result["colors"])) == 2, result
     finally:
         browser.execute_script("""
           document.getElementById('timing-axis-fixture')?.remove();

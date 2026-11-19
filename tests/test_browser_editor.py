@@ -2367,6 +2367,7 @@ def test_markdown_prosemirror_supports_safe_html_round_trip(browser, tmp_path):
               'before<br>after',
               '',
               '<mark>highlight</mark> <kbd>Ctrl</kbd> <sup>2</sup> <img src="static/brand.css" alt="brand" title="Brand">',
+              'Run <code>npm test</code> to check the changes.',
               '',
               '<details>',
               '<summary>More details</summary>',
@@ -2390,8 +2391,11 @@ def test_markdown_prosemirror_supports_safe_html_round_trip(browser, tmp_path):
             if (!panel._pmView) throw new Error(panel._pmError || 'safe HTML ProseMirror ViewEditor did not initialize');
             const serialized = serializeProseMirrorSource(panel);
             const dom = panel._pmView.dom;
+            const reopened = prosemirrorMarkdownParser(window.YOmuxProseMirror, prosemirrorMarkdownSchema(window.YOmuxProseMirror)).parse(serialized);
             done({
               serialized,
+              inlineCode: dom.querySelector('code')?.textContent || '',
+              codeRoundTrip: JSON.stringify(reopened.toJSON()) === JSON.stringify(panel._pmView.state.doc.toJSON()),
               br: dom.querySelectorAll('br').length,
               mark: dom.querySelector('mark')?.textContent || '',
                kbd: dom.querySelector('kbd')?.textContent || '',
@@ -2415,6 +2419,8 @@ def test_markdown_prosemirror_supports_safe_html_round_trip(browser, tmp_path):
     assert "<mark>highlight</mark>" in metrics["serialized"], metrics
     assert "<kbd>Ctrl</kbd>" in metrics["serialized"], metrics
     assert "<sup>2</sup>" in metrics["serialized"], metrics
+    assert "`npm test`" in metrics["serialized"], metrics
+    assert metrics["inlineCode"] == "npm test" and metrics["codeRoundTrip"], metrics
     assert '![brand](static/brand.css "Brand")' in metrics["serialized"], metrics
     assert "<details>" in metrics["serialized"] and "<summary>More details</summary>" in metrics["serialized"], metrics
     assert metrics["br"] >= 1 and metrics["mark"] == "highlight" and metrics["kbd"] == "Ctrl" and metrics["sup"] == "2", metrics

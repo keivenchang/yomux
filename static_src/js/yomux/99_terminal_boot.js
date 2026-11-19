@@ -4658,6 +4658,7 @@ function syncPanelVisibility(previousActive = []) {
     }
   }
   if (typeof syncChatActiveLifecycle === 'function') syncChatActiveLifecycle();
+  scheduleVisibleTerminalResizeAuthority();
   syncFileIndexStatusPollInterval();
 }
 
@@ -4695,6 +4696,7 @@ function activateTab(session, name, options = {}) {
   if (name === 'events') refreshEventLog(session);
   if (typeof syncClientEventDemand === 'function') syncClientEventDemand();
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  scheduleVisibleTerminalResizeAuthority();
 }
 
 function tmuxWindow(session, key, label) {
@@ -4925,6 +4927,13 @@ function consumeTerminalControlMessage(session, data) {
   if (typeof data !== 'string' || data.charCodeAt(0) !== 123) return false;
   let message = null;
   try { message = JSON.parse(data); } catch (_) { return false; }
+  if (message?.type === 'resize-owner') {
+    const item = terminals.get(session);
+    if (item && /^\d{20}-\d{10}-\d{20}$/.test(message.token) && /^@\d+$/.test(message.window_id)) {
+      item.resizeOwner = {token: message.token, window_id: message.window_id};
+    }
+    return true;
+  }
   if (message?.type === 'application-scroll-error') {
     statusErr(esc(t('common.requestFailed')));
     return true;
@@ -4948,6 +4957,7 @@ function finishTmuxWindowSwitchPaint(session, sequence) {
   if (!loading) return false;
   clearTerminalConnectionState(session, {sequence});
   clearTmuxWindowSwitchLoading(session, {sequence});
+  scheduleVisibleTerminalResizeAuthority('focus');
   return true;
 }
 
@@ -4993,6 +5003,31 @@ async function ensureTerminalRunning(session) {
   }
 }
 
+function suspendTerminalSocketForHiddenPage(item) {
+  const socket = item?.socket;
+  if (!socket) return false;
+  item.manualClose = true;
+  item.closeHandled = true;
+  item.socket = null;
+  tmuxSessionLifecycleReleaseSource(item.sessionLifecycleToken, socket);
+  if (socket.readyState !== WebSocket.CLOSED && socket.readyState !== WebSocket.CLOSING) socket.close();
+  return true;
+}
+
+function suspendHiddenTerminalSockets() {
+  for (const item of terminals.values()) suspendTerminalSocketForHiddenPage(item);
+}
+
+function resumeVisibleTerminalSockets() {
+  for (const session of activeSessions.filter(isTmuxSession)) {
+    const pane = document.getElementById(`terminal-pane-${session}`);
+    const container = document.getElementById(terminalDomId(session));
+    if (!itemIsActivePaneTab(session) || !pane?.classList.contains(CLS.active) || !container?.isConnected) continue;
+    const item = terminals.get(session);
+    if (item?.term && item.container === container) connectTerminalSocket(session, item);
+  }
+}
+
 function connectTerminalSocket(session, item) {
   if (!item?.term || !item?.container) return;
   if (item.socket && item.socket.readyState !== WebSocket.CLOSED && item.socket.readyState !== WebSocket.CLOSING) return;
@@ -5008,6 +5043,10 @@ function connectTerminalSocket(session, item) {
   item.closeHandled = false;
   socket.onopen = () => {
     if (!socketIsCurrent()) return;
+    if (document.visibilityState === 'hidden') {
+      suspendTerminalSocketForHiddenPage(item);
+      return;
+    }
     // Socket close clears logical focus while the native textarea can remain focused.
     if (terminalContainerOwnsNativeFocus(session, item.container)
         && [focusedPanelItem, editorNav.focusedItem, editorNav.pendingFocus?.item].every(target => !target || target === session)) {
@@ -5046,7 +5085,12 @@ function connectTerminalSocket(session, item) {
     }
   };
   socket.onclose = event => {
-    if (item.manualClose || item.closeHandled || !socketIsCurrent()) return;
+    if (!socketIsCurrent()) return;
+    if (document.visibilityState === 'hidden') {
+      suspendTerminalSocketForHiddenPage(item);
+      return;
+    }
+    if (item.manualClose || item.closeHandled) return;
     tmuxSessionLifecycleReleaseSource(lifecycleToken, socket);
     postEvent(session, 'terminal_disconnected', `terminal disconnected from ${session}`, {});
     clearFocusedTerminal(session);
@@ -5114,10 +5158,10 @@ function processTerminalSocketFrame(session, item, data) {
   // Output resumes a committed paint barrier; it must not consume a held tab's pointer intent.
   if (dockviewLayoutState.tabActivationPerf?.terminal) dockviewFinishTabActivationPerf(session);
   clearTerminalConnectionState(session);
-  // The first resize frame can reach the server before tmux has registered its new attach client.
-  // First PTY output proves the attach exists, so repeat the visible surface's authority claim once.
+  // Reconcile dimensions once tmux has attached. The shared sender alone consumes
+  // a pending focus claim; output must not renew an already published appearance.
   if (firstOutput && terminalIsVisible(session, item.container)) {
-    sendRemoteResize(session, {activate: true});
+    sendRemoteResize(session);
   }
   item.fileUnderlineController?.schedule?.({reason: 'output'});
   if (firstOutput) scheduleTerminalBlankScreenRefresh(session, {reason: 'first-output'});
@@ -5275,6 +5319,7 @@ function startTerminal(session) {
     blankScreenRefreshAttempts: 0,
     attentionHighlightFrame: 0,
     terminalOutputSeen: false,
+    pendingAppearanceClaim: false,
     pendingTerminalWrites: 0,
     refreshViewportFrame: 0,
     refreshViewportRows: 0,
@@ -5282,6 +5327,8 @@ function startTerminal(session) {
     containerBindingDispose: null,
   };
   terminals.set(session, item);
+  installTerminalCursorOutput(session, item);
+  scheduleVisibleTerminalResizeAuthority();
   item.fileUnderlineController = installTerminalFileReferenceUnderlines(session, term, container);
   item.containerBindingDispose = bindTerminalContainerForSession(session, term, container);
   term.onFocus?.(() => {
@@ -7381,16 +7428,19 @@ function scheduleReconnectResync(reason = '') {
 
 function resyncVisibleTerminalRemoteSizes(reason = '') {
   for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);
-  scheduleVisibleTerminalResizeAuthority();
+  if (reason === 'refresh') scheduleVisibleTerminalResizeAuthority('refresh');
   if (reason === 'refresh') scheduleSettledTerminalResizeAuthority();
 }
 
 function installReconnectResyncHandlers() {
   if (statsOnlyBootEnabled()) return;
   document.addEventListener('visibilitychange', () => {
+    const visible = document.visibilityState === 'visible';
+    if (!visible) suspendHiddenTerminalSockets();
     syncFileIndexStatusPollInterval();
     syncPanelVisibility(activeSessions.slice());
-    if (document.visibilityState === 'visible') {
+    if (visible) {
+      resumeVisibleTerminalSockets();
       if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
       scheduleReconnectResync('visible');
       resyncVisibleTerminalRemoteSizes('visible');

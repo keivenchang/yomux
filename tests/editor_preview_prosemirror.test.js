@@ -60,7 +60,7 @@ assert.match(fs.readFileSync(path.join(root, 'static_src/js/yomux/94_markdown_fo
 assert.match(adapter, /strike: prosemirrorCodeStyleMark/);
 assert.match(adapter, /underline: \{open: '<u>'/);
 assert.match(adapter, /s: \{mark: 'strike'\}/);
-assert.match(adapter, /const markName = \{u: 'underline', strong: 'strong', em: 'em', s: 's', mark: 'highlight', kbd: 'kbd', sup: 'superscript'\}/);
+assert.match(adapter, /type: 'code_inline', tag: 'code', nesting: 0, content, markup: ''/);
 assert.match(adapter, /sup: 'superscript'/);
 assert.match(adapter, /superscript: \{mark: 'superscript'\}/);
 assert.match(adapter, /underline: \{mark: 'underline'\}/);
@@ -229,6 +229,12 @@ const markdownPreview = fs.readFileSync(path.join(root, 'static_src/js/yomux/88_
 vm.runInContext(markdownPreview.slice(markdownPreview.indexOf('function markdownTexMathAt('), markdownPreview.indexOf('function renderTexMathSource(')), sourceContext);
 vm.runInContext(adapter + `\nwindow.formatParser = prosemirrorMarkdownParser(window.YOmuxProseMirror, prosemirrorMarkdownSchema(window.YOmuxProseMirror));`, sourceContext);
 const parser = sourceContext.window.formatParser;
+const htmlCode = parser.parse('Use <code>npm test</code> to run it.');
+const htmlCodeText = [];
+htmlCode.descendants(node => {
+  if (node.isText && node.marks.some(mark => mark.type.name === 'code')) htmlCodeText.push(node.text);
+});
+assert.deepEqual(htmlCodeText, ['npm test']);
 const referenceShapes = ['[ref][id]\n\n[id]: https://x "title"', '[ref][]\n\n[ref]: https://x', '[ref]\n\n[ref]: https://x'];
 const imageShapes = [...referenceShapes.map(source => '!' + source), '![alt](image.png "title")', '[![alt](image.png)](https://x "title")'];
 for (const input of ['a | b\n--|--\nx|y', '| a | b |\n| :--- | ---: |\n| x | y |', '| a \\| b | c |\n| --- | --- |\n| x | y |', ...referenceShapes, ...imageShapes, ...imageShapes.map(source => 'before ' + source.replace('\n\n', ' after\n\n'))]) {
@@ -248,6 +254,8 @@ for (const input of ['a | b\n--|--\nx|y', '| a | b |\n| :--- | ---: |\n| x | y |
   }
 }
 vm.runInContext(`window.formatSerializer = prosemirrorMarkdownSerializer(window.YOmuxProseMirror);`, sourceContext);
+const htmlCodeSerialized = sourceContext.window.formatSerializer.serialize(htmlCode);
+assert.equal(parser.parse(htmlCodeSerialized).eq(htmlCode), true, JSON.stringify({htmlCodeSerialized, htmlCode: htmlCode.toJSON(), reopened: parser.parse(htmlCodeSerialized).toJSON()}));
 for (const source of [
   '> $$\n> x\n> $$',
   '- $$\n  x\n  $$',

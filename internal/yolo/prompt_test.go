@@ -4,6 +4,7 @@
 package yolo
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -122,10 +123,18 @@ func TestClassifyPromptDoesNotJoinStaleShellApprovalToLaterMenu(t *testing.T) {
 }
 
 func TestClassifyPromptAllowsStructuredCodexReasonBeforeCommand(t *testing.T) {
-	text := "Would you like to run the following command?\nReason:\n  This command reads the local test fixture.\n$ cat ./fixture.txt\n› 1. Yes, proceed\n  2. No\nPress enter to confirm or esc to cancel"
+	text := "Would you like to run the following command?\n\nEnvironment: local\n\nReason:\n  This command reads the local test fixture.\n$ cat ./fixture.txt\n› 1. Yes, proceed\n  2. No\nPress enter to confirm or esc to cancel"
 	prompt := ClassifyPrompt(text, "")
 	if !prompt.Actionable || prompt.Command != "cat ./fixture.txt" {
 		t.Fatalf("ClassifyPrompt() = %#v, want an actionable shell prompt with a structured reason and visible command", prompt)
+	}
+}
+
+func TestClassifyPromptLeavesMultilineCodexCommandForManualApproval(t *testing.T) {
+	text := "Would you like to run the following command?\nEnvironment: local\nReason: Run a shell script.\n$ systemd-run --user /bin/bash -c 'set -eu\nprintf hello\nprintf world'\n› 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\nPress enter to confirm or esc to cancel"
+	prompt := ClassifyPrompt(text, "")
+	if !prompt.ManualApproval || prompt.Actionable || !prompt.Approval || prompt.SelectedOption != 1 || !strings.Contains(prompt.Command, "\nprintf world'") {
+		t.Fatalf("ClassifyPrompt() = %#v, want visible manual approval with the full multiline command", prompt)
 	}
 }
 

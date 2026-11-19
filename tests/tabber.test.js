@@ -829,6 +829,21 @@ test('shared CSS length owner resolves pixel literals without layout probes and 
   assert.ok(!fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8').includes('withRootCssLengthSnapshot'), 'row selection does not eagerly measure unused split minima');
 });
 
+test('read-only initial sizing carries dimensions without appearance or ownership', () => {
+  const source = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+  const messages = [];
+  const item = {term: {cols: 87, rows: 24}, pendingAppearanceClaim: true,
+    resizeOwner: {token: 'old-owner', window_id: '@1'},
+    socket: {readyState: 1, send: data => messages.push(JSON.parse(data))}};
+  const context = {terminals: new Map([['viewer', item]]), readOnlyMode: true,
+    terminalCanPublishRemoteSize: () => true, WebSocket: {OPEN: 1}, browserClientId: ''};
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function sendRemoteResize('), source.indexOf('function scheduleRemoteResize(')), context);
+  assert.equal(context.sendRemoteResize('viewer', {activate: true}), true);
+  assert.deepEqual(messages, [{type: 'resize', cols: 87, rows: 24, foreground: true, focus_claim: false}]);
+  assert.equal(item.pendingAppearanceClaim, false);
+});
+
 test('resize renewal coalesces focus, visibility and gestures independently of Finder cancellation', () => {
   const source = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
   const frames = [], listeners = {}, calls = [];
@@ -843,16 +858,44 @@ test('resize renewal coalesces focus, visibility and gestures independently of F
   context.claimVisibleTerminalResizeAuthority = () => calls.push('claim');
   context.installTerminalResizeAuthorityHandlers();
   listeners.focus();
-  listeners.pointerdown({target: {closest: () => null}});
+  assert.equal(listeners.pointerdown, undefined, 'routine clicks never claim colors');
   listeners.visibilitychange();
   context.tabSwitchHighlightGeneration++;
   frames.shift()(); frames.shift()();
   assert.deepEqual(calls, ['claim'], 'one foreground gesture renews even when Finder changes generation');
-  listeners.pointerdown({target: {closest: () => ({dataset: {paneTab: 'second'}})}});
+  context.scheduleVisibleTerminalResizeAuthority();
+  frames.shift()(); frames.shift()();
   assert.equal(frames.length, 0, 'held tabs leave ownership to release-time activation');
   context.scheduleVisibleTerminalResizeAuthority();
   frames.shift()(); frames.shift()();
-  assert.equal(calls.length, 2, 'a later gesture can recover ownership from a competing client');
+  assert.equal(calls.length, 3, 'a later gesture can recover ownership from a competing client');
+});
+
+test('appearance claims follow shown terminals and coalesce linked physical windows', () => {
+  const source = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+  const sends = [];
+  const context = {
+    focusedPanelItem: 'a', activeSessions: ['a', 'alias', 'b'],
+    isTmuxSession: () => true, terminalCanPublishRemoteSize: () => true,
+    terminals: new Map(['a', 'alias', 'b'].map(session => [session, {term: {}, container: {session}}])),
+    tabberViewSessions: new Map([['alias', {windowId: '@1'}]]),
+    activeTmuxSignalWindowForSession: session => ({window_id: session === 'b' ? '@2' : '@1'}),
+    terminalIsVisible: () => true,
+    fitTerminal: (session, options) => sends.push({session, claim: options.claim}),
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('let lastTerminalResizeAuthoritySignature'), source.indexOf('function fitTerminal(')), context);
+  context.claimVisibleTerminalResizeAuthority();
+  assert.deepEqual(sends.map(entry => entry.session), ['a', 'b']);
+  context.claimVisibleTerminalResizeAuthority();
+  assert.equal(sends.length, 2, 'duplicate activation does not apply colors');
+  context.activeSessions = [];
+  context.claimVisibleTerminalResizeAuthority();
+  context.activeSessions = ['a'];
+  context.claimVisibleTerminalResizeAuthority();
+  assert.equal(sends.length, 3, 'showing a terminal again reclaims its appearance');
+  context.claimVisibleTerminalResizeAuthority('focus', {force: true});
+  assert.equal(sends.length, 4, 'a fresh browser focus can repeat the same displayed selection');
 });
 
 test('manual refresh renews terminal size after the mobile viewport settles', () => {
@@ -863,6 +906,7 @@ test('manual refresh renews terminal size after the mobile viewport settles', ()
   let viewportSignature = 'keyboard-open';
   const context = {
     activeSessions: ['one'],
+    focusedPanelItem: 'one',
     isTmuxSession: session => session === 'one',
     nativeAppViewportSettleDelayMs: 250,
     requestAnimationFrame: callback => { frames.push(callback); return frames.length; },
@@ -900,7 +944,7 @@ test('manual refresh renews terminal size after the mobile viewport settles', ()
   settle.callback();
   assert.deepEqual(sends, [
     {session: 'one', options: {claim: true}},
-    {session: 'one', options: {claim: true}},
+    {session: 'one', options: {force: true}},
   ], 'refresh sends the final measured dimensions after keyboard geometry settles');
   timers.clear();
   context.refreshAll({forceMetadata: false, settleTerminalResize: false});
@@ -1422,6 +1466,7 @@ test('terminal activation reconciles changed focus once and preserves repeated f
     refreshTerminal() {}, scheduleTerminalBlankScreenRefresh() {},
     document: {querySelectorAll: () => [], getElementById: () => null},
   };
+  context.scheduleVisibleTerminalResizeAuthority = () => {};
   vm.createContext(context);
   vm.runInContext(core.slice(core.indexOf('function setFocusedTerminalMeasured('), core.indexOf('function clearFocusedTerminal(')), context);
   vm.runInContext(core.slice(core.indexOf('function setFocusedPanelItem('), core.indexOf('function clearPendingFileEditorFocusExcept(')), context);
@@ -1542,6 +1587,7 @@ test('user layout activation establishes terminal focus before mount reconciliat
       autoFocusCanFollowCursor: () => false, resetLayoutStatusSurface() {}, updateStatus() {},
       clientPushCanSupplyData: () => false,
     };
+    context.scheduleVisibleTerminalResizeAuthority = () => {};
     vm.createContext(context);
     vm.runInContext(core.slice(core.indexOf('function setFocusedTerminalMeasured('), core.indexOf('function clearFocusedTerminal(')), context);
     vm.runInContext(layout.slice(layout.indexOf('function applyLayoutSlots('), layout.indexOf('function cleanupRemovedDynamicLayoutItems(')), context);
