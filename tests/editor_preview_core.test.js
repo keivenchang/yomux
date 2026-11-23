@@ -5,9 +5,30 @@ const {
   TestElement,
   sourceBetween,
   test,
+  testAsync,
   runSuites,
 } = require('./browser_helpers/layout_test_helper');
 const {runEditorPreviewSuite} = require('./browser_helpers/editor_preview_suite');
+
+test('file merges retain compatible changes and keep line endings exact', () => {
+  const source = fs.readFileSync('static_src/js/yomux/45_file_explorer_actions.js', 'utf8');
+  const merge = vm.runInNewContext(sourceBetween(source, 'function diffRowsForLines', 'function fileCompareLineHtml') + '\nmergeOpenFileText');
+  assert.equal(merge('a\nb\nc\n', 'A\nb\nc\n', 'a\nb\nC\n').content, 'A\nb\nC\n');
+  assert.equal(merge('a\nb\nc', 'a\n\nb\nc', 'a\nb\nC').content, 'a\n\nb\nC');
+  assert.equal(merge('a\nb\nc\n', 'a\nc\n', 'a\nb\nc\nend\n').content, 'a\nc\nend\n');
+  assert.equal(merge('a\nb\nc\n', 'A\nb\nC\n', 'A\nB\nc\n').content, 'A\nB\nC\n');
+  const overlap = merge('a\nb\nc\nd\ne\n', 'A\nb\nMine\nd\ne\n', 'a\nb\nTheirs\nd\nE\n');
+  assert.equal(overlap.useDraft, 'A\nb\nMine\nd\nE\n');
+  assert.equal(overlap.useDisk, 'A\nb\nTheirs\nd\nE\n');
+  const adjacent = merge('a\nb\nc\n', 'A\nMine\nc\n', 'a\nTheirs\nC\n');
+  assert.equal(adjacent.useDraft, 'A\nMine\nC\n');
+  assert.equal(adjacent.useDisk, 'A\nTheirs\nC\n');
+  assert.equal(merge('a\nb\nc\n', 'A\nMine\nextra\nc\n', 'a\nTheirs\nC\n').needsManual, true);
+  assert.equal(merge('a\nb\nc\n', 'a\nb\nextra\nc\n', 'a\nb\nC\n').content, 'a\nb\nextra\nC\n');
+  const insertions = merge('a\nb\n', 'a\nleft\nb\n', 'a\nright\nb\n');
+  assert.equal(insertions.useDraft, 'a\nleft\nb\n');
+  assert.equal(insertions.useDisk, 'a\nright\nb\n');
+});
 
 test('numbered Markdown task labels are a post-parse presentation transform', () => {
   const source = fs.readFileSync('static_src/js/yomux/88_markdown_preview.js', 'utf8');
@@ -293,4 +314,107 @@ test('preview popouts transfer all root tokens through the common host and prese
   assert.ok(context.previewPopoutVariableStyle().includes('--editor-preview-bg: var(--paint-white)'));
 });
 
-runSuites([() => runEditorPreviewSuite({shardIndex: 0, shardCount: 3})]);
+
+
+
+async function testRecentReviewResponses() {
+await testAsync('recent review rejects delayed ranges and retired file identities', async () => {
+  const source = fs.readFileSync('static_src/js/yomux/92_codemirror_editor.js', 'utf8');
+  const pending = [];
+  const state = {trackingId: 'file-1', recentReview: {id: 'review-1', tracking: 'file-1', minutes: 0}};
+  const context = {fileState: new Map([['/outside.txt', state]]), browserClientId: 'browser',
+    saveRecentFileReview() {}, apiFetchJson(_url, options) {
+      return new Promise(resolve => pending.push({resolve, body: JSON.parse(options.body)}));
+    }};
+  vm.createContext(context);
+  vm.runInContext(sourceBetween(source, 'async function requestRecentFileReview', 'async function refreshRecentFileReview'), context);
+  const review = state.recentReview;
+  const full = context.requestRecentFileReview('/outside.txt', review, 'read');
+  review.minutes = 1;
+  const rolling = context.requestRecentFileReview('/outside.txt', review, 'read');
+  pending[1].resolve({review_id: 'review-1', original: 'rolling'});
+  assert.equal(await rolling, true);
+  pending[0].resolve({review_id: 'review-1', original: 'stale full'});
+  assert.equal(await full, false);
+  assert.equal(review.original, 'rolling');
+  const retired = context.requestRecentFileReview('/outside.txt', review, 'read');
+  state.trackingId = 'file-2';
+  pending[2].resolve({review_id: 'review-1', original: 'retired identity'});
+  assert.equal(await retired, false);
+  assert.equal(review.original, 'rolling');
+  state.trackingId = 'file-1';
+  const oldReview = context.requestRecentFileReview('/outside.txt', review, 'read');
+  review.id = 'review-2';
+  pending[3].resolve({review_id: 'review-1', original: 'retired review'});
+  assert.equal(await oldReview, false);
+  assert.equal(review.original, 'rolling');
+  assert.equal(pending[1].body.minutes, 1);
+  const reset = context.requestRecentFileReview('/outside.txt', review, 'reset');
+  review.minutes = 15;
+  pending[4].resolve({review_id: 'review-3', original: 'new baseline'});
+  assert.equal(await reset, true, 'a range change cannot discard a successful reset capability');
+  assert.equal(review.id, 'review-3');
+  const end = context.requestRecentFileReview('/outside.txt', review, 'end');
+  review.minutes = 0;
+  pending[5].resolve({ok: true});
+  assert.equal(await end, true, 'a range change cannot discard a successful end');
+  const renameReset = context.requestRecentFileReview('/outside.txt', review, 'reset');
+  context.fileState.delete('/outside.txt');
+  context.fileState.set('/renamed.txt', state);
+  review.path = '/renamed.txt';
+  pending[6].resolve({review_id: 'review-4', original: 'renamed baseline'});
+  assert.equal(await renameReset, true, 'confirmed rename retains a pending reset');
+  assert.equal(review.id, 'review-4');
+  assert.equal(review.path, '/renamed.txt');
+  const atomicReset = context.requestRecentFileReview('/renamed.txt', review, 'reset');
+  state.trackingId = '';
+  pending[7].resolve({review_id: 'review-5', original: 'atomic baseline'});
+  assert.equal(await atomicReset, true, 'same review identity survives a verified atomic replacement');
+  assert.equal(review.id, 'review-5');
+
+});
+
+}
+
+async function testRecentReviewRecovery() {
+  await testAsync('expired reviews clear their capability and allow a fresh toolbar start', async () => {
+    const source = fs.readFileSync('static_src/js/yomux/92_codemirror_editor.js', 'utf8');
+    const state = {trackingId: 'file-1', recentReview: {id: 'expired', tracking: 'file-1'}};
+    const saved = [], actions = [];
+    const context = {fileState: new Map([['/outside.txt', state]]), browserClientId: 'browser',
+      serverWatchRootsState: {registered: true, openFileTrackingIds: new Set(['file-1'])},
+      fileEditorPanelsForPath: () => [], scheduleRecentFileReviews() {}, syncRecentReviewControls() {},
+      editorViewModeFor: () => 'edit', fileEditorPanelItem: () => 'item', renderOpenFilePath() {},
+      syncServerWatchRootsNow: async () => {}, setFileEditorPanelStatus() {},
+      saveRecentFileReview(_path, review) {saved.push(review?.id || null);},
+      async apiFetchJson(_url, options) {
+        const request = JSON.parse(options.body); actions.push(request.action);
+        if (request.action === 'read') throw Object.assign(new Error('Review ended'), {status:410});
+        return {review_id: 'fresh', original: 'saved baseline'};
+      }};
+    vm.createContext(context);
+    vm.runInContext(sourceBetween(source, 'async function requestRecentFileReview', 'function navigateRecentFileReview'), context);
+    await context.refreshRecentFileReview('/outside.txt');
+    assert.equal(state.recentReview.id, undefined);
+    assert.equal(saved[0], null);
+    await context.changeRecentFileReview({}, '/outside.txt', 'toggle');
+    assert.equal(state.recentReview.id, 'fresh');
+    assert.equal(state.recentReview.error, '');
+    assert.deepEqual(actions, ['read', 'start']);
+  });
+}
+
+test('Split scroll uses current source text blocks around deleted widgets', () => {
+  const source = fs.readFileSync('static_src/js/yomux/92_codemirror_editor.js', 'utf8');
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext(sourceBetween(source, 'function codeMirrorSourceTextBlock', 'function sourcePositionForEditorScroll'), context);
+  for (const deletedHeight of [0, 1, 100, 10000]) {
+    const current = {type:0, top:deletedHeight, height:20};
+    const group = {top:0,height:deletedHeight+20,type:[{type:1,top:0,height:deletedHeight},current]};
+    assert.equal(context.codeMirrorSourceTextBlock(group), current);
+    assert.equal(context.codeMirrorSourceTextBlock(current), current);
+  }
+});
+
+runSuites([testRecentReviewResponses, testRecentReviewRecovery, () => runEditorPreviewSuite({shardIndex: 0, shardCount: 3})]);

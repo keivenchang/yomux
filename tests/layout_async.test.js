@@ -656,7 +656,7 @@ test('Finder expansion depth ordering derives each path depth once', () => {
 test('Finder highlight plans reuse payload work while tracking focus and manual collapse', () => {
 const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
 let plans=0,cwd='/repo',gitRoot='/repo',collapsed=false;
-const c={fileExplorerRootMode:'sync',isTmuxSession:()=>true,tmuxGitRootForItem:()=>gitRoot,tmuxDirectoryForItem:()=>cwd,fileExplorerSyncSessionContext:()=>({repository:gitRoot,cwd}),fileExplorerFinderSessionFilesState:{payload:{session:'1'}},sessionFilesPayloadOverlapsFocusedRoot:()=>true,sessionFilesRepoRoots:()=>['/repo'],fileExplorerSyncPlan:()=>{plans++;return{session:'1'};},fileExplorerSyncHighlightedRepoRoots:()=>collapsed?[]:['/repo'],fileExplorerSyncTargetDirs:()=>[],t:()=>'',emptyFileExplorerSessionHighlightSets:()=>({expandedDirs:new Set()})};
+const c={fileExplorerRootMode:'sync',isTmuxSession:()=>true,fileExplorerSyncSessionContext:()=>({repository:gitRoot,cwd}),fileExplorerFinderSessionFilesState:{payload:{session:'1'}},sessionFilesPayloadOverlapsFocusedRoot:()=>true,sessionFilesRepoRoots:()=>['/repo'],fileExplorerSyncPlan:()=>{plans++;return{session:'1'};},fileExplorerSyncHighlightedRepoRoots:()=>collapsed?[]:['/repo'],fileExplorerSyncTargetDirs:()=>[],t:()=>'',emptyFileExplorerSessionHighlightSets:()=>({expandedDirs:new Set()})};
 vm.createContext(c);vm.runInContext(source.slice(source.indexOf('function fileExplorerSessionHighlightSets('),source.indexOf('function fileExplorerSessionHighlightClassForPath(')),c);
 const context={};c.fileExplorerSessionHighlightSets('1',context);c.fileExplorerSessionHighlightSets('1',context);assert.equal(plans,1);
 collapsed=true;assert.equal(c.fileExplorerSessionHighlightSets('1',context).expandedDirs.size,0);assert.equal(plans,1);
@@ -712,7 +712,7 @@ test('explicit editor reveal shares tab synchronization while passive reveal ret
     const calls = [];
     const path = '/repo/src/file.py';
     const context = {
-      activeFile: path, fileExplorerRootMode: 'sync',
+      bootstrap: {guestWorkspace: false}, activeFile: path, fileExplorerRootMode: 'sync',
       normalizeDirectoryPath: value => value, updateFileExplorerCurrentFileHighlight() {},
       fileExplorerExplicitSyncSessionTarget: () => '2', fileExplorerSyncPlanForFile: () => ({session: '2'}),
       fileEditorItemFor: value => `file:${value}`,
@@ -732,6 +732,9 @@ test('explicit editor reveal shares tab synchronization while passive reveal ret
       assert.equal(calls[0][0], 'sync');
       assert.equal(calls[0][2].guardExplicitTarget, true, 'passive reveal keeps the existing target guard');
     }
+    context.bootstrap.guestWorkspace = true;
+    context.scheduleFileExplorerActiveFileReveal(path, {explicit});
+    assert.equal(calls.length, 1, 'guest editor navigation cannot demand host Finder data');
   }
 });
 
@@ -1067,7 +1070,7 @@ test('Finder metadata never replaces Differ or repository diff status, including
         for (const [start, end] of [
           ['const fileTreeMetadataRefreshState =', '\nfunction selectFileTreePath('],
           ['function fileTreeRowDerivedState(', '\nfunction buildFileTreeRowState('],
-          ['function normalizeGitStatus(', '\nfunction fileTreeRepoBranch('],
+          ['function normalizeGitStatus(', '\nfunction fileTreeRepoStatus('],
           ['function gitStatusRowClass(', '\nfunction gitStatusBadgeTitle('],
           ['function applyGitStatusRowClass(', '\nfunction applySessionHighlightRowClass('],
         ]) vm.runInContext(extract(start, end), context);
@@ -2822,8 +2825,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       'commit dates and file-count summaries use 80 percent of the row text size');
     assert.match(css, /\.git-diff-commit\s*\{[\s\S]*grid-template-columns:\s*subgrid/,
       'each commit group inherits the list tracks');
-    assert.match(css, /\.git-diff-worktree-status\s*\{[\s\S]*display:\s*block/,
-      'the native details disclosure retains normal block flow for its expanded file tree');
+    assert.match(css, /\.git-diff-worktree-status::details-content\s*\{[^}]*grid-column:\s*1 \/ -1/,
+      'the native disclosure spans the shared history columns when expanded');
     assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*grid-template-columns:\s*subgrid/,
       'each summary row inherits the same list tracks');
     assert.match(css, /\.git-diff-commits\s*\{[\s\S]*gap:\s*0 var\(--space-6\)/,
@@ -7222,15 +7225,55 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       return {content:'disk replacement',mtime:4,size:16};
     });
     api.setOpenFileStateForTest(path,{kind:'text',mtime:1,size:4,original:'base',content:'old edit',dirty:true,externalChanged:{mtime:2,size:10}});
+    api.currentFileStateForTest(path).editorTabItems.add(panel.dataset.layoutItem);
+    api.setDocumentActiveElementForTest(api.testElementForId('terminal-keyboard'));
     api.handleFileEditorContentChangedForTest(panel,path,'old edit',{deferAutosave:true});
-    const dialog = api.testElementForId('appOverlayRoot').querySelector('.file-editor-external-change-dialog');
+    assert.equal(api.testElementForId('appOverlayRoot').querySelector('.file-editor-merge-dialog'),null);
+    api.setDocumentActiveElementForTest(panel);
+    api.handleFileEditorContentChangedForTest(panel,path,'old edit',{deferAutosave:true});
+    await flushAsyncWork();
+    const dialog = api.testElementForId('appOverlayRoot').querySelector('.file-editor-merge-dialog');
     assert.ok(dialog);
     api.setOpenFileStateForTest(path,{kind:'text',mtime:3,size:8,original:'new base',content:'fresh unsaved',dirty:true});
-    dialog.listeners.get('click')[0]({target:dialog.querySelector('[data-dialog-action="reload"]'),preventDefault() {}});
+    dialog.listeners.get('click')[0]({target:dialog.querySelector('[data-dialog-action="merge-disk"]'),preventDefault() {}});
     await flushAsyncWork();
-    assert.deepEqual(reads,[]);
+    assert.equal(reads.filter(url => url.startsWith('/api/fs/read?') || url.startsWith('/api/fs/info?')).length, 1);
     assert.equal(api.currentFileStateForTest(path).content,'fresh unsaved');
     assert.equal(api.currentFileStateForTest(path).dirty,true);
+  });
+
+  await testAsync('editor retries an outside change that supersedes an in-flight merge read', async () => {
+    const api = loadYomux('', ['1']);
+    const path = '/repo/merge-reread.md';
+    const panel = api.testElementForId('merge-reread-panel');
+    panel.dataset.filePath = path;
+    panel.dataset.layoutItem = api.fileEditorItemFor(path);
+    api.setPanelNodeForTest(panel.dataset.layoutItem, panel);
+    let readCount = 0, releaseFirstRead;
+    api.setApiFetchJsonForTest(async url => {
+      if (!String(url).startsWith('/api/fs/read?')) return {};
+      readCount += 1;
+      if (readCount === 1) return new Promise(resolve => { releaseFirstRead = resolve; });
+      return {content: 'top\ncontext\nnewest\n', mtime: 3, size: 19};
+    });
+    api.setOpenFileStateForTest(path, {
+      kind: 'text', mtime: 1, size: 19, original: 'top\ncontext\nbottom\n',
+      content: 'mine\ncontext\nbottom\n', dirty: true, externalChanged: {mtime: 2, size: 18},
+    });
+    api.currentFileStateForTest(path).editorTabItems.add(panel.dataset.layoutItem);
+    api.setDocumentActiveElementForTest(panel);
+    api.handleFileEditorContentChangedForTest(panel, path, 'mine\ncontext\nbottom\n', {deferAutosave: true});
+    await flushAsyncWork();
+    assert.equal(readCount, 1);
+    api.patchOpenFileStateForTest(path, {externalChanged: {mtime: 3, size: 19}});
+    releaseFirstRead({content: 'top\ncontext\nolder\n', mtime: 2, size: 18});
+    await flushAsyncWork();
+    const state = api.currentFileStateForTest(path);
+    assert.equal(readCount, 2);
+    assert.equal(state.content, 'mine\ncontext\nnewest\n');
+    assert.equal(state.original, 'top\ncontext\nnewest\n');
+    assert.equal(state.externalChanged, undefined);
+    assert.equal(api.testElementForId('appOverlayRoot').querySelector('.file-editor-dialog'), null);
   });
 
   await testAsync('editor keeps a genuine write conflict actionable and overwrite cannot deadlock', async () => {

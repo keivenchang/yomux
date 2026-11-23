@@ -1503,7 +1503,6 @@ def codemirror_editor_controls_fixture_html():
                 <button type="button" data-editor-mode="edit"><span class="file-editor-icon file-editor-icon-edit"></span></button>
                 <button type="button" data-editor-mode="preview"><span class="file-editor-icon file-editor-icon-eye"></span></button>
                 <button type="button" data-editor-mode="split"><span class="file-editor-icon file-editor-icon-split"></span></button>
-                <button type="button" class="file-editor-popout-preview-panel"><span class="file-editor-icon file-editor-icon-popout-preview"></span></button>
               </div>
               <button type="button" class="file-editor-gutter-panel active">#</button>
               <button type="button" class="file-editor-wrap-panel active"><span class="file-editor-icon file-editor-icon-wrap"></span></button>
@@ -1598,7 +1597,6 @@ def editor_diff_ref_toolbar_fixture_html():
                 <button type="button" data-editor-mode="edit"><span class="file-editor-icon file-editor-icon-edit"></span></button>
                 <button type="button" data-editor-mode="preview"><span class="file-editor-icon file-editor-icon-eye"></span></button>
                 <button type="button" data-editor-mode="split"><span class="file-editor-icon file-editor-icon-split"></span></button>
-                <button type="button" class="file-editor-popout-preview-panel"><span class="file-editor-icon file-editor-icon-popout-preview"></span></button>
               </div>
               <button type="button" class="file-editor-find-panel"><span class="file-editor-icon file-editor-icon-find"></span></button>
               <button type="button" class="file-editor-theme-panel"><span class="file-editor-icon file-editor-icon-theme"></span></button>

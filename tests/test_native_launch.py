@@ -18,6 +18,7 @@ import tempfile
 import pytest
 
 from tests.isolated_dev_server import go_test_server_binary
+from tests.helpers.fixture_tools import fixture_install_update_source
 from tests.helpers.fixture_tools import run_fixture_cleanup_phases
 from tests.gate_harness import FixtureMemberExitBarrier
 from tests.tmux_runtime import start_isolated_default_tmux_runtime
@@ -118,7 +119,8 @@ def test_native_force_refuses_foreign_listener_without_root_mutation(native_laun
 def test_installed_native_launch_duplicate_and_verified_replacement(native_launch_environment, tmp_path):
     binary, environment = native_launch_environment
     installed = tmp_path / "installed"
-    result = subprocess.run([str(REPO / "tools/install.sh"), "--prefix", str(installed)],
+    source = fixture_install_update_source(tmp_path, environment)
+    result = subprocess.run([str(REPO / "tools/install.sh"), "--prefix", str(installed), "--source-root", str(source)],
                             env=environment, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert not [path for path in installed.rglob("*") if path.suffix in {".py", ".pyc", ".pyo"}]
@@ -172,7 +174,8 @@ def test_installed_native_launch_duplicate_and_verified_replacement(native_launc
 def test_installed_boot_uses_verified_assets_without_its_recorded_source(authenticated_native_launch_environment, monkeypatch, tmp_path):
     _binary, environment = authenticated_native_launch_environment
     prefix = tmp_path / "installed"
-    installed = subprocess.run([str(REPO / "tools/install.sh"), "--prefix", str(prefix)],
+    source = fixture_install_update_source(tmp_path, environment)
+    installed = subprocess.run([str(REPO / "tools/install.sh"), "--prefix", str(prefix), "--source-root", str(source)],
                                env=environment, capture_output=True, text=True, timeout=30)
     assert installed.returncode == 0, installed.stderr
     root = prefix / "lib/yomux"

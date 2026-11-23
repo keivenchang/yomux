@@ -42,6 +42,7 @@ func New(backendBuild string) *Catalog {
 	entries := map[string]Entry{}
 	for _, name := range []string{
 		"core.bootstrap.v1",
+		"sharing.scoped.v1",
 		"core.diagnostics.v1",
 		"core.settings.v1",
 		"core.integrations.v1",
@@ -72,6 +73,7 @@ func New(backendBuild string) *Catalog {
 	}
 	for _, name := range []string{
 		"core.bootstrap.v1",
+		"sharing.scoped.v1",
 		"core.diagnostics.v1",
 		"terminal.websocket.v1",
 		"terminal.tmux.v1",
@@ -245,6 +247,8 @@ var routePolicies = []RoutePolicy{
 	// Arbitrary filesystem bytes share the server's OS access and require admin authority.
 	{"*", "/api/fs/read", "admin", "finder.read.v1", false},
 	{"*", "/api/fs/raw", "admin", "finder.read.v1", false},
+	{"*", "/api/fs/sqlite-preview", "admin", "finder.read.v1", false},
+	{"*", "/api/fs/office-preview", "admin", "finder.preview.v1", false},
 	{"*", "/api/fs/diff", "admin", "finder.git.v1", false},
 	{"*", "/api/fs/git-history", "readonly", "finder.git.v1", false},
 	{"*", "/api/fs/git-history-stats-stream", "readonly", "finder.git.v1", false},
@@ -252,6 +256,7 @@ var routePolicies = []RoutePolicy{
 	{"*", "/api/batch/blame", "admin", "finder.git.v1", false},
 	{"*", "/api/batch/zip", "admin", "finder.preview.v1", false},
 	{"*", "/api/batch/html-preview", "admin", "finder.preview.v1", false},
+	{"DELETE", "/api/tex/compiler", "admin", "finder.preview.v1", false},
 	{"GET", "/api/tex/compiler", "admin", "finder.preview.v1", false},
 	{"POST", "/api/tex/compiler/install", "admin", "finder.preview.v1", false},
 	{"POST", "/api/tex/preview", "admin", "finder.preview.v1", false},
@@ -269,6 +274,7 @@ var routePolicies = []RoutePolicy{
 	{"*", "/api/fs/unindex", "admin", "finder.search.v1", false},
 	{"*", "/api/batch/search", "readonly", "finder.search.v1", false},
 	{"*", "/api/watch/roots", "admin", "finder.watch.v1", false},
+	{"POST", "/api/fs/review", "admin", "finder.watch.v1", false},
 	{"*", "/api/fs/watch-diff", "readonly", "finder.watch.v1", false},
 	{"*", "/api/fs/batch", "admin", "finder.batch.v1", false},
 	{"*", "/api/batch/count", "admin", "finder.batch.v1", false},
@@ -276,6 +282,8 @@ var routePolicies = []RoutePolicy{
 	{"*", "/api/pricing-catalog/refresh", "admin", "pane.stats.v1", false},
 	{"*", "/api/stats-refill", "admin", "pane.stats.v1", false},
 	{"*", "/api/agent-auth", "readonly", "pane.agent.v1", false},
+	{"*", "/api/share", "admin", "sharing.scoped.v1", false},
+	{"*", "/api/share/", "admin", "sharing.scoped.v1", true},
 	{"GET", "/api/yoagent/skills", "admin", "pane.agent.v1", false},
 	{"GET", "/api/yoagent/skill-files", "admin", "pane.agent.v1", false},
 	{"POST", "/api/yoagent/skill-files/upsert", "admin", "pane.agent.v1", false},

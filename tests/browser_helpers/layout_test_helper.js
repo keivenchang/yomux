@@ -47,7 +47,7 @@ function canonicalWorkGraphFixture(session, info = {}) {
     }
     const hosted = repo.github_repo || null;
     const hostedId = hosted?.url ? `hosted:${hosted.url}` : '';
-    if (hostedId) graph.hosted_repositories[hostedId] ||= {id: hostedId, url: hosted.url, pull_request_ids: []};
+    if (hostedId) graph.hosted_repositories[hostedId] ||= {id: hostedId, url: hosted.url, provider: hosted.provider, pull_request_ids: []};
     const branchIds = [];
     for (const source of sourceBranches.length ? sourceBranches : (currentName ? [{name: currentName, current: true}] : [])) {
       const name = String(source?.name || '');
@@ -61,7 +61,7 @@ function canonicalWorkGraphFixture(session, info = {}) {
         if (!Number.isFinite(number)) continue;
         const prId = `pr:${hostedId || localId}:${number}`;
         const linearIds = (value.linear || value.linear_ids || []).map(ensureIssue).filter(Boolean);
-        graph.pull_requests[prId] ||= {id: prId, hosted_repository_id: hostedId || null, number, title: value.title || value.description || '', description: value.description || '', url: value.url || '', state: value.state, status_label: value.status_label || '', draft: value.draft === true, merged: value.merged === true, checks: value.checks, review_decision: value.review_decision || '', linear_issue_ids: linearIds, local_branch_ids: []};
+        graph.pull_requests[prId] ||= {id: prId, hosted_repository_id: hostedId || null, number, title: value.title || value.description || '', description: value.description || '', url: value.url || '', state: value.state, provider: value.provider, status_label: value.status_label || '', draft: value.draft === true, merged: value.merged === true, checks: value.checks, review_decision: value.review_decision || '', linear_issue_ids: linearIds, local_branch_ids: []};
         if (!graph.pull_requests[prId].local_branch_ids.includes(branchId)) graph.pull_requests[prId].local_branch_ids.push(branchId);
         if (hostedId && !graph.hosted_repositories[hostedId].pull_request_ids.includes(prId)) graph.hosted_repositories[hostedId].pull_request_ids.push(prId);
         prIds.push(prId);
@@ -72,7 +72,7 @@ function canonicalWorkGraphFixture(session, info = {}) {
       const linearIds = [...(source.linear || source.linear_ids || []), ...prs.flatMap(value => value?.linear || value?.linear_ids || []), ...currentProjectLinear]
         .map(ensureIssue)
         .filter(Boolean);
-      graph.local_branches[branchId] = {id: branchId, local_repository_id: localId, name, current: source.current === true || name === currentName, updated: source.updated, updated_ts: source.updated_ts, subject: source.subject, pull_request_ids: [...new Set(prIds)], linear_issue_ids: [...new Set(linearIds)]};
+      graph.local_branches[branchId] = {id: branchId, local_repository_id: localId, name, current: source.current === true || name === currentName, updated: source.updated, updated_ts: source.updated_ts, subject: source.subject, pull_request_ids: [...new Set(prIds)], github_issues: source.github_issues, linear_issue_ids: [...new Set(linearIds)]};
       branchIds.push(branchId);
     }
     const currentBranchId = branchIds.find(id => graph.local_branches[id].current) || branchIds[0] || null;
@@ -440,6 +440,7 @@ class TestElement {
     return this.children.some(child => child?.contains?.(node));
   }
   getBoundingClientRect() { return this.rect; }
+  getClientRects() { return this.isConnected && !this.hidden && this.style.display !== 'none' ? [this.rect] : []; }
   insertAdjacentHTML(position, html) {
     if (position !== 'beforeend') throw new Error(`TestElement.insertAdjacentHTML does not support ${position}`);
     this._innerHTML += String(html || '');
@@ -2707,7 +2708,8 @@ globalThis.__layoutTestApi = {
   },
   cacheFileExplorerRepoInfoForTest: cacheFileExplorerRepoInfo,
   repoInfoPopoverHtml,
-  fileTreeRepoSyncMeta,
+  fileTreeRepoStatus,
+  gitRepositoryStatusParts,
   fileTreeDisplayParts,
   setChangesFolderCollapsedForTest(keys) { changesFolderCollapsed = new Set((keys || []).map(String)); },
   changesFolderCollapsedForTest() { return Array.from(changesFolderCollapsed).sort(); },
@@ -2980,9 +2982,7 @@ globalThis.__layoutTestApi = {
   syncInitialLayoutUrl,
   tabMenuDetailText,
   sessionWorkGraphForTest: sessionWorkGraph,
-  focusedRepositoryIdsForTmuxTargetForTest: focusedRepositoryIdsForTmuxTarget,
   branchIdsForGitWorktreeForTest: branchIdsForGitWorktree,
-  pullRequestIdsForTmuxTargetForTest: pullRequestIdsForTmuxTarget,
   sessionWorkSummaryForTest: sessionWorkSummary,
   sessionTabDescriptionForTest: sessionTabDescription,
   sessionWorkDescriptionForTest: sessionWorkDescription,

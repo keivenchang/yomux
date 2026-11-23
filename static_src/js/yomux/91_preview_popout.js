@@ -430,16 +430,16 @@ function previewPopoutVariableStyle() {
     .join('; ');
 }
 
-function previewPopoutToolbarHtml() {
+function previewPopoutToolbarHtml(showTextSize = true) {
   const themeState = editorPreviewThemeState();
   const themeShort = editorPreviewThemeShortLabel(themeState);
   const themeNext = editorPreviewThemeShortLabel(themeState === 'dark' ? 'light' : (themeState === 'light' ? 'vanilla' : 'dark'));
   return `
-      <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('common.previewFontSize'))}">
+      ${showTextSize ? `<span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('common.previewFontSize'))}">
         <button type="button" data-editor-preview-font-step="-1" title="${esc(t('editor.previewFont.decrease'))}" aria-label="${esc(t('editor.previewFont.decrease'))}">A-</button>
         <span class="file-editor-preview-font-value" aria-live="polite">${esc(String(editorPreviewFontSize))}</span>
         <button type="button" data-editor-preview-font-step="1" title="${esc(t('editor.previewFont.increase'))}" aria-label="${esc(t('editor.previewFont.increase'))}">A+</button>
-      </span>
+      </span>` : ''}
       <button type="button" class="file-editor-theme-panel theme-with-label" data-preview-popout-theme data-editor-theme="${esc(themeState)}" data-editor-theme-short="${esc(themeShort)}" data-editor-theme-next="${esc(themeNext)}" title="${esc(editorThemeLabel())}" aria-label="${esc(editorThemeLabel())}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span><span class="file-editor-theme-label">${esc(themeShort)}</span></button>`;
 }
 
@@ -671,7 +671,7 @@ function filePreviewPopoutBodyHtml(path, snapshot) {
   return `<main class="file-preview-popout-shell">
     <header class="file-preview-popout-title" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}">
       <span class="file-preview-popout-title-path">${esc(compactHomePath(path))}</span>
-      ${previewPopoutToolbarHtml()}
+      ${previewPopoutToolbarHtml(previewKindForPath(path) !== 'pdf')}
     </header>
     <article data-preview-root${previewSnapshotDataAttributesHtml(snapshot)} class="${esc(snapshot.className)}">${snapshot.html}</article>
   </main>`;
@@ -697,9 +697,14 @@ function updateFilePreviewPopoutControls(path, previewWindow) {
   const doc = previewWindow?.document;
   if (!doc) return;
   const root = doc.querySelector('[data-preview-root]');
-  if (root && previewKindForPath(path) === 'pdf' && !root.querySelector('.file-editor-pdf-preview')?._rawFileReadyCleanup) {
-    releaseRawFileMediaSources(root);
-    renderPdfPreviewInto(root, path, {item: filePreviewPopouts.get(path)?.item || fileEditorItemFor(path)});
+  if (root && previewKindForPath(path) === 'pdf') {
+    const version = rawFileMediaVersion(fileState.get(path));
+    const item = filePreviewPopouts.get(path)?.item || fileEditorItemFor(path);
+    const frame = root.querySelector('.file-editor-pdf-preview');
+    if (root._pdfSourceVersion !== version || !frame?._rawFileReadyCleanup || frame.dataset.layoutItem !== item) {
+      renderPdfPreviewInto(root, path, {sourceUrl: rawFileUrl(path, {version}), item});
+      root._pdfSourceVersion = version;
+    }
   }
   doc.body?.setAttribute('style', previewPopoutVariableStyle());
   const themeButton = doc.querySelector('[data-preview-popout-theme]');
@@ -794,11 +799,11 @@ function applyFilePreviewPopoutSnapshot(path, previewWindow, generation, snapsho
     if (!filePreviewPopoutGenerationMatches(path, previewWindow, generation) || previewWindow.closed) return false;
     const doc = filePreviewPopoutDocument(previewWindow);
     const root = doc?.querySelector?.('[data-preview-root]');
-    if (!root) return writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
+    if (!root) return false;
     const scroller = filePreviewPopoutScrollElement(previewWindow);
     const coordinates = filePreviewPopoutScrollCoordinates(scroller);
     const scrollOwner = createPassiveDeferredElementScrollOwner(scroller);
-    applyPreviewSnapshotRoot(root, snapshot);
+    if (previewKindForPath(path) !== 'pdf') applyPreviewSnapshotRoot(root, snapshot);
     doc.body.className = previewPopoutBodyClassName();
     updateFilePreviewPopoutControls(path, previewWindow);
     doc.title = t('preview.popout.title', {name: basenameOf(path)});
@@ -816,14 +821,20 @@ function updateFilePreviewPopout(path, text) {
   const record = filePreviewPopouts.get(path);
   if (!record) return false;
   const previewWindow = record.window;
-  const generation = bumpFilePreviewPopoutGeneration(path);
   if (!previewWindow || previewWindow.closed) {
     filePreviewPopouts.delete(path);
     return false;
   }
+  const pdf = previewKindForPath(path) === 'pdf';
+  if (!filePreviewPopoutPreviewRoot(previewWindow)) {
+    if (!record.navigationWrite) writeFilePreviewPopoutWhenReady(path, previewWindow, text);
+    return true;
+  }
+  const generation = bumpFilePreviewPopoutGeneration(path);
   const snapshot = renderedPreviewSnapshot(path, text);
   try {
     applyFilePreviewPopoutSnapshot(path, previewWindow, generation, snapshot);
+    if (pdf) return true;
     applyFilePreviewPopoutAsync(path, previewWindow, generation, renderedPreviewSnapshotAsync(path, text), asyncSnapshot => {
       return applyFilePreviewPopoutSnapshot(path, previewWindow, generation, asyncSnapshot);
     });
@@ -869,27 +880,30 @@ function writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot, pr
     resolve: resolveCompletion,
     settled: false,
     timer: 0,
-    clearTimeout: typeof previewWindow.clearTimeout === 'function'
-      ? previewWindow.clearTimeout.bind(previewWindow)
-      : window.clearTimeout.bind(window),
+    clearTimeout: window.clearTimeout.bind(window),
   };
   record.navigationWrite = job;
+  const scheduleWrite = delay => {
+    if (job.timer) return;
+    // The popup's initial document and its timers may disappear during navigation.
+    job.timer = window.setTimeout(() => {
+      job.timer = 0;
+      write();
+    }, delay);
+  };
   const write = () => {
     if (job.settled) return;
     if (record.navigationWrite !== job || !filePreviewPopoutGenerationMatches(path, previewWindow, previewGeneration) || previewWindow.closed) {
       settleFilePreviewPopoutNavigationWrite(record, job, false);
       return;
     }
-    if (filePreviewPopoutScrollInputActive(record)) {
-      const schedule = typeof previewWindow.setTimeout === 'function'
-        ? previewWindow.setTimeout.bind(previewWindow)
-        : window.setTimeout.bind(window);
-      if (!job.timer) {
-        job.timer = schedule(() => {
-          job.timer = 0;
-          write();
-        }, filePreviewPopoutSnapshotRetryMs);
-      }
+    const doc = filePreviewPopoutDocument(previewWindow);
+    if (doc && (doc.URL === 'about:blank' || doc.readyState !== 'complete' || filePreviewPopoutScrollInputActive(record))) {
+      scheduleWrite(filePreviewPopoutSnapshotRetryMs);
+      return;
+    }
+    if (!doc?.querySelector('[data-preview-popout-shell], [data-preview-root]')) {
+      settleFilePreviewPopoutNavigationWrite(record, job, false);
       return;
     }
     const written = writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
@@ -902,10 +916,7 @@ function writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot, pr
       return completion;
     }
     previewWindow.addEventListener?.('load', write, {once: true});
-    const schedule = typeof previewWindow.setTimeout === 'function'
-      ? previewWindow.setTimeout.bind(previewWindow)
-      : window.setTimeout.bind(window);
-    schedule(write, 1000);
+    scheduleWrite(1000);
   } catch (_) {
     write();
   }
@@ -915,6 +926,8 @@ function writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot, pr
 function writeFilePreviewPopoutWhenReady(path, previewWindow, text) {
   const generation = bumpFilePreviewPopoutGeneration(path);
   writeFilePreviewPopoutAfterNavigation(path, previewWindow, renderedPreviewSnapshot(path, text), generation);
+  // PDF.js mounts directly in the popout. A second HTML snapshot would recreate the live iframe.
+  if (previewKindForPath(path) === 'pdf') return;
   applyFilePreviewPopoutAsync(path, previewWindow, generation, renderedPreviewSnapshotAsync(path, text), snapshot => {
     return writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot, generation);
   });

@@ -96,7 +96,7 @@ The current catalog marks these capabilities available:
 
 * `yolo.auto-approve.v1`
 
-The server enables `pane.chat.v1` and `pane.agent.v1` after their native stores initialize. `core.integrations.v1` remains unavailable. Watched pull requests and hosted GitHub/Linear enrichment are retired. Go does not register `/api/search`, `/api/run-history`, `/api/activity-summary`, or `/api/watched-prs`; the corresponding Search & Runs, background-summary, and integration services are outside the supported feature set. Native bootstrap disables background activity summaries. Terminal transcripts and per-session event logs retain their registered handlers.
+The server enables `pane.chat.v1` and `pane.agent.v1` after their native stores initialize. `core.integrations.v1` remains unavailable. Watched pull requests remain retired. Session metadata discovers links for branches with GitHub or GitLab remotes. GitHub.com and GitLab.com requests use public APIs by default. To share private metadata with users who can read YOmux session metadata, an operator can opt specific repositories into authenticated lookup by setting `YOMUX_HOSTED_AUTH_REPOSITORIES` to their comma-separated HTTPS repository URLs. Authenticated lookup uses the host’s GitHub CLI login or `GITLAB_TOKEN`. Linear links come from explicit URLs or issue IDs in branch and commit references or hosted requests. Set `YOMUX_LINEAR_ISSUE_BASE_URL` to the workspace’s `https://linear.app/WORKSPACE/issue` base to link bare IDs directly. Linked GitHub issues come from explicit issue URLs and, when authenticated discovery is enabled, GitHub’s closing references. Go does not register `/api/search`, `/api/run-history`, `/api/activity-summary`, or `/api/watched-prs`; the corresponding Search & Runs, background-summary, and integration services are outside the supported feature set. Native bootstrap disables background activity summaries. Terminal transcripts and per-session event logs retain their registered handlers.
 
 Any unregistered `/api/*` request receives HTTP `501` with `error: feature_unavailable` and the mapped capability name. Unsupported product code must not silently return an empty Python-shaped payload.
 
@@ -138,7 +138,7 @@ The shared browser must capability-gate unavailable terminal/session paths. Go p
 
 ### Finder, Editor, And Differ
 
-* `/api/fs/fast/list`, `/api/fs/list`, `/api/fs/read`, `/api/fs/info`, `/api/fs/raw`
+* `/api/fs/fast/list`, `/api/fs/list`, `/api/fs/read`, `/api/fs/info`, `/api/fs/raw`, `/api/fs/sqlite-preview`
 
 * `/api/fs/write`, `/api/fs/delete`, `/api/fs/rename`, `/api/fs/move`, `/api/fs/mkdir`, `/api/upload`
 
@@ -306,3 +306,7 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 * [`docs/specs/BACKEND_ARCHITECTURE.md`](docs/specs/BACKEND_ARCHITECTURE.md): current native process ownership and filesystem boundary.
 
 * [`docs/specs/GUI.md`](docs/specs/GUI.md): shared user-interface behavior and verification rules.
+
+## Scoped sharing
+
+`sharing.scoped.v1` admits the native YO!share host routes: `/api/share`, `/api/share/document`, `/api/share/chat`, and `/api/share/recovery`. These require an administrator. `/share/<grant>` and its guest resource, join, state, and chat operations use a separate scoped cookie and never enter ordinary account authentication. Grants are memory-only; retained file-edit recovery journals are private configuration state. `share.go` owns grants, browser slots, pinned terminal access, publication, and share chat. `share_collaboration.go` owns per-file revisions, edit validation, presence, durable acceptance, guarded saves, and recovery. Finder's granted-file and write-reservation owners fence filesystem generations and ordinary saves.

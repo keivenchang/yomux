@@ -50,6 +50,10 @@ body.pane-popout-live #grid {
   min-width: 0;
   min-height: 0;
 }
+.share-workspace-session {
+  --file-pane-min-inline-size: var(--share-guest-pane-min-inline-size);
+  --file-editor-pane-min-inline-size: var(--share-guest-pane-min-inline-size);
+}
 .yomux-dockview .dv-groupview:has(> :where(.dv-content-container) > :where(.dockview-panel-content) > .file-explorer-panel) {
   min-width: var(--file-pane-min-inline-size);
 }
@@ -1543,6 +1547,12 @@ body.theme-light .panel .tmux-pane-tab-token:not(.active):is(:hover, :focus-visi
 .pane-tab.file-missing.active .file-tab-missing-badge {
   color: var(--40-layout-panes-tabs-pane-tab-fg-16);
 }
+.pane-tab-dismiss-controls {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--pane-tab-close-gap);
+}
 .pane-tab-close {
   position: relative;
   flex: 0 0 18px;
@@ -2085,6 +2095,7 @@ body.theme-light .pane-tab-close {
 }
 
 /* Keep the home controls mounted when Normal hides its own pane tab. */
+.yomux-dockview .dv-tab:has(> .dockview-pane-tab[hidden]),
 body.tabber-mode-normal .yomux-dockview .dv-tab:has(> .dockview-pane-tab[data-pane-tab="__tabber__"]) {
   display: none;
 }

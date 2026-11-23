@@ -21,6 +21,8 @@ type tmuxSessionRosterSnapshot struct {
 	identities map[string]string
 	known      bool
 	revision   uint64
+	// Fresh tmux reads also retain literal targets omitted from the browser roster.
+	observedIdentities map[string]string
 }
 
 type goTmuxTopology struct {
@@ -727,7 +729,9 @@ func (s *server) tmuxSessionRosterSnapshotLocked(forceFresh bool) (tmuxSessionRo
 	}
 	result = normalizeTmuxSessionRoster(visible)
 	s.rememberTmuxSessionRoster(result, identities)
-	return s.cachedTmuxSessionRosterSnapshot(), nil
+	snapshot := s.cachedTmuxSessionRosterSnapshot()
+	snapshot.observedIdentities = identities
+	return snapshot, nil
 }
 
 // refreshTmuxMetadataAfterMutationLocked confirms topology before the mutation

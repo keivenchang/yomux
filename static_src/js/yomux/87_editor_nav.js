@@ -38,7 +38,7 @@ function reconcileEditorNav(previousFocus = focusedPanelItem || editorNav.focuse
   const removedEntries = [...editorNav.liveItems].some(item => !live.has(item));
   editorNav.liveItems = live;
   const preserveContentFocus = removedEntries && (panelNodes.get(previousFocus)?.contains(document.activeElement)
-    || document.activeElement?.closest?.('[data-pane-tab-close], .session-context-menu'));
+    || document.activeElement?.closest?.('.pane-tab-dismiss-controls, .session-context-menu'));
   editorNav.stack = editorNav.stack.filter(item => live.has(item));
   editorNav.index = editorNav.stack.indexOf(current);
   const removedFocus = previousFocus && !live.has(previousFocus);
@@ -87,6 +87,8 @@ function finishEditorNavFocus() {
     focusEditorNavItem(pending.item);
     scheduleEditorNavContentFocus(pending.item);
   }
+  const panel = panelNodes.get(editorNav.focusedItem);
+  if (panel?._guestTerminal && document.activeElement === document.body) focusFileEditorPanelIfReady(panel, editorNav.focusedItem);
 }
 
 function activateNavItem(item) {

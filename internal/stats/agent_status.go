@@ -228,9 +228,12 @@ func classifyPaneStatus(pane AgentStatusPane, request AgentStatusRequest) AgentS
 		stoppedAt = request.WorkingStoppedAt
 	}
 	result := AgentStatusResult{RawStatus: raw, Acknowledged: acknowledged, WorkingStoppedAt: stoppedAt}
-	if CapacityNoticeCurrent(pane.VisibleText) {
+	if notice, serverError := CodexRecoveryNotice(pane.VisibleText); notice != "" && (!serverError || strings.EqualFold(request.Kind, "codex")) {
 		result.Status = AgentStatusError
 		result.Evidence = []string{"model-capacity-notice"}
+		if serverError {
+			result.Evidence = []string{"codex-server-error-notice"}
+		}
 		result.AttentionKind = "unknown"
 		return result
 	}
@@ -291,10 +294,74 @@ func classifyPaneStatus(pane AgentStatusPane, request AgentStatusRequest) AgentS
 	return result
 }
 
-// CapacityNoticeCurrent recognizes the visible Codex capacity failure only
-// while it remains the newest turn output above the live composer. Sharing this
-// predicate keeps status display and YO's optional retry worker in agreement.
-func CapacityNoticeCurrent(visible string) bool {
+var codexServerErrorNotice = regexp.MustCompile(`^unexpected status 5[0-9]{2}(?:[[:space:]:]|$)`)
+var tmuxCaptureStyle = regexp.MustCompile(`\x1b\[[0-9:;]*m|\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)`)
+
+// CodexRecoveryCapture keeps the plain capture unless a hard-wrapped error
+// needs tmux's foreground attributes to recover its continuation rows.
+func CodexRecoveryCapture(plain string, captureStyled func() (string, error)) (string, error) {
+	if current, _ := CodexRecoveryNotice(plain); current != "" {
+		return plain, nil
+	}
+	for _, row := range strings.Split(plain, "\n") {
+		if codexServerErrorLine(strings.TrimSpace(row)) {
+			styled, err := captureStyled()
+			if err != nil {
+				return "", err
+			}
+			return joinCodexServerErrorRows(styled), nil
+		}
+	}
+	return plain, nil
+}
+
+func codexServerErrorLine(line string) bool {
+	message, marked := strings.CutPrefix(line, "■")
+	return marked && codexServerErrorNotice.MatchString(strings.TrimSpace(message))
+}
+
+func joinCodexServerErrorRows(styled string) string {
+	rows := strings.Split(styled, "\n")
+	output := make([]string, 0, len(rows))
+	red, errorRow := false, -1
+	for _, row := range rows {
+		var plain strings.Builder
+		allRed, offset := true, 0
+		for _, match := range tmuxCaptureStyle.FindAllStringIndex(row, -1) {
+			text, style := row[offset:match[0]], row[match[0]:match[1]]
+			plain.WriteString(text)
+			allRed = allRed && (red || strings.TrimSpace(text) == "")
+			// tmux emits foreground and background as separate SGR sequences.
+			code := strings.TrimSuffix(strings.TrimPrefix(style, "\x1b["), "m")
+			switch {
+			case code == "31" || code == "91" || code == "38;5;1" || code == "38;5;9":
+				red = true
+			case code == "" || code == "0" || strings.HasPrefix(code, "38;") || strings.HasPrefix(code, "38:"),
+				len(code) == 2 && (code[0] == '3' || code[0] == '9'):
+				red = false
+			}
+			offset = match[1]
+		}
+		plain.WriteString(row[offset:])
+		allRed = allRed && (red || strings.TrimSpace(row[offset:]) == "")
+		text := strings.TrimSpace(plain.String())
+		if errorRow >= 0 && allRed && text != "" &&
+			!strings.HasPrefix(text, "■") && !capacityComposerLine(text) {
+			output[errorRow] += " " + text
+			continue
+		}
+		errorRow = -1
+		if allRed && codexServerErrorLine(text) {
+			errorRow = len(output)
+		}
+		output = append(output, plain.String())
+	}
+	return strings.Join(output, "\n")
+}
+
+// CodexRecoveryNotice returns the newest retryable Codex notice above the
+// live composer, and whether it is an HTTP server error.
+func CodexRecoveryNotice(visible string) (notice string, serverError bool) {
 	lines := strings.Split(strings.ReplaceAll(visible, "\r\n", "\n"), "\n")
 	composer := -1
 	for index := len(lines) - 1; index >= max(0, len(lines)-12); index-- {
@@ -304,25 +371,31 @@ func CapacityNoticeCurrent(visible string) bool {
 		}
 	}
 	if composer < 0 {
-		return false
+		return "", false
 	}
 	for index := composer - 1; index >= 0; index-- {
 		line := strings.TrimSpace(lines[index])
 		if agentComposerChromeLine(line, true) {
 			continue
 		}
-		return capacityNoticeLine(line)
+		if !strings.HasPrefix(line, "■") {
+			break
+		}
+		message := strings.TrimSpace(strings.TrimPrefix(line, "■"))
+		if message == "Selected model is at capacity. Please try a different model." {
+			return line, false
+		}
+		if codexServerErrorLine(line) {
+			return line, true
+		}
+		break
 	}
-	return false
+	return "", false
 }
 
-func capacityNoticeLine(line string) bool {
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "■") {
-		return false
-	}
-	line = strings.TrimLeft(strings.TrimPrefix(line, "■"), " \t\r\n\v\f")
-	return line == "Selected model is at capacity. Please try a different model."
+func CapacityNoticeCurrent(visible string) bool {
+	notice, serverError := CodexRecoveryNotice(visible)
+	return notice != "" && !serverError
 }
 
 func capacityComposerLine(line string) bool {
@@ -330,7 +403,7 @@ func capacityComposerLine(line string) bool {
 }
 
 var agentBackgroundTerminalChrome = regexp.MustCompile(`^\d+\s+background terminals? running\s+·\s+/ps to view\s+·\s+/stop to close$`)
-var agentComposerShortcutChrome = regexp.MustCompile(`^\? for shortcuts(?:\s+⚠\x{FE0F}?\s+\d+\s+warnings?\s+·\s+f2 to view)?$`)
+var agentComposerShortcutChrome = regexp.MustCompile(`^(?:← for agents\s+·\s+)?\? for shortcuts(?:\s+⚠\x{FE0F}?\s+\d+\s+warnings?\s+·\s+f2 to view)?$`)
 var agentComposerModelChrome = regexp.MustCompile(`(?i)^(?:gpt-[^ ]+\b.*|claude\s+code\b.*)$`)
 var agentComposerOtherFooterChrome = regexp.MustCompile(`(?i)^(?:bypass permissions\b.*|tip:.*)$`)
 

@@ -44,6 +44,11 @@ func (s *Service) registerOpenFilesLocked(clientID string, value any) (map[strin
 	// Capacity belongs to the replacement registration and surviving clients.
 	// Keep outgoing descriptors until validation succeeds so rejection is atomic.
 	retained := map[string]bool{}
+	for _, review := range s.reviews {
+		if review.expiresAt.After(s.reviewTimeLocked()) {
+			retained[review.tracking] = true
+		}
+	}
 	for id, record := range s.watches {
 		if id != clientID {
 			for trackingID := range record.OpenFiles {
@@ -190,6 +195,17 @@ func (s *Service) openFileSnapshotLocked(refs map[string]string) []map[string]an
 
 func (s *Service) releaseUnusedOpenFilesLocked() {
 	used := map[string]bool{}
+	now := s.reviewTimeLocked()
+	for id, r := range s.reviews {
+		if watch := s.watches[r.client]; watch.OpenFiles[r.tracking] != "" {
+			r.expiresAt = watch.ExpiresAt
+		}
+		if !r.expiresAt.After(now) {
+			delete(s.reviews, id)
+		} else {
+			used[r.tracking] = true
+		}
+	}
 	for _, record := range s.watches {
 		for id := range record.OpenFiles {
 			used[id] = true
@@ -299,6 +315,7 @@ func (s *Service) reconcileOpenFilesWithinMutation(committed *preparedRename) {
 		entry.revision++
 		events = append(events, map[string]any{"tracking_id": entry.id, "revision": entry.revision, "old_path": old, "new_path": requested, "file_id": entry.fileID})
 	}
+	s.observeReviewsLocked(s.reviewTimeLocked())
 	s.mu.Unlock()
 	for _, event := range events {
 		if s.publish != nil {

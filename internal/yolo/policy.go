@@ -64,19 +64,27 @@ type invocation struct {
 	args []string
 }
 
+type shellHardBlock struct {
+	rule string
+	risk string
+}
+
+func (block *shellHardBlock) Error() string { return block.rule }
+
 var (
-	validActions   = map[Action]bool{Approve: true, Decline: true, Block: true, Ask: true, Notify: true, Off: true}
-	validMatchers  = map[MatchType]bool{MatchCommand: true, MatchRegex: true, MatchGlob: true, MatchContains: true}
-	separators     = map[string]bool{";": true, "&&": true, "||": true, "|": true, "&": true}
-	assignRE       = regexp.MustCompile("^[A-Za-z_][A-Za-z0-9_]*=")
-	variableRE     = regexp.MustCompile("\\$(?:[A-Za-z_{])")
-	blockDeviceRE  = regexp.MustCompile("/dev/(?:sd[a-z]\\d*|nvme\\d+n\\d+(?:p\\d+)?|vd[a-z]\\d*)")
-	redirectRE     = regexp.MustCompile("(?:^|[\\s;&|])(?:\\d?>|>>?)\\s*/dev/(?:sd[a-z]|nvme\\d|vd[a-z])")
-	forkRE         = regexp.MustCompile("([A-Za-z_:][A-Za-z0-9_:.-]*)\\(\\)\\{([^}]*)\\};?([A-Za-z_:][A-Za-z0-9_:.-]*)")
-	forkFunctionRE = regexp.MustCompile("function([A-Za-z_][A-Za-z0-9_.-]*)\\{([^}]*)\\};?([A-Za-z_][A-Za-z0-9_.-]*)")
-	rootDirs       = map[string]bool{"/": true, "/bin": true, "/boot": true, "/dev": true, "/etc": true, "/home": true, "/lib": true, "/lib64": true, "/opt": true, "/proc": true, "/root": true, "/sbin": true, "/sys": true, "/tmp": true, "/usr": true, "/var": true}
-	shells         = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "fish": true}
-	wrappers       = map[string]bool{"sudo": true, "doas": true, "command": true, "builtin": true, "time": true, "nohup": true, "nice": true}
+	validActions       = map[Action]bool{Approve: true, Decline: true, Block: true, Ask: true, Notify: true, Off: true}
+	validMatchers      = map[MatchType]bool{MatchCommand: true, MatchRegex: true, MatchGlob: true, MatchContains: true}
+	separators         = map[string]bool{";": true, "&&": true, "||": true, "|": true, "&": true}
+	assignRE           = regexp.MustCompile("^[A-Za-z_][A-Za-z0-9_]*=")
+	variableRE         = regexp.MustCompile("\\$(?:[A-Za-z_{])")
+	blockDeviceRE      = regexp.MustCompile("/dev/(?:sd[a-z]\\d*|nvme\\d+n\\d+(?:p\\d+)?|vd[a-z]\\d*)")
+	redirectRE         = regexp.MustCompile("(?:^|[\\s;&|])(?:\\d?>|>>?)\\s*/dev/(?:sd[a-z]|nvme\\d|vd[a-z])")
+	continuedCommentRE = regexp.MustCompile("#[^\n]*\\\\\n")
+	forkRE             = regexp.MustCompile("([A-Za-z_:][A-Za-z0-9_:.-]*)\\(\\)\\{([^}]*)\\};?([A-Za-z_:][A-Za-z0-9_:.-]*)")
+	forkFunctionRE     = regexp.MustCompile("function([A-Za-z_][A-Za-z0-9_.-]*)\\{([^}]*)\\};?([A-Za-z_][A-Za-z0-9_.-]*)")
+	rootDirs           = map[string]bool{"/": true, "/bin": true, "/boot": true, "/dev": true, "/etc": true, "/home": true, "/lib": true, "/lib64": true, "/opt": true, "/proc": true, "/root": true, "/sbin": true, "/sys": true, "/tmp": true, "/usr": true, "/var": true}
+	shells             = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "fish": true}
+	wrappers           = map[string]bool{"sudo": true, "doas": true, "command": true, "builtin": true, "time": true, "nohup": true, "nice": true}
 )
 
 // Parse validates a YAML policy and compiles regex patterns. An omitted default
@@ -248,6 +256,81 @@ func LoadAndEvaluate(path, command string, dangerouslyYolo bool) Decision {
 	return Evaluate(policy, command, dangerouslyYolo)
 }
 
+// LoadAndEvaluatePrompt treats every captured Codex row boundary as ambiguous:
+// the terminal can split a word or wrap at a space or shell newline.
+func LoadAndEvaluatePrompt(path string, prompt Prompt, dangerouslyYolo bool) Decision {
+	if prompt.Agent != AgentCodex || prompt.Type != PromptShell || len(prompt.CommandRows) < 2 {
+		return LoadAndEvaluate(path, prompt.RuleInput, dangerouslyYolo)
+	}
+	breaks := len(prompt.CommandRows) - 1
+	manual := Decision{Action: Ask, RuleName: "ambiguous command rows", Source: "prompt", ReasonCode: "command_rows_ambiguous"}
+	if breaks > 5 {
+		return manual
+	}
+	separators := [...]string{"", " ", "\n"}
+	count := 1
+	for range breaks {
+		count *= len(separators)
+	}
+	policy, loadErr := Load(path)
+	result := manual
+	allApprove := true
+	for combination := range count {
+		var command strings.Builder
+		command.WriteString(prompt.CommandRows[0])
+		for _, row := range prompt.CommandRows[1:] {
+			command.WriteString(separators[combination%len(separators)])
+			combination /= len(separators)
+			command.WriteString(row)
+		}
+		text := command.String()
+		decision := Evaluate(policy, text, dangerouslyYolo)
+		if decision.Action == Block && decision.Source == "hard-floor" {
+			return decision
+		}
+		// Multirow input must parse even for policies without command matchers.
+		if !supportedMultirowCommand(text) || decision.Action != Approve {
+			allApprove = false
+		}
+		result = decision
+	}
+	if loadErr != nil {
+		return Decision{Action: Ask, RuleName: "ruleset error", Source: "error", ReasonCode: "rules_file_unavailable", Error: loadErr.Error()}
+	}
+	if !allApprove {
+		return manual
+	}
+	return result
+}
+
+func supportedMultirowCommand(command string) bool {
+	calls, err := invocations(command, 0)
+	if err != nil {
+		return false
+	}
+	for _, call := range calls {
+		switch call.name {
+		case "if", "then", "elif", "else", "fi", "for", "select", "while", "until", "do", "done", "case", "esac", "in", "function", "coproc", "!", "[[", "]]", "{", "}", "eval", "source", ".", "exec", "trap":
+			return false
+		}
+		for _, payload := range nestedPayloads(call) {
+			if !supportedMultirowCommand(payload) {
+				return false
+			}
+		}
+	}
+	tokens, err := shellTokens(command)
+	if err != nil {
+		return false
+	}
+	for _, token := range tokens {
+		if strings.HasPrefix(token, "#") || token == "<<" || token == "<<<" || token == ";;" {
+			return false
+		}
+	}
+	return true
+}
+
 func containsCommandRule(policy *Policy) bool {
 	for _, rule := range policy.Rules {
 		if rule.Type == MatchCommand {
@@ -354,14 +437,11 @@ func hardFloor(command string) Decision {
 	if strings.TrimSpace(command) == "" {
 		return Decision{}
 	}
-	compact := strings.Join(strings.Fields(command), "")
-	if forkBombMatch(forkRE, compact) || forkBombMatch(forkFunctionRE, compact) {
-		return Decision{Action: Block, RuleName: "built-in hard floor: fork bomb", Risk: "process", Source: "hard-floor"}
-	}
-	if redirectRE.MatchString(command) {
-		return Decision{Action: Block, RuleName: "built-in hard floor: block-device redirect", Risk: "device", Source: "hard-floor"}
-	}
 	calls, err := invocations(command, 0)
+	var block *shellHardBlock
+	if errors.As(err, &block) {
+		return Decision{Action: Block, RuleName: block.rule, Risk: block.risk, Source: "hard-floor"}
+	}
 	if err != nil {
 		return Decision{Action: Ask, RuleName: "command parse error", Risk: "unknown", Source: "error", ReasonCode: "command_parse_failed", Error: err.Error()}
 	}
@@ -475,6 +555,17 @@ func rootLike(target string) bool {
 func invocations(command string, depth int) ([]invocation, error) {
 	if depth > 4 {
 		return nil, errors.New("shell command nesting exceeds the safe parser limit")
+	}
+	command, err := shellWithoutContinuations(command)
+	if err != nil {
+		return nil, err
+	}
+	compact := strings.Join(strings.Fields(command), "")
+	if forkBombMatch(forkRE, compact) || forkBombMatch(forkFunctionRE, compact) {
+		return nil, &shellHardBlock{rule: "built-in hard floor: fork bomb", risk: "process"}
+	}
+	if redirectRE.MatchString(command) {
+		return nil, &shellHardBlock{rule: "built-in hard floor: block-device redirect", risk: "device"}
 	}
 	tokens, err := shellTokens(command)
 	if err != nil {
@@ -925,7 +1016,48 @@ func commandName(value string) string {
 	return filepath.Base(value)
 }
 
+// Delete continuations before recognizing shell words, operators, and substitutions.
+// A backslash that was itself escaped and text inside single quotes stay literal.
+func shellWithoutContinuations(input string) (string, error) {
+	if !strings.Contains(input, "\\\n") {
+		return input, nil
+	}
+	var result strings.Builder
+	var quote byte
+	for index := 0; index < len(input); index++ {
+		char := input[index]
+		if char == '\\' && quote != '\'' && index+1 < len(input) {
+			next := input[index+1]
+			if next == '\n' {
+				index++
+				continue
+			}
+			if quote == 0 || strings.ContainsRune("\\\"$`", rune(next)) {
+				result.WriteByte(char)
+				result.WriteByte(next)
+				index++
+				continue
+			}
+		}
+		if char == quote {
+			quote = 0
+		} else if quote == 0 && (char == '\'' || char == '"') {
+			quote = char
+		}
+		result.WriteByte(char)
+	}
+	logical := result.String()
+	if logical != input && continuedCommentRE.MatchString(input) {
+		return "", errors.New("the policy parser cannot resolve a possible shell comment ending in a continuation")
+	}
+	return logical, nil
+}
+
 func shellTokens(input string) ([]string, error) {
+	input, err := shellWithoutContinuations(input)
+	if err != nil {
+		return nil, err
+	}
 	var tokens []string
 	var current strings.Builder
 	var quote rune
@@ -941,9 +1073,9 @@ func shellTokens(input string) ([]string, error) {
 	for index := 0; index < len(runes); index++ {
 		char := runes[index]
 		if escaped {
+			escaped = false
 			current.WriteRune(char)
 			inToken = true
-			escaped = false
 			continue
 		}
 		if quote == '\'' {
@@ -957,7 +1089,7 @@ func shellTokens(input string) ([]string, error) {
 		if quote == '"' {
 			if char == '"' {
 				quote = 0
-			} else if char == '\\' && index+1 < len(runes) && strings.ContainsRune("\\\"$", runes[index+1]) {
+			} else if char == '\\' && index+1 < len(runes) && strings.ContainsRune("\\\"$\n", runes[index+1]) {
 				escaped = true
 			} else {
 				current.WriteRune(char)
@@ -971,9 +1103,11 @@ func shellTokens(input string) ([]string, error) {
 			inToken = true
 		case '\\':
 			escaped = true
-			inToken = true
-		case ' ', '\t', '\r', '\n':
+		case ' ', '\t', '\r':
 			flush()
+		case '\n':
+			flush()
+			tokens = append(tokens, ";")
 		case '(', ')', ';', '<', '>', '|', '&':
 			flush()
 			punctuation := string(char)

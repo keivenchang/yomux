@@ -380,3 +380,13 @@ def independent():
     assert findings[0].startswith("same:")
     assert findings[1].startswith("Sample.method:")
     assert findings[2].startswith("Sample.value:")
+
+
+def test_scoped_sharing_still_rejects_retired_replay(tmp_path):
+    path = tmp_path / "cmd/yomux-go/share.go"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'package main\n// /api/' + b'share\n')
+    assert architecture_budgets._retired_share_surface_violations(tmp_path) == ()
+    path.write_bytes(b'package main\n// share' + b'_replay\n')
+    violations = architecture_budgets._retired_share_surface_violations(tmp_path)
+    assert len(violations) == 1 and "forbidden" in violations[0]

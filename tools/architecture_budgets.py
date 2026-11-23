@@ -82,9 +82,15 @@ RETIRED_SHARE_FILENAME_EXCEPTIONS: Final[frozenset[str]] = frozenset((
     "yomux_lib/infra/" + "shared_config_lock.py",
     "tests/test_" + "shared_config_lock.py",
 ))
+SCOPED_SHARE_PATHS: Final[frozenset[str]] = frozenset((
+    "cmd/yomux-go/pages/share_client.gohtml", "cmd/yomux-go/pages/share_style.gohtml",
+    "cmd/yomux-go/share.go", "cmd/yomux-go/share_http.go", "cmd/yomux-go/share_collaboration.go", "cmd/yomux-go/share_test.go", "internal/capabilities/catalog.go", "internal/capabilities/catalog_test.go",
+    "static_src/js/yomux/95_share.js", "static_src/js/yomux/96_share_workspace.js", "tests/test_share_workspace_browser.py", "tests/browser_helpers/share_workspace.py", "static_src/js/yomux/89_preview_renderers.js", "tests/cross_surface_state.test.js", "tests/test_browser_layout.py", "tests/test_share_browser.py", "tests/share_collaboration.test.js",
+))
 RETIRED_SHARE_CONTENT_EXCEPTIONS: Final[frozenset[str]] = frozenset((
     "DOIT.075.2." + "yo" + "share-removal.md",
 ))
+SCOPED_SHARING_TOKENS: Final[frozenset[bytes]] = frozenset((("/api/" + "share").encode(), ("yo!" + "share").encode()))
 RETIRED_SHARE_SKIPPED_PARTS: Final[frozenset[str]] = frozenset((
     ".git", ".claude", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
 ))
@@ -302,7 +308,7 @@ def _retired_share_surface_violations(root: Path) -> tuple[str, ...]:
                 for part in parts
             ):
                 continue
-            if RETIRED_SHARE_FILENAME_FRAGMENT in relative.lower() and relative not in RETIRED_SHARE_FILENAME_EXCEPTIONS:
+            if RETIRED_SHARE_FILENAME_FRAGMENT in relative.lower() and relative not in RETIRED_SHARE_FILENAME_EXCEPTIONS and relative not in SCOPED_SHARE_PATHS:
                 violations.append(f"retired_share_surface: forbidden filename {relative}")
             if relative in RETIRED_SHARE_CONTENT_EXCEPTIONS:
                 continue
@@ -310,6 +316,9 @@ def _retired_share_surface_violations(root: Path) -> tuple[str, ...]:
             lowered = content.lower()
             matches: list[tuple[int, str]] = []
             for token in RETIRED_SHARE_CONTENT_TOKENS:
+                scoped = relative in SCOPED_SHARE_PATHS or relative.startswith(("static/", "static_src/locales/")) or relative in ("README.md", "docs/specs/GUI.md", "GO_MIGRATION.md")
+                if scoped and token in SCOPED_SHARING_TOKENS:
+                    continue
                 offset = lowered.find(token.lower())
                 if offset >= 0:
                     matches.append((offset, token.decode("ascii")))

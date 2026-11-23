@@ -52,6 +52,19 @@ func permissionString(mode os.FileMode) string {
 	return string(text)
 }
 
+func entryKind(mode os.FileMode) string {
+	switch {
+	case mode&os.ModeSymlink != 0:
+		return "symlink"
+	case mode.IsDir():
+		return "dir"
+	case mode.IsRegular():
+		return "file"
+	default:
+		return "other"
+	}
+}
+
 func numericMode(mode os.FileMode) uint32 {
 	n := uint32(mode.Perm())
 	if mode&os.ModeSetuid != 0 {
@@ -75,6 +88,7 @@ func addEntryMetadata(row map[string]any, info os.FileInfo) {
 	row["metadata_identity"] = fileID(info)
 	row["mtime"] = info.ModTime().Unix()
 	row["mtime_ns"] = info.ModTime().UnixNano()
+	row["mtime_ns_exact"] = strconv.FormatInt(info.ModTime().UnixNano(), 10)
 	row["created"] = nil
 	row["accessed"] = nil
 	row["allocated_size"] = nil
@@ -163,14 +177,7 @@ func (s *Service) entryMetadata(raw string) (map[string]any, *Error) {
 	if err != nil {
 		return nil, filesystemError(requested, err)
 	}
-	kind := "other"
-	if info.IsDir() {
-		kind = "dir"
-	} else if info.Mode().IsRegular() {
-		kind = "file"
-	} else if info.Mode()&os.ModeSymlink != 0 {
-		kind = "symlink"
-	}
+	kind := entryKind(info.Mode())
 	row := map[string]any{"path": requested, "name": filepath.Base(requested), "realpath": resolved, "kind": kind, "size": info.Size(), "is_symlink": info.Mode()&os.ModeSymlink != 0}
 	addEntryMetadata(row, info)
 	if birth := platformBirthAt(parent, filepath.Base(requested)); birth != nil {

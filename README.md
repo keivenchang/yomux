@@ -105,7 +105,7 @@ Pinned tabs show their existing pin icon in Tabber and precede unpinned conversa
 
 * Drag a tab between same-role pane tab bars, drop near a Generic Pane edge to split it, or drop on the outer root edge for a full-span pane. A generic tab moved to the far right creates another Generic Pane, not a Side Pane. No tab can move or swap between Side and Generic roles. Pane roles, edges, splits, and percentages encode into the shareable page URL. Pinned tabs stay in their pane, are never minimized or auto-evicted, and a full pane with no evictable unpinned/clean tab refuses incoming tabs with a visible status message instead of silently exceeding the per-pane tab cap.
 
-* File -> `Finder/Differ/Tabber` opens the three independent file-surface tabs. Normal Tabber shows one flat, rounded row per conversation/window: the first line has the shared activity marker, agent symbol, tmux name, and muted activity date; the second line has its description.
+* File -> `Finder/Differ/Tabber` opens the three independent file-surface tabs. Normal Tabber shows one flat, rounded row per conversation/window: the first line has the shared activity marker, agent symbol, tmux name, repository branch, and colored clean/dirty/ahead/behind markers for the active pane's worktree; the second line has that window's description. Its matching pane tab uses the same description and omits the `AI summary` prefix to save space.
 
 Normal shows at most one content pane and hides its tab strip. The left Tabber owns select/unselect for conversations, file editors, Finder, Differ, and other tools; unselected items keep their buffers and view state. Select a row to show its content in the pane, select another row to switch content, or select the current row again to hide it. The empty Normal pane does not show the drag-and-drop prompt.
 
@@ -120,6 +120,10 @@ Automatic descriptions are enabled by default and summarize changed conversation
 In Advanced, at 900px and wider the available file surfaces live in an explicit narrow left Side Pane; a missing one recreates that Side Pane, and Side tabs never enter Generic Panes. Below 900px there is no Side Pane and File opens only the selected surface in the sole full-width Generic Pane. Widening restores the available file surfaces to the left while leaving YO!\* tabs generic.
 
 * Tabber lists open tabs and tmux sub-windows by recent activity. `Mod+B` hides Finder/Differ/Tabber or restores the default left Side Pane on wide layouts. The top-bar language picker changes the live UI.
+
+### Office previews
+
+Open DOCX and PPTX files from Finder or a direct file link to read a locally converted PDF. Download original stays available during conversion and on failure. Office files have no editing or save controls. Reload reconverts the original. The previous PDF stays readable at its current zoom and position until the new PDF is ready. If conversion fails, use Retry alongside the previous PDF. Closing the preview cancels unfinished work. Conversion uses an operator-installed LibreOffice with isolation, accepts inputs up to 25 MiB, and has a 30-second deadline and two-job limit. Linux requires bubblewrap and util-linux; Debian/Ubuntu operators can install these with `sudo apt install libreoffice bubblewrap util-linux`. Missing dependencies or unavailable isolation show instructions and Retry. macOS conversion remains unavailable pending native sandbox qualification. Preview fidelity depends on server fonts; slide animations and transitions become static pages.
 
 ### Terminals and activity
 
@@ -175,11 +179,15 @@ Text files provide TextEdit for raw source editing. Markdown also provides Prose
 
 * Upload or paste files with drag-drop, clipboard paste, or the `+` button. Dropping a file on a terminal offers actions suited to an AI or shell pane; the numbered upload chooser opens at the pane top-left without a separate Uploaded toast. Terminal uploads are transient artifacts stored at `/tmp/yomux.<login-user>/uploads/<session>/`, where the login user is the authenticated YOmux username rather than the Unix account. Each user tree is private (`0700`), files are removed lazily after seven days by default, and `uploads.retention_days` in `~/.config/yomux/settings.yaml` accepts 1–365 days. Markdown editor image paste uses separate document storage: `/a/b/file.md` creates `/a/b/file/`, writes the image there, and inserts a relative `file/<name>` reference at the captured editor selection.
 
+Graphviz files (`.dot` and `.gv`) open in Preview with zoom, fit, and pan. Use Edit or Split to work on the DOT source. SQLite files (`.sqlite`, `.sqlite3`, and `.db`) open in a read-only Preview for browsing tables, schema, and 50-row pages. Each page reads a fresh snapshot of up to 20 MiB, including committed WAL data when present.
+
 ### LaTeX previews
 
 The TeX compiler prompt uses a left-aligned status card, normal UI text, wrapped command instructions, and wrapping Install and Retry actions. Installation still requires consent and retains progress and errors.
 
-LaTeX documents (`.tex` and `.ltx`) provide TextEdit, Preview, and Split. Preview compiles the current editor buffer to PDF without saving it. YOmux detects Tectonic or pdfLaTeX on the server; if missing, Preview asks before downloading a checksum-verified Tectonic compiler into this instance’s private tools directory, without sudo. The first compilation may also download TeX packages. Failed installation shows manual instructions and Retry. Compiler execution restricts reads to the document folder and required runtime files, disables shell escape, and confines writes to private jobs and cache. Linux needs bubblewrap (`sudo apt install bubblewrap`); macOS uses its built-in sandbox. Compilation errors appear in Preview.
+LaTeX documents (`.tex` and `.ltx`) provide TextEdit, Preview, and Split. Preview compiles the current editor buffer to PDF without saving it and keeps the last successful PDF visible during recompilation. In Split, scrolling either pane moves the other to the matching page or source location when the compiler provides a source map. Use the PDF toolbar to change zoom. YOmux detects Tectonic or pdfLaTeX on the server; if missing, Preview asks before downloading a checksum-verified Tectonic compiler into the tools directory under the server’s configuration directory, without sudo. Instances using the same configuration directory share the compiler and TeX package cache. The first compilation may also download TeX packages. Failed installation shows manual instructions and Retry. Compiler execution restricts reads to the document folder and required runtime files, disables shell escape, and confines writes to private jobs and cache. Linux needs bubblewrap (`sudo apt install bubblewrap`); macOS uses its built-in sandbox. Compilation errors appear in Preview.
+
+Click **Δ** in the source toolbar to review saved changes in Edit or Split. **Since review started** compares against the saved file when you started the review. Choose **Last 1 min**, **Last 5 min**, **Last 15 min**, or **Last 30 min** for a rolling comparison, or click **New diff** to reset the baseline without saving. Use the arrow buttons to go to the previous or next change. You can select and copy green additions and red deletions. The preview shows the current document. Markdown, text files, and files outside Git are supported up to 1 MiB. When the file changes on disk, compatible changes merge into your draft automatically. If changes overlap, autosave pauses and the editor asks how to resolve them. Reviews survive a browser reload while the file watch is active and end when the server restarts. **Watching saves** means the editor compares saved versions it observed. Several rapid saves can appear as one change.
 
 ### Quick Open and indexing
 
@@ -213,9 +221,17 @@ In Codex, ordinary wheel or trackpad scrolling moves through the conversation wh
 
 * File -> `YO!stats` uses the shared `Graphs`, `Cost`, `API/SSE`, `Daemons`, and `Logs` shell when `pane.stats.v1` is available. The browser uses server capabilities and complete snapshots; backend parity gaps are listed in [`GO_MIGRATION.md`](GO_MIGRATION.md).
 
-* The pane header pop-out button opens supported file previews in a detached browser window. YO!stats opens in a live, single-pane window without YOmux menus or Finder/Differ/Tabber or a minimize control; its controls stay interactive, and its tab leaves the source layout while detached and returns to its prior slot when the window closes.
+* The pane header pop-out button opens text files and PDFs in a live detached tab and opens other supported file previews in a detached window. YO!stats opens in a live, single-pane window without YOmux menus or Finder/Differ/Tabber or a minimize control; its controls stay interactive, and its tab leaves the source layout while detached and returns to its prior slot when the window closes.
 
 * For a real-device mobile diagnostic, open YOmux with `?debug=1`, reproduce the Preview or terminal input problem once, then open `YO!stats` -> `API/SSE` and press `Copy Events`. That debug-only action copies raw JSON containing the Preview touch/viewport/write owners and generations plus terminal tap/focus/input stages; normal sessions do not retain this mobile trace.
+
+## Sharing selected tabs
+
+Open **File → YO!share** to manage shares over HTTPS. Expand **New Share** to choose tabs, name the guest, set the duration and browser limit, then select **Create New Share**. Supported files default to read access. Enable **W** for collaborative text editing or terminal input. Writable terminal access runs commands as your OS user. Each active share shows its invitation, countdown, and connected guest count. Expand the share to change tabs, write access, expiry, or the guest limit. Removed tabs keep unsent text available for copying.
+
+The invitation opens a guest workspace with Normal Tabber, the available editor controls, and a countdown. Reload restores the selected tab, view mode, and scroll position. The guest address bar keeps that view state for the current browser. To invite another browser profile, use the owner’s **Copy URL to share** button. Guests inherit the share’s theme and accent and can save their own Dark or Light choice. YO!Chat sits below Finder or Tabber with a movable divider. Enter sends, Shift+Enter inserts a newline, and the conversation closes when sharing ends. Reloads and additional tabs in the same browser profile reuse its claimed slot. Closing a browser tab drops the connected count when its heartbeat expires. The slot remains assigned to that browser profile. The host controls terminal dimensions and the writable guest sends input to the shared pane.
+
+Save your existing draft before enabling W on a file. Shared source editing shows one caret per participant and saves through the server. Markdown Preview follows the shared text, and rich ViewEdit returns after sharing ends. If the file changes on disk, sharing pauses saves and keeps a recovery draft for the host to resolve. Recovery drafts survive a server restart. Guest access ends on restart, expiry, or Stop Sharing. Read-only files show saved content, and local Markdown images require their own grants. TeX guests see the PDF the host publishes through YO!share. Later source edits mark that PDF stale.
 
 ## Two machines sharing a home
 
@@ -271,7 +287,7 @@ Choose the mode for each session in the menu. There is no server-wide permission
 
 ### Existing-session YO toggle
 
-The `YO` toggle watches the visible screen of an existing session and applies configured approval rules. Choosing a dangerous launch does not bypass these rules or change another session. Rules live in `~/.config/yomux/yolo-rules.yaml`:
+The `YO` toggle watches the visible screen of an existing session and applies configured approval rules. If a Codex command spans multiple terminal rows, YO checks every supported interpretation before approving and leaves unresolved commands for manual approval. Choosing a dangerous launch does not bypass these rules or change another session. Rules live in `~/.config/yomux/yolo-rules.yaml`:
 
 ```yaml
 default: ask

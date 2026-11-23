@@ -1001,6 +1001,13 @@ func (s *server) shutdown() {
 			s.serverCancel()
 		}
 		s.stopRequestAdmission()
+		s.shares.mu.Lock()
+		for _, grant := range s.shares.grants {
+			if grant.cancel != nil {
+				grant.cancel()
+			}
+		}
+		s.shares.mu.Unlock()
 		s.closeNativePages()
 		s.requestWorkers.Wait()
 		if s.agentActions != nil {

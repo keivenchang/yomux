@@ -113,6 +113,7 @@ function valueFromPreferenceControl(control) {
 }
 
 async function saveSettingsPatch(patch, options = {}) {
+  if (bootstrap.guestWorkspace) return saveShareWorkspaceSettings(patch);
   if (readOnlyMode) return;
   const payload = await apiFetchJson('/api/settings', {
     method: 'POST',

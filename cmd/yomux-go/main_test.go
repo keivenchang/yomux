@@ -1077,7 +1077,28 @@ func TestGoSessionMutationsPublishCompleteRosterBeforeReturning(t *testing.T) {
 		}
 	}
 	assertRoutes(want)
+	for _, query := range []string{"", "?session=keep", "?session=%240"} {
+		response := httptest.NewRecorder()
+		s.killSession(response, httptest.NewRequest(http.MethodPost, "/api/kill-session"+query, nil))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("kill accepted missing session %q: %d %s", query, response.Code, response.Body.String())
+		}
+	}
+	if output, err := exec.Command("tmux", "-S", socket, "has-session", "-t", "=keeper:").CombinedOutput(); err != nil {
+		t.Fatalf("invalid target removed keeper: %v (%s)", err, output)
+	}
+	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "$0").CombinedOutput(); err != nil {
+		t.Fatalf("create literal session name: %v (%s)", err, output)
+	}
 	response := httptest.NewRecorder()
+	s.killSession(response, httptest.NewRequest(http.MethodPost, "/api/kill-session?session=%240", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("kill literal session name: %d %s", response.Code, response.Body.String())
+	}
+	if got := s.cachedTmuxSessionRosterSnapshot(); !slices.Equal(got.sessions, want) {
+		t.Fatalf("kill targeted the tmux ID instead of the literal name: got %v, want %v", got.sessions, want)
+	}
+	response = httptest.NewRecorder()
 	s.killSession(response, httptest.NewRequest(http.MethodPost, "/api/kill-session?session=5", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("kill: %d %s", response.Code, response.Body.String())

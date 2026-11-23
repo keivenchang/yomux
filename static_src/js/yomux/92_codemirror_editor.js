@@ -13,13 +13,17 @@ function destroyCodeMirrorPanel(panel, {invalidateEnsure = true} = {}) {
   // Clear the diff scrollbar overview so its red/green rail doesn't linger after switching to
   // edit/normal mode (only the diff build re-adds it via updateCodeMirrorDiffOverview).
   panel?.querySelector?.('.cm-diff-overview')?.remove();
+  if (panel?._shareConnection) disconnectShareEditor(panel);
   if (panel?._cmView) {
     panel._cmView.destroy();
     panel._cmView = null;
   }
   if (panel) {
+    panel._cmReviewCompartment = null;
+    panel._cmReviewOriginal = null;
     panel._cmApi = null;
     panel._cmThemeCompartment = null;
+    panel._cmBlameCompartment = null;
     panel._cmEditorOptionCompartment = null;
     panel._cmEditorOptionConfig = null;
     panel._cmLocaleCompartment = null;
@@ -47,12 +51,17 @@ function commitCodeMirrorSource(panel, path) {
   const state = fileEditorPanelState(panel);
   if (!state || state.historical === true) return false;
   const next = panel._cmView.state.doc.toString();
+  if (state._shareActive) { shareHostLocalChanged(panel, path); return true; }
   if (next === state.content) return true;
   handleFileEditorContentChanged(panel, path, next, {syntax: false, sourceSurface: 'text-editor'});
   return true;
 }
 
 function scheduleCodeMirrorSource(panel, path) {
+  if (fileEditorPanelState(panel)?._shareActive) {
+    shareHostLocalChanged(panel, path);
+    return;
+  }
   if (panel._cmSerializeTimer) clearTimeout(panel._cmSerializeTimer);
   const generation = Number(panel._cmSerializeGeneration || 0) + 1;
   panel._cmSerializeGeneration = generation;
@@ -90,11 +99,7 @@ function codeMirrorConfigSignature(path, options = {}) {
     expand: options.expand === true,
     language: codeMirrorLanguageName(path),
     readOnly: readOnlyMode,
-    // fix: the blame ViewPlugin is added/removed only at editor build time, so blame state must
-    // be in the signature — otherwise toggling blame OFF reuses the existing view and the annotations
-    // linger (and toggling ON wouldn't add them without an unrelated rebuild).
-    blame: fileEditorBlameEnabled,
-    blameAllLines: fileEditorBlameAllLines,
+
   });
 }
 
@@ -146,6 +151,24 @@ function codeMirrorSplitSyncExtension(api, panel, path) {
   });
 }
 
+function codeMirrorDeletedSelectionText(view) {
+  const document = view.dom.ownerDocument;
+  const selection = document?.getSelection?.();
+  if (!selection || selection.isCollapsed || !view.contentDOM.contains(selection.anchorNode)
+      || !view.contentDOM.contains(selection.focusNode)) return '';
+  const active = document.activeElement;
+  if (active && active !== document.body && active !== document.documentElement && !view.dom.contains(active)) return '';
+  const inDeletion = node => Boolean((node?.nodeType === 1 ? node : node?.parentElement)?.closest('.cm-deletedChunk'));
+  if (!inDeletion(selection.anchorNode) && !inDeletion(selection.focusNode)) {
+    // A drag starting or ending at a widget boundary can report the content container as its endpoint.
+    // For an ordinary CodeMirror selection that spans widgets, leave copying to CodeMirror.
+    if (!view.state.selection.main.empty || !selection.rangeCount) return '';
+    const range = selection.getRangeAt(0);
+    if (!Array.from(view.contentDOM.querySelectorAll('.cm-deletedChunk')).some(chunk => range.intersectsNode(chunk))) return '';
+  }
+  return selection.toString();
+}
+
 function codeMirrorContextMenuSelectionExtension(api) {
   return safeCodeMirrorExtension('context menu selection', () => {
     if (!api.ViewPlugin) return [];
@@ -154,8 +177,24 @@ function codeMirrorContextMenuSelectionExtension(api) {
         this.view = view;
         this.pending = null;
         this.clearTimer = 0;
+        this.copyDeletedSelection = event => {
+          const selected = codeMirrorDeletedSelectionText(view);
+          if (!selected || !event.clipboardData) return;
+          event.clipboardData.setData('text/plain', selected);
+          event.preventDefault();
+          event.stopPropagation();
+        };
+        // Let native Copy reach the clipboard event even if async clipboard writes are blocked.
+        this.cutDeletedSelectionShortcut = event => {
+          if (event.key?.toLowerCase() !== 'x' || event.altKey || event.shiftKey || event.ctrlKey === event.metaKey) return;
+          const selected = codeMirrorDeletedSelectionText(view);
+          if (!selected) return;
+          event.preventDefault();
+          event.stopPropagation();
+          void copyTextWithFeedback(selected);
+        };
         this.captureSelectionAtRightMouseDown = event => {
-          if (event.button !== 2 || !this.view.dom.contains(event.target)) return;
+          if (event.button !== 2 || !this.view.dom.contains(event.target) || event.target.closest?.('.cm-deletedChunk')) return;
           const selection = this.view.state.selection;
           const position = this.view.posAtCoords({x: event.clientX, y: event.clientY});
           if (!Number.isFinite(position) || !selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to)) return;
@@ -169,7 +208,7 @@ function codeMirrorContextMenuSelectionExtension(api) {
           }, 250);
         };
         this.handleContextMenu = event => {
-          if (!this.view.dom.contains(event.target)) return;
+          if (!this.view.dom.contains(event.target) || event.target.closest?.('.cm-deletedChunk')) return;
           // Capture-phase listeners run before CodeMirror's own contextmenu handling. Chrome can
           // otherwise collapse contenteditable's selection before CodeMirror observes the event.
           const captured = this.pending;
@@ -215,12 +254,18 @@ function codeMirrorContextMenuSelectionExtension(api) {
         document.addEventListener('pointerdown', this.captureSelectionAtRightMouseDown, true);
         document.addEventListener('mousedown', this.captureSelectionAtRightMouseDown, true);
         document.addEventListener('contextmenu', this.handleContextMenu, true);
+        document.addEventListener('copy', this.copyDeletedSelection, true);
+        document.addEventListener('cut', this.copyDeletedSelection, true);
+        document.addEventListener('keydown', this.cutDeletedSelectionShortcut, true);
       }
 
       destroy() {
         document.removeEventListener('pointerdown', this.captureSelectionAtRightMouseDown, true);
         document.removeEventListener('mousedown', this.captureSelectionAtRightMouseDown, true);
         document.removeEventListener('contextmenu', this.handleContextMenu, true);
+        document.removeEventListener('copy', this.copyDeletedSelection, true);
+        document.removeEventListener('cut', this.copyDeletedSelection, true);
+        document.removeEventListener('keydown', this.cutDeletedSelectionShortcut, true);
         clearTimeout(this.clearTimer);
         this.pending = null;
       }
@@ -316,6 +361,7 @@ function codeMirrorPlainEditableExtensions(api, panel, path, options = {}) {
     ...(Array.isArray(api.searchKeymap) ? api.searchKeymap : []),
   ].filter(Boolean)));
   return [
+    codeMirrorRecentReviewExtension(api, panel),
     codeMirrorLocaleExtensions(api, panel),
     safeCodeMirrorExtension('history', () => api.history?.()),
     safeCodeMirrorExtension('selection drawing', () => api.drawSelection()),
@@ -329,6 +375,7 @@ function codeMirrorPlainEditableExtensions(api, panel, path, options = {}) {
     saveKeymap,
     findKeymap,
     defaultKeymap,
+    codeMirrorBlameCompartmentExtensions(api,panel,path),
     codeMirrorFileAccessExtensions(api, panel, path),
     codeMirrorThemedExtensions(api, panel, path),
     codeMirrorWorkingUpdateExtension(api, panel, path),
@@ -416,7 +463,7 @@ function createEditableCodeMirrorState(api, panel, path, doc) {
     };
   } catch (error) {
     console.warn('CodeMirror language parser failed; retrying plain editable editor', error);
-    if (panel) panel._cmThemeCompartment = null;
+    if (panel) {panel._cmThemeCompartment = null;panel._cmBlameCompartment=null;}
     return {
       state: api.EditorState.create({
         doc,
@@ -432,6 +479,22 @@ function trackCodeMirrorViews(panel, api, views) {
   if (!panel) return;
   panel._cmApi = api;
   panel._cmViews = views.filter(Boolean);
+}
+
+function codeMirrorBlameCompartmentExtensions(api,panel,path) {
+  const extensions=codeMirrorBlameExtension(api,path);
+  if(!panel || !api.Compartment)return extensions;
+  panel._cmBlameCompartment=panel._cmBlameCompartment || new api.Compartment();
+  return panel._cmBlameCompartment.of(extensions);
+}
+
+function reconfigureCodeMirrorPanelBlame(panel) {
+  const api=panel?._cmApi,compartment=panel?._cmBlameCompartment;
+  const views=Array.isArray(panel?._cmViews)?panel._cmViews:[];
+  if(!api || !compartment || !views.length)return false;
+  const effect=compartment.reconfigure(codeMirrorBlameExtension(api,panel._cmPath));
+  for(const view of views)updateCodeMirrorViewPreservingState(view,(selection,scrollSnapshot)=>view.dispatch({effects:scrollSnapshot?[effect,scrollSnapshot]:effect,...(selection?{selection}:{})}));
+  return true;
 }
 
 function reconfigureCodeMirrorPanelLocale(panel) {
@@ -1011,15 +1074,11 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     panel._cmDiffLayout = layout;
     installCodeMirrorDiffResizeObserver(panel, item, path, container);
     installCodeMirrorDiffCollapsedScrollGuard(panel, container);
-    const unifiedMergeOptions = {
-      original,
-      // Full-line red/green only, without intra-line token highlighting.
-      highlightChanges: false,
-      gutter: true,
+    const unifiedMergeOptions = codeMirrorUnifiedMergeOptions(original, {
       mergeControls: !readOnlyMode && diffEditsAllowed,
       // B4: expand-all omits collapseUnchanged so every unchanged line shows; else collapse the runs.
       ...(expandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
-    };
+    });
     const unifiedDiffExtensions = (plain = false) => [
       api.unifiedMergeView(unifiedMergeOptions),
       ...(diffEditsAllowed ? codeMirrorExtensions(api, panel, path, {plain}) : codeMirrorReadOnlyExtensions(api, path, panel, {plain})),
@@ -1140,15 +1199,18 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       if (createdState.plain) {
         setFileEditorPanelStatus(panel, t('editor.codemirrorPlainText'), 'warn');
       }
-    } else if (panel._cmView.state.doc.toString() !== currentText && !state.dirty && !panel._cmSerializeTimer) {
+    } else if (!state._shareActive && panel._cmView.state.doc.toString() !== currentText && !state.dirty && !panel._cmSerializeTimer) {
       panel._cmView.dispatch({
         changes: {from: 0, to: panel._cmView.state.doc.length, insert: currentText},
       });
       updateCodeMirrorCursorStatus(panel);
     }
+    syncCodeMirrorRecentReview(panel, state);
     restoreFileEditorPanelViewState(item, panel, {restoreFresh: created});
     focusFileEditorPanelIfReady(panel, item);
     applyPendingFileEditorLineTarget(item, panel);
+    bindTexPreviewScrollSync(panel);
+    if (state._shareActive) await shareAttachHostPanel(panel, path);
     ensureMarkdownFormattingToolbar(panel);
     // if blame is on but this path isn't cached yet (file opened after the toggle), fetch it
     // and nudge the editor so the annotation appears without a manual toggle. Deduped; no-op otherwise.
@@ -1227,11 +1289,11 @@ function editorPanelParts(panel) {
     gutterButton: panel.querySelector('.file-editor-gutter-panel'),
     wrapButton: panel.querySelector('.file-editor-wrap-panel'),
     findButton: panel.querySelector('.file-editor-find-panel'),
+    reviewButton: panel.querySelector('.file-editor-review-panel'),
+    reviewToolbar: panel.querySelector('.file-editor-review-toolbar'),
     diffButton: panel.querySelector('.file-editor-diff-panel'),
     diffRefPanel: panel.querySelector('.file-editor-diff-ref-panel'),
     diffExpandButton: panel.querySelector('.file-editor-diff-expand-panel'),
-    popoutPreviewButton: panel.querySelector('.file-editor-popout-preview-panel'),
-    popoutEditorButton: panel.querySelector('.file-editor-popout-editor-panel'),
     reloadButton: panel.querySelector('.file-editor-reload-panel'),
     uploadButton: panel.querySelector('.file-editor-upload-panel'),
     themeButton: panel.querySelector('.file-editor-theme-panel'),
@@ -1240,6 +1302,8 @@ function editorPanelParts(panel) {
     content: panel.querySelector('.file-editor-content'),
   };
   parts.textControls = [
+    parts.reviewButton,
+    parts.reviewToolbar,
     parts.modeControl,
     parts.previewFontPanel,
     parts.gutterButton,
@@ -1249,8 +1313,6 @@ function editorPanelParts(panel) {
     parts.diffButton,
     parts.diffExpandButton,
     parts.diffRefPanel,
-    parts.popoutPreviewButton,
-    parts.popoutEditorButton,
     parts.reloadButton,
     parts.uploadButton,
   ];
@@ -1342,14 +1404,14 @@ function syncEditorDiffRefPanel(path, state, item, parts, mode) {
 }
 
 function syncTextEditorControls(panel, path, state, item, parts, mode) {
+  syncRecentReviewControls(panel, path, state, mode);
   const diffExpandButton = parts.diffExpandButton;
-  const popoutPreviewButton = parts.popoutPreviewButton;
-  const popoutEditorButton = parts.popoutEditorButton;
   const previewable = editorPreviewModeAvailable(path, state);
+  const renderer = previewRendererForPath(path, state);
   updateEditorThemeButton(parts.themeButton, {includeVanilla: true});
   updateEditorModeControl(parts.modeControl, path, state, item);
   if (parts.previewFontPanel) {
-    parts.previewFontPanel.hidden = state.kind !== 'text' || !previewable || (mode !== 'preview' && mode !== 'split');
+    parts.previewFontPanel.hidden = state.kind !== 'text' || !previewable || renderer.id === 'tex' || (mode !== 'preview' && mode !== 'split');
     updateEditorPreviewFontControls(parts.previewFontPanel);
   }
   if (parts.gutterButton) {
@@ -1367,8 +1429,6 @@ function syncTextEditorControls(panel, path, state, item, parts, mode) {
   updateFileEditorBlameButton(parts.blameButton, path, state, item);
   updateFileEditorDiffButton(parts.diffButton, path, state, item);
   updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
-  if (popoutPreviewButton) popoutPreviewButton.hidden = !previewable || state.historical === true || previewRendererForPath(path, state).snapshot === false;
-  if (popoutEditorButton) popoutEditorButton.hidden = state.kind !== 'text' || state.historical === true;
   syncEditorDiffRefPanel(path, state, item, parts, mode);
   updateFileEditorToolbarSeparators(panel);
   return {previewable};
@@ -1416,7 +1476,7 @@ function resetImagePreviewPane(parts) {
 }
 
 function renderTextPreviewMode(panel, item, path, state, parts) {
-  destroyCodeMirrorPanel(panel);
+  if (!(bootstrap.guestWorkspace && state._shareActive)) destroyCodeMirrorPanel(panel);
   if (parts.rawPane) parts.rawPane.hidden = true;
   if (parts.codeMirrorPane) parts.codeMirrorPane.hidden = true;
   panel.classList.remove('syntax-highlighted');
@@ -1477,6 +1537,7 @@ function renderTextEditorMode(panel, item, path, state, parts, mode) {
 }
 
 function renderFileEditorPanel(panel, item, options = {}) {
+  if (panel._guestTerminal) return;
   const path = fileItemPath(item);
   if (renderFileEditorPanelShouldCaptureViewState(options)) capturePaneViewState(item, panel);
   const shouldUpdateActiveFile = options.updateActiveFile !== false
@@ -1974,12 +2035,18 @@ function semanticSourceLineAnchors(previewPane) {
   return anchors.filter(anchor => !comments.some(range => Number(anchor.line) >= Number(range.from) && Number(anchor.line) < Number(range.to)));
 }
 
+function codeMirrorSourceTextBlock(block) {
+  return Array.isArray(block?.type) ? block.type.find(part => part.type === 0) || block : block;
+}
+
 function sourcePositionForEditorScroll(cmView) {
   if (!cmView?.scrollDOM || !cmView.state?.doc) return null;
   try {
     const y = Math.max(0, Number(cmView.scrollDOM.scrollTop || 0)) + (Math.max(1, Number(cmView.scrollDOM.clientHeight || 0)) * fileEditorSplitScrollFocusRatio);
-    const block = cmView.lineBlockAtHeight(y);
-    const line = cmView.state.doc.lineAt(block.from).number;
+    const measured = cmView.lineBlockAtHeight(y);
+    const sourceLine = cmView.state.doc.lineAt(measured.from);
+    const block = codeMirrorSourceTextBlock(cmView.lineBlockAt(sourceLine.from));
+    const line = sourceLine.number;
     const height = Math.max(1, Number(block.height || 0));
     const fraction = Math.min(1, Math.max(0, (y - Number(block.top || 0)) / height));
     return {line: line + fraction};
@@ -2038,7 +2105,7 @@ function editorScrollTopForSourcePosition(cmView, position) {
     const line = Math.max(1, Math.min(Number(position.line || 1), cmView.state.doc.lines));
     const beforeLine = Math.max(1, Math.min(Math.floor(line), cmView.state.doc.lines));
     const afterLine = Math.max(1, Math.min(Math.ceil(line), cmView.state.doc.lines));
-    const beforeBlock = cmView.lineBlockAt(cmView.state.doc.line(beforeLine).from);
+    const beforeBlock = codeMirrorSourceTextBlock(cmView.lineBlockAt(cmView.state.doc.line(beforeLine).from));
     const beforeTop = Number(beforeBlock?.top || 0);
     if (afterLine === beforeLine) {
       // CodeMirror may classify the exact top boundary as the preceding visual block. Keep an integer
@@ -2046,7 +2113,7 @@ function editorScrollTopForSourcePosition(cmView, position) {
       const interiorInset = Math.min(1, Math.max(0, Number(beforeBlock?.height || 0)) / 2);
       return clampScrollTop(cmView.scrollDOM, beforeTop + interiorInset - targetOffset);
     }
-    const afterBlock = cmView.lineBlockAt(cmView.state.doc.line(afterLine).from);
+    const afterBlock = codeMirrorSourceTextBlock(cmView.lineBlockAt(cmView.state.doc.line(afterLine).from));
     const afterTop = Number(afterBlock?.top || beforeTop);
     return clampScrollTop(cmView.scrollDOM, beforeTop + ((afterTop - beforeTop) * (line - beforeLine)) - targetOffset);
   } catch (_) {
@@ -2294,6 +2361,8 @@ function syncFileEditorInPaneSplitScroll(host, source, generation, deferredOwner
   const editorScroller = cmView?.scrollDOM || null;
   const previewPane = host.querySelector?.('.file-editor-preview-pane-panel');
   if (!editorScroller || !previewPane || previewPane.hidden) return false;
+  // The TeX PDF scrolls inside PDF.js and has its own source map.
+  if (previewPane.querySelector?.('[data-tex-preview]')) return false;
   if (!fileEditorSourceCanDrive(host, source)) return false;
   const from = source === 'preview' ? previewPane : editorScroller;
   const to = source === 'preview' ? editorScroller : previewPane;
@@ -2476,6 +2545,11 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
   const statePath = options.statePath || path;
   const item = fileEditorPanelItem(panel) || options.item || fileEditorItemFor(path);
   const state = fileEditorStateForItem(statePath, item);
+  if (state?._shareActive) {
+    const outcomes=await Promise.all(fileEditorPanelsForPath(statePath).filter(owner=>owner._shareConnection).map(owner=>owner._shareConnection.flush()));
+    shareHostFileState(statePath);
+    return outcomes.every(Boolean) && !state._sharePaused && !state.dirty;
+  }
   if (!fileEditorStateWritable(state) || state.kind !== 'text' || (expectedState && state !== expectedState)) return false;
   const contentPanel = panel || state.contentOwnerPanel || null;
   flushProseMirrorSource(contentPanel, statePath, {preserveTerminalNewline: true});
@@ -2483,7 +2557,7 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
   if (!options.force && ((state.externalChanged && !fileEditorSelfWritePending(statePath, state)) || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
     clearFileAutosaveTimer(path);
-    return {conflict: true, message: ''};
+    return {conflict: true, mergeEligible: !state.externalMissing, message: ''};
   }
   applyFileEditorSaveHygiene(path);
   if (!state.dirty && options.force !== true) return true;
@@ -2502,7 +2576,10 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
       content: savedContent,
     };
     if (state.fileId) body.expected_file_id = state.fileId;
-    if (options.force !== true) body.expected_mtime = state.mtime;
+    if (options.force !== true) {
+      if (state.diskMtimeExact && state.fileId) body.expected_mtime_ns_exact = state.diskMtimeExact;
+      else body.expected_mtime = state.mtime;
+    }
     // write_file truncates in place before writing the replacement bytes. Register the expected
     // self-write before admission so watchd's zero-byte observation cannot be mistaken for an
     // external edit while the filesystem operation is still queued/in flight.
@@ -2536,9 +2613,11 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
       state,
       mtime: state.mtime,
       size: state.size,
+      fileId: state.fileId,
       expiresAt: Date.now() + 5000,
     });
     state.original = savedContent;
+    state.diskMtimeExact = payload.mtime_ns_exact;
     state.dirty = state.content !== savedContent;
     if (state.dirty) delete state.lastCleanAt;
     else state.lastCleanAt = Date.now();
@@ -2565,7 +2644,7 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
     if (Number(state.relocationRevision || 0) !== relocationRevision) return false;
     if (err?.status === 409) {
       setFileEditorPanelStatus(panel, t('dialog.conflictTitle'), 'warn');
-      return {conflict: true, message: userMessageText(err, err.message)};
+      return {conflict: true, mergeEligible: err.code === 'changed_on_disk', message: userMessageText(err, err.message)};
     }
     setFileEditorPanelStatus(panel, t('editor.saveFailed', {error: err}), 'error');
     return false;
@@ -2588,11 +2667,29 @@ async function runFileEditorSaveOwner(path, owner) {
         owner.pending = null;
         continue;
       }
-      const conflict = await showFileSaveConflictDialog(conflictPath, request.panel, {
-        message: result.message,
-        returnAction: true,
-        deferSave: true,
-      });
+      const state = request.state;
+      if (!state.externalMissing) state.externalChanged ||= {mtime: 0, size: null};
+      const observation = state.externalChanged;
+      const merge = !request.options.force && result.mergeEligible
+        ? await reconcileOpenFileEdits(conflictPath, state) : null;
+      if (merge?.merged || (merge?.disk && await pickOpenFileMerge(conflictPath, state, merge))) {
+        owner.conflict = false;
+        // A busy writer can invalidate the new disk version again. Keep the merged draft in that
+        // case so one Save cannot spin indefinitely while another process is editing.
+        if (!request.mergeRetried && fileStateIsCurrent(conflictPath, state)) {
+          request.mergeRetried = true;
+          request.path = conflictPath;
+          owner.active = request;
+          continue;
+        }
+        if (fileStateIsCurrent(conflictPath, state)) setFileEditorPanelStatus(request.panel, t('dialog.staleStatus'), 'warn');
+      }
+      const conflict = !merge && state.externalChanged === observation && fileStateIsCurrent(conflictPath, state)
+        ? await showFileSaveConflictDialog(conflictPath, request.panel, {
+          message: result.message,
+          returnAction: true,
+          deferSave: true,
+        }) : null;
       owner.conflict = false;
       if (!fileStateIsCurrent(owner.path || requestPath, conflict?.state || request.state)) {
         resolveFileEditorSaveRequest(request, false);
@@ -2656,4 +2753,201 @@ function saveFileEditor(path, panel, options = {}) {
     fileEditorSaveOwners.set(path, owner);
   }
   return queueFileEditorSave(path, owner, panel, options);
+}
+
+function codeMirrorRecentReviewExtension(api, panel) {
+  panel._cmReviewCompartment = new api.Compartment();
+  return panel._cmReviewCompartment.of([]);
+}
+
+function syncCodeMirrorRecentReview(panel, state) {
+  const view = panel._cmView;
+  const api = panel._cmApi;
+  if (!view || !api || panel._cmMode !== 'edit' || !panel._cmReviewCompartment) return;
+  const review = state?.recentReview;
+  const original = review?.id && typeof review.original === 'string' ? review.original : null;
+  panel.querySelector('.file-editor-codemirror-panel')?.classList.toggle('file-editor-diff-codemirror', original !== null);
+  if (panel._cmReviewOriginal === original) return;
+  const top = view.scrollDOM.scrollTop;
+  const left = view.scrollDOM.scrollLeft;
+  if (original === null || panel._cmReviewOriginal == null) {
+    view.dispatch({effects: panel._cmReviewCompartment.reconfigure(original === null ? [] : api.unifiedMergeView(codeMirrorUnifiedMergeOptions(original, {mergeControls: false})))});
+  } else {
+    const old = api.getOriginalDoc(view.state);
+    view.dispatch({effects: api.originalDocChangeEffect(view.state, api.EditorState.create({doc: old}).changes({from: 0, to: old.length, insert: original}))});
+  }
+  panel._cmReviewOriginal = original;
+  view.scrollDOM.scrollTop = top;
+  view.scrollDOM.scrollLeft = left;
+}
+
+function recentReviewStorageKey(path) {
+  return `yomux.recentReview.${browserClientId}.${path}`;
+}
+
+function saveRecentFileReview(path, review) {
+  if (review?.id) sessionStorage.setItem(recentReviewStorageKey(path), JSON.stringify({id: review.id, tracking: review.tracking, minutes: review.minutes || 0}));
+  else sessionStorage.removeItem(recentReviewStorageKey(path));
+}
+
+function syncRecentReviewControls(panel, path, state, mode) {
+  const button = panel.querySelector('.file-editor-review-panel');
+  if (!button) return;
+  const allowed = clientCanUseUnscopedHostRequests() && !readOnlyMode && state.kind === 'text' && state.historical !== true;
+  if (allowed && !state.recentReview) {
+    const stored = sessionStorage.getItem(recentReviewStorageKey(path));
+    if (stored) {
+      try {
+        const saved = JSON.parse(stored);
+        if (typeof saved.id === 'string' && typeof saved.tracking === 'string') {
+          state.recentReview = saved;
+          state.trackingId ||= saved.tracking;
+          void refreshRecentFileReview(path);
+        }
+      } catch (error) {
+        sessionStorage.removeItem(recentReviewStorageKey(path));
+        setFileEditorPanelStatus(panel, `Recent changes could not reconnect: ${error.message}`, 'warn');
+      }
+    }
+  }
+  const review = state.recentReview;
+  button.hidden = !allowed || mode === 'preview' || mode === 'diff';
+  button.setAttribute('aria-pressed', String(Boolean(review?.id)));
+  button.disabled = Boolean(review?.busy);
+  const toolbar = panel.querySelector('.file-editor-review-toolbar');
+  if (toolbar) {
+    toolbar.hidden = button.hidden || !(review?.id || review?.error);
+    for (const control of toolbar.querySelectorAll('button, select')) {
+      control.hidden = !review?.id;
+      control.disabled = Boolean(review?.busy);
+    }
+  }
+  const select = panel.querySelector('.file-editor-review-range');
+  if (select) {
+    select.value = String(review?.minutes || 0);
+    select.onchange = () => {
+      const current = fileState.get(path)?.recentReview;
+      if (!current) return;
+      current.minutes = Number(select.value);
+      saveRecentFileReview(path, current);
+      void refreshRecentFileReview(path);
+    };
+  }
+  const status = panel.querySelector('.file-editor-review-status');
+  if (status) {
+    const detail = review?.error || review?.problem;
+    const incomplete = review?.complete === false;
+    status.textContent = detail || (incomplete ? 'Partial history' : 'Watching saves');
+    status.title = detail || (incomplete
+      ? `History available since ${new Date(review.earliest_at).toLocaleTimeString()}`
+      : 'Compares saved file versions observed while this file is open.');
+  }
+}
+
+let recentFileReviewTimer = null;
+function scheduleRecentFileReviews() {
+  if (recentFileReviewTimer) return;
+  if (!Array.from(fileState.values()).some(state => state.recentReview?.id)) return;
+  recentFileReviewTimer = setTimeout(() => {
+    recentFileReviewTimer = null;
+    for (const [path, state] of fileState) if (state.recentReview?.id) void refreshRecentFileReview(path);
+    scheduleRecentFileReviews();
+  }, 5003);
+}
+
+async function requestRecentFileReview(path, review, action) {
+  const state = fileState.get(path);
+  const sequence = review.sequence = (review.sequence || 0) + 1;
+  const tracking = state.trackingId || review.tracking;
+  const minutes = review.minutes || 0;
+  const id = review.id || '';
+  const payload = await apiFetchJson('/api/fs/review', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+    client_id: browserClientId, tracking_id: tracking, review_id: id, action, minutes,
+  })});
+  const currentPath = action === 'read' ? path : Array.from(fileState.keys()).find(candidate => {
+    const value = fileState.get(candidate);
+    return value.recentReview === review && (value.trackingId || review.tracking) === tracking;
+  });
+  const current = fileState.get(currentPath);
+  if (current?.recentReview !== review || review.sequence !== sequence || (current.trackingId && current.trackingId !== tracking)
+      || (action === 'read' && (review.minutes || 0) !== minutes) || (review.id || '') !== id) {
+    if (action === 'start' || action === 'reset') await apiFetchJson('/api/fs/review', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({client_id: browserClientId, tracking_id: tracking, review_id: payload.review_id, action: 'end'})});
+    return false;
+  }
+  if (action !== 'end') {
+    Object.assign(review, payload, {id: payload.review_id, tracking, path: currentPath, error: ''});
+    saveRecentFileReview(currentPath, review);
+  }
+  return true;
+}
+
+async function refreshRecentFileReview(path) {
+  const review = fileState.get(path)?.recentReview;
+  if (!review?.id || review.busy) return;
+  if (!serverWatchRootsState.registered || !serverWatchRootsState.openFileTrackingIds?.has(fileState.get(path).trackingId || review.tracking)) {
+    syncServerWatchRoots({immediate: true});
+    scheduleRecentFileReviews();
+    return;
+  }
+  const reading = {minutes: review.minutes || 0, id: review.id};
+  if (review.reading?.minutes === reading.minutes && review.reading.id === reading.id) return;
+  review.reading = reading;
+  const sequence = (review.sequence || 0) + 1;
+  try {
+    if (!await requestRecentFileReview(path, review, 'read')) return;
+  } catch (error) {
+    if (fileState.get(path)?.recentReview !== review || review.sequence !== sequence) return;
+    if (Number(error.status) === 410) {
+      delete review.id;
+      review.original = null;
+      saveRecentFileReview(path, null);
+    }
+    review.error = `Recent changes: ${error.message}`;
+  } finally {
+    if (review.reading === reading) delete review.reading;
+  }
+  for (const panel of fileEditorPanelsForPath(path)) {
+    const state = fileState.get(path);
+    syncCodeMirrorRecentReview(panel, state);
+    syncRecentReviewControls(panel, path, state, editorViewModeFor(path, fileEditorPanelItem(panel)));
+  }
+  scheduleRecentFileReviews();
+}
+
+async function changeRecentFileReview(panel, path, action) {
+  const state = fileState.get(path);
+  if (!state || state.recentReview?.busy) return;
+  const review = state.recentReview || {minutes: 0};
+  state.recentReview = review;
+  review.busy = true;
+  syncRecentReviewControls(panel, path, state, editorViewModeFor(path, fileEditorPanelItem(panel)));
+  try {
+    await syncServerWatchRootsNow({force: true});
+    const operation = action === 'toggle' ? (review.id ? 'end' : 'start') : action;
+    if (!await requestRecentFileReview(path, review, operation)) return;
+    if (operation === 'end') {
+      delete fileState.get(review.path || path).recentReview;
+      saveRecentFileReview(review.path || path, null);
+    }
+  } catch (error) {
+    if (Number(error.status) === 410) { delete review.id; review.original = null; saveRecentFileReview(path, null); }
+    review.error = `Recent changes: ${error.message}`;
+    setFileEditorPanelStatus(panel, review.error, 'error');
+  } finally {
+    review.busy = false;
+    renderOpenFilePath(review.path || path);
+    scheduleRecentFileReviews();
+  }
+}
+
+function navigateRecentFileReview(panel, forward) {
+  if (!panel._cmView || panel._cmReviewOriginal == null) return;
+  const api = panel._cmApi;
+  (forward ? api.goToNextChunk : api.goToPreviousChunk)(panel._cmView);
+  panel._cmView.focus();
+}
+
+function codeMirrorUnifiedMergeOptions(original, options = {}) {
+  return {original, highlightChanges: false, gutter: true, ...options};
 }

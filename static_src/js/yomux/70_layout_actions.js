@@ -33,7 +33,7 @@ function hiddenFromLayoutStatusMessage(item) {
 
 function removeSessionFromLayout(item, options = {}) {
   if (!itemInLayout(item)) return;
-  if (!tabLayoutManipulationAllowed() && isTmuxSession(item) && tabberNormalSelections?.includes(item)) {
+  if (!tabberIsAdvanced() && tabberNormalSelections?.includes(item)) {
     return toggleTabberNormalPane(item);
   }
   const isFiles = isFileExplorerItem(item);
@@ -98,6 +98,8 @@ function closePaneFrameItem(item) {
     closeEmptyPaneFromLayout(emptySlot);
     return;
   }
+  if (isTmuxSession(item)) return killTmuxSession(item);
+  if (isFileEditorItem(item) || gitDiffItemPath(item)) return closeLayoutTabItem(item);
   const resolved = resolveLayoutItem(item);
   if (isFileExplorerItem(resolved)) {
     removeSessionFromLayout(resolved);
@@ -309,8 +311,18 @@ function canPaneExpand(item, slots = layoutSlots) {
   ));
 }
 
+function canPaneMinimize(item) {
+  if (bootstrap.guestWorkspace && item === tabberItemId) return false;
+  if (urlFlagEnabled('pane_popout')) return false;
+  if (!tabberIsAdvanced()) return item === tabberItemId || tabberNormalSelections?.includes(item) === true;
+  return Boolean(gitDiffItemPath(item)) || !narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(item);
+}
+
 function minimizePaneFromLayout(item) {
-  if (!tabLayoutManipulationAllowed()) return item === tabberItemId ? toggleTabberSidebar() : false;
+  if (!canPaneMinimize(item)) return false;
+  if (!tabberIsAdvanced() && item === tabberItemId) return toggleTabberSidebar();
+  if (!tabberIsAdvanced() || gitDiffItemPath(item)) return removeSessionFromLayout(item);
+  if (!tabLayoutManipulationAllowed()) return false;
   const sourceSlot = slotForSession(item);
   if (!sourceSlot) return;
   const returnItem = historicalFileReturnItem(item);
@@ -1767,8 +1779,8 @@ function pullRequestLifecycleState(pr) {
   if (!pr?.number) return '';
   if (pullRequestIsMerged(pr)) return 'merged';
   const status = pullRequestStatusLabel(pr).toLowerCase();
+  if (String(pr.state || '').toLowerCase() === 'closed' || /\bclosed\b/.test(status)) return 'closed';
   if (pr.draft === true || /\bdraft\b/.test(status)) return 'draft';
-  if (/\bclosed\b/.test(status)) return 'closed';
   return 'open';
 }
 
@@ -1863,6 +1875,12 @@ function pullRequestCiIndicatorHtml(session, pr) {
 
 function pullRequestNumberIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
+  if (pr.provider === 'github' || pr.provider === 'gitlab') {
+    const lifecycle = pullRequestLifecycleStatus(pr);
+    const label = `${pr.provider === 'gitlab' ? 'MR' : 'PR'}#${pr.number}`;
+    const classes = metadataBadgeClasses(session, 'pr', `ci-indicator tab-symbol pr-number-chip hosted-request-number ${lifecycle.className} chip-base`);
+    return `<span class="${esc(classes)}" aria-label="${esc(`${label} ${lifecycle.text}`)}">${esc(label)}</span>`;
+  }
   // No native title — the rich custom session popover already shows PR #, CI, and review state
   // (avoid a duplicate browser tooltip alongside the popover).
   const classes = pullRequestIsMerged(pr)
@@ -1928,6 +1946,11 @@ function pullRequestReviewInlineHtml(pr) {
 }
 
 function pullRequestLinkHtml(pr) {
+  if (pr.provider === 'github' || pr.provider === 'gitlab') {
+    const lifecycle = pullRequestLifecycleStatus(pr);
+    const label = `${pr.provider === 'gitlab' ? 'MR' : 'PR'}#${pr.number} ${lifecycle.text}`;
+    return linkHtml(pr.url, label, pr.title || '', `ci-indicator pr-number-chip hosted-request-number chip-base ${lifecycle.className}`);
+  }
   return linkHtml(pr.url, pullRequestLinkLabel(pr), pr.title || pr.description || '', pullRequestStatusClass(pr));
 }
 
@@ -1972,9 +1995,9 @@ function projectMetaSelection(session, info) {
   // The active TmuxWindow's PathObservation owns the Info Bar context. Browser-selected terminal
   // state and auto-approve status are presentation inputs only; neither may recreate a parallel
   // per-window Git owner or displace the active tmux window's canonical worktree.
-  const workSummary = sessionWorkSummary(session, info, {tmuxTarget: explicitRoot ? '' : activeTarget});
+  const workSummary = sessionTabWorkSummary(session, info);
   const repos = workSummary.repositories;
-  const activePath = normalizeDirectoryPath(activePane?.current_path || workSummary.selectedPath || '');
+  const activePath = workSummary.selectedPath;
   const hasActiveTmuxTarget = Boolean(activeTarget);
   const primaryRoot = repoRootKey(workSummary.git?.root);
   const primaryRepoIndex = primaryRoot ? repos.findIndex(repo => repoRootKey(repo.root) === primaryRoot) : -1;
@@ -1991,7 +2014,7 @@ function projectMetaSelection(session, info) {
   let git = selectedRepo ? repoSummaryAsGit(selectedRepo) : displayedSessionGit(session, info);
   let repoSwitchRepos = repos;
   let fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
-  if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root)) {
+  if (!explicitRoot && activePane && git?.root && (!activePath || !pathIsInsideDirectory(activePath, git.root))) {
     git = null;
     selectedRepo = null;
     repoIndex = -1;
@@ -2002,10 +2025,10 @@ function projectMetaSelection(session, info) {
 }
 
 function panelFullPath(session, info) {
-  const summary = sessionWorkSummary(session, info);
+  const summary = sessionTabWorkSummary(session, info);
   const git = summary.git;
   const activePane = activeWindowPaneForProjectMeta(session, info);
-  if (activePane?.current_path) return activePane.current_path;
+  if (activePane || summary.target) return summary.selectedPath;
   const panes = Array.isArray(info?.panes) ? info.panes : [];
   const nonHomePane = panes.find(pane => pane?.current_path && pane.current_path !== homePath && !['claude', 'codex', 'opencode'].includes(String(pane.command || '').toLowerCase()));
   if (nonHomePane?.current_path) return nonHomePane.current_path;
@@ -2052,15 +2075,13 @@ function projectMetaParts(session, info, options = {}) {
     metadataParts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
     return {repoSwitchHtml, metadataParts};
   }
-  const prGit = selectedRepo ? gitFromRepoSummary(selectedRepo) : git;
-  const pr = displayPullRequestForGit(info, prGit);
-  if (pr?.number) metadataParts.push(pullRequestLinkHtml(pr));
-  if (showingPrimaryGit && (!selectedRepo || repoRootKey(selectedRepo.root) === repoRootKey(summary.git?.root))) {
-    for (const issue of summary.linearIssues) {
-      const state = issue.state ? ` ${issue.state}` : '';
-      metadataParts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
-    }
-  }
+  const branch = git?.other_branches?.branches?.find(branch => branch.current);
+  const requests = branch?.pull_requests || [];
+  const pr = requests[0];
+  metadataParts.push(...requests.map(pullRequestLinkHtml));
+  for (const issue of branch?.github_issues || []) metadataParts.push(githubIssueLinkHtml(issue));
+  for (const issue of branch?.linear || []) metadataParts.push(linearIssueHtml(issue));
+  if (!requests.length && git?.github_repo?.provider) metadataParts.push(hostedRepositoryLinkHtml(git.github_repo));
   if (git.branch) metadataParts.push(`<span class="meta-branch">${esc(fullText ? git.branch : shortBranch(git.branch))}</span>`);
   if (fullPath) metadataParts.push(projectMetaPathHtml(fullPath));
   if (Number.isFinite(git.behind) && git.behind > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
@@ -2643,7 +2664,9 @@ function showSessionRenameDialog(session, descriptionWindow = null, descriptionW
   const titleName = sessionLabel(session);
   const descriptionMode = descriptionWindow !== null;
   const renameLabel = descriptionMode ? 'Rename Description' : t('common.renameTmuxSession');
-  const initialValue = descriptionMode ? tabberWindowDescription(session, descriptionWindow) : session;
+  const initialValue = descriptionMode
+    ? tmuxWindowDescriptionForIndex(transcriptMetadataState.payload.sessions?.[session], descriptionWindow)
+    : session;
   overlay.innerHTML = `
     <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="${esc(renameLabel)}">
       <div class="session-rename-title">${esc(descriptionMode ? renameLabel : t('common.renameNamed', {name: titleName}))}</div>
@@ -2785,6 +2808,7 @@ async function killTmuxSession(session) {
     statusErr(localizedHtml('status.readOnlyKillSessions'));
     return false;
   }
+  session = tabberViewDescriptorForSession(session)?.sourceSession || session;
   if (!isTmuxSession(session)) return false;
   if (!window.confirm(t('dialog.sessionKill', {session: sessionLabel(session)}))) return false;
   showLayoutStatus(t('status.sessionKilling', {session: sessionLabel(session)}));

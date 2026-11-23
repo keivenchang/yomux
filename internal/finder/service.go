@@ -24,6 +24,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"weak"
 
 	"github.com/keivenchang/yomux/internal/cache"
 	"github.com/keivenchang/yomux/internal/work"
@@ -112,6 +113,8 @@ func changed(path string) *Error {
 }
 
 type Service struct {
+	grantRegistryMu    sync.Mutex
+	grantedFiles       map[string][]weak.Pointer[GrantedFile]
 	root               string
 	uploadMu           sync.RWMutex
 	uploadLimits       UploadLimits
@@ -119,9 +122,12 @@ type Service struct {
 	mu                 sync.Mutex
 	nativeMu           work.ContextMutex
 	watches            map[string]watchRecord
+	reviewClock        func() time.Time
+	reviews            map[string]*fileReview
 	openFiles          map[string]*openFileRecord
 	openFileSequence   uint64
 	openFileMutationMu work.ContextMutex
+	writeReservations  map[string]*GrantedFile
 	watchGeneration    uint64
 	epoch              string
 	revision           uint64
@@ -338,6 +344,7 @@ func (s *Service) Close() {
 	<-s.done
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reviews = nil
 	for id, entry := range s.openFiles {
 		entry.file.Close()
 		delete(s.openFiles, id)
@@ -1616,6 +1623,7 @@ func (s *Service) handleNativeEvent(event nativeWatchEvent) {
 	if event.overflow {
 		reason = "native-overflow"
 	}
+	s.reconcileOpenFiles()
 	s.recordChange(paths, reason)
 	// The native watcher admits newly created directories while consuming the event. Rebuilding
 	// every registration for ordinary file changes makes a high-churn tree spend its event reader
@@ -1730,6 +1738,11 @@ func (s *Service) pruneExpiredWatches(now time.Time) {
 	for clientID, record := range s.watches {
 		if !record.ExpiresAt.IsZero() && !record.ExpiresAt.After(now) {
 			delete(s.watches, clientID)
+			for id, r := range s.reviews {
+				if r.client == clientID {
+					delete(s.reviews, id)
+				}
+			}
 			removed = true
 		}
 	}
@@ -1921,7 +1934,7 @@ func (s *Service) descriptorWatchSignature(ctx context.Context, file *os.File, p
 		kind = "file"
 	}
 	if !info.IsDir() {
-		return []any{path, kind, info.ModTime().UnixNano(), info.Size(), numericMode(info.Mode())}
+		return []any{path, kind, info.ModTime().UnixNano(), info.Size(), numericMode(info.Mode()), fileID(info)}
 	}
 	entries, err := file.ReadDir(maxWatchSignatureEntries + 1)
 	if err != nil && !errors.Is(err, io.EOF) {

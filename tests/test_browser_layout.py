@@ -5654,6 +5654,18 @@ def test_pane_info_bar_repository_selector_cycles_opens_and_selects(browser, tmp
           graph.git_worktrees[worktreeId] = {id: worktreeId, root: repo.root, git_dir: `${repo.root}/.git`, kind: 'primary', local_repository_id: repositoryId, current_branch_id: branchId, path_observation_ids: index === 0 ? [observationId] : [], branch_activity_ids: [], git: repo};
         });
         graph.path_observations[observationId] = {id: observationId, path: repos[0].root, path_snapshot: repos[0].root, exists: true, source: 'fixture', priority: 1, first_observed_at: 1, last_observed_at: 1, tmux_pane_id: paneId, runtime_actor_id: null, git_worktree_id: `git-worktree:${repos[0].root}`};
+        const branch = Object.values(graph.local_branches)[0];
+        const requests = [
+          {id: 'pr1', number: 1, provider: 'github', state: 'merged', url: 'https://github.com/team/project/pull/1'},
+          {id: 'mr2', number: 2, provider: 'gitlab', state: 'open', url: 'https://gitlab.com/team/project/-/merge_requests/2'},
+          {id: 'pr3', number: 3, provider: 'github', state: 'closed', url: 'https://github.com/team/project/pull/3'},
+          {id: 'mr4', number: 4, provider: 'gitlab', state: 'open', draft: true, url: 'https://gitlab.com/team/project/-/merge_requests/4'},
+        ];
+        graph.pull_requests = Object.fromEntries(requests.map(pr => [pr.id, pr]));
+        branch.pull_request_ids = requests.map(pr => pr.id);
+        graph.linear_issues['ABC-42'] = {id: 'ABC-42', identifier: 'ABC-42', url: 'https://linear.app/team/issue/ABC-42'};
+        branch.linear_issue_ids = ['ABC-42'];
+        branch.github_issues = [{identifier: '#42', url: 'https://github.com/team/project/issues/42'}];
         const info = {
           session: '1',
           selected_pane: {current_path: repos[0].root},
@@ -5674,6 +5686,19 @@ def test_pane_info_bar_repository_selector_cycles_opens_and_selects(browser, tmp
     previous = browser.find_element("css selector", '[data-repo-cycle="1"][data-repo-cycle-dir="-1"]')
     fast_pointer_actions(browser).move_to_element(previous).click().perform()
     assert browser.find_element("css selector", '[data-repo-chip="1"]').text.strip() == "1/4"
+    links = browser.execute_script("""
+      return Object.fromEntries([...document.querySelectorAll('#meta-1 a')].map(
+        link => [link.href, getComputedStyle(link).backgroundColor]
+      ));
+    """)
+    assert links == {
+        "https://github.com/team/project/pull/1": "rgb(107, 33, 168)",
+        "https://gitlab.com/team/project/-/merge_requests/2": "rgb(22, 101, 52)",
+        "https://github.com/team/project/pull/3": "rgb(0, 0, 0)",
+        "https://gitlab.com/team/project/-/merge_requests/4": "rgb(75, 85, 99)",
+        "https://linear.app/team/issue/ABC-42": "rgba(0, 0, 0, 0)",
+        "https://github.com/team/project/issues/42": "rgba(0, 0, 0, 0)",
+    }, links
     assert browser.execute_script("return document.getElementById('panel-1').classList.contains('focused-pane')") is True
 
     next_button = browser.find_element("css selector", '[data-repo-cycle="1"][data-repo-cycle-dir="1"]')
@@ -6596,7 +6621,6 @@ def test_standard_component_text_follows_responsive_ui_type_scale(browser, tmp_p
             <div class="js-debug-x-axis"><span id="axis">10</span></div>
             <div class="js-debug-log-row"><div id="debug-log" class="js-debug-log-meta">11</div></div>
             <div id="agent-state" class="yoagent-message-state">11</div>
-            <span id="popout-icon" class="file-editor-icon file-editor-icon-popout-preview"></span>
             <div class="drop-action-result"><pre id="drop-result">12</pre></div>
             """
         ),
@@ -6607,7 +6631,6 @@ def test_standard_component_text_follows_responsive_ui_type_scale(browser, tmp_p
           axis: getComputedStyle(document.getElementById('axis')).fontSize,
           debugLog: getComputedStyle(document.getElementById('debug-log')).fontSize,
           agentState: getComputedStyle(document.getElementById('agent-state')).fontSize,
-          popoutIcon: getComputedStyle(document.getElementById('popout-icon'), '::after').fontSize,
           dropResult: getComputedStyle(document.getElementById('drop-result')).fontSize,
         });
         const defaults = read();
@@ -6619,14 +6642,12 @@ def test_standard_component_text_follows_responsive_ui_type_scale(browser, tmp_p
         "axis": "10px",
         "debugLog": "11px",
         "agentState": "11px",
-        "popoutIcon": "10px",
         "dropResult": "12px",
     }, metrics
     assert metrics["scaled"] == {
         "axis": "15px",
         "debugLog": "16px",
         "agentState": "16px",
-        "popoutIcon": "15px",
         "dropResult": "17px",
     }, metrics
 
@@ -7552,7 +7573,7 @@ def test_touch_editor_preview_and_diff_controls_keep_desktop_button_geometry(bro
             </span>
             <span id="action-zone" class="file-editor-toolbar-zone file-editor-toolbar-right">
               <button id="theme" class="file-editor-theme-panel theme-with-label">Dark</button>
-              <span class="file-editor-mode-control"><button id="mode">E</button><button id="preview">P</button><button id="popout" class="file-editor-popout-preview-panel">O</button></span>
+              <span class="file-editor-mode-control"><button id="mode">E</button><button id="preview">P</button><button id="split">S</button></span>
               <button id="upload" class="file-editor-upload-panel">↑</button>
               <span class="file-editor-preview-find-panel"><input id="find"><button id="next">N</button></span>
               <span class="file-editor-diff-ref-panel"><span class="diff-ref-controls compact"><label class="diff-ref-control"><input id="ref" class="diff-ref-input"></label><button id="reset" class="diff-ref-reset">Reset</button></span></span>
@@ -7563,7 +7584,7 @@ def test_touch_editor_preview_and_diff_controls_keep_desktop_button_geometry(bro
         )
         metrics = browser.execute_script(
             """
-            const ids = ['mode', 'preview', 'popout', 'theme', 'wrap', 'diff', 'font', 'upload', 'find', 'next', 'ref', 'reset', 'zoom'];
+            const ids = ['mode', 'preview', 'split', 'theme', 'wrap', 'diff', 'font', 'upload', 'find', 'next', 'ref', 'reset', 'zoom'];
             const box = node => {
               const rect = node.getBoundingClientRect();
               return {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height};
@@ -11586,11 +11607,13 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
                 "YO!agent",
                 "YO!chat",
                 "YO!info",
+                "YO!share",
                 "YO!stats",
             ], metrics
             icons = {command["label"]: command["iconClass"] for command in yo_commands}
             assert "app-menu-ui-icon-robot" in icons["YO!agent"], metrics
             assert "app-menu-ui-icon-chat-bubble" in icons["YO!chat"], metrics
+            assert "app-menu-ui-icon-share" in icons["YO!share"], metrics
             assert "app-menu-ui-icon-chart" in icons["YO!stats"], metrics
 
         first_command = browser.find_element("css selector", f'.app-menu[data-app-menu="{menu_id}"] > .app-menu-popover .app-menu-command:not([disabled])')
@@ -11607,7 +11630,18 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
     )
     assert switched["openIds"] == ["view"], switched
 
-    browser.find_element("css selector", "#panel-1").click()
+    # Menu width can cover the panel center; close it through an exposed terminal point.
+    panel = browser.find_element("css selector", "#panel-1")
+    point = browser.execute_script("""
+      const panel=document.getElementById('panel-1'),rect=panel.getBoundingClientRect();
+      for(const [rx,ry] of [[0.05,0.95],[0.95,0.95],[0.05,0.5],[0.95,0.5]]) {
+        const x=rect.left+rect.width*rx,y=rect.top+rect.height*ry;
+        if(panel.contains(document.elementFromPoint(x,y)))return {x,y};
+      }
+      return null;
+    """)
+    assert point, "the terminal must expose a hit-tested point outside the open menu"
+    fast_pointer_actions(browser).move_to_element_with_offset(panel, point["x"] - (panel.rect["x"] + panel.rect["width"] / 2), point["y"] - (panel.rect["y"] + panel.rect["height"] / 2)).click().perform()
     closed = WebDriverWait(browser, 5).until(
         lambda _driver: (state if not (state := menu_metrics("view"))["open"] else False)
     )
@@ -17807,7 +17841,7 @@ def test_tabber_description_native_input_waits_for_opening_selection(browser, tm
         WebDriverWait(browser, 5).until(lambda driver: not driver.find_elements('css selector', '.session-rename-dialog'))
         assert browser.execute_script('return window.__descriptionRequests') == [
             {'session':'5', 'window':'1', 'window_id':'@51', 'description':expected}]
-        assert browser.execute_script("return tabberWindowDescription('5', 1)") == expected
+        assert browser.execute_script("return tmuxWindowDescriptionForIndex(transcriptMetadataState.payload.sessions['5'], 1)") == expected
     finally:
         browser.execute_script('''
           closeSessionRenameDialog();

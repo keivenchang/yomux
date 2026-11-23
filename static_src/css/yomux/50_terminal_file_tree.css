@@ -574,8 +574,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   font: 600 var(--ui-font-size-sm)/1.3 var(--ui-font);
   text-align: start;
 }
-.tab-action-description:hover,
-.tab-action-description:focus-visible {
+button.tab-action-description:hover,
+button.tab-action-description:focus-visible {
   color: var(--chrome-text-strong);
   background: var(--overlay-option-hover-bg);
   outline: none;
@@ -1119,9 +1119,13 @@ body.app-topbar-touch-compact .attention-alerts .attention-alert {
 body.app-topbar-touch-compact .attention-alerts .attention-alert :is(button, a, input, select, [role="button"], [tabindex]) {
   pointer-events: auto;
 }
-.attention-alerts .startup-helper-toast {
-  width: min(720px, 100%);
-  align-self: flex-end;
+.attention-alerts > .startup-helper-toast:only-child {
+  position: fixed;
+  inset-inline-end: 12px;
+  inset-block-end: max(12px, env(safe-area-inset-bottom));
+  width: min(360px, calc(100vw - 24px));
+  max-height: 50vh;
+  overflow: auto;
 }
 .upload-result {
   width: 100%;
@@ -3308,18 +3312,23 @@ button.info-tree-tab-token.active:focus-visible {
   flex-wrap: wrap;
   justify-content: flex-end;
 }
+.server-update-banner-reload,
+.share-manager .share-stop-action {
+  background: var(--danger-strong);
+  color: var(--paint-white);
+}
 .server-update-banner-reload {
   cursor: pointer;
   border: 1px solid var(--danger-strong-hover);
   border-radius: var(--radius-control);
-  background: var(--danger-strong);
-  color: var(--paint-white);
   font: inherit;
   font-weight: 800;
   padding: var(--space-2) var(--space-10);
 }
 .server-update-banner-reload:hover,
-.server-update-banner-reload:focus-visible {
+.server-update-banner-reload:focus-visible,
+.share-manager .share-stop-action:hover,
+.share-manager .share-stop-action:focus-visible {
   border-color: var(--danger-strong-border);
   background: var(--danger-strong-hover);
   color: var(--paint-white);
@@ -3361,6 +3370,58 @@ body.app-vw-lte-760 .server-update-banner-actions {
   overflow: hidden;
 }
 .modal.open { display: grid; }
+.share-access-dialog[open] {
+  position: fixed;
+  inset: 0;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: var(--space-12);
+  border: 0;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: var(--space-12);
+  background: var(--bg);
+  color: var(--text);
+}
+.share-access-dialog > .brand-title {
+  justify-self: left;
+  font-size: var(--ui-font-size-lg);
+}
+.share-workspace-session .brand-title .brand-second,
+.share-access-dialog .brand-title .brand-second {
+  color: var(--active-control-bg);
+}
+.share-access-dialog .share-access-card {
+  place-self: center;
+  box-sizing: border-box;
+  width: min(100%, 58ch);
+  padding: var(--space-12);
+  background: var(--panel);
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--app-modal-dialog-shadow);
+}
+.share-access-dialog #shareAccessNotice {
+  line-height: 1.55;
+  outline: none;
+}
+.share-access-dialog .share-sidebar-chat form {
+  display: none;
+}
+.share-access-dialog .share-sidebar-chat [role=log] {
+  height: auto;
+}
+.share-access-dialog #share-retained-drafts {
+  position: static;
+  max-width: 100%;
+}
+.share-access-dialog[open] ~ #grid {
+  display: none;
+}
 .modal-dialog {
   width: min(86vw, var(--popover-max-inline-size));
   max-height: min(86vh, calc(100vh - var(--popover-edge-gap) - var(--popover-edge-gap)));
@@ -3789,6 +3850,10 @@ body.app-vw-lte-980 .tabs {
 .file-tree-repo-dirty {
   font-family: var(--mono-font);
   color: var(--accent-gold);
+}
+.file-tree-repo-clean {
+  font-family: var(--mono-font);
+  color: var(--success-text-strong);
 }
 /* Rich hover popover for a repo dir (replaces the native title tooltip). */
 .file-tree-repo-popover {

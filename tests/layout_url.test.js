@@ -19,6 +19,7 @@ const allSuiteFiles = [
   'tests/file_surface_menu.test.js',
   'tests/side_panes.test.js',
   'tests/cross_surface_state.test.js',
+  'tests/share_collaboration.test.js',
   'tests/editor_preview_core.test.js',
   'tests/editor_preview_prosemirror.test.js',
   'tests/editor_preview_tmux.test.js',

@@ -1002,7 +1002,7 @@ function restoreProseMirrorPanelDom(panel, parts) {
 }
 
 function prosemirrorSupportedSource(path, state) {
-  return state?.kind === 'text' && previewKindForPath(path) === 'markdown' && state.historical !== true;
+  return state?.kind === 'text' && previewKindForPath(path) === 'markdown' && state.historical !== true && state._shareActive !== true;
 }
 
 function clearProseMirrorFallback(parts) {

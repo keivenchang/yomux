@@ -63,6 +63,20 @@
       "normalize_text": []
     },
     {
+      "version": "viz-3.31.0",
+      "archive_sha256": "7dc0189874849cca2fed7cbe88bf334cd0e6e012db16657794a812ad6f2b8c70",
+      "urls": [
+        "https://registry.npmjs.org/@viz-js/viz/-/viz-3.31.0.tgz"
+      ],
+      "files": {
+        "static/vendor/viz.js": "b9840ae5b70681356c207510db8820ac3f883607740616455d9c7c47d67ea646"
+      },
+      "members": {
+        "static/vendor/viz.js": "package/dist/viz.js"
+      },
+      "normalize_text": []
+    },
+    {
       "version": "marked-12.0.2",
       "archive_sha256": "6cfd2d09c6bce2541558a1547e5f3b9895ed743f0d287536ff2280e318e8a074",
       "urls": [
@@ -279,8 +293,8 @@
     {
       "directory": "codemirror",
       "output": "static/codemirror.js",
-      "sha256": "d7c393b03dc3100cc28eb8c0f1db54a69cd8ed8a7e11187c541ef49bfbc14d1e",
-      "input_sha256": "dceaf3fa9e598309a912516ef67d41859af42cbca2e19d7bd38718f87fb5971f"
+      "sha256": "eba75df5643fce2442cbd5296033519cf676a390dce4e702b631947d69068f29",
+      "input_sha256": "4951c6684935bc0d1565e16c06285d5ab575c88de003bb239245656742a8acb8"
     },
     {
       "directory": "prosemirror",

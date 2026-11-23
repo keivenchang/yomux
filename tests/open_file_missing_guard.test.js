@@ -352,7 +352,7 @@ async function runOpenFileMissingGuardSuite() {
   await testAsync('poll lane: exact status clears a deletion tombstone and seeds the next cache read', async () => {
     const api = loadYomux('', ['1']);
     api.setOpenFileStateForTest(MD, {
-      kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
+      kind: 'text', mtime: 5, size: 18943, dirty: true, content: 'local', original: 'disk',
     });
     api.markFileExplorerDeletedPathsForTest([MD]);
     let requests = 0;

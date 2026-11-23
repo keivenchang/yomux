@@ -44,14 +44,16 @@ func splitTmuxFields(line string) []string {
 }
 
 type goGitSnapshot struct {
-	Root       string
-	Branch     string
-	Head       string
-	HeadSHA    string
-	Upstream   string
-	DirtyCount int
-	Ahead      any
-	Behind     any
+	Root           string
+	Branch         string
+	Head           string
+	HeadSHA        string
+	Upstream       string
+	DirtyCount     int
+	Ahead          any
+	Behind         any
+	HostedRemote   map[string]string
+	HostedUpstream map[string]string
 }
 
 type procEntry struct {
@@ -115,6 +117,15 @@ func gitSnapshotForPath(path string) (goGitSnapshot, bool) {
 	snapshot.HeadSHA, _ = runGitMetadata(path, "rev-parse", "HEAD")
 	snapshot.Head, _ = runGitMetadata(path, "show", "-s", "--format=%s", "HEAD")
 	snapshot.Upstream, _ = runGitMetadata(path, "rev-parse", "--abbrev-ref", "@{upstream}")
+	if raw, ok := runGitMetadata(root, "config", "--local", "--get", "remote.origin.url"); ok {
+		snapshot.HostedRemote = finder.HostedGitRemoteURL(raw)
+	}
+	if raw, ok := runGitMetadata(root, "config", "--local", "--get", "remote.upstream.url"); ok {
+		snapshot.HostedUpstream = finder.HostedGitRemoteURL(raw)
+		if snapshot.HostedRemote == nil {
+			snapshot.HostedRemote = snapshot.HostedUpstream
+		}
+	}
 	if status, statusOK := runGitMetadata(path, "status", "--porcelain"); statusOK && status != "" {
 		snapshot.DirtyCount = len(strings.Split(status, "\n"))
 	}
@@ -217,36 +228,13 @@ func (s *server) sessionWorkGraphWithGitCache(session string, info map[string]an
 	tmuxSessions[sessionID] = map[string]any{
 		"id": sessionID, "name": session, "tmux_window_ids": []string{}, "tmux_pane_ids": []string{}, "runtime_actor_ids": []string{}, "path_observation_ids": []string{},
 	}
-	panes, _ := info["panes"].([]map[string]any)
-	paneIDs := map[string]string{}
-	observationIDs := map[string]string{}
-	for _, pane := range panes {
-		target, _ := pane["target"].(string)
-		window, _ := pane["window"].(string)
-		path, _ := pane["current_path"].(string)
-		paneID := goGraphID("tmux-pane", session+"|"+target)
-		windowID := goGraphID("tmux-window", session+"|"+window)
-		paneIDs[target] = paneID
-		tmuxPanes[paneID] = map[string]any{
-			"id": paneID, "target": target, "pane_id": target, "index": pane["pane"], "current_path": path,
-			"command": pane["command"], "pid": pane["pid"], "active": pane["active"], "window_active": pane["window_active"],
-			"tmux_window_id": windowID, "runtime_actor_ids": []string{}, "path_observation_ids": []string{},
-		}
-		if _, exists := tmuxWindows[windowID]; !exists {
-			tmuxWindows[windowID] = map[string]any{"id": windowID, "tmux_session_id": sessionID, "index": window, "name": pane["window_name"], "tmux_pane_ids": []string{}}
-			appendStringValue(tmuxSessions[sessionID].(map[string]any), "tmux_window_ids", windowID)
-		}
-		appendStringValue(tmuxWindows[windowID].(map[string]any), "tmux_pane_ids", paneID)
-		appendStringValue(tmuxSessions[sessionID].(map[string]any), "tmux_pane_ids", paneID)
-
-		if path == "" {
-			continue
-		}
+	observePath := func(target, paneID, path, actorID, source string) string {
 		observationID := goGraphID("path-observation", session+"|"+target+"|"+path)
-		observationIDs[target] = observationID
-		observation := map[string]any{"id": observationID, "path": path, "path_snapshot": path, "exists": true, "source": "pane-cwd", "priority": 10, "tmux_pane_id": paneID, "runtime_actor_id": nil, "git_worktree_id": nil}
+		observation := map[string]any{"id": observationID, "path": path, "path_snapshot": path, "exists": true, "source": source, "priority": 10, "tmux_pane_id": paneID, "runtime_actor_id": nil, "git_worktree_id": nil}
+		if actorID != "" {
+			observation["runtime_actor_id"] = actorID
+		}
 		observations[observationID] = observation
-		appendStringValue(tmuxPanes[paneID].(map[string]any), "path_observation_ids", observationID)
 		appendStringValue(tmuxSessions[sessionID].(map[string]any), "path_observation_ids", observationID)
 
 		cacheKey := gitWorktreePathHint(path)
@@ -256,7 +244,7 @@ func (s *server) sessionWorkGraphWithGitCache(session string, info map[string]an
 			gitCache[cacheKey] = result
 		}
 		if !result.available {
-			continue
+			return observationID
 		}
 		snapshot := result.snapshot
 		worktreeID := goGraphID("git-worktree", snapshot.Root)
@@ -280,7 +268,55 @@ func (s *server) sessionWorkGraphWithGitCache(session string, info map[string]an
 		observation["git_worktree_id"] = worktreeID
 		if _, exists := branches[branchID]; !exists {
 			branches[branchID] = map[string]any{"id": branchID, "local_repository_id": repositoryID, "name": snapshot.Branch, "sha": snapshot.HeadSHA, "head_sha": snapshot.HeadSHA, "subject": snapshot.Head, "current": true, "remote": false, "checked_out_worktree_ids": []string{worktreeID}, "pull_request_ids": []string{}, "linear_issue_ids": []string{}, "updated_ts": 0}
+			s.addHostedBranchMetadata(graph, snapshot, repositories[repositoryID].(map[string]any), worktrees[worktreeID].(map[string]any), branches[branchID].(map[string]any))
 			appendStringValue(repositories[repositoryID].(map[string]any), "local_branch_ids", branchID)
+		}
+		return observationID
+	}
+	panes, _ := info["panes"].([]map[string]any)
+	paneIDs := map[string]string{}
+	inheritedPaths := map[string]string{}
+	for _, pane := range panes {
+		target, _ := pane["target"].(string)
+		window, _ := pane["window"].(string)
+		path, _ := pane["current_path"].(string)
+		paneID := goGraphID("tmux-pane", session+"|"+target)
+		windowID := goGraphID("tmux-window", session+"|"+window)
+		paneIDs[target] = paneID
+		node := map[string]any{
+			"id": paneID, "target": target, "pane_id": target, "index": pane["pane"], "current_path": path,
+			"command": pane["command"], "pid": pane["pid"], "active": pane["active"], "window_active": pane["window_active"],
+			"tmux_window_id": windowID, "runtime_actor_ids": []string{}, "path_observation_ids": []string{},
+		}
+		tmuxPanes[paneID] = node
+		if _, exists := tmuxWindows[windowID]; !exists {
+			tmuxWindows[windowID] = map[string]any{"id": windowID, "tmux_session_id": sessionID, "index": window, "name": pane["window_name"], "tmux_pane_ids": []string{}}
+			appendStringValue(tmuxSessions[sessionID].(map[string]any), "tmux_window_ids", windowID)
+		}
+		appendStringValue(tmuxWindows[windowID].(map[string]any), "tmux_pane_ids", paneID)
+		appendStringValue(tmuxSessions[sessionID].(map[string]any), "tmux_pane_ids", paneID)
+
+		startPath, _ := pane["start_path"].(string)
+		if s.root != "" && session != filepath.Base(s.root) &&
+			filepath.Clean(startPath) == filepath.Clean(s.root) {
+			inheritedPaths[target] = filepath.Clean(startPath)
+		}
+		projectPath, _ := pane["project_path"].(string)
+		if filepath.IsAbs(projectPath) {
+			if directory, err := os.Stat(projectPath); err == nil && directory.IsDir() {
+				projectPath = filepath.Clean(projectPath)
+				node["project_path"] = projectPath
+				appendStringValue(node, "path_observation_ids", observePath(target, paneID, projectPath, "", "window-project"))
+			}
+		}
+		if filepath.Clean(path) == inheritedPaths[target] {
+			// The service checkout is the default spawn directory. Require an independent
+			// observation or an explicit window association to treat it as this window's work.
+			if node["project_path"] == nil {
+				node["project_path"] = ""
+			}
+		} else if path != "" && filepath.Clean(path) != node["project_path"] {
+			appendStringValue(node, "path_observation_ids", observePath(target, paneID, filepath.Clean(path), "", "pane-cwd"))
 		}
 	}
 
@@ -297,10 +333,21 @@ func (s *server) sessionWorkGraphWithGitCache(session string, info map[string]an
 		runtimeActors[actorID] = map[string]any{"id": actorID, "tmux_pane_id": paneID, "kind": agent["kind"], "pid": agent["pid"], "command": agent["command"], "cwd": agent["cwd"], "status": agent["status"], "agent_session_id": agent["session_id"], "transcript": agent["transcript"], "error": agent["error"], "path_observation_ids": []string{}}
 		appendStringValue(tmuxPanes[paneID].(map[string]any), "runtime_actor_ids", actorID)
 		appendStringValue(tmuxSessions[sessionID].(map[string]any), "runtime_actor_ids", actorID)
-		if observationID := observationIDs[target]; observationID != "" {
-			runtimeActors[actorID].(map[string]any)["path_observation_ids"] = []string{observationID}
-			observations[observationID].(map[string]any)["runtime_actor_id"] = actorID
-			worktreeID, _ := observations[observationID].(map[string]any)["git_worktree_id"].(string)
+		actorPath, _ := agent["cwd"].(string)
+		if !filepath.IsAbs(actorPath) {
+			continue
+		}
+		actorPath = filepath.Clean(actorPath)
+		observationID := goGraphID("path-observation", session+"|"+target+"|"+actorPath)
+		if observations[observationID] == nil && actorPath != inheritedPaths[target] {
+			if directory, err := os.Stat(actorPath); err == nil && directory.IsDir() {
+				observationID = observePath(target, paneID, actorPath, actorID, "actor-cwd")
+			}
+		}
+		if observation, ok := observations[observationID].(map[string]any); ok {
+			appendStringValue(runtimeActors[actorID].(map[string]any), "path_observation_ids", observationID)
+			observation["runtime_actor_id"] = actorID
+			worktreeID, _ := observation["git_worktree_id"].(string)
 			if worktree := worktrees[worktreeID]; worktree != nil {
 				worktree.(map[string]any)["has_actor_cwd"] = true
 			}
@@ -314,8 +361,10 @@ func (s *server) sessionWorkGraphWithGitCache(session string, info map[string]an
 		runtimeActors[actorID] = map[string]any{"id": actorID, "tmux_pane_id": paneID, "kind": "shell", "pid": tmuxPanes[paneID].(map[string]any)["pid"], "command": tmuxPanes[paneID].(map[string]any)["command"], "cwd": tmuxPanes[paneID].(map[string]any)["current_path"], "status": nil, "agent_session_id": nil, "transcript": nil, "error": nil, "path_observation_ids": []string{}}
 		appendStringValue(tmuxPanes[paneID].(map[string]any), "runtime_actor_ids", actorID)
 		appendStringValue(tmuxSessions[sessionID].(map[string]any), "runtime_actor_ids", actorID)
-		if observationID := observationIDs[target]; observationID != "" {
-			runtimeActors[actorID].(map[string]any)["path_observation_ids"] = []string{observationID}
+		for _, observationID := range tmuxPanes[paneID].(map[string]any)["path_observation_ids"].([]string) {
+			if observations[observationID].(map[string]any)["source"] == "pane-cwd" {
+				appendStringValue(runtimeActors[actorID].(map[string]any), "path_observation_ids", observationID)
+			}
 		}
 	}
 	return graph
@@ -1164,7 +1213,7 @@ func readTranscriptTextForAgent(path string, agent map[string]any, lines int) (s
 	return text, nil, err
 }
 
-const liveSessionMetadataTmuxFormat = "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{pane_pid}\t#{pane_active}\t#{window_active}\t#{window_id}\t#{@yomux_description}"
+const liveSessionMetadataTmuxFormat = "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{pane_pid}\t#{pane_active}\t#{window_active}\t#{window_id}\t#{@yomux_description}\t#{pane_start_path}\t#{@yomux_project_path}"
 
 const (
 	goTmuxSignalWindowFormat = "#{session_name}\t#{session_id}\t#{session_activity}\t#{session_last_attached}\t#{session_attached}\t#{session_attached_list}\t#{window_index}\t#{window_id}\t#{window_name}\t#{window_active}\t#{window_activity}\t#{window_activity_flag}\t#{window_bell_flag}\t#{window_silence_flag}\t#{window_active_clients}\t#{window_active_clients_list}\t#{window_panes}\t#{window_width}\t#{window_height}\t#{window_zoomed_flag}\t#{window_layout}\t#{window_visible_layout}"
@@ -1260,6 +1309,12 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 		}
 		if len(parts) >= 12 {
 			pane["window_id"] = parts[11]
+		}
+		if len(parts) >= 14 {
+			pane["start_path"] = parts[13]
+		}
+		if len(parts) >= 15 {
+			pane["project_path"] = parts[14]
 		}
 		panes = append(panes, pane)
 		if windowActive && active {

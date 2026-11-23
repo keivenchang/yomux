@@ -17,10 +17,12 @@
 <script src="{{asset "vendor/highlight.min.js"}}" defer></script>
 <script src="{{asset "vendor/katex/katex.min.js"}}" defer></script>
 <script src="{{asset "vendor/katex/auto-render.min.js"}}" defer></script>
+<link rel="stylesheet" href="/share-style.css">
+<script src="/share-client.js"></script>
 </head>
 <body>
 <div id="appRoot" class="app-root">
-<header class="topbar">
+<header class="topbar"{{if .GuestWorkspace}} hidden{{end}}>
   <div class="brand-cell">
     {{brand "brand brand-title title" "div"}}
     <span id="httpsWarning" class="transport-warning" hidden aria-label="{{t "app.noHttps"}}"></span>
@@ -39,6 +41,7 @@
     <span id="status" class="sub a11y-only" role="status" aria-live="polite" aria-atomic="true">{{t "state.starting"}}</span>
   </div>
 </header>
+{{if .GuestWorkspace}}<p id="shareAccessNotice" class="share-access-notice" role="status" hidden></p>{{end}}
 <div id="attentionAlerts" class="attention-alerts" aria-live="polite"></div>
 <aside id="fileExplorer" class="file-explorer" hidden aria-label="{{t "finder.label.explorer"}}">
   <div class="file-explorer-tree-col">

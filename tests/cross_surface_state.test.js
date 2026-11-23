@@ -106,6 +106,8 @@ async function runCrossSurfaceStateSuite() {
         focusedTerminal: 'one', focusedPanelItem: 'one', lastFocusedTmuxSession: 'one',
         normalizedSessionOrder: value => value, tmuxSessionLifecycleAllowsTopologySession: () => true,
         isTmuxSession: () => true, window: {confirm: () => true},
+        tabberViewDescriptorForSession: item => item === 'window-view' ? {sourceSession: 'one'} : null,
+        apiFetchJson(path) { context.requestPath = path; },
         replaceEditorNavItems() {}, clearPendingTmuxSession() {}, markPendingTmuxSession() {},
         detachSessionUi(session) { calls.push('detach-' + session); if (session === 'one') throw failure; },
         clearSessionUiState(session) { calls.push('state-' + session); },
@@ -118,7 +120,8 @@ async function runCrossSurfaceStateSuite() {
         updateDocumentTitle() {}, renderSessionButtons() {}, renderPaneTabStrips() {}, renderAutoApproveButtons() {},
         renderPanels() { calls.push('render'); }, statusOk() {}, statusErr() {}, showLayoutStatus() {},
         t: value => value, localizedHtml: value => value, sessionLabel: value => value,
-        async runTmuxSessionMutation(_kind, _options, _request, commit) {
+        async runTmuxSessionMutation(_kind, _options, request, commit) {
+          await request();
           try { await commit({sessions: ['two']}); }
           catch (error) { context.commitError = error; }
           return {committed: true};
@@ -138,7 +141,8 @@ async function runCrossSurfaceStateSuite() {
         assert.equal(context.focusedTerminal, 'renamed-one');
       } else {
         if (route === 'kill') {
-          assert.equal(await context.killTmuxSession('one'), true);
+          assert.equal(await context.killTmuxSession('window-view'), true);
+          assert.equal(context.requestPath, '/api/kill-session?session=one');
           assert.equal(context.commitError.errors[0], failure);
         } else assert.throws(() => context.pruneDeadSession('one'), error => error.errors[0] === failure);
         assert.deepStrictEqual([...context.sessions], ['two']);
@@ -156,7 +160,8 @@ async function runCrossSurfaceStateSuite() {
         const failure = new Error('dispose failed');
         const context = {
           document: {createElement: () => ({addEventListener() {}})},
-          dockviewLayoutState: {applyingFromLayout: true}, tabberIsAdvanced: () => true,
+          dockviewLayoutState: {applyingFromLayout: true}, normalTabberPaneTabStripHidden: () => false,
+          slotForItem: () => 'left',
           cleanupDetachedPaneTabPopover() { if (failPopover) throw failure; },
           bindPaneTabDismissInteraction() {},
         };
@@ -499,16 +504,19 @@ async function runCrossSurfaceStateSuite() {
     const popup = new TestElement('', 'div');
     popup.className = 'session-popover popover-open';
     anchor.__yomuxDetachedPopover = popup;
+    let detailCloseCount = 0;
     const context = {
       document: {
         querySelectorAll() { throw new Error('popover closure scanned mounted trees'); },
         getElementsByClassName: () => [anchor, current, popup],
       },
+      tabDescriptionOverlay: {close() { detailCloseCount++; }},
       popoverStillActive: () => false,
     };
     vm.createContext(context);
     vm.runInContext(source.slice(source.indexOf('function closeOtherSessionPopovers('), source.indexOf('function popoverLifecycleActive(')), context);
     context.closeOtherSessionPopovers(current, {force: true});
+    assert.equal(detailCloseCount, 1);
     assert.equal(anchor.classList.contains('popover-open'), false);
     assert.equal(popup.classList.contains('popover-open'), false);
     assert.equal(current.classList.contains('popover-open'), true);
@@ -848,7 +856,7 @@ async function runCrossSurfaceStateSuite() {
   test('cross-surface host state 01: YO!info and YO!agent are independent virtual tabs; legacy yoagent/yosup aliases open...', () => {
     api = loadYomux('', ['1', '2']);
     api.setFileExplorerTreeDateModeForTest('date');
-    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,git-diff,image-viewer,file-editor');
+    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,share,debug,git-diff,image-viewer,file-editor');
     const virtualItems = {
       info: api.infoItemId,
       yoagent: api.yoagentItemId,
@@ -1904,6 +1912,30 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(secondaryPrHtml.includes('#10853'), 'Info Bar shows a current-branch PR from the selected secondary repo');
     assert.ok(secondaryPrHtml.includes('feat: gate Lark3-Coder tool calls'), 'Info Bar uses the selected secondary repo PR title');
     assert.equal(secondaryPrHtml.includes('CFG-1'), false, 'secondary repo Info Bar does not inherit primary repo Linear metadata');
+    const hostedBranch = secondaryPrInfo.project.repos[0].other_branches.branches[0];
+    const github = 'https://github.com/team/project';
+    const gitlab = 'https://gitlab.com/team/project';
+    hostedBranch.pull_requests = [
+      {number: 1, provider: 'github', state: 'merged', url: `${github}/pull/1`},
+      {number: 2, provider: 'gitlab', state: 'open', url: `${gitlab}/-/merge_requests/2`},
+      {number: 3, provider: 'github', state: 'closed', draft: true, url: `${github}/pull/3`},
+      {number: 4, provider: 'gitlab', state: 'open', draft: true, url: `${gitlab}/-/merge_requests/4`},
+    ];
+    hostedBranch.github_issues = [{identifier: '#42', url: `${github}/issues/42`}];
+    hostedBranch.linear = [{identifier: 'ABC-42', url: 'https://linear.app/team/issue/ABC-42'}];
+    const hostedHtml = api.paneInfoBarMetaHtml('hosted', secondaryPrInfo);
+    api.setTranscriptInfoForTest('hosted', secondaryPrInfo);
+    const hostedTabHtml = api.tmuxPaneTabHtml('hosted', api.transcriptInfoForTest('hosted'), null, false);
+    for (const [url, label, status] of [
+      [`${github}/pull/1`, 'PR#1', 'merged'],
+      [`${gitlab}/-/merge_requests/2`, 'MR#2', 'open'],
+      [`${github}/pull/3`, 'PR#3', 'closed'],
+      [`${gitlab}/-/merge_requests/4`, 'MR#4', 'draft'],
+    ]) {
+      assert.ok(hostedHtml.includes(`href="${url}"`) && hostedHtml.includes(label) && hostedHtml.includes(`pr-status-${status}`), hostedHtml);
+      assert.ok(hostedTabHtml.includes(`hosted-request-number pr-status-${status}`) && hostedTabHtml.includes(`>${label}</span>`), hostedTabHtml);
+    }
+    assert.ok(hostedHtml.includes(`${github}/issues/42`) && hostedHtml.includes('https://linear.app/team/issue/ABC-42'), hostedHtml);
     const singleRepoInfo = {...multiRepoInfo, project: {...multiRepoInfo.project, git: multiRepoInfo.project.repos[0], repos: [multiRepoInfo.project.repos[0]]}};
     assert.equal(api.projectMetaHtml('single-repo-cycle', singleRepoInfo).includes('meta-repo-switch'), false, 'C9: a single-repo session shows no carousel');
     const windowScopedInfo = {
@@ -2087,7 +2119,7 @@ async function runCrossSurfaceStateSuite() {
     // through unifiedMergeView, so deleted lines are merge-decoration widgets (read-only, unnumbered),
     // never real numbered document lines. (No real CodeMirror in this Node harness, so this guards the
     // construction that produces the rendered behaviour, which was verified visually.)
-    assert.ok(appSource.includes('const unifiedMergeOptions = {') && appSource.includes('original,'), 'unified diff options carry the original document for deleted-line widgets');
+    assert.ok(appSource.includes('const unifiedMergeOptions = codeMirrorUnifiedMergeOptions(original,'), 'unified diff options carry the original document for deleted-line widgets');
     assert.ok(appSource.includes('doc: currentText,'), 'unified diff edits the modified/current document');
     assert.ok(appSource.includes('api.unifiedMergeView(unifiedMergeOptions)'), 'unified diff overlays the original via unifiedMergeView, so deleted rows are unnumbered read-only widgets');
     const diffGutterCss = fs.readFileSync('static/yomux.css', 'utf8');
@@ -3069,7 +3101,6 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/\.meta-path\s*\{[\s\S]*color:\s*var\(--pane-meta-path\)/.test(preferencesCss), 'status path color is theme-tokenized');
     assert.ok(/function projectMetaPathHtml\(path\)[\s\S]*data-info-open-path/.test(fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8')), 'Info Bar paths use the shared Finder reveal action');
     assert.ok(/body\.theme-light\s*\{[\s\S]*--drop-outline:\s*var\(--drop-outline-light\)/.test(fs.readFileSync('static_src/css/yomux/00_tokens_base.css', 'utf8')), 'light editor panes switch drop-target outlines to readable blue through root theme tokens');
-    assert.ok(/\.file-editor-popout-preview-panel,[\s\S]*?\.file-editor-popout-editor-panel,[\s\S]*?\.file-editor-save-panel\s*\{[^}]*height:\s*20px/.test(preferencesCss), 'preview and editor pop-out buttons share compact editor toolbar sizing');
     assert.ok(/\.file-editor-panel-actions\s*\{[\s\S]*background:\s*color-mix\(in srgb, var\(--panel2\)/.test(preferencesCss), 'editor actions render as one compact gray toolbar');
     assert.ok(/\.file-editor-gutter-panel,\s*\n\.file-editor-wrap-panel,\s*\n\.file-editor-find-panel,\s*\n\.file-editor-diff-panel/.test(preferencesCss), 'diff button shares the compact editor toolbar sizing');
     assert.ok(preferencesCss.includes('--code-diff-add: #56d364'), 'dark diff add base is a brighter vivid green');
@@ -3078,7 +3109,6 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(preferencesCss.includes('--code-diff-remove: #e06c75'), false, 'muted one-dark diff red must not return as the YOmux dark default');
     assert.ok(preferencesCss.includes('--diff-remove-line-bg: #540c06'), '#250: dark diff removed-line fill matches the sampled deep maroon guide');
     assert.ok(preferencesCss.includes('--diff-add-line-bg: #2b5d16'), '#250: dark diff added-line fill matches the sampled deep green guide');
-    assert.ok(preferencesCss.includes('.file-editor-icon-popout-preview'), 'preview pop-out has a distinct icon');
     assert.equal(preferencesCss.includes('preview-linked'), false, 'old paired side-preview ring styling is removed');
     assert.ok(/\.yoagent-global\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent global summary fits narrow panes');
     assert.ok(/\.yoagent-list\s*\{[\s\S]*display:\s*flex[\s\S]*flex-direction:\s*column/.test(preferencesCss), 'YO!agent content column can push the chat section to the bottom');
@@ -4042,6 +4072,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(layoutSubmenu.items.some(item => item.disabled), false, 'Every View layout option is implemented');
     menus = api.appMenuTree();
     assert.equal(menus.map(menu => menu.label).join(','), 'File,View,tmux,Tabs,Help');
+    assert.ok(menus.find(menu => menu.id === 'file').items.some(item => item.label === 'YO!share'));
     assert.equal(menus.some(menu => menu.id === 'yolo'), false);
     const aboutHelpMenu = menus.find(menu => menu.id === 'help');
     assert.equal(aboutHelpMenu.items.some(item => item.type === 'submenu' && item.label === 'About'), false, 'Help menu no longer nests About as a submenu');
@@ -4104,6 +4135,7 @@ async function runCrossSurfaceStateSuite() {
     api.i18nSetCatalogForTest('zh-Hant', zhHantMenu);
     api.setActiveLocaleForTest('zh-Hant');
     assert.equal(api.appMenuTree().map(menu => menu.label).join(','), '檔案,檢視,tmux,分頁,說明', 'menu bar localizes (tmux unchanged)');
+    assert.ok(api.appMenuTree().find(menu => menu.id === 'file').items.some(item => item.label === '優!分享'));
     api.showAboutModal();
     assert.equal(api.modalTitleForTest(), zhHantMenu['menu.help.about'], 'About modal title localizes to Chinese');
     assert.ok(api.modalBodyHtmlForTest().includes('about-brand-mark') && api.modalBodyHtmlForTest().includes('>優<'), 'Traditional Chinese About brand uses 優');
@@ -4134,9 +4166,9 @@ async function runCrossSurfaceStateSuite() {
     const destinationLabels = fileMenu.items
       .slice(fileMenu.items.findIndex(item => item.type === 'separator') + 1, fileMenu.items.findLastIndex(item => item.type === 'separator'))
       .map(item => item.label);
-    assert.deepStrictEqual(canonical(destinationLabels), [api.fileSurfaceGroupLabel(), 'Open file', 'Preferences', 'Search & Runs', 'YO!agent', 'YO!chat', 'YO!info', 'YO!stats'], 'File navigation destinations are alphabetized by their localized visible labels');
+    assert.deepStrictEqual(canonical(destinationLabels), [api.fileSurfaceGroupLabel(), 'Open file', 'Preferences', 'Search & Runs', 'YO!agent', 'YO!chat', 'YO!info', 'YO!share', 'YO!stats'], 'File navigation destinations are alphabetized by their localized visible labels');
     const yoLabels = destinationLabels.filter(label => label.startsWith('YO!'));
-    assert.deepStrictEqual(canonical(yoLabels), ['YO!agent', 'YO!chat', 'YO!info', 'YO!stats'], 'File menu keeps the YO!* destinations in alphabetical order');
+    assert.deepStrictEqual(canonical(yoLabels), ['YO!agent', 'YO!chat', 'YO!info', 'YO!share', 'YO!stats'], 'File menu keeps the YO!* destinations in alphabetical order');
     assert.deepStrictEqual(canonical(fileMenu.items.slice(-2).map(item => item.type === 'separator' ? '---' : item.label)), ['---', 'Log out'], 'Log out remains in its own final group');
     const tripletLabel = api.fileSurfaceGroupLabel();
     for (const label of [tripletLabel, 'YO!info', 'Search & Runs', 'YO!agent', 'Open file', 'Preferences', 'YO!stats', 'Log out']) {
@@ -4322,7 +4354,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(source.includes("window.addEventListener('keydown', handleGlobalShortcutKeydown, true)"), 'global shortcuts run in capture phase before focused controls swallow them');
     assert.ok(source.includes("if (mod && key === 'w')"), 'Cmd/Ctrl+W is captured before browser/app defaults');
     assert.ok(source.includes('function itemCanCloseWithAppShortcut(item)'), 'global close shortcut is scoped through a shared item guard');
-    assert.ok(source.includes('if (itemCanCloseWithAppShortcut(item)) removeSessionFromLayout(item);'), 'Cmd/Ctrl+W cannot close Preferences, YO!agent, Finder, Changes, or tmux tabs');
+    assert.ok(source.includes('if (itemCanCloseWithAppShortcut(item)) closeLayoutTabItem(item);'), 'Cmd/Ctrl+W uses the shared tab close action for eligible items');
     assert.ok(source.includes("(key === 'backspace' || key === 'delete') && globalShortcutTargetAllowsAppAction(event.target)"), 'Backspace/Delete close fallback stays out of text editing contexts');
     assert.equal(source.includes('Ctrl/Cmd'), false, 'served UI strings do not show Ctrl/Cmd combined shortcuts');
     assert.ok(source.includes('showFileSaveConflictDialog'), 'editor saves route conflicts through the shared conflict dialog');
@@ -4334,9 +4366,10 @@ async function runCrossSurfaceStateSuite() {
     // A non-dirty editor reloads disk changes silently (the prompt is only for the genuine unsaved-edits conflict).
     assert.ok(/function promptExternalChangeBeforeEditing[\s\S]*?if \(!state\.dirty\) \{[\s\S]*?reloadOpenFileFromDisk\(path, \{force: true\}\)/.test(source), 'a non-dirty editor reloads external disk changes silently (no dialog)');
     const splitButtonIndex = source.indexOf("dataset: {editorMode: 'split'}");
-    const popoutPreviewButtonIndex = source.indexOf("className: 'file-editor-popout-preview-panel'");
     const modeSeparatorIndex = source.indexOf("dataset: {editorToolbarSeparator: 'mode'}");
-    assert.ok(splitButtonIndex > 0 && popoutPreviewButtonIndex > splitButtonIndex && popoutPreviewButtonIndex < modeSeparatorIndex, 'Preview pop-out sits directly in the editor mode button group after Split view');
+    assert.ok(splitButtonIndex > 0 && modeSeparatorIndex > splitButtonIndex, 'Split remains in the editor mode group');
+    const modeControls = source.slice(splitButtonIndex, modeSeparatorIndex);
+    assert.ok(!modeControls.includes('editor-popout-'), 'file pop-out belongs to the tab header');
     assert.ok(source.includes('editor.autosave_delay_seconds'), 'editor autosave delay is a persisted preference');
     assert.ok(source.includes('(commandPaletteState.index + 1) % commandPaletteState.items.length'), 'command palette arrow navigation wraps down');
     assert.ok(source.includes('item.splitRun'), 'command palette supports split-open actions');
@@ -5573,7 +5606,7 @@ async function runCrossSurfaceStateSuite() {
     const contextMenuNode = () => api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
     const tabContextMenuStart = source.indexOf('function showTabContextMenu(');
     const tabContextMenuEnd = source.indexOf('function showSessionContextMenu(', tabContextMenuStart);
-    assert.ok(source.slice(tabContextMenuStart, tabContextMenuEnd).includes('tabMenuDetailText(item, info)'), 'tab action descriptions reuse the full metadata detail for an interactive terminal');
+    assert.ok(source.slice(tabContextMenuStart, tabContextMenuEnd).includes('tabMenuDetailText(item, info, {windowIndex: options.descriptionWindow})'), 'tab action descriptions reuse the full metadata detail for an interactive terminal');
     api.showSessionContextMenu('1', 10, 10);
     contextMenu = contextMenuNode();
     const pinTabRow = Array.from(contextMenu.children).find(child => child.getAttribute('aria-label') === 'Pin Tab');
@@ -5586,7 +5619,7 @@ async function runCrossSurfaceStateSuite() {
     const tabContextLabels = Array.from(contextMenu.children).map(button => button.getAttribute('aria-label')?.split(' - ')[0] || '').filter(Boolean);
     const renameIndex = tabContextLabels.findIndex(label => label === "Rename tmux session '1'");
     const killIndex = tabContextLabels.findIndex(label => label === "Kill tmux session '1'");
-    assert.equal(tabContextLabels[0], 'More desc: 1 — /repo/workspace · workspace');
+    assert.equal(tabContextLabels[0], 'More desc: 1 — workspace · /repo/workspace · /repo/workspace/src');
     assert.equal(tabContextLabels[renameIndex + 1], 'Expand pane', 'Rename immediately precedes Expand pane');
     assert.equal(killIndex, tabContextLabels.length - 1, 'Kill remains the final context action');
     assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), true);
@@ -5611,7 +5644,7 @@ async function runCrossSurfaceStateSuite() {
     const filePopoutButton = Array.from(fileContextMenu.children).find(child => child.getAttribute('aria-label') === 'Pop out');
     assert.ok(filePopoutButton, 'preview-capable file editor tabs expose Pop out in the shared tab context menu');
     const editorTabPopoutOwner = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
-    assert.ok(editorTabPopoutOwner.includes("if (renderer?.textBacked === true || renderer?.id === 'pdf') return openLivePanePopout(item);"), 'text and PDF tabs use the live editor popout lifecycle');
+    assert.ok(editorTabPopoutOwner.includes("if (state?.kind === 'text' || renderer?.textBacked === true || renderer?.id === 'pdf') return openLivePanePopout(item);"), 'text and PDF tabs use the live editor popout lifecycle');
     assert.ok(editorTabPopoutOwner.includes('return openFilePreviewPopout(path, document.getElementById(panelDomId(item)));'), 'other non-text files retain their preview snapshot popout');
     api.setPinnedTabsForTest([]);
     const sessionViews = api.tmuxSessionViewCommands('1');

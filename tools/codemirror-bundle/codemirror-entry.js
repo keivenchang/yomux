@@ -7,12 +7,14 @@
 // npm ci
 // npm run build
 
+import {collab, receiveUpdates, sendableUpdates, getSyncedVersion} from "@codemirror/collab";
 import {basicSetup} from "codemirror";
-import {Compartment, EditorState} from "@codemirror/state";
+import {Compartment, EditorState, ChangeSet, StateField, StateEffect, EditorSelection, Transaction} from "@codemirror/state";
 import {
   Decoration,
   EditorView,
   ViewPlugin,
+  WidgetType,
   crosshairCursor,
   drawSelection,
   dropCursor,
@@ -44,6 +46,10 @@ import {
   searchKeymap,
 } from "@codemirror/search";
 import {
+  getOriginalDoc,
+  originalDocChangeEffect,
+  goToNextChunk,
+  goToPreviousChunk,
   MergeView,
   unifiedMergeView,
 } from "@codemirror/merge";
@@ -75,6 +81,7 @@ import {stex} from "@codemirror/legacy-modes/mode/stex";
 import {tags} from "@lezer/highlight";
 
 window.YOmuxCodeMirror = {
+  Transaction, WidgetType, collab, receiveUpdates, sendableUpdates, getSyncedVersion, ChangeSet, StateField, StateEffect, EditorSelection,
   EditorState,
   ensureSyntaxTree,
   EditorView,
@@ -114,6 +121,10 @@ window.YOmuxCodeMirror = {
   markdown,
   markdownStrikethrough: Strikethrough,
   markdownTable: Table,
+  getOriginalDoc,
+  originalDocChangeEffect,
+  goToNextChunk,
+  goToPreviousChunk,
   MergeView,
   openSearchPanel,
   python,

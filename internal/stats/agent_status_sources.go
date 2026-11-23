@@ -78,14 +78,28 @@ func linuxCaptureAgentPane(ctx context.Context, target string) (AgentStatusPane,
 	// Capture the visible screen only. Scrollback contains completed turns and
 	// stale prompts, so mixing it into the current-state classifier produces
 	// false "conflicting-pane-evidence" results and silently drops live agents.
-	result, err := runBoundedCommand(commandContext, tmuxCommandArgs(linuxAgentPaneCaptureArgs(target)...))
-	if err != nil || result.ExitCode != 0 || len(result.Stdout) > maxAgentStatusCommandOutput {
-		if err != nil {
-			return AgentStatusPane{}, fmt.Errorf("pane-capture-failed: %w", err)
+	capture := func(styled bool) (string, error) {
+		args := linuxAgentPaneCaptureArgs(target)
+		if styled {
+			args = append(args, "-e")
 		}
-		return AgentStatusPane{}, errors.New("pane-capture-failed")
+		result, err := runBoundedCommand(commandContext, tmuxCommandArgs(args...))
+		if err != nil {
+			return "", fmt.Errorf("pane-capture-failed: %w", err)
+		}
+		if result.ExitCode != 0 || len(result.Stdout) > maxAgentStatusCommandOutput {
+			return "", errors.New("pane-capture-failed")
+		}
+		return string(result.Stdout), nil
 	}
-	return AgentStatusPane{Target: target, VisibleText: string(result.Stdout), ObservedAt: time.Now()}, nil
+	visible, err := capture(false)
+	if err == nil {
+		visible, err = CodexRecoveryCapture(visible, func() (string, error) { return capture(true) })
+	}
+	if err != nil {
+		return AgentStatusPane{}, err
+	}
+	return AgentStatusPane{Target: target, VisibleText: visible, ObservedAt: time.Now()}, nil
 }
 
 func linuxAgentPaneCaptureArgs(target string) []string {

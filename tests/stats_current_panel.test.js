@@ -230,6 +230,7 @@ testAsync('capability-gated requests report full-mode failures but stay quiet in
     const deliveries = [];
     const backendHealth = [];
     const context = {
+      bootstrap: {guestWorkspace: false},
       AbortController,
       Response,
       clearTimeout() {},

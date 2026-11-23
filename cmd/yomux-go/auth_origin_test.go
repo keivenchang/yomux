@@ -188,7 +188,7 @@ func TestKillSessionRejectsSafeAndUnsupportedMethods(t *testing.T) {
 }
 
 func TestArbitraryFilesystemContentRequiresAdmin(t *testing.T) {
-	for _, path := range []string{"/api/fs/read", "/api/fs/raw", "/api/fs/diff", "/api/fs/git-commit", "/api/batch/blame", "/api/batch/zip", "/api/batch/html-preview"} {
+	for _, path := range []string{"/api/fs/read", "/api/fs/raw", "/api/fs/sqlite-preview", "/api/fs/diff", "/api/fs/git-commit", "/api/batch/blame", "/api/batch/zip", "/api/batch/html-preview"} {
 		for _, role := range []string{"readonly", "admin"} {
 			t.Run(path+"/"+role, func(t *testing.T) {
 				reached := false

@@ -4,6 +4,7 @@
 package yolo
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -130,11 +131,32 @@ func TestClassifyPromptAllowsStructuredCodexReasonBeforeCommand(t *testing.T) {
 	}
 }
 
-func TestClassifyPromptLeavesMultilineCodexCommandForManualApproval(t *testing.T) {
-	text := "Would you like to run the following command?\nEnvironment: local\nReason: Run a shell script.\n$ systemd-run --user /bin/bash -c 'set -eu\nprintf hello\nprintf world'\n› 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\nPress enter to confirm or esc to cancel"
-	prompt := ClassifyPrompt(text, "")
-	if !prompt.ManualApproval || prompt.Actionable || !prompt.Approval || prompt.SelectedOption != 1 || !strings.Contains(prompt.Command, "\nprintf world'") {
-		t.Fatalf("ClassifyPrompt() = %#v, want visible manual approval with the full multiline command", prompt)
+func TestClassifyPromptJoinsCodexCommandRows(t *testing.T) {
+	header := "Would you like to run the following command?\n\nEnvironment: local\n\nReason: Inspect the monitor process.\n\n$ "
+	menu := "\n\n› 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\n\nPress enter to confirm or esc to cancel"
+	rows := "python3 ~/scripts/inspect_process.py\n3178740 --expect-cwd\n/home/keivenc/dev/parser-toolkits --expect-argv /tmp/monitor.py"
+	command := strings.ReplaceAll(rows, "\n", " ")
+	wrapped := ClassifyPrompt(header+rows+menu, "")
+	oneLine := ClassifyPrompt(header+command+menu, "")
+	if !wrapped.Actionable || wrapped.Command != command || wrapped.RuleInput != command || wrapped.Hash == oneLine.Hash {
+		t.Fatalf("wrapped = %#v, single line = %#v, want the same command with distinct row identities", wrapped, oneLine)
+	}
+	separated := ClassifyPrompt(header+strings.Replace(rows, "\n", "\n\n", 1)+menu, "")
+	if separated.Actionable {
+		t.Fatalf("separated = %#v, must not approve a command prefix across a blank line", separated)
+	}
+}
+
+func TestCodexPromptIdentityPreservesRowBytes(t *testing.T) {
+	header := "Would you like to run the following command?\nEnvironment: local\n$ "
+	menu := "\n› 1. Yes, proceed (y)\n  2. No (esc)\nPress enter to confirm or esc to cancel"
+	rows := "echo harmless\nrm -rf /"
+	multi := ClassifyPrompt(header+rows+menu, "")
+	for _, command := range []string{strconv.Quote(rows), strings.ReplaceAll(rows, "\n", " "), rows + " "} {
+		other := ClassifyPrompt(header+command+menu, "")
+		if !other.Actionable || multi.Hash == other.Hash {
+			t.Fatalf("row identity collision: %+v and %+v", multi, other)
+		}
 	}
 }
 

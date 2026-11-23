@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import threading
+from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import shlex
 import tempfile
@@ -215,7 +216,7 @@ def test_native_finder_get_info_permissions(browser, isolated_dev_server_factory
     browser.set_window_size(1280, 1200)
     for dialog_class in ['finder-move-dialog', 'markdown-link-url-dialog', 'drop-action-result-dialog',
                          'file-editor-compare-dialog', 'file-editor-conflict-dialog',
-                         'file-editor-external-change-dialog', 'file-editor-close-dialog']:
+                         'file-editor-close-dialog']:
         browser.execute_script("showFileEditorDecisionDialog({title:'Dialog contrast',message:'Readable explanation',className:arguments[0]})", dialog_class)
         colors = browser.execute_script("const d=document.querySelector('.'+arguments[0]+' .file-editor-dialog');return [getComputedStyle(d.querySelector('.file-editor-dialog-body')).color,getComputedStyle(d).backgroundColor]", dialog_class)
         assert wcag_contrast_ratio(*colors) >= 4.5, (dialog_class, colors)
@@ -532,16 +533,16 @@ def test_native_readonly_editor_and_finder_details(browser, isolated_dev_server_
     assert target.read_text(encoding='utf-8') == original
 
 
-def test_native_codex_wrapped_file_context_menu_opens_complete_path(browser, isolated_dev_server_factory, request):
+def test_native_codex_wrapped_file_context_menu_opens_complete_path(browser, isolated_dev_server_factory):
     server = isolated_dev_server_factory('codex-wrapped-file')
-    request.addfinalizer(lambda: browser.get('about:blank'))
     session = server.tmux.sessions[0]
-    browser.get(server.base_url + f'/?sessions={session}&layout=left&tabs=left:{session}')
-    WebDriverWait(browser, 15).until(lambda driver: driver.execute_script(
-        "return typeof terminalReferenceAtClientPoint === 'function' && terminals.get(arguments[0])?.term?.element && initialAppShellPainted",
-        session,
-    ))
-    with tempfile.TemporaryDirectory(prefix='yfl-', dir='/tmp') as directory:
+    with tempfile.TemporaryDirectory(prefix='yfl-', dir='/tmp') as directory, ExitStack() as retirement:
+        retirement.callback(browser.get, 'about:blank')
+        browser.get(server.base_url + f'/?sessions={session}&layout=left&tabs=left:{session}')
+        WebDriverWait(browser, 15).until(lambda driver: driver.execute_script(
+            "return typeof terminalReferenceAtClientPoint === 'function' && terminals.get(arguments[0])?.term?.element && initialAppShellPainted",
+            session,
+        ))
         path = Path(directory) / 'ssc-resident-cintas-schedule-2026-10-26.md'
         content = 'Wrapped file link reached the complete file.\n'
         path.write_text(content, encoding='utf-8')
@@ -898,12 +899,19 @@ def test_native_mixed_notices_scroll_below_editor_controls_on_short_viewports(br
                     window.__shortNoticeIds=[tip,command].map(node=>Number(node.dataset.alertId));
                     const stack=tip.parentElement;
                     const reload=panelNodes.get(item).querySelector('.file-editor-reload-panel');
-                    await window.__yomuxTestWaitFor(()=>{
+                    const noticeGeometry=()=>{
                       const bounds=stack.getBoundingClientRect(),button=reload.getBoundingClientRect();
                       const header=reload.closest('.file-editor-toolbars').getBoundingClientRect();
-                      return Math.abs(bounds.top-(Math.ceil(header.bottom)+12))<=1
-                        && document.elementFromPoint(button.x+button.width/2,button.y+button.height/2)===reload;
-                    },{timeoutMs:5000,description:'notice and header geometry converge after viewport change'});
+                      const hit=document.elementFromPoint(button.x+button.width/2,button.y+button.height/2);
+                      return {top:bounds.top, headerBottom:header.bottom, hit:hit===reload, hitClass:hit?.className,
+                        width:innerWidth,height:innerHeight,compact, stackHeight:bounds.height,
+                        appScroll:appRootElement().scrollTop, pageScroll:document.scrollingElement.scrollTop};
+                    };
+                    await window.__yomuxTestWaitFor(()=>{
+                      const {top, headerBottom, hit}=noticeGeometry();
+                      return Math.abs(top-(Math.ceil(headerBottom)+12))<=1 && hit;
+                    },{timeoutMs:5000,description:'notice and header geometry converge after viewport change'})
+                      .catch(error=>{throw new Error(error.message + ': ' + JSON.stringify(noticeGeometry()));});
                     const bounds=stack.getBoundingClientRect(),button=reload.getBoundingClientRect();
                     const body=tip.querySelector('.toast-body').getBoundingClientRect();
                     const bodyHit=document.elementFromPoint(body.left+4,Math.max(body.top,bounds.top)+2);
@@ -919,7 +927,7 @@ def test_native_mixed_notices_scroll_below_editor_controls_on_short_viewports(br
                       button:button.toJSON(),width:innerWidth,compact};
                   })().then(done,error=>done({error:String(error.stack||error)}));
                 """, setup['item'], compact)
-                assert 'error' not in geometry, geometry
+                assert 'error' not in geometry, geometry.get('error', geometry)
                 assert geometry['hit'] and geometry['top'] >= geometry['reloadBottom'], json.dumps(geometry)
                 assert abs(geometry['top'] - (geometry['headerBottom'] + 12)) <= 1, geometry
                 assert geometry['bottom'] <= geometry['height'] - 12 + 1, geometry

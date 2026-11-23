@@ -117,6 +117,22 @@ func TestCodexCapacityNoticeIsBlockedAndClearsWithNewerOutput(t *testing.T) {
 	if cleared := classify(stale); cleared.Status != AgentStatusIdle {
 		t.Fatalf("capacity notice followed by newer output = %+v, want idle", cleared)
 	}
+	for _, status := range []string{"500 Internal Server Error", "503 Service Unavailable: upstream connect error or disconnect/reset before headers", "599"} {
+		visible := "■ unexpected status " + status + "\n\n›"
+		if got := classify(visible); got.Status != AgentStatusError {
+			t.Errorf("current %s = %q, want blocked error", status, got.Status)
+		}
+	}
+	for _, visible := range []string{
+		"■ unexpected status 429 Too Many Requests\n›",
+		"■ unexpected status 5030\n›",
+		"■ unexpected status 503 Service Unavailable\nCompleted successfully\n›",
+		"unexpected status 503 Service Unavailable\n›",
+	} {
+		if got := classify(visible); got.Status != AgentStatusIdle {
+			t.Errorf("unrelated screen %q = %q, want idle", visible, got.Status)
+		}
+	}
 	for _, variant := range []string{
 		"■  Selected model is at capacity. Please try a different model.",
 		"■Selected model is at capacity. Please try a different model.",
@@ -124,6 +140,37 @@ func TestCodexCapacityNoticeIsBlockedAndClearsWithNewerOutput(t *testing.T) {
 	} {
 		if !CapacityNoticeCurrent(variant + "\n›") {
 			t.Errorf("capacity notice variant %q was not recognized", variant)
+		}
+	}
+}
+
+func TestCodexRecoveryCaptureJoinsOnlyRedErrorRows(t *testing.T) {
+	const first = "■ unexpected status 503 Service Unavailable: upstream connect error or"
+	const continuation = "disconnect/reset before headers. retried and the latest reset reason:\nremote connection failure, url:\nhttp://127.0.0.1:33375/scenario/done/v1/responses"
+	const footer = "\n\n› Ask Codex to do anything\n\n  gpt-4o-mini default · ~ · Show the test error.\n  ← for agents · ? for shortcuts ⚠ 1 warning · f2 to view"
+	const styledFooter = "\x1b[39m\n\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\n\x1b[0m\n  gpt-4o-mini default · ~ · Show the test error.\n  ← for agents · ? for shortcuts ⚠ 1 warning · f2 to view"
+	for _, test := range []struct {
+		suffix string
+		newer  string
+	}{
+		{suffix: "\n"},
+		{suffix: ""},
+		{suffix: "\n\x1b[39mCompleted successfully\x1b[31m\n", newer: "Completed successfully\n"},
+	} {
+		styled := "\x1b[38;5;1m\x1b[49m" + first + "\n" + continuation + test.suffix + styledFooter
+		plain := first + "\n" + continuation + "\n" + test.newer + footer
+		visible, err := CodexRecoveryCapture(plain, func() (string, error) { return styled, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		notice, serverError := CodexRecoveryNotice(visible)
+		if test.newer == "" {
+			want := first + " " + strings.ReplaceAll(continuation, "\n", " ")
+			if notice != want || !serverError || !AgentComposerFooter(strings.Split(footer, "\n")[3:]) {
+				t.Fatalf("wrapped notice = %q, serverError = %t; capture = %q", notice, serverError, visible)
+			}
+		} else if notice != "" {
+			t.Fatalf("stale notice %q survived newer output in %q", notice, visible)
 		}
 	}
 }

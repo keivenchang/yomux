@@ -167,12 +167,26 @@ test('shared work-graph selectors keep tabs, popovers, and metadata on the focus
     project: {git: {root: '/legacy/stale', branch: 'legacy', other_branches: {branches: [{name: 'legacy', current: true, pull_request: {number: 999, title: 'Wrong legacy PR'}}]}}, pull_request: {number: 999, title: 'Wrong legacy PR'}, linear: [{identifier: 'LEG-999', title: 'Wrong legacy issue'}], repos: []},
   });
   api.setTranscriptSessionOrderForTest(['graph-session']);
-  assert.deepStrictEqual(canonical(api.focusedRepositoryIdsForTmuxTargetForTest(graph && {work_graph: graph, selected_pane: {target: '%focused'}}, '%focused')), ['local:focused'], 'focused repository selector follows TmuxPane -> observation -> worktree edges');
   assert.deepStrictEqual(canonical(api.branchIdsForGitWorktreeForTest({work_graph: graph}, 'worktree:focused')), ['branch:focused', 'branch:other'], 'worktree branch selector exposes the LocalGitRepository inventory once');
-  assert.deepStrictEqual(canonical(api.pullRequestIdsForTmuxTargetForTest({work_graph: graph, selected_pane: {target: '%focused'}}, '%focused')), ['pr:80'], 'focused PR selector never uses a singular legacy session PR');
   const summary = canonical(api.sessionWorkSummaryForTest('graph-session', {work_graph: graph, selected_pane: {target: '%focused'}}));
+  assert.deepStrictEqual(summary.focusedRepositoryIds, ['local:focused']);
+  assert.deepStrictEqual(summary.pullRequestIds, ['pr:80']);
   assert.equal(summary.git.root, '/canonical/focused');
   assert.equal(summary.pullRequests[0].number, 80);
+  const unmatchedTarget = canonical(api.sessionWorkSummaryForTest('graph-session', {
+    work_graph: graph,
+    selected_pane: {target: '%missing'},
+    project: {git: {root: '/unrelated/yo7110'}},
+  }));
+  assert.equal(unmatchedTarget.selectedRepo, null, 'an unmatched explicit pane target cannot inherit a different repository');
+  assert.equal(unmatchedTarget.selectedPath, '', 'an unmatched explicit pane target has no inferred path');
+  assert.deepEqual(unmatchedTarget.focusedRepositories, [], 'an unmatched explicit pane target has no repositories');
+  assert.deepEqual(unmatchedTarget.focusedPaths, [], 'an unmatched explicit pane target has no observed paths');
+  assert.equal(api.sessionTabDescriptionForTest('graph-session', {
+    work_graph: graph,
+    selected_pane: {target: '%missing'},
+    project: {git: {root: '/unrelated/yo7110'}},
+  }).includes('yo7110'), false, 'tab description does not borrow an unrelated checkout path');
   assert.equal(api.displayPullRequestForTest({work_graph: graph, selected_pane: {target: '%focused'}}).number, 80);
   assert.ok(api.sessionTabDescriptionForTest('graph-session', {work_graph: graph, selected_pane: {target: '%focused'}}).includes('Canonical graph PR'), 'tab description uses the graph PR rather than project.pull_request');
   assert.ok(api.tabMenuDetailText('graph-session').includes('feature/canonical'), 'tab menu metadata uses the graph branch rather than the stale project branch');
@@ -938,13 +952,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/id="status" class="sub a11y-only" role="status" aria-live="polite"/.test(webSource), 'the legacy generic status text remains assistive feedback instead of visible text beside Exit');
   });
 
-  test('one-column pane frame controls remove the selected tab instead of the only pane', () => {
+  test('one-column minimize hides the selected tab and the terminal X remains a kill action', () => {
     const api = loadYomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
       viewport: {width: 599, height: 1024},
     });
     assert.ok(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), 'a selected tab can be minimized while another tab remains in the one-column pane');
-    assert.ok(api.panelControlsHtml('1').includes('data-pane-close="1"'), 'a terminal exposes the shared X when narrow mode can safely close its selected tab');
+    assert.ok(api.panelControlsHtml('1').includes('data-pane-close="1"'), 'the terminal exposes the session kill action on a one-column layout');
     api.minimizePaneFromLayout('1');
     assert.deepEqual(canonical(api.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
@@ -965,19 +979,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setPinnedTabsForTest([]);
     api.setLayoutSlotsForTest({
       __tree: {slot: 'left'},
-      left: {active: '1', tabs: [api.finderItemId, '1', '2']},
-    });
-    api.closePaneFrameItem('1');
-    assert.deepEqual(canonical(api.layoutSlotsForTest()), {
-      __tree: {slot: 'left'},
-      left: {active: '2', tabs: [api.finderItemId, '2']},
-    }, 'X shares the same selected-tab close route in one-column mode');
-    api.setLayoutSlotsForTest({
-      __tree: {slot: 'left'},
       left: {active: '1', tabs: ['1']},
     });
     assert.equal(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), false, 'the last remaining tab has no misleading minimize control');
-    assert.equal(api.panelControlsHtml('1').includes('data-pane-close="1"'), false, 'the last remaining tab has no blank-layout close control');
+    assert.ok(api.panelControlsHtml('1').includes(api.t('menu.tmux.kill')), 'the last terminal still exposes the session kill action');
   });
 
   test('phone tab hide remains hidden after one-column normalization', () => {
@@ -1021,9 +1026,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.itemInLayout(api.fileExplorerItemId), false, 'Finder X removes only Finder from the current layout');
     assert.equal(api.itemInLayout('1') && api.itemInLayout('2'), true, 'Finder X leaves the current and adjacent terminal panes intact');
     const shellSource = fs.readFileSync('static_src/js/yomux/78_panel_shell.js', 'utf8');
-    assert.ok(/button\.dataset\.paneClose !== undefined[\s\S]*closePaneFrameItem\(button\.dataset\.paneClose \|\| session\)/.test(shellSource), 'the shared frame-control binding routes Finder X through the Finder-aware closer');
+    assert.ok(shellSource.includes('closePaneFrameItem(paneClose || fallbackItem)'), 'the shared frame-control binding routes Finder X through the Finder-aware closer');
     const dockviewSource = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
-    assert.ok(/button\.dataset\.paneClose !== undefined[\s\S]*closePaneFrameItem\(button\.dataset\.paneClose \|\| item\)/.test(dockviewSource), 'Dockview header X uses the same Finder-aware close path');
+    assert.ok(dockviewSource.includes('if (handlePaneFrameActionClick(event, fallbackItem)) return;'), 'Dockview header X uses the same Finder-aware close path');
   });
 
   test('Tabber uses the terminal tmux selection rather than stale agent-poll current state', () => {
@@ -2383,7 +2388,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(networkErrorStatus.message, `${api.t('dialog.unableLoadDisk')}: network down`, 'file-state errors use the shared localized disk-load message');
     assert.equal(networkErrorStatus.message.includes('deleted'), false, 'network/list refresh errors are not reported as deletion');
     assert.equal(
-      api.fileInspectionErrorMessageForTest({payload: {error: 'outside allowed root'}, status: 403}, '/home/test/yolomux.dev3/examples/preview/03-mixed.md'),
+      api.fileInspectionErrorMessageForTest({payload: {error: 'outside allowed root'}, status: 403}, '/home/test/yolomux.dev3/examples/03-mixed.md'),
       'outside allowed root',
       'file inspection resolves the structured backend reason through the shared user-message parent',
     );
@@ -2952,7 +2957,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.itemIsBackgroundPaneTab('__info__'), true);
     assert.equal(api.itemIsBackgroundPaneTab('1'), false);
     assert.deepStrictEqual(canonical(api.backgroundTabItems()), ['__info__']);
-    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__chat__', '__finder__', '__differ__', '__tabber__', '__search_history__', '__prefs__', '__debug__', '3']);
+    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__chat__', '__finder__', '__differ__', '__tabber__', '__search_history__', '__prefs__', '__share__', '__debug__', '3']);
   });
 
   test('new file editors reuse the existing editor pane', () => {
@@ -3493,7 +3498,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const yoloCss = fs.readFileSync('static/yomux.css', 'utf8');
     assert.ok(/function updatePanelWindowStepButtons\(session, info, controlNodes = null\)[\s\S]*tmuxWindowBarHtml\(session, sessionMetadataForLayoutItem\(session, info\), \{infoBar: true\}\)/.test(source), 'Info Bar renders the shared window bar from terminal layout-item metadata');
     assert.ok(/if \(controls\?\.parentElement === row\) row\.insertBefore\(replacement, controls\)/.test(source), 'Info Bar keeps the repo selector slot directly after the tmux sub-window bar');
-    assert.ok(/function sessionMetadataForLayoutItem\(session, fallback = null\)[\s\S]*filter\(pane => tmuxWindowNumber\(pane\.window\) === index\)/.test(source), 'grouped Tabber window views render only the selected window metadata');
+    const scopedMetadata = source.slice(source.indexOf('function sessionMetadataForLayoutItem('), source.indexOf('function tmuxWindowBarLabelMode('));
+    assert.ok(scopedMetadata.includes('const index = windowIndex ?? view?.windowIndex;')
+      && scopedMetadata.includes('filter(pane => tmuxWindowNumber(pane.window) === index)'), 'explicit and grouped Tabber window views scope the same metadata');
     assert.ok(/delegate\(panel, 'click', '\[data-window-dir\], \[data-window-index\]'/.test(source), 'DOIT.53 P3: in-panel window buttons use the shared delegated click path');
     assert.ok(source.includes("const repoSelectorControlSelector = '[data-repo-cycle], [data-repo-chip]';") && source.includes("delegate(panel, 'click', repoSelectorControlSelector, (event, button) => activateRepoSelectorControl(event, button, session));"), 'Info Bar repo arrows and count use one delegated panel path after moving outside scrolling metadata');
     assert.ok(/const chromeTarget = event\.target\?\.closest\?\.\(`[^`]*\$\{repoSelectorControlSelector\}/.test(source), 'Info Bar repo controls are pane chrome and do not acknowledge terminal attention');
@@ -4496,7 +4503,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(multiWindowApi.browserFaviconBadgeCount(multiWindowCounts), 2, 'favicon uses the same per-window count');
     assert.equal(multiWindowApi.documentTitleForTest(), 'YOmux [2 running]', 'document title uses the same per-window count');
     assert.ok(/topbar-activity-working active[\s\S]*topbar-activity-count-number">2</.test(multiWindowApi.globalActivityStatusLineHtml()), 'topbar uses the same per-window count');
-    assert.ok(/function updateDocumentTitle\(\)\s*\{\s*const counts = globalActivityCounts\(\);\s*updateBrowserFavicon\(\{counts\}\);\s*const count = runningAgentCount\(counts\);/.test(source), 'title and favicon consume one shared activity-count snapshot');
+    assert.ok(/function updateDocumentTitle\(\)\s*\{\s*const counts = globalActivityCounts\(\);\s*updateBrowserFavicon\(\{counts\}\);\s*if \(bootstrap\.guestWorkspace\) return;\s*const count = runningAgentCount\(counts\);/.test(source), 'host title and favicon consume one shared activity-count snapshot');
   });
 
   test('session tabs render shared metadata and status chips', () => {
@@ -5128,8 +5135,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const prFailingLabel = api.t('pr.ci.failing');
     assert.ok(detail.includes(`#9981 ${prFailingLabel}`), 'tab menu detail includes localized PR and status');
     assert.ok(detail.includes('GH-2132'), 'tab menu detail includes Linear identifier');
-    const linearIndex = detail.indexOf('GH-2132', detail.indexOf('~/project/project3'));
-    assert.ok(linearIndex < detail.indexOf(`#9981 ${prFailingLabel}`), 'tab menu detail lists Linear before PR');
+    assert.ok(detail.startsWith(`#9981 ${prFailingLabel}`), 'tab menu detail starts with the tab description');
+    assert.equal(detail.indexOf(`#9981 ${prFailingLabel}`, 1), -1, 'tab description does not repeat the same PR label');
 
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('left');
@@ -9088,7 +9095,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/openFileInEditor\(resolved, basenameOf\(resolved\), \{[\s\S]*?viewMode: editorPreviewModeAvailable\(resolved\) \? 'preview' : 'edit'/.test(src), '#133: preview-capable file links open in preview (md/html), else edit');
     assert.ok(/t\('preview\.openFailed'/.test(src), "#133: a failed open surfaces a toast");
     // The handler is wired ONLY to the file-editor preview (path provided), not to yoagent bodies.
-    assert.ok(/renderMarkdownPreviewInto\(container, text, path, \{context, readOnly: state \? !fileEditorStateWritable\(state\) : false(?:, snapshot)?\}\)/.test(src), '#133: the file-editor preview strategy threads the owning path, preview context, and historical read-only state; yoagent bodies pass no path');
+    assert.ok(/renderMarkdownPreviewInto\(container, text, path, \{context, readOnly: state \? state\._shareActive === true \|\| !fileEditorStateWritable\(state\) : false(?:, snapshot)?\}\)/.test(src), '#133: the file-editor preview strategy threads the owning path, preview context, and shared or historical read-only state; yoagent bodies pass no path');
   });
 
   test('theme preference radios localize and select one value', () => {
@@ -9209,10 +9216,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     // order ends Language, Theme, Activity (activity pinned far-right).
     // #257: the topbar theme and distributed-owner controls were removed. Language and Activity
     // remain in the right group, with Activity pinned at the far right.
-    assert.ok(/function createTopbarCenterTools\(\)[\s\S]*?group\.append\(createTopbarNav\(\), createTopbarTabberToggle\(\), createTopbarSearch\(\)\)/.test(src) && /function createTopbarRightTools\(\)[\s\S]*?group\.append\(createTopbarLanguageSwitcher\(\), createTopbarActivityStatus\(\)\)/.test(src) && /sessionButtons\.appendChild\(createAppMenuBar\(\)\)[\s\S]*?sessionButtons\.appendChild\(createTopbarCenterTools\(\)\)[\s\S]*?sessionButtons\.appendChild\(createTopbarRightTools\(\)/.test(src), '#257: File/View/tmux/Tabs/Help precede the arrows/Tabber/Search group, which precedes Language and Activity');
+    assert.ok(/function createTopbarCenterTools\(\)[^}]*group\.append\(createTopbarNav\(\)\);\s*if \(!bootstrap\.guestWorkspace\) group\.append\(createTopbarTabberToggle\(\)\);\s*group\.append\(createTopbarSearch\(\)\)/.test(src) && /function createTopbarRightTools\(\)[\s\S]*?group\.append\(createTopbarLanguageSwitcher\(\), createTopbarActivityStatus\(\)\)/.test(src) && /sessionButtons\.appendChild\(createAppMenuBar\(\)\)[\s\S]*?sessionButtons\.appendChild\(createTopbarCenterTools\(\)\)[\s\S]*?sessionButtons\.appendChild\(createTopbarRightTools\(\)/.test(src), '#257: File/View/tmux/Tabs/Help precede the arrows/Tabber/Search group, which precedes Language and Activity');
     assert.equal(/createTopbarOwnerStatus/.test(src), false, '#257: the distributed-owner status control is gone with the owner/follower model');
     assert.ok(/function topbarControlIsActive\(\)[\s\S]*document\.activeElement[\s\S]*sessionButtons\?\.contains\(active\)[\s\S]*active\.matches\?\.\('select, input, \.topbar-language, \.app-menu-button'\)/.test(src), '#62: topbar detects focused controls before passive rebuilds');
-    assert.ok(/if \(!options\.force && topbarControlIsActive\(\)\) \{[\s\S]*pendingSessionButtonsRender = true[\s\S]*return;\s*\}/.test(src), '#62: passive topbar renders defer while a topbar control is focused');
+    assert.ok(/if \(!inactiveGuest && !options\.force && topbarControlIsActive\(\)\) \{[\s\S]*pendingSessionButtonsRender = true[\s\S]*return;\s*\}/.test(src), '#62: passive topbar renders defer while a topbar control is focused unless guest access ended');
     assert.ok(/button\.addEventListener\('blur', flushPendingSessionButtonsRender\)/.test(src), '#62: language button blur flushes a deferred topbar render');
     assert.equal(/createTopbarThemeSwitcher/.test(src), false, '#257: createTopbarThemeSwitcher is gone (no redundant topbar theme select)');
     {
@@ -9469,6 +9476,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
     assert.equal(typeof api.previewRendererForPath('/tmp/config.json').parse, 'function', 'structured preview owns its parse strategy');
     assert.equal(typeof api.previewRendererForPath('/tmp/table.tsv').parse, 'function', 'delimited preview owns its parse strategy');
+    for (const extension of ['docx', 'pptx']) {
+      const renderer = api.previewRendererForPath(`/tmp/sample.${extension}`);
+      assert.equal(renderer.id, 'office');
+      assert.equal(renderer.previewOnly, true);
+      assert.equal(renderer.maxBytes, 25 * 1024 * 1024);
+      assert.equal(api.previewKindForPath(`/tmp/sample.${extension}`), 'office');
+    }
     const source = fs.readFileSync('static_src/js/yomux/89_preview_renderers.js', 'utf8');
     const dispatch = source.slice(source.indexOf('function renderEditorPreviewPane'), source.indexOf('\n}', source.indexOf('function renderEditorPreviewPane')) + 2);
     assert.ok(dispatch.includes('renderPreviewDescriptor(renderer'), 'editor preview routes through the registry descriptor');

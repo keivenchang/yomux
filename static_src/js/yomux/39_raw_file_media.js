@@ -3,6 +3,7 @@
 // Authenticated raw-byte fetch and Blob URL lifecycle shared by file preview surfaces.
 
 function rawFileUrl(path, params = {}) {
+  if (bootstrap.guestWorkspace) return shareWorkspaceRawURL(path, params);
   const queryParts = [`path=${encodeURIComponent(path)}`];
   for (const [key, value] of Object.entries(params)) {
     if (value === null || value === undefined || value === '') continue;

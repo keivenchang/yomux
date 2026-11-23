@@ -233,6 +233,16 @@ func TestGoYoloPersistsPaneProcessIdentityAndRefusesReplacement(t *testing.T) {
 	if bound, err := reloaded.bindAgentInstance("codex-session", "socket\t$1\t100\t10", "%1", "pid=99:start=2000"); err != nil || bound {
 		t.Fatalf("replacement pane process = (%t, %v), want (false, nil)", bound, err)
 	}
+	const key = "codex-session\x00%1"
+	reloaded.serverErrorSeen[key] = goYoloServerErrorObservation{notice: "■ unexpected status 503", since: time.Now()}
+	reloaded.lastSent[key] = time.Now()
+	reloaded.capacityRecovery[key] = goYoloCapacityRecovery{pending: true}
+	if err := reloaded.set("codex-session", true, "socket\t$1\t200\t10"); err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.serverErrorSeen[key].since.IsZero() || !reloaded.lastSent[key].IsZero() || reloaded.capacityRecovery[key].pending {
+		t.Fatal("new session identity inherited recovery timing or pending input")
+	}
 	reloaded.close()
 	store.close()
 }
@@ -330,7 +340,7 @@ func TestGoYoloApprovalUsesRulesAndVerifiesSubmission(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(config, "settings.yaml"), []byte("yolo:\n  rule_file_path: ./rules.yaml\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(rulesPath, []byte("default: ask\nrules:\n  - name: approve fixture command\n    type: command\n    match: touch\n    action: approve\n"), 0o600); err != nil {
+	if err := os.WriteFile(rulesPath, []byte("default: approve\nrules: []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store, err := newGoYoloStore(config)
@@ -341,8 +351,9 @@ func TestGoYoloApprovalUsesRulesAndVerifiesSubmission(t *testing.T) {
 	if err := store.set("codex-session", true, "socket\t$1\t100\t10"); err != nil {
 		t.Fatal(err)
 	}
-	visible := "Would you like to run the following command?\n\nEnvironment: local\n\n$ touch /tmp/yolo-fixture\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for commands that start with `touch /tmp/yolo-fixture` (p)\n  3. No, and tell Codex what to do differently (esc)\n\nPress enter to confirm or esc to cancel"
+	visible := "Would you like to run the following command?\n\nEnvironment: local\n\n$ touch /tmp/yolo-fixture\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for commands that start with `touch\n    /tmp/yolo-fixture` (p)\n  3. No, and tell Codex what to do differently (esc)\n\nPress enter to confirm or esc to cancel"
 	state := "needs-input"
+	captureCount, changeRowsOnCapture := 0, 0
 	sends := make([]string, 0, 3)
 	processIdentity := goYoloTestProcessID(99, "fixture")
 	s := &server{config: config, yolo: store, goYoloPaneOwnsProcessFn: func(context.Context, string, int) (bool, error) { return true, nil }, agentProcessSnapshot: func(context.Context, int) (stats.AgentStatusProcess, error) {
@@ -360,6 +371,10 @@ func TestGoYoloApprovalUsesRulesAndVerifiesSubmission(t *testing.T) {
 		case "display-message":
 			return exec.CommandContext(ctx, "printf", "socket\t$1\t100\t10")
 		case "capture-pane":
+			captureCount++
+			if captureCount == changeRowsOnCapture {
+				visible = strings.Replace(visible, "$ touch /tmp/yolo-fixture", "$ touch\n/tmp/yolo-fixture", 1)
+			}
 			return exec.CommandContext(ctx, "printf", "%s", visible)
 		case "send-keys":
 			sends = append(sends, args[len(args)-1])
@@ -382,6 +397,48 @@ func TestGoYoloApprovalUsesRulesAndVerifiesSubmission(t *testing.T) {
 	if !prompt.Actionable || prompt.Command != "touch /tmp/yolo-fixture" {
 		t.Fatalf("fixture approval prompt = %#v", prompt)
 	}
+
+	originalVisible := visible
+	for _, rows := range []string{
+		"echo safe \\ \nrm -rf /",
+		"echo safe\nrm -rf /",
+		"echo safe\nrm\n-rf /",
+		"echo $\\\n(rm -rf /)",
+		"echo safe >\\\n /dev/sda",
+		strings.Repeat("echo safe\n", 9) + "fixture",
+	} {
+		visible = "Would you like to run the following command?\nEnvironment: local\n$ " + rows + "\n› 1. Yes, proceed (y)\n  2. No (esc)\nPress enter to confirm or esc to cancel"
+		candidate := yolo.ClassifyPrompt(visible, "")
+		if !candidate.Actionable {
+			t.Fatalf("non-actionable fixture: %q", rows)
+		}
+		if err := s.goYoloApprovalCycle(context.Background(), "codex-session", "%1", "socket\t$1\t100\t10", agent, candidate); err != nil {
+			t.Fatal(err)
+		}
+		if len(sends) != 0 {
+			t.Fatalf("ambiguous prompt %q sent keys: %v", rows, sends)
+		}
+	}
+	if err := os.WriteFile(rulesPath, []byte("default: ask\nrules:\n  - name: approve fixture command\n    type: regex\n    match: '^touch[[:space:]]+/tmp/yolo-fixture$'\n    action: approve\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The flattened command stays identical, but changed row boundaries must fail
+	// the existing final key guard.
+	visible = originalVisible
+	captureCount, changeRowsOnCapture = 0, 2
+	if err := s.goYoloApprovalCycle(context.Background(), "codex-session", "%1", "socket\t$1\t100\t10", agent, prompt); err != nil {
+		t.Fatal(err)
+	}
+	if len(sends) != 0 {
+		t.Fatalf("changed rows sent keys: %v", sends)
+	}
+	if captureCount < 2 {
+		t.Fatal("fixture did not reach final key guard")
+	}
+	visible = originalVisible
+	changeRowsOnCapture = 0
+	store.lastPrompt = make(map[string]string)
+	store.lastPromptAt = make(map[string]time.Time)
 	if err := s.goYoloApprovalCycle(context.Background(), "codex-session", "%1", "socket\t$1\t100\t10", agent, prompt); err != nil {
 		t.Fatal(err)
 	}
@@ -444,14 +501,6 @@ func TestGoYoloApprovalDryRunAndAmbiguousPromptSendNoInput(t *testing.T) {
 	}
 	if yolo.ClassifyPrompt(visible+"\nCompleted successfully", "").Actionable {
 		t.Fatal("stale approval menu followed by successful output remained actionable")
-	}
-	multiline := strings.Replace(visible, "$ touch /tmp/yolo-fixture", "Environment: local\n$ bash -c 'printf hello\nprintf world'", 1)
-	prompt = yolo.ClassifyPrompt(multiline, "")
-	if err := s.goYoloApprovalCycle(context.Background(), "codex-session", "%1", "identity", map[string]any{}, prompt); err != nil {
-		t.Fatal(err)
-	}
-	if sends != 0 || store.lastAction["codex-session"] != "left prompt for manual approval: multiline Codex command" {
-		t.Fatalf("multiline prompt sent %d keys and reported %q", sends, store.lastAction["codex-session"])
 	}
 }
 
@@ -933,7 +982,7 @@ func TestGoYoloWorkerStatusPreservesSuspendedAndDryRunStates(t *testing.T) {
 		state  string
 	}{
 		{action: "suspended: fresh status unavailable", state: "suspended"},
-		{action: "left prompt for manual approval: multiline Codex command", state: "manual-approval"},
+		{action: "left prompt for manual approval: default", state: "manual-approval"},
 		{action: "dry-run: would submit continue", state: "dry-run"},
 		{action: "capacity recovery submission sent; agent response not yet confirmed", state: "awaiting-confirmation"},
 		{action: "submitted continue", state: "watching"},
@@ -1088,7 +1137,8 @@ func TestGoYoloCapacityCycleRetriesOnlyTheVisibleGuardedNotice(t *testing.T) {
 			pastes++
 			screenBeforePaste = screen
 			if !paintDelayed {
-				screen = "■ Selected model is at capacity. Please try a different model.\n› continue"
+				notice, _ := stats.CodexRecoveryNotice(screen)
+				screen = notice + "\n› continue"
 			}
 			return exec.CommandContext(ctx, "true")
 		case "send-keys":
@@ -1227,9 +1277,37 @@ func TestGoYoloCapacityCycleRetriesOnlyTheVisibleGuardedNotice(t *testing.T) {
 		t.Fatalf("new output retained capacity recovery: sends=%d deadline=%v", sends, store.lastSent[key])
 	}
 
+	const serverError = "■ unexpected status 503 Service Unavailable: upstream connect error or disconnect/reset before headers. retried and the latest reset reason: remote connection failure, url: https://chatgpt.com/backend-api/codex/responses, cf-ray: a5da183bcdc6f3e8-SJC"
+	s.metadataPayload["sessions"].(map[string]any)["codex-session"].(map[string]any)["agents"].([]map[string]any)[0]["status"] = "blocked"
+	screen = serverError + "\n›"
+	priorPastes := pastes
+	cycle()
+	firstSeen := store.serverErrorSeen[key]
+	if sends != 5 || pastes != priorPastes || firstSeen.notice != serverError || firstSeen.since.IsZero() {
+		t.Fatalf("first observation must schedule without input: sends=%d pastes=%d observation=%+v", sends, pastes, firstSeen)
+	}
+	if goYoloServerErrorDelay != time.Second {
+		t.Fatalf("server error delay = %s, want one second", goYoloServerErrorDelay)
+	}
+	firstSeen.since = time.Now().Add(-goYoloServerErrorDelay)
+	store.serverErrorSeen[key] = firstSeen
+	cycle()
+	if sends != 6 || pastes != priorPastes+1 || screen != serverError+"\n› continue" {
+		t.Fatalf("503 retry did not paste and submit: sends=%d pastes=%d screen=%q", sends, pastes, screen)
+	}
+	cycle()
+	if sends != 6 || pastes != priorPastes+1 {
+		t.Fatalf("pending 503 retry sent input before its deadline: sends=%d pastes=%d", sends, pastes)
+	}
+	store.lastSent[key] = time.Now().Add(-goYoloServerErrorDelay)
+	cycle()
+	if sends != 7 || pastes != priorPastes+1 {
+		t.Fatalf("pending 503 retry must send only Enter: sends=%d pastes=%d", sends, pastes)
+	}
+
 	sessionIdentity = "$2"
 	cycle()
-	if sends != 5 || store.isEnabled("codex-session") {
+	if sends != 7 || store.isEnabled("codex-session") {
 		t.Fatalf("replacement session retained YO or received a retry: sends=%d enabled=%t", sends, store.isEnabled("codex-session"))
 	}
 
@@ -1237,7 +1315,7 @@ func TestGoYoloCapacityCycleRetriesOnlyTheVisibleGuardedNotice(t *testing.T) {
 		t.Fatal(err)
 	}
 	cycle()
-	if sends != 5 {
+	if sends != 7 {
 		t.Fatalf("disabled YO mode sent another capacity retry: %d", sends)
 	}
 }

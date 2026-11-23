@@ -83,7 +83,7 @@ function capabilityNameForRequest(url, options = {}) {
   let pathname = '';
   try { pathname = new URL(String(url || ''), globalThis.location?.href || 'http://localhost/').pathname; } catch (_) { pathname = String(url || '').split(/[?#]/, 1)[0]; }
   if (pathname === '/api/capabilities' || pathname === '/api/ping' || pathname === '/api/background/status' || pathname === '/api/system-status' || pathname === '/api/system-status/advanced' || pathname === '/api/logs' || pathname === '/api/client-events') return 'core.diagnostics.v1';
-  if (pathname.startsWith('/api/tex/')) return 'finder.preview.v1';
+  if (pathname.startsWith('/api/tex/') || pathname === '/api/fs/office-preview') return 'finder.preview.v1';
   if (pathname === '/api/settings') return 'core.settings.v1';
   if (pathname === '/api/update-status' || pathname === '/api/self-update' || pathname === '/api/self-update/status') return 'core.updates.v1';
   if (pathname === '/api/watched-prs') return 'core.integrations.v1';
@@ -101,7 +101,7 @@ function capabilityNameForRequest(url, options = {}) {
 		if (['/api/fs/diff', '/api/fs/git-history', '/api/fs/git-commit', '/api/batch/blame'].includes(pathname)) return 'finder.git.v1';
 		if (['/api/fs/write', '/api/fs/delete', '/api/fs/rename', '/api/fs/move', '/api/fs/mkdir', '/api/fs/chmod', '/api/upload'].includes(pathname)) return 'finder.write.v1';
 		if (['/api/fs/search', '/api/fs/search-stream', '/api/fs/index-status', '/api/fs/unindex', '/api/batch/search'].includes(pathname)) return 'finder.search.v1';
-		if (['/api/watch/roots', '/api/fs/watch-diff'].includes(pathname)) return 'finder.watch.v1';
+		if (['/api/watch/roots', '/api/fs/watch-diff', '/api/fs/review'].includes(pathname)) return 'finder.watch.v1';
     if (['/api/batch/zip', '/api/batch/html-preview'].includes(pathname)) return 'finder.preview.v1';
     if (['/api/fs/batch', '/api/batch/count'].includes(pathname)) return 'finder.batch.v1';
     return 'finder.read.v1';
@@ -157,7 +157,7 @@ const authUsername = String(bootstrap.authUsername || '');
 const readOnlyMode = accessRole !== 'admin';
 const devMode = bootstrap.dev === true;   // dev-velocity #1b: subscribe to /api/dev-reload + auto-reload
 const clientCapabilityState = Object.freeze({
-  unscopedHostRequests: true,
+  unscopedHostRequests: bootstrap.guestWorkspace !== true,
 });
 function clientCanUseUnscopedHostRequests() {
   return clientCapabilityState.unscopedHostRequests === true;
@@ -396,7 +396,7 @@ function previewRendererStrategy(specification) {
 const PREVIEW_RENDERERS = Object.freeze([
   previewRendererStrategy({id: 'markdown', kind: 'markdown', extensions: ['.md', '.markdown'], textBacked: true, defaultMode: 'preview', language: 'markdown', surfaceClasses: ['markdown-body'], cleanup: cleanupMarkdownPreviewStrategy, signature: markdownPreviewStrategySignature, render: renderMarkdownPreviewStrategy}),
   previewRendererStrategy({id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'preview', language: 'xml', sandbox: true, surfaceClasses: ['html-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: htmlPreviewStrategySignature, render: renderHtmlPreviewStrategy}),
-  previewRendererStrategy({id: 'tex', kind: 'tex', extensions: ['.tex', '.ltx'], textBacked: true, defaultMode: 'preview', language: 'stex', sandbox: true, snapshot: false, surfaceClasses: ['pdf-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: htmlPreviewStrategySignature, render: renderTexPreviewStrategy}),
+  previewRendererStrategy({id: 'tex', kind: 'tex', extensions: ['.tex', '.ltx'], textBacked: true, defaultMode: 'preview', language: 'stex', sandbox: true, snapshot: false, surfaceClasses: ['pdf-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: texPreviewStrategySignature, render: renderTexPreviewStrategy}),
   previewRendererStrategy({id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, previewOnly: true, defaultMode: 'preview', raw: true, surfaceClasses: ['image-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderImagePreviewStrategy, mimeByExtension: {
     '.png': 'image/png',
     '.apng': 'image/apng',
@@ -409,8 +409,10 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.bmp': 'image/bmp',
     '.avif': 'image/avif',
   }}),
+  previewRendererStrategy({id: 'office', kind: 'office', mediaKind: 'office', maxBytes: 25 * 1024 * 1024, extensions: ['.docx', '.pptx'], textBacked: false, previewOnly: true, defaultMode: 'preview', raw: true, sandbox: true, snapshot: false, surfaceClasses: ['office-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderOfficePreviewStrategy, mimeByExtension: {'.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation'}}),
   previewRendererStrategy({id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, surfaceClasses: ['pdf-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderPdfPreviewStrategy, mimeByExtension: {'.pdf': 'application/pdf'}}),
   previewRendererStrategy({id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, previewOnly: true, defaultMode: 'preview', language: 'mermaid', surfaceClasses: ['code-preview-body'], cleanup: cleanupMermaidPreviewStrategy, signature: mermaidPreviewStrategySignature, render: renderMermaidPreviewStrategy}),
+  previewRendererStrategy({id: 'graphviz', kind: 'graphviz', extensions: ['.dot', '.gv'], textBacked: true, defaultMode: 'preview', language: 'text', surfaceClasses: ['code-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: htmlPreviewStrategySignature, render: renderGraphvizPreviewStrategy}),
   previewRendererStrategy({id: 'json-lines-table', kind: 'table', extensions: ['.jsonl', '.ndjson'], textBacked: true, defaultMode: 'preview', language: 'json', surfaceClasses: ['data-preview-body'], render: renderJsonLinesPreviewStrategy}),
   previewRendererStrategy({id: 'structured', kind: 'structured', extensions: ['.json', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', surfaceClasses: ['data-preview-body'], parse: parseStructuredPreviewStrategy, parseByExtension: {
     '.json': parseJsonStructuredPreviewStrategy,
@@ -461,7 +463,7 @@ const PREVIEW_RENDERERS = Object.freeze([
   }}),
   // Finder exposes Edit, Preview, and Diff as modes of one file tab, so generic text/code files need
   // the existing syntax-highlighted Preview surface too; commit snapshots reuse this same renderer.
-  previewRendererStrategy({id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.dtx', '.cls', '.sty', '.ins', '.bbl', '.bib', '.bst', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: true, defaultMode: 'edit', surfaceClasses: ['code-preview-body'], render: renderCodePreviewStrategy, languageByExtension: {
+  previewRendererStrategy({id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.dtx', '.cls', '.sty', '.ins', '.bbl', '.bib', '.bst', '.diff', '.patch', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: true, defaultMode: 'edit', surfaceClasses: ['code-preview-body'], render: renderCodePreviewStrategy, languageByExtension: {
     '.txt': 'text',
     '.log': 'text',
     '.trace': 'text',
@@ -478,8 +480,6 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.bst': 'text',
     '.diff': 'diff',
     '.patch': 'diff',
-    '.dot': 'text',
-    '.gv': 'text',
     '.puml': 'text',
     '.plantuml': 'text',
     '.srt': 'text',
@@ -491,18 +491,18 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.heic': 'image/heic',
     '.heif': 'image/heif',
   }}),
-  previewRendererStrategy({id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.document', mimeByExtension: {
+  previewRendererStrategy({id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.ppt', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.document', mimeByExtension: {
     '.doc': 'application/msword',
-    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     '.ppt': 'application/vnd.ms-powerpoint',
-    '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     '.xls': 'application/vnd.ms-excel',
     '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   }}),
-  previewRendererStrategy({id: 'unsupported-data', kind: 'unsupported', extensions: ['.sqlite', '.sqlite3', '.db', '.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.data', mimeByExtension: {
+  previewRendererStrategy({id: 'sqlite', kind: 'sqlite', extensions: ['.sqlite', '.sqlite3', '.db'], textBacked: false, previewOnly: true, defaultMode: 'preview', raw: true, snapshot: false, surfaceClasses: ['data-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderSQLitePreviewStrategy, mimeByExtension: {
     '.sqlite': 'application/vnd.sqlite3',
     '.sqlite3': 'application/vnd.sqlite3',
     '.db': 'application/vnd.sqlite3',
+  }}),
+  previewRendererStrategy({id: 'unsupported-data', kind: 'unsupported', extensions: ['.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.data', mimeByExtension: {
     '.parquet': 'application/vnd.apache.parquet',
     '.arrow': 'application/vnd.apache.arrow.file',
     '.feather': 'application/vnd.apache.arrow.file',
@@ -572,6 +572,7 @@ const pendingFileEditorFocus = new Set();
 const paneViewState = new Map();  // layout item -> generic pane scroll state
 const pendingPaneViewStateCaptures = new Set();
 const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
+const pdfReloadViewportStorageKey = 'yomux.pdfReloadViewport.v1';
 const pendingFileEditorLineTargets = new Map();  // layout item -> line target to apply after async CodeMirror load
 const fileEditorDiffExpandOverrides = new Map();  // layout item -> per-editor diff context expansion
 const layoutUrlState = {
@@ -828,7 +829,7 @@ function consumeTabberModePreferenceMigration() {
 }
 let tabberMode = tabberModePreferenceNeedsMigration ? 'advanced'
   : normalizeTabberMode(configuredTabberMode);
-let tabberSidebarRequestedVisible = storageGet(tabberSidebarPreferenceStorageKey) !== 'false';
+let tabberSidebarRequestedVisible = bootstrap.guestWorkspace || storageGet(tabberSidebarPreferenceStorageKey) !== 'false';
 let tabberSidebarVisible = tabberSidebarRequestedVisible;
 let tabberSidebarSinglePane = false;
 let tabberSidebarNarrowOverride = false;
@@ -1104,6 +1105,7 @@ function fileSurfaceGroupLabel() {
 const searchHistoryItemId = '__search_history__';
 function searchHistoryTabLabel() { return t('tab.searchHistory'); }
 const prefsItemId = '__prefs__';
+const shareItemId = '__share__';
 const debugPaneItemId = '__debug__';
 const yocostItemId = '__yocost__';
 const legacyYoCostItemAliases = Object.freeze(['cost', 'yocost', 'yo!cost', 'yo-cost', yocostItemId]);
@@ -1226,7 +1228,7 @@ function narrowTouchSingleColumnViewport(viewport) {
 }
 
 function narrowSingleColumnMode(viewport) {
-  return narrowTouchSingleColumnViewport(viewport);
+  return !bootstrap.guestWorkspace && narrowTouchSingleColumnViewport(viewport);
 }
 const debugModeExplicitUrlEnabled = urlFlagEnabled('debug');
 let debugModeEnabled = debugModeExplicitUrlEnabled;
@@ -1443,7 +1445,9 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     canPopout: item => {
       if (isHistoricalFileEditorItem(item)) return false;
       const path = fileItemPath(item);
-      return Boolean(path && editorPreviewModeAvailable(path, fileEditorStateForItem(path, item)));
+      if (!path) return false;
+      const state = fileEditorStateForItem(path, item);
+      return state?.kind === 'text' || editorPreviewModeAvailable(path, state);
     },
     popoutDisabledReason: item => t(isHistoricalFileEditorItem(item)
       ? 'editor.historicalReadOnly'
@@ -1456,7 +1460,7 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
       if (!path) return false;
       const state = fileEditorStateForItem(path, item);
       const renderer = previewRendererForPath(path, state);
-      if (renderer?.textBacked === true || renderer?.id === 'pdf') return openLivePanePopout(item);
+      if (state?.kind === 'text' || renderer?.textBacked === true || renderer?.id === 'pdf') return openLivePanePopout(item);
       return openFilePreviewPopout(path, document.getElementById(panelDomId(item)));
     },
     focusSearch,
@@ -1625,6 +1629,16 @@ const TAB_TYPES = [
     className: () => 'preferences-item',
     icon: 'gear',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
+  }),
+  virtualPanelTabType({
+    key: 'share',
+    id: shareItemId,
+    label: () => t('sharing.title'),
+    sortRank: 0.66,
+    createPanel: () => createShareManager(),
+    renderAttached: () => refreshShareManager(),
+    relocalize: (_item, panel) => relocalizeShareManager(panel),
+    icon: 'share',
   }),
   virtualPanelTabType({
     key: 'debug',
@@ -1830,7 +1844,9 @@ function applyFileExplorerStaticLabels() {
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 const dynamicVirtualLayoutItems = new Set();
 function virtualTabItems() {
-  return [infoItemId, yoagentItemId, chatItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId, ...dynamicVirtualLayoutItems];
+  if (bootstrap.guestWorkspace) return [tabberItemId];
+  const sharing = !readOnlyMode && capabilityAvailable('sharing.scoped.v1') ? [shareItemId] : [];
+  return [infoItemId, yoagentItemId, chatItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, ...sharing, debugPaneItemId, ...dynamicVirtualLayoutItems];
 }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions, ...tabberViewSessions.keys()];
@@ -2312,6 +2328,7 @@ const tabTouchLongPressMoveThresholdPx = 10;
 const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
+const tabDescriptionOverlay = createDismissableOverlayController();
 const linkContextMenu = createContextMenuController();
 const markdownPreviewContextMenuController = createContextMenuController();
 const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover

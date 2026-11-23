@@ -1141,14 +1141,21 @@ function renderRawImagePreviewInto(container, path, state = null, options = {}) 
   });
 }
 
-function renderPdfPreviewInto(container, path, {sourceUrl = rawFileUrl(path), objectUrl = '', item: previewItem = ''} = {}) {
+function renderPdfPreviewInto(container, path, {sourceUrl = rawFileUrl(path), objectUrl = '', item: previewItem = '', readOnly = false, retainPrevious = false, onLoadError = null, onDocumentReady = null} = {}) {
+  container.classList.add('pdf-preview-body');
   const ownerDocument = container.ownerDocument || document;
   const source = new URL(sourceUrl, `${location.protocol}//${location.host}/`).href;
   const frame = ownerDocument.createElement('iframe');
   frame.className = 'file-editor-pdf-preview';
+  let staging = retainPrevious && Boolean(container.querySelector(':scope > iframe[data-pdf-ready="true"]'));
+  if (staging) {
+    container.classList.add('pdf-preview-status-host');
+    frame.classList.add('pdf-preview-staged-frame');
+  }
   frame.setAttribute('title', t('preview.pdf.frameTitle', {name: basenameOf(path)}));
   const item = previewItem || container.closest?.('[data-layout-item]')?.dataset.layoutItem || fileEditorItemFor(path);
   frame.dataset.layoutItem = item;
+  const pdfViewOwner = Symbol();
   const savedPage = fileEditorViewState.get(item)?.pdfPage;
   const initialPage = Number.isSafeInteger(savedPage) && savedPage > 0 ? savedPage : 1;
   let active = true;
@@ -1156,6 +1163,12 @@ function renderPdfPreviewInto(container, path, {sourceUrl = rawFileUrl(path), ob
   let viewerDocument = null;
   let documentInitialized = false;
   let wasVisible = false;
+  let wideSidebar = null;
+  let retiring = false;
+  let lastPdfScrollTop = 0;
+  let lastPdfScrollLeft = 0;
+  let stagedPage = 0;
+  const paintedPages = new Set();
   const visible = () => active && frame.isConnected && frame.getBoundingClientRect().width > 0
     && frame.getBoundingClientRect().height > 0;
   const blockDocumentReplacement = event => {
@@ -1165,7 +1178,7 @@ function renderPdfPreviewInto(container, path, {sourceUrl = rawFileUrl(path), ob
       event.stopImmediatePropagation();
     }
   };
-  const rememberViewState = patch => {
+  const rememberViewState = (patch, deferUrl = false) => {
     if (!visible()) {
       wasVisible = false;
       return;
@@ -1175,52 +1188,177 @@ function renderPdfPreviewInto(container, path, {sourceUrl = rawFileUrl(path), ob
     if (patch.pdfPage) frame.dataset.pdfPage = String(patch.pdfPage);
     const previous = fileEditorViewState.get(item) || {};
     if (Object.entries(patch).every(([key, value]) => previous[key] === value)) return;
-    fileEditorViewState.set(item, {...previous, ...patch});
-    if (itemInLayout(item)) updateActiveSessionParam();
+    const next = {...previous, ...patch};
+    if (patch.pdfPage || patch.pdfViewport) next.pdfViewOwner = pdfViewOwner;
+    fileEditorViewState.set(item, next);
+    if (!retiring && itemInLayout(item)) {
+      if (deferUrl) {
+        storePdfReloadViewport(item, patch.pdfViewport);
+        scheduleLayoutUrlStateRefresh();
+      } else {
+        storePdfReloadViewport(item, null);
+        updateActiveSessionParam();
+      }
+    }
   };
   const rememberPage = ({pageNumber}) => {
     if (Number.isSafeInteger(pageNumber) && pageNumber > 0) rememberViewState({pdfPage: pageNumber});
   };
+  const rememberViewport = ({location: position}) => {
+    const viewer = app.pdfViewer;
+    lastPdfScrollTop = viewer.container.scrollTop;
+    lastPdfScrollLeft = viewer.container.scrollLeft;
+    const viewport = normalizedPdfViewport({
+      page: position.pageNumber, activePage: viewer.currentPageNumber,
+      left: position.left, top: position.top, zoom: viewer.currentScaleValue,
+      rotation: viewer.pagesRotation, scrollMode: viewer.scrollMode, spreadMode: viewer.spreadMode,
+    });
+    if (!viewport) return;
+    const previous = fileEditorViewState.get(item)?.pdfViewport;
+    if (previous && Object.keys(viewport).every(key => previous[key] === viewport[key])) return;
+    const scrolling = previous && ['zoom', 'rotation', 'scrollMode', 'spreadMode'].every(key => previous[key] === viewport[key]);
+    rememberViewState({pdfViewport: viewport}, scrolling);
+  };
   const rememberSidebar = () => {
-    if (isPdfSidebarView(app?.viewsManager?.active)) {
+    if (!wideSidebar && isPdfSidebarView(app?.viewsManager?.active)) {
       rememberViewState({pdfSidebarView: app.viewsManager.active, pdfSidebarOpen: app.viewsManager.isOpen});
+    }
+  };
+  const fitOfficeSidebar = () => {
+    const sidebar = app.viewsManager;
+    if (!readOnly || !sidebar) return;
+    // At this width PDF.js overlays its sidebar on the page. Keep the wide preference.
+    if (frame.contentWindow.matchMedia('(max-width: 840px)').matches) {
+      if (!wideSidebar) {
+        wideSidebar = {view: sidebar.active, open: sidebar.isOpen};
+        sidebar.close();
+      }
+    } else if (wideSidebar) {
+      const {view, open} = wideSidebar;
+      wideSidebar = null;
+      if (open) sidebar.switchView(view, true);
+      else sidebar.close();
     }
   };
   const documentReady = () => {
     if (!active || app !== frame.contentWindow?.PDFViewerApplication || app.url !== source) return;
     documentInitialized = true;
     if (!visible()) return;
+    wasVisible = false;
     app.eventBus.off('pagechanging', rememberPage);
+    app.eventBus.off('updateviewarea', rememberViewport);
     app.eventBus.off('sidebarviewchanged', rememberSidebar);
     const state = fileEditorViewState.get(item);
-    if (isPdfSidebarView(state?.pdfSidebarView)) app.viewsManager.switchView(state.pdfSidebarView, state.pdfSidebarOpen === true);
-    if (state?.pdfSidebarOpen === false) app.viewsManager.switchView(0);
+    if (!wideSidebar) {
+      if (isPdfSidebarView(state?.pdfSidebarView)) app.viewsManager.switchView(state.pdfSidebarView, state.pdfSidebarOpen === true);
+      if (state?.pdfSidebarOpen === false) app.viewsManager.switchView(0);
+    }
+    fitOfficeSidebar();
     const page = state?.pdfPage || initialPage;
-    app.pdfViewer.currentPageNumber = Math.min(page, app.pagesCount);
+    const targetPage = Math.min(page, app.pagesCount);
+    const viewport = state?.pdfViewport;
+    const viewer = app.pdfViewer;
+    if (viewport) {
+      if (viewport.rotation !== undefined && viewer.pagesRotation !== viewport.rotation) viewer.pagesRotation = viewport.rotation;
+      if (viewport.scrollMode !== undefined && viewer.scrollMode !== viewport.scrollMode) viewer.scrollMode = viewport.scrollMode;
+      if (viewport.spreadMode !== undefined && viewer.spreadMode !== viewport.spreadMode) viewer.spreadMode = viewport.spreadMode;
+      if (viewer.currentScaleValue !== viewport.zoom) viewer.currentScaleValue = viewport.zoom;
+    }
+    if (viewport?.activePage === page && page <= app.pagesCount && viewport.page <= app.pagesCount) {
+      viewer.scrollPageIntoView({
+        pageNumber: viewport.page,
+        destArray: [null, {name: 'XYZ'}, viewport.left, viewport.top, null],
+        allowNegativeOffset: true, ignoreDestinationZoom: true,
+      });
+    } else if (viewer.currentPageNumber !== targetPage) {
+      viewer.currentPageNumber = targetPage;
+    }
+    if (staging) {
+      stagedPage = viewer.currentPageNumber;
+      const view = viewer.getPageView(stagedPage - 1);
+      if (!paintedPages.has(stagedPage) || !view?.div.querySelector('canvas')) {
+        viewer.update();
+        return;
+      }
+    }
+    let restoreFocus = false;
+    let focusedControl = '';
+    if (staging) {
+      const focusedFrame = ownerDocument.activeElement;
+      restoreFocus = focusedFrame !== frame && focusedFrame?.parentElement === container && focusedFrame.matches('iframe');
+      if (restoreFocus) focusedControl = focusedFrame.contentDocument?.activeElement?.id || '';
+      // Reparenting an iframe reloads it. Keep the admitted viewer node mounted while retiring its siblings.
+      for (const sibling of [...container.children]) {
+        if (sibling === frame) continue;
+        if (sibling.matches('iframe')) releaseRawFileMediaSource(sibling);
+        sibling.remove();
+      }
+      staging = false;
+      app.eventBus.off('pagerendered', stagedPageRendered);
+      frame.classList.remove('pdf-preview-staged-frame');
+      container.append(fallback);
+    }
+    lastPdfScrollTop = viewer.container.scrollTop;
+    lastPdfScrollLeft = viewer.container.scrollLeft;
     wasVisible = true;
     rememberPage({pageNumber: app.pdfViewer.currentPageNumber});
     rememberSidebar();
     app.eventBus.on('pagechanging', rememberPage);
+    app.eventBus.on('updateviewarea', rememberViewport);
     app.eventBus.on('sidebarviewchanged', rememberSidebar);
     frame.dataset.pdfReady = 'true';
-    const fallback = frame.parentElement?.querySelector('.file-editor-preview-fallback');
-    if (fallback) fallback.hidden = true;
+    fallback.hidden = true;
+    if (restoreFocus) {
+      frame.focus({preventScroll: true});
+      if (focusedControl) viewerDocument.getElementById(focusedControl)?.focus({preventScroll: true});
+    }
+    onDocumentReady?.({frame, app, canNavigate: () => active && wasVisible && visible()});
+  };
+  const reportLoadError = message => {
+    if (!active) return;
+    if (staging) {
+      releaseRawFileMediaSource(frame);
+      frame.remove();
+    }
+    if (onLoadError) onLoadError(message);
+    else statusErr(message);
+  };
+  const documentError = ({source: failedApp, message}) => {
+    if (failedApp === app) reportLoadError(message);
+  };
+  const stagedPageRendered = ({pageNumber, cssTransform, error}) => {
+    if (!active || !staging || cssTransform) return;
+    if (error) {
+      if (pageNumber === stagedPage) reportLoadError(userMessageText(error, t('common.requestFailed')));
+      return;
+    }
+    paintedPages.add(pageNumber);
+    if (pageNumber === stagedPage) documentReady();
   };
   const detachViewer = () => {
     for (const type of ['drop', 'change', 'keydown']) viewerDocument?.removeEventListener(type, blockDocumentReplacement, true);
     app?.eventBus?.off('documentinit', documentReady);
+    app?.eventBus?.off('pagerendered', stagedPageRendered);
+    app?.eventBus?.off('documenterror', documentError);
     app?.eventBus?.off('pagechanging', rememberPage);
+    app?.eventBus?.off('updateviewarea', rememberViewport);
     app?.eventBus?.off('sidebarviewchanged', rememberSidebar);
   };
   const initialize = event => {
     if (!active || event.detail?.source !== frame.contentWindow) return;
     detachViewer();
     documentInitialized = false;
+    paintedPages.clear();
     wasVisible = false;
+    wideSidebar = null;
     delete frame.dataset.pdfReady;
     const viewer = event.detail.source;
     viewerDocument = viewer.document;
     for (const type of ['drop', 'change', 'keydown']) viewerDocument.addEventListener(type, blockDocumentReplacement, true);
+    for (const id of ['openFile', 'secondaryOpenFile']) {
+      const control = viewerDocument.getElementById(id);
+      if (control) control.hidden = true;
+    }
     const sidebar = fileEditorViewState.get(item);
     viewer.PDFViewerApplicationOptions.setAll({
       disablePreferences: true, disableHistory: true, viewOnLoad: 1,
@@ -1228,7 +1366,14 @@ function renderPdfPreviewInto(container, path, {sourceUrl = rawFileUrl(path), ob
         ? (sidebar.pdfSidebarOpen ? (isPdfSidebarView(sidebar.pdfSidebarView) ? sidebar.pdfSidebarView : 1) : 0) : -1,
       enableScripting: false, enableXfa: false, externalLinkTarget: 2,
       enableWebGPU: false,
+      ...(readOnly ? {annotationEditorMode: -1, annotationMode: 1, enableSignatureEditor: false} : {}),
     });
+    if (readOnly) {
+      for (const id of ['editorModeButtons', 'editorModeSeparator', 'editorCommentButton', 'editorSignatureButton']) {
+        const control = viewerDocument.getElementById(id);
+        if (control) control.hidden = true;
+      }
+    }
     app = viewer.PDFViewerApplication;
     const initializedApp = app;
     app.initializedPromise.then(() => {
@@ -1237,8 +1382,12 @@ function renderPdfPreviewInto(container, path, {sourceUrl = rawFileUrl(path), ob
       const scrollPage = app.pdfViewer.scrollPageIntoView.bind(app.pdfViewer);
       app.pdfViewer.scrollPageIntoView = options => { if (visible()) scrollPage(options); };
       app.eventBus.on('documentinit', documentReady);
+      if (staging) app.eventBus.on('pagerendered', stagedPageRendered);
+      if (onLoadError) app.eventBus.on('documenterror', documentError);
     }).catch(error => {
-      if (active && app === initializedApp) statusErr(userMessageText(error, t('common.requestFailed')));
+      if (!active || app !== initializedApp) return;
+      const message = userMessageText(error, t('common.requestFailed'));
+      reportLoadError(message);
     });
   };
   ownerDocument.addEventListener('webviewerloaded', initialize);
@@ -1246,11 +1395,25 @@ function renderPdfPreviewInto(container, path, {sourceUrl = rawFileUrl(path), ob
   const visibilityObserver = ResizeObserverCtor ? new ResizeObserverCtor(() => {
     const isVisible = visible();
     if (isVisible && !wasVisible && documentInitialized) documentReady();
+    else if (isVisible && documentInitialized) fitOfficeSidebar();
     if (!isVisible) wasVisible = false;
   }) : null;
   visibilityObserver?.observe(frame);
-  const retire = () => releaseRawFileMediaSource(frame);
-  ownerDocument.defaultView?.addEventListener('pagehide', retire, {once: true});
+  const retire = event => {
+    if (event.persisted) return;
+    const currentOwner = fileEditorViewState.get(item)?.pdfViewOwner;
+    const scroller = app?.pdfViewer?.container;
+    const unreadScroll = scroller && (scroller.scrollTop !== lastPdfScrollTop || scroller.scrollLeft !== lastPdfScrollLeft);
+    if (ownerDocument === document && !staging && wasVisible && visible() && itemInLayout(item)
+        && (!currentOwner || currentOwner === pdfViewOwner || unreadScroll)) {
+      retiring = true;
+      // PDF.js reads native scroll on the next animation frame, which a reload can interrupt.
+      app.pdfViewer.update();
+      storePdfReloadViewport(item, fileEditorViewState.get(item)?.pdfViewport);
+    }
+    releaseRawFileMediaSource(frame);
+  };
+  ownerDocument.defaultView?.addEventListener('pagehide', retire);
   frame._rawFileReadyCleanup = () => {
     active = false;
     visibilityObserver?.disconnect();
@@ -1269,15 +1432,123 @@ function renderPdfPreviewInto(container, path, {sourceUrl = rawFileUrl(path), ob
   detail.className = 'file-editor-empty-detail';
   if (!objectUrl) detail.append(...previewFileActionLinks(path));
   fallback.append(title, detail);
-  container.replaceChildren(frame, fallback);
+  if (staging) container.append(frame);
+  else {
+    releaseRawFileMediaSources(container);
+    container.replaceChildren(frame, fallback);
+  }
+}
+
+function bindTexPreviewScrollSync(panel) {
+  panel?.querySelector('.file-editor-preview-pane-panel')?._texPreviewSyncBind?.();
+}
+
+function cleanupTexProgressJob(jobID) {
+  if (!jobID) return;
+  const query = new URLSearchParams({job_id: jobID});
+  void apiFetch(`/api/tex/compiler?${query}`, {method: 'DELETE', keepalive: true}, {recordDebug: false}).catch(() => {});
+}
+
+function retireStagedPdfPreview(container) {
+  for (const frame of container?.querySelectorAll('.pdf-preview-staged-frame') || []) {
+    releaseRawFileMediaSource(frame);
+    frame.remove();
+  }
+}
+
+// Keep status separate from the PDF viewport so progress does not resize the reading surface.
+function showPdfPreviewUpdateStatus(viewer, card) {
+  retireStagedPdfPreview(viewer);
+  const previous = viewer.querySelector(':scope > .pdf-preview-update-status');
+  previous?.remove();
+  if (viewer.querySelector(':scope > iframe[data-pdf-ready="true"]')) {
+    viewer.classList.add('pdf-preview-status-host');
+    card.classList.add('pdf-preview-update-status');
+    viewer.append(card);
+  } else {
+    releaseRawFileMediaSources(viewer);
+    viewer.replaceChildren(card);
+  }
+}
+
+function renderOfficePreviewStrategy({container, path, signature}) {
+  let host = container.querySelector(':scope > [data-office-preview]');
+  const retainPdf = host?.dataset.officePreviewPath === path && Boolean(host.querySelector('iframe[data-pdf-ready="true"]'));
+  if (!prepareRetainedPreviewStrategy(container, signature, '[data-office-preview]', {retainPdf})) return false;
+  if (!retainPdf) {
+    host = document.createElement('div');
+    host.dataset.officePreview = '';
+    host.dataset.officePreviewPath = path;
+    host.className = 'office-preview';
+    const actions = document.createElement('div');
+    actions.className = 'office-preview-actions';
+    const viewer = document.createElement('div');
+    viewer.className = 'office-preview-viewer';
+    host.append(actions, viewer);
+    container.replaceChildren(host);
+  }
+  const [actions, viewer] = host.children;
+  const download = previewFileActionLinks(path).filter(node => node.tagName === 'A').at(-1);
+  download.textContent = localizedLabel('preview.office.download', 'Download original');
+  actions.replaceChildren(download);
+  const controller = new AbortController();
+  container._officePreviewController = controller;
+  const current = () => container._officePreviewController === controller && !controller.signal.aborted;
+  let busy = false;
+  const refresh = makeButton({label: t('common.reload'), title: t('common.reload'), ariaLabel: t('common.reload'), onClick: () => { container._previewAsync = run(); }});
+  actions.append(refresh);
+  const showFailure = message => {
+    if (!current()) return;
+    const card = fileEditorEmptyState(localizedLabel('preview.office.failed', 'Office preview unavailable'), message);
+    card.append(makeButton({label: t('common.retry'), title: t('common.retry'), ariaLabel: t('common.retry'), onClick: () => { container._previewAsync = run(); }}));
+    showPdfPreviewUpdateStatus(viewer, card);
+  };
+  const run = async () => {
+    if (!current() || busy) return;
+    busy = true;
+    refresh.disabled = true;
+    showPdfPreviewUpdateStatus(viewer, fileEditorEmptyState(localizedLabel('preview.office.converting', 'Converting Office document to PDF…')));
+    try {
+      const response = await apiFetch('/api/fs/office-preview', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path}),
+        signal: controller.signal, deadlineMs: 35000, startupImmediate: true,
+      }, {abortRetirementReason: 'office_preview_replaced'});
+      if (!current()) return;
+      if (!response.ok || !String(response.headers.get('Content-Type') || '').startsWith('application/pdf')) {
+        const payload = await response.json();
+        throw new Error([payload.error || t('common.requestFailed'), payload.instructions].filter(Boolean).join('\n'));
+      }
+      const blob = await response.blob();
+      if (!current()) return;
+      const objectUrl = URL.createObjectURL(blob);
+      renderPdfPreviewInto(viewer, path, {sourceUrl: objectUrl, objectUrl, readOnly: true, retainPrevious: true, onLoadError: showFailure});
+    } catch (error) {
+      showFailure(userMessageText(error, t('common.requestFailed')));
+    } finally {
+      busy = false;
+      refresh.disabled = false;
+    }
+  };
+  container._previewAsync = run();
+  return true;
 }
 
 function renderTexPreviewStrategy({container, path, text, signature}) {
-  if (!prepareRetainedPreviewStrategy(container, signature, '[data-tex-preview]')) return false;
-  const host = document.createElement('div');
-  host.dataset.texPreview = '';
-  host.style.cssText = 'display:flex;flex-direction:column;min-height:100%;height:100%';
-  container.replaceChildren(host);
+  if (bootstrap.guestWorkspace) return renderSharePublishedPDF(container, path);
+  if (fileState.get(path)?._shareActive && !container._sharePublishRequested) {
+    container.replaceChildren(document.createTextNode('Shared TeX source. Use Publish PDF in YO!share to compile and publish.'));
+    return true;
+  }
+  let host = container.querySelector(':scope > [data-tex-preview]');
+  const retainPdf = host?.dataset.texPreviewPath === path && Boolean(host.querySelector(':scope > iframe[data-pdf-ready="true"]'));
+  if (!prepareRetainedPreviewStrategy(container, signature, '[data-tex-preview]', {retainPdf})) return false;
+  if (!retainPdf) {
+    host = document.createElement('div');
+    host.dataset.texPreview = '';
+    host.dataset.texPreviewPath = path;
+    host.style.cssText = 'display:flex;flex-direction:column;min-height:100%;height:100%';
+    container.replaceChildren(host);
+  }
   const controller = new AbortController();
   let instructions = '';
   container._texPreviewController = controller;
@@ -1286,10 +1557,77 @@ function renderTexPreviewStrategy({container, path, text, signature}) {
     ...(body ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)} : {}),
     signal: controller.signal, deadlineMs: 200000, startupImmediate: true,
   }, {abortRetirementReason: 'tex_preview_replaced'});
+  const newJobID = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
+  const runWithProgress = async (title, startRequest, retainCompletedJob = false) => {
+    const card = show(title);
+    if (!card) return null;
+    const progress = document.createElement('progress');
+    progress.className = 'tex-preview-progress-bar';
+    progress.removeAttribute('value');
+    const message = document.createElement('div');
+    message.className = 'tex-preview-progress-message';
+    message.textContent = title;
+    const elapsed = document.createElement('div');
+    elapsed.className = 'tex-preview-progress-elapsed';
+    const output = document.createElement('pre');
+    output.className = 'tex-preview-progress-output';
+    output.hidden = true;
+    card.append(progress, message, elapsed, output);
+    const jobID = newJobID();
+    const startedAt = Date.now();
+    let active = true;
+    let polling = false;
+    const updateElapsed = () => {
+      const seconds = Math.floor((Date.now() - startedAt) / 1000);
+      elapsed.textContent = `${t('duration.minuteShort', {count: Math.floor(seconds / 60)})} ${tPlural('duration.second', seconds % 60)}`;
+    };
+    const updateProgress = async () => {
+      if (!active || polling || !current()) return;
+      polling = true;
+      try {
+        const response = await request(`/api/tex/compiler?job_id=${encodeURIComponent(jobID)}`);
+        if (!response.ok) await apiJsonResponse(response);
+        const state = (await response.json()).progress;
+        if (!state || !active || !current()) return;
+        message.textContent = state.message || title;
+        const total = Number(state.total_bytes) || 0;
+        const downloaded = Number(state.downloaded_bytes) || 0;
+        if (total > 0) {
+          progress.max = total;
+          progress.value = Math.min(downloaded, total);
+          message.textContent += ` (${Math.floor(downloaded * 100 / total)}%)`;
+        } else {
+          progress.removeAttribute('value');
+        }
+        if (state.log) {
+          output.hidden = false;
+          output.textContent = state.log;
+          output.scrollTop = output.scrollHeight;
+        }
+      } catch (error) {
+        if (active && current()) message.textContent = `${title} · ${userMessageText(error, t('common.requestFailed'))}`;
+      } finally {
+        polling = false;
+      }
+    };
+    updateElapsed();
+    const elapsedTimer = setInterval(updateElapsed, 1000);
+    const progressTimer = setInterval(updateProgress, 1000);
+    updateProgress();
+    let keepJob = false;
+    try {
+      const response = await startRequest(jobID);
+      keepJob = retainCompletedJob;
+      return {response, jobID};
+    } finally {
+      active = false;
+      clearInterval(elapsedTimer);
+      clearInterval(progressTimer);
+      if (!keepJob) cleanupTexProgressJob(jobID);
+    }
+  };
   const show = (title, detail = '', payload = null) => {
     if (!current()) return;
-    releaseRawFileMediaSources(host);
-    delete host.dataset.texPreviewReady;
     const card = fileEditorEmptyState(title, detail);
     card.classList.add('tex-preview-status');
     if (payload?.instructions) {
@@ -1298,11 +1636,11 @@ function renderTexPreviewStrategy({container, path, text, signature}) {
       instructions.textContent = payload.instructions;
       card.append(instructions);
     }
-    host.replaceChildren(card);
+    showPdfPreviewUpdateStatus(host, card);
     return card;
   };
-  const button = (parent, label, action) => {
-    const control = makeButton({label, title: label, ariaLabel: label, onClick: () => {
+  const button = (parent, label, action, className = '') => {
+    const control = makeButton({label, title: label, ariaLabel: label, className, onClick: () => {
       control.disabled = true;
       container._previewAsync = run(action);
     }});
@@ -1317,39 +1655,200 @@ function renderTexPreviewStrategy({container, path, text, signature}) {
       parent.append(actions);
     }
     actions.append(control);
+    return control;
+  };
+  const bindTexSplitScroll = (frame, app, canNavigate, anchors) => {
+    const panel = container.closest('.file-editor-panel');
+    const editor = panel?._cmView;
+    if (!editor || !frame.isConnected || !anchors.length) return;
+    if (container._texPreviewSyncCleanup?.editor === editor
+        && container._texPreviewSyncCleanup.frame === frame && container._texPreviewSyncCleanup.app === app) return;
+    container._texPreviewSyncCleanup?.();
+    const panelItem = panel.dataset.layoutItem || fileEditorItemFor(path);
+    const scroller = editor.scrollDOM;
+    const ownerWindow = panel.ownerDocument.defaultView;
+    let observedDoc = null;
+    let matchesCompile = false;
+    const usable = () => {
+      if (!current() || !canNavigate() || app !== frame.contentWindow?.PDFViewerApplication
+          || panel._cmView !== editor || editorViewModeFor(path, panelItem) !== 'split') return false;
+      if (observedDoc !== editor.state.doc) {
+        observedDoc = editor.state.doc;
+        matchesCompile = observedDoc.toString() === text;
+      }
+      return matchesCompile;
+    };
+    const firstLineByPage = new Map();
+    for (const {line, page} of anchors) {
+      if (!firstLineByPage.has(page)) firstLineByPage.set(page, line);
+    }
+    let pendingScroll = 0;
+    let lastTop = scroller.scrollTop;
+    let lastCaret = editor.state.selection.main.head;
+    let settingPdfPage = false;
+    const pdfDocument = frame.contentDocument;
+    const pdfNavigationEvents = ['wheel', 'pointerdown', 'keydown'];
+    const cancelEditorScroll = () => {
+      if (pendingScroll) ownerWindow.cancelAnimationFrame(pendingScroll);
+      pendingScroll = 0;
+    };
+    const revealPdfPage = line => {
+      if (!usable() || !Number.isFinite(line)) return;
+      let first = 0;
+      let end = anchors.length;
+      while (first < end) {
+        const middle = Math.floor((first + end) / 2);
+        if (anchors[middle].line < line) first = middle + 1;
+        else end = middle;
+      }
+      const before = anchors[first - 1];
+      const after = anchors[first];
+      const page = !after || before && line - before.line <= after.line - line ? before.page : after.page;
+      if (page === app.pdfViewer.currentPageNumber) return;
+      settingPdfPage = true;
+      try {
+        app.pdfViewer.currentPageNumber = page;
+      } finally {
+        settingPdfPage = false;
+      }
+    };
+    const onEditorScroll = () => {
+      const top = scroller.scrollTop;
+      if (top === lastTop) return;
+      lastTop = top;
+      if (pendingScroll || !usable()) return;
+      pendingScroll = ownerWindow.requestAnimationFrame(() => {
+        pendingScroll = 0;
+        const line = scroller.scrollTop === 0 ? 1 : fileEditorScrollAtBottom(scroller)
+          ? editor.state.doc.lines : sourcePositionForEditorScroll(editor)?.line;
+        revealPdfPage(line);
+      });
+    };
+    const onCaretChange = () => {
+      const head = editor.state.selection.main.head;
+      if (head === lastCaret) return;
+      lastCaret = head;
+      if (!editor.hasFocus || !usable()) return;
+      cancelEditorScroll();
+      revealPdfPage(editor.state.doc.lineAt(head).number);
+    };
+    const onPdfPageChange = ({pageNumber}) => {
+      if (settingPdfPage || !usable()) return;
+      cancelEditorScroll();
+      const line = firstLineByPage.get(pageNumber);
+      if (line === undefined) return;
+      const top = editorScrollTopForSourcePosition(editor, {line});
+      if (top === null) return;
+      writeOwnedElementScroll(scroller, {top}, 'tex-pdf-page');
+      // A reflected scroll may clamp near EOF. Its scroll event must not change the PDF page.
+      lastTop = scroller.scrollTop;
+    };
+    scroller.addEventListener('scroll', onEditorScroll, {passive: true});
+    panel.ownerDocument.addEventListener('selectionchange', onCaretChange);
+    app.eventBus.on('pagechanging', onPdfPageChange);
+    for (const type of pdfNavigationEvents) pdfDocument.addEventListener(type, cancelEditorScroll, {capture: true, passive: true});
+    const cleanup = () => {
+      cancelEditorScroll();
+      scroller.removeEventListener('scroll', onEditorScroll);
+      panel.ownerDocument.removeEventListener('selectionchange', onCaretChange);
+      app.eventBus.off('pagechanging', onPdfPageChange);
+      for (const type of pdfNavigationEvents) pdfDocument.removeEventListener(type, cancelEditorScroll, true);
+    };
+    cleanup.app = app;
+    cleanup.editor = editor;
+    cleanup.frame = frame;
+    container._texPreviewSyncCleanup = cleanup;
   };
   const compile = async () => {
-    show(t('preview.tex.compiling'));
-    const response = await request('/api/tex/preview', {path, content: text});
-    if (!response.ok) await apiJsonResponse(response);
-    if (!current()) return;
-    if (!String(response.headers.get('Content-Type') || '').startsWith('application/pdf')) {
-      const payload = await response.json();
-      if (payload.code === 'compiler_missing') return missing(payload);
-      const card = show(t('preview.tex.failed'), payload.error || t('common.requestFailed'), payload);
-      if (card) button(card, t('common.retry'), check);
-      return;
+    const result = await runWithProgress(t('preview.tex.compiling'), jobID => request('/api/tex/preview', {path, content: text, job_id: jobID}), true);
+    if (!result) return;
+    const {response, jobID} = result;
+    try {
+      if (!response.ok) await apiJsonResponse(response);
+      if (!current()) {
+        cleanupTexProgressJob(jobID);
+        return;
+      }
+      if (!String(response.headers.get('Content-Type') || '').startsWith('application/pdf')) {
+        cleanupTexProgressJob(jobID);
+        const payload = await response.json();
+        if (payload.code === 'compiler_missing') return missing(payload);
+        const card = show(t('preview.tex.failed'), payload.error || t('common.requestFailed'), payload);
+        if (card) button(card, t('common.retry'), check);
+        return;
+      }
+      const blob = await response.blob();
+      if (!current()) {
+        cleanupTexProgressJob(jobID);
+        return;
+      }
+      const objectUrl = URL.createObjectURL(blob);
+      container._texPreviewSyncJobID = jobID;
+      const query = new URLSearchParams({job_id: jobID, sync: '1'});
+      const sourceMap = request(`/api/tex/compiler?${query}`).then(async response => {
+        if (!response.ok) await apiJsonResponse(response);
+        return (await response.json()).sync_pages || [];
+      }).catch(error => {
+        if (current()) console.warn('TeX source map unavailable', error);
+        return [];
+      });
+      renderPdfPreviewInto(host, path, {
+        sourceUrl: objectUrl, objectUrl, retainPrevious: true,
+        onLoadError: message => {
+          if (!current()) return;
+          cleanupTexProgressJob(jobID);
+          container._texPreviewSyncJobID = '';
+          const card = show(t('preview.tex.failed'), message);
+          if (card) button(card, t('common.retry'), check);
+        },
+        onDocumentReady: async ({frame, app, canNavigate}) => {
+          host.dataset.texPreviewReady = 'true';
+          const anchors = (await sourceMap).filter(({line, page}) => Number.isSafeInteger(line) && line > 0
+            && Number.isSafeInteger(page) && page > 0 && page <= app.pagesCount);
+          if (!current() || !frame.isConnected) return;
+          container._texPreviewSyncBind = () => bindTexSplitScroll(frame, app, canNavigate, anchors);
+          bindTexPreviewScrollSync(container.closest('.file-editor-panel'));
+        },
+      });
+    } catch (error) {
+      cleanupTexProgressJob(jobID);
+      throw error;
     }
-    const blob = await response.blob();
-    if (!current()) return;
-    releaseRawFileMediaSources(host);
-    const objectUrl = URL.createObjectURL(blob);
-    renderPdfPreviewInto(host, path, {sourceUrl: objectUrl, objectUrl});
-    host.dataset.texPreviewReady = 'true';
   };
   const missing = payload => {
-    const card = show(t('preview.tex.missing'), t('preview.tex.consent'), payload);
+    const card = show(t('preview.tex.missing'));
     if (!card) return;
-    if (payload.install_supported !== false) button(card, t('preview.tex.install'), async () => {
-      show(t('preview.tex.installing'));
-      const response = await request('/api/tex/compiler/install', {consent: true});
-      if (!response.ok) await apiJsonResponse(response);
-      const installed = await response.json();
-      if (!current()) return;
-      if (installed.available) return compile();
-      const failure = show(t('preview.tex.failed'), installed.error, installed);
-      if (failure) button(failure, t('common.retry'), check);
-    });
+    if (payload.install_supported !== false) {
+      const installRow = document.createElement('div');
+      installRow.className = 'tex-preview-install-row';
+      card.append(installRow);
+      button(installRow, t('preview.tex.install'), async () => {
+        const result = await runWithProgress(t('preview.tex.installing'), jobID => request('/api/tex/compiler/install', {consent: true, job_id: jobID}));
+        if (!result) return;
+        const {response} = result;
+        if (!response.ok) await apiJsonResponse(response);
+        const installed = await response.json();
+        if (!current()) return;
+        if (installed.available) return compile();
+        const failure = show(t('preview.tex.failed'), installed.error, installed);
+        if (failure) button(failure, t('common.retry'), check);
+      }, 'tex-preview-install-button');
+    }
+    if (payload.install_path) {
+      const location = document.createElement('div');
+      location.className = 'tex-preview-install-location';
+      location.textContent = `${localizedLabel('preview.tex.installLocation', 'Shared install location')}: ${payload.install_path}`;
+      card.append(location);
+    }
+    if (payload.instructions) {
+      const manual = document.createElement('div');
+      manual.className = 'tex-preview-manual-install';
+      manual.append(document.createTextNode(`${localizedLabel('preview.tex.manualInstall', 'Or install manually')}: `));
+      const command = document.createElement('code');
+      command.textContent = payload.instructions;
+      manual.append(command);
+      card.append(manual);
+    }
     button(card, t('common.retry'), check);
   };
   const check = async () => {
@@ -1527,7 +2026,7 @@ function renderHtmlPreviewInto(container, path, text) {
 
 const PREVIEW_SURFACE_CLASSES = Object.freeze([
   'markdown-body', 'html-preview-body', 'image-preview-body', 'pdf-preview-body',
-  'data-preview-body', 'media-preview-body', 'code-preview-body',
+  'data-preview-body', 'media-preview-body', 'code-preview-body', 'office-preview-body',
 ]);
 
 function cleanupStandardPreviewStrategy(container) {
@@ -1554,16 +2053,35 @@ function disconnectPreviewZoomSurfaces(root) {
   for (const surface of surfaces) disconnectPreviewZoomSurface(surface, {resetClasses: true});
 }
 
-function releasePreviewSurfaceResources(container) {
+function releasePreviewSurfaceResources(container, {retainPdf = false} = {}) {
+  container?._officePreviewController?.abort();
+  if (container) container._officePreviewController = null;
+  container?._texPreviewSyncCleanup?.();
+  if (container) {
+    container._texPreviewSyncCleanup = null;
+    container._texPreviewSyncBind = null;
+    cleanupTexProgressJob(container._texPreviewSyncJobID);
+    container._texPreviewSyncJobID = '';
+  }
   container?._texPreviewController?.abort();
   if (container) container._texPreviewController = null;
-  releaseRawFileMediaSources(container);
+  if (container?._graphvizPreviewController || container?._sqlitePreviewController) container._retainedPreviewSignature = null;
+  container?._graphvizPreviewController?.abort();
+  container?._sqlitePreviewController?.abort();
+  if (container?._graphvizImageUrl?.startsWith('blob:')) URL.revokeObjectURL(container._graphvizImageUrl);
+  if (container) {
+    container._graphvizPreviewController = null;
+    container._sqlitePreviewController = null;
+    container._graphvizImageUrl = '';
+  }
+  if (retainPdf) retireStagedPdfPreview(container);
+  else releaseRawFileMediaSources(container);
   disconnectPreviewZoomSurfaces(container);
 }
 
-function prepareRetainedPreviewStrategy(container, signature, selector) {
+function prepareRetainedPreviewStrategy(container, signature, selector, options) {
   if (container._retainedPreviewSignature === signature && container.querySelector(selector)) return false;
-  releasePreviewSurfaceResources(container);
+  releasePreviewSurfaceResources(container, options);
   container._retainedPreviewSignature = signature;
   return true;
 }
@@ -1583,6 +2101,10 @@ function htmlPreviewStrategySignature({path, text, context}) {
   return JSON.stringify([path, text, context]);
 }
 
+function texPreviewStrategySignature({path, text}) {
+  return JSON.stringify([path, text]);
+}
+
 function rawMediaPreviewStrategySignature({path, state, context}) {
   return JSON.stringify([path, rawFileMediaVersion(state), context]);
 }
@@ -1598,7 +2120,7 @@ function renderMarkdownPreviewStrategy({container, path, text, state, context, s
   container._previewText = text;
   container._previewDisplayMode = fileEditorPreviewDisplayMode;
   container._previewContext = context;
-  renderMarkdownPreviewInto(container, text, path, {context, readOnly: state ? !fileEditorStateWritable(state) : false, snapshot});
+  renderMarkdownPreviewInto(container, text, path, {context, readOnly: state ? state._shareActive === true || !fileEditorStateWritable(state) : false, snapshot});
   return true;
 }
 
@@ -1606,6 +2128,174 @@ function renderMermaidPreviewStrategy({container, path, text, context, signature
   if (container._mermaidSig === signature && container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) return false;
   container._mermaidSig = signature;
   container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context});
+  return true;
+}
+
+function graphvizWorker() {
+  const source = `onmessage = async ({data: {bundle, text}}) => {
+    try {
+      const {instance} = await import(bundle);
+      const viz = await instance();
+      const svg = viz.renderString(text, {format: 'svg'});
+      if (svg.length > 4 * 1024 * 1024) throw new Error('Graphviz output exceeds 4 MiB');
+      postMessage({svg});
+    } catch (error) {
+      postMessage({error: String(error.message || error).slice(0, 2000)});
+    }
+  };`;
+  const url = URL.createObjectURL(new Blob([source], {type: 'text/javascript'}));
+  try {
+    return new Worker(url);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function graphvizPreviewSvg(text, signal) {
+  if (new Blob([text]).size > 128 * 1024) throw new Error('Graphviz source exceeds 128 KiB');
+  const worker = graphvizWorker();
+  const stop = () => worker.terminate();
+  let timer;
+  let cancel;
+  try {
+    return await new Promise((resolve, reject) => {
+      cancel = () => reject(new DOMException('Preview superseded', 'AbortError'));
+      signal.addEventListener('abort', cancel, {once: true});
+      timer = setTimeout(() => reject(new Error('Graphviz rendering timed out')), 10000);
+      worker.onmessage = ({data}) => data.svg ? resolve(data.svg) : reject(new Error(data.error));
+      worker.onerror = event => reject(new Error(event.message));
+      worker.postMessage({bundle: new URL('/static/vendor/viz.js', window.location.href).href, text});
+    });
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', cancel);
+    stop();
+  }
+}
+
+function renderGraphvizPreviewStrategy({container, path, text, context, signature, snapshot}) {
+  if (!prepareRetainedPreviewStrategy(container, signature, '.graphviz-preview-result')) return false;
+  const host = document.createElement('div');
+  host.className = 'graphviz-preview-result';
+  host.replaceChildren(fileEditorEmptyState(t('common.loading')));
+  container.replaceChildren(host);
+  const controller = new AbortController();
+  container._graphvizPreviewController = controller;
+  const current = () => !controller.signal.aborted && container.contains(host);
+  container._previewAsync = (async () => {
+    try {
+      const svg = await graphvizPreviewSvg(text, controller.signal);
+      if (!current()) return false;
+      const image = document.createElement('img');
+      image.alt = t('preview.structured.title', {format: 'Graphviz'});
+      image.className = 'mermaid-preview-image';
+      // SVG image context disables links, scripts and external resources.
+      if (snapshot) {
+        image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+        host.replaceChildren(image);
+      } else {
+        container._graphvizImageUrl = image.src = svgImageUrl(svg);
+        installPreviewZoomSurface(host, image, previewZoomOptionsForKind('mermaidFull', {path, zoomKey: 'graphviz', context}));
+      }
+      return true;
+    } catch (error) {
+      if (current()) host.replaceChildren(fileEditorEmptyState(t('preview.structured.parseError', {format: 'Graphviz'}), error.message));
+      return false;
+    }
+  })();
+  return true;
+}
+
+function renderSQLitePreviewStrategy({container, path, signature}) {
+  const previous = container.querySelector('.sqlite-preview-result');
+  if (!prepareRetainedPreviewStrategy(container, signature, '.sqlite-preview-result')) return false;
+  if (previous?.dataset.path === path) {
+    container._previewAsync = previous._refreshSQLitePreview();
+    return true;
+  }
+  const host = document.createElement('div');
+  host.className = 'file-editor-data-preview sqlite-preview-result';
+  host.dataset.path = path;
+  const heading = document.createElement('div');
+  heading.className = 'file-editor-data-preview-header';
+  heading.textContent = t('preview.structured.title', {format: 'SQLite'});
+  const refresh = makeButton({label: t('common.reload')});
+  const selector = document.createElement('select');
+  selector.setAttribute('aria-label', t('preview.sqlite.table'));
+  selector.hidden = true;
+  const content = document.createElement('div');
+  host.append(heading, selector, refresh, content);
+  container.replaceChildren(host);
+  let requestedTable = '', requestedPage = 0;
+  async function load(table = '', page = 0) {
+    requestedTable = table;
+    requestedPage = page;
+    container._sqlitePreviewController?.abort();
+    const controller = new AbortController();
+    container._sqlitePreviewController = controller;
+    const current = () => !controller.signal.aborted && container.contains(host);
+    selector.disabled = refresh.disabled = true;
+    content.replaceChildren(fileEditorEmptyState(t('common.loading')));
+    const query = new URLSearchParams({path, table, page, recover_table: '1'});
+    try {
+      const result = await apiFetchJson(`/api/fs/sqlite-preview?${query}`, {signal: controller.signal}, {abortRetirementReason: 'sqlite_preview_replaced'});
+      if (!current()) return;
+      requestedTable = result.table;
+      requestedPage = result.page;
+      selector.replaceChildren(...result.tables.map(name => new Option(name, name)));
+      selector.value = result.table;
+      selector.hidden = result.tables.length === 0;
+      selector.disabled = refresh.disabled = false;
+      if (!result.columns?.length) {
+        content.replaceChildren(fileEditorEmptyState(t('preview.sqlite.empty')));
+        return;
+      }
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = t('preview.sqlite.schema');
+      const schema = document.createElement('pre');
+      schema.textContent = result.schema + (result.schema_truncated ? '…' : '');
+      details.append(summary, schema);
+      const tableGrid = document.createElement('div');
+      tableGrid.className = 'file-editor-table-preview';
+      const rows = document.createElement('table');
+      const row = rows.createTHead().insertRow();
+      for (const name of result.columns) appendJsonLinesTableCell(row, 'th', {text: name});
+      const body = rows.createTBody();
+      for (const values of result.rows) {
+        const row = body.insertRow();
+        for (const value of values) appendJsonLinesTableCell(row, 'td', {text: value ?? 'NULL'});
+      }
+      tableGrid.append(rows);
+      const pages = document.createElement('div');
+      pages.className = 'sqlite-preview-pages';
+      const pageButton = (label, next, enabled) => makeButton({
+        label, disabled: !enabled,
+        onClick: () => { container._previewAsync = load(result.table, next); },
+      });
+      pages.append(
+        pageButton(t('preview.sqlite.previous'), result.page - 1, result.page > 0),
+        document.createTextNode(t('preview.sqlite.page', {page: result.page + 1})),
+        pageButton(t('preview.sqlite.next'), result.page + 1, result.more),
+      );
+      content.replaceChildren(details, tableGrid, pages);
+    } catch (error) {
+      if (current()) {
+        selector.disabled = refresh.disabled = false;
+        const message = previewActionFallbackNode(t('preview.structured.parseError', {format: 'SQLite'}), error.message, path);
+        const retry = makeButton({
+          label: t('common.retry'),
+          onClick: () => { container._previewAsync = load(table, page); },
+        });
+        message.append(retry);
+        content.replaceChildren(message);
+      }
+    }
+  }
+  selector.addEventListener('change', () => { container._previewAsync = load(selector.value); });
+  refresh.addEventListener('click', () => { container._previewAsync = load(); });
+  host._refreshSQLitePreview = () => load(requestedTable, requestedPage);
+  container._previewAsync = load();
   return true;
 }
 
@@ -1619,7 +2309,8 @@ function renderImagePreviewStrategy({container, path, state, context, signature,
   renderRawImagePreviewInto(container, path, state, {context, snapshot});
   return true;
 }
-function renderPdfPreviewStrategy({container, path, signature}) {
+function renderPdfPreviewStrategy({container, path, signature, snapshot}) {
+  if (snapshot) return false;
   if (!prepareRetainedPreviewStrategy(container, signature, '.file-editor-pdf-preview')) return false;
   renderPdfPreviewInto(container, path);
   return true;

@@ -481,6 +481,113 @@ def test_normal_tabber_context_menu_kill_actions_follow_window_count(browser, tm
         assert "Kill tmux session '1'" not in result["labels"], result
 
 
+def test_terminal_frame_and_tab_kill_match_right_click_confirmation(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser, tmp_path, "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2",
+        sessions=["1", "2"], settings={"general": {"default_tabber_mode": "advanced"}},
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    header = '.dv-groupview:has([data-pane-tab="1"]) .dv-right-actions-container'
+    order = browser.execute_script("""
+      const header = document.querySelector(arguments[0]);
+      return [...header.querySelectorAll('button')].filter(button => button.getClientRects().length)
+        .map(button => Object.keys(button.dataset).find(key => ['paneExpand', 'paneMinimize', 'paneClose'].includes(key)))
+        .filter(Boolean);
+    """, header)
+    assert order == ["paneExpand", "paneMinimize", "paneClose"]
+    click_visible_selector(browser, f'{header} [data-pane-close="1"]')
+    alert = WebDriverWait(browser, 10).until(lambda driver: driver.switch_to.alert)
+    frame_prompt = alert.text
+    alert.dismiss()
+    tab = '.dockview-pane-tab[data-pane-tab="1"]'
+    controls = browser.execute_script("""
+      const tab = document.querySelector(arguments[0]);
+      const minimize = tab.querySelector('[data-pane-tab-minimize]');
+      const close = tab.querySelector('[data-pane-tab-close]');
+      return minimize && close && minimize.getBoundingClientRect().right <= close.getBoundingClientRect().left
+        && minimize.getClientRects().length > 0 && close.getClientRects().length > 0;
+    """, tab)
+    assert controls, "The inline minimize control precedes the kill control"
+    close = f'{tab} [data-pane-tab-close]'
+    click_visible_selector(browser, close)
+    alert = WebDriverWait(browser, 10).until(lambda driver: driver.switch_to.alert)
+    try:
+        assert alert.text == frame_prompt
+    finally:
+        alert.dismiss()
+    browser.find_element("css selector", close).send_keys(Keys.ENTER)
+    alert = WebDriverWait(browser, 10).until(lambda driver: driver.switch_to.alert)
+    try:
+        assert alert.text == frame_prompt
+    finally:
+        alert.dismiss()
+    browser.execute_script("showTabContextMenu('1', 80, 80)")
+    click_visible_selector(browser, '.session-context-menu button:has(svg[data-menu-icon="delete"])')
+    alert = WebDriverWait(browser, 10).until(lambda driver: driver.switch_to.alert)
+    try:
+        assert alert.text == frame_prompt
+        assert "Kill" in frame_prompt and "1" in frame_prompt
+    finally:
+        alert.dismiss()
+    assert browser.execute_script("""
+      return sessions.includes('1') && itemInLayout('1')
+        && !window.__bootFetches.some(request => request.path === '/api/kill-session');
+    """)
+
+
+@pytest.mark.parametrize(("mode", "surface"), [("advanced", "frame"), ("normal", "frame"), ("advanced", "tab")])
+def test_repo_diff_minimize_retains_tabber_row_and_close_removes_it(browser, tmp_path, mode, surface):
+    repository = "/home/test/yolomux.dev"
+    item = "gitdiff:" + quote(repository, safe="")
+    load_dockview_runtime_boot_fixture(
+        browser, tmp_path, "?sessions=tabber&layout=left&tabs=left:tabber", sessions=["1"],
+        settings={"general": {"default_tabber_mode": mode}},
+    )
+    wait = WebDriverWait(browser, 10)
+    wait.until(lambda driver: driver.execute_script(
+        "return typeof openGitDiffTab === 'function' && !!document.querySelector('#panel-__tabber__')"
+    ))
+    browser.execute_script("openGitDiffTab(arguments[0], {userInitiated: true})", repository)
+    row = f'#panel-__tabber__ [data-tabber-item="{item}"]'
+    if surface == "tab":
+        controls = f'.dockview-pane-tab[data-pane-tab="{item}"]'
+        minimize, close = (f'{controls} [data-pane-tab-{action}]' for action in ("minimize", "close"))
+    else:
+        minimize, close = (f'.dv-right-actions-container [data-pane-{action}="{item}"]' for action in ("minimize", "close"))
+    click_visible_selector(browser, minimize)
+    wait.until(lambda driver: driver.execute_script("""
+      return !itemIsActivePaneTab(arguments[0]) && gitDiffTabState.has(arguments[0])
+        && !!document.querySelector(arguments[1]);
+    """, item, row))
+    click_visible_selector(browser, row)
+    click_visible_selector(browser, close)
+    wait.until(lambda driver: driver.execute_script("""
+      return !itemInLayout(arguments[0]) && !isLayoutItem(arguments[0])
+        && !gitDiffTabState.has(arguments[0]) && !document.querySelector(arguments[1]);
+    """, item, row))
+
+
+def test_repo_diff_close_retires_pending_open(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"],
+        settings={"general": {"default_tabber_mode": "advanced"}},
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    result = browser.execute_async_script("""
+      const done = arguments[arguments.length - 1];
+      const item = openGitDiffTab('/home/test/closing', {userInitiated: true});
+      const opened = gitDiffTabState.has(item);
+      closeLayoutTabItem(item);
+      requestAnimationFrame(() => done({
+        opened,
+        inLayout: itemInLayout(item),
+        registered: isLayoutItem(item),
+        retained: gitDiffTabState.has(item),
+      }));
+    """)
+    assert result == {"opened": True, "inLayout": False, "registered": False, "retained": False}
+
+
 def test_advanced_finder_reload_restores_expanded_directory_children(browser, tmp_path):
     root = '/home/test'
     dev = f'{root}/dev'
@@ -775,11 +882,13 @@ def test_dockview_tmux_menu_retargets_after_terminal_tab_click(browser, tmp_path
 def test_dockview_tab_click_captures_editor_scroll_before_dockview_detach(browser, tmp_path):
     path = "/home/test/yolomux.dev/IMMEDIATE-SCROLL.md"
     item = f"file:{path}"
+    source = "# Immediate scroll\n\n" + "\n".join(f"- row {index}" for index in range(1800))
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        f"?sessions=1&layout=right&tabs=right:{quote(item, safe='')},__prefs__",
+        f"?sessions=1&layout=right&tabs=right:{quote(item, safe='')}*,__prefs__",
         sessions=["1"],
+        fs_entries={os.path.dirname(path): [{"name": os.path.basename(path), "kind": "file", "content": source}]},
     )
     wait_for_dockview(browser, min_tabs=2)
     setup = browser.execute_async_script(
@@ -787,15 +896,14 @@ def test_dockview_tab_click_captures_editor_scroll_before_dockview_detach(browse
         const item = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const path = fileItemPath(item);
-          const source = '# Immediate scroll\\n\\n' + Array.from({length: 1800}, (_, index) => `- row ${index}`).join('\\n');
-          setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
-          setFileEditorViewMode(path, 'preview', item);
           const panel = panelNodes.get(item);
-          destroyProseMirrorPanel(panel);
-          delete panel._pmError;
+          const path = fileItemPath(item);
+          await window.__yomuxTestWaitFor(() => fileStateFor(path)?.content.includes('row 1799'),
+            {description: 'fixture file read'});
+          setFileEditorViewMode(path, 'preview', item);
           renderFileEditorPanel(panel, item);
-          await window.__yomuxTestWaitFor(() => panel._pmView || panel._pmError, {timeoutMs: 5000});
+          await window.__yomuxTestWaitFor(() => panel._pmView && !fileStateFor(fileItemPath(item))?.loading,
+            {description: 'real fixture Markdown loaded'});
           const preview = panel.querySelector('.file-editor-preview-pane-panel');
           preview.scrollTop = 100;
           capturePaneViewState(item, panel);
@@ -1220,13 +1328,26 @@ def test_dockview_editor_and_differ_tabs_close_from_right_click_menu(browser, tm
             }
             return originalFetch(input, init);
           };
-          const fileItem = await openFileInEditor(path, {name: 'CONTEXT-CLOSE.md'}, {userInitiated: true});
+          fileEditorAutosaveEnabled = false;
+          const fileItem = await openFileInEditor(path, {name: 'CONTEXT-CLOSE.md'}, {userInitiated: true, viewMode: 'edit'});
           await waitFor(() => document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(fileItem)}"]`), {description: 'editor tab rendered'});
+          const view = await waitFor(() => panelNodes.get(fileItem)?._cmView, {description: 'editor view ready'});
+          view.dispatch({changes: {from: 0, insert: 'unsaved edit '}});
+          await waitFor(() => fileState.get(path)?.dirty, {description: 'unsaved editor content'});
+          document.querySelector(`.dockview-pane-header-actions [data-pane-close="${CSS.escape(fileItem)}"]`).click();
+          const dialog = await waitFor(() => document.querySelector('.file-editor-close-dialog'), {description: 'frame X opens dirty-file confirmation'});
+          const frameDialogText = dialog.textContent;
+          dialog.querySelector('[data-dialog-action="cancel"]').click();
+          await waitFor(() => !dialog.isConnected, {description: 'cancelled frame close'});
+          if (!itemInLayout(fileItem) || !fileState.get(path)?.dirty) throw new Error('Cancelled frame close lost editor state');
           tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(fileItem)}"]`);
           const editorMenu = rightClick(tab);
           const editorClose = Array.from(document.querySelectorAll('.session-context-menu button')).find(button => button.textContent.trim().startsWith('Close '));
           if (!editorClose) throw new Error(`Editor close action missing: ${JSON.stringify(editorMenu)}`);
           editorClose.click();
+          const menuDialog = await waitFor(() => document.querySelector('.file-editor-close-dialog'), {description: 'right-click opens dirty-file confirmation'});
+          if (menuDialog.textContent !== frameDialogText) throw new Error('Frame and menu use different close confirmations');
+          menuDialog.querySelector('[data-dialog-action="discard"]').click();
           await waitFor(() => !itemInLayout(fileItem), {description: 'editor closed from tab context menu'});
           done({differMenu, editorMenu, differClosed: !itemInLayout(differItemId), editorClosed: !itemInLayout(fileItem)});
         })().catch(error => done({error: String(error && error.stack || error)}));
@@ -1540,16 +1661,14 @@ def test_dockview_tab_actions_preserve_target_focus_and_readable_description(bro
         const label = descriptionNode?.querySelector('.context-menu-label');
         const labelFits = label ? label.scrollWidth <= label.clientWidth + 1 : false;
         descriptionNode?.click();
-        const detailPopover = paneTabPopoverForAnchor(tab);
+        const detailPopover = document.querySelector('.tab-description-popover');
         const descriptionOpensDetail = Boolean(
           !document.querySelector('.session-context-menu')
-          && tab.classList.contains('popover-open')
           && detailPopover?.classList.contains('popover-open')
           && detailPopover?.textContent?.trim()
         );
         focusTerminalFromUserAction('2');
-        const detailClosesOnTerminalEngagement = !tab.classList.contains('popover-open')
-          && !detailPopover?.classList.contains('popover-open');
+        const detailClosesOnTerminalEngagement = !detailPopover?.isConnected;
         const keyEvent = new KeyboardEvent('keydown', {bubbles: true, cancelable: true, key: 'F10', shiftKey: true});
         tab.dispatchEvent(keyEvent);
         const keyboardMenu = document.querySelector('.session-context-menu');
@@ -6385,7 +6504,7 @@ def test_dockview_drag_reorders_into_first_top_left_tab_without_root_split(brows
     assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
-def test_dockview_real_close_button_hides_only_clicked_tmux_tab(browser, tmp_path):
+def test_dockview_real_minimize_button_hides_only_clicked_tmux_tab(browser, tmp_path):
     """The browser's physical click on a tmux tab dismiss control removes that tab, not its sibling."""
     load_dockview_runtime_boot_fixture(
         browser,
@@ -6394,11 +6513,12 @@ def test_dockview_real_close_button_hides_only_clicked_tmux_tab(browser, tmp_pat
         sessions=["deleteme", "DELETEME1"],
     )
     wait_for_dockview(browser, min_tabs=2)
-    click_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="deleteme"] [data-pane-tab-close]')
+    click_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="deleteme"] [data-pane-tab-minimize]')
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return !itemInLayout('deleteme') && itemInLayout('DELETEME1');")
     )
     assert dockview_layout_metrics(browser)["slots"]["left"]["tabs"] == ["DELETEME1"]
+    assert browser.execute_script("return sessions.includes('deleteme') && !window.__bootFetches.some(request => request.path === '/api/kill-session')")
 
 
 def test_dockview_drag_reorders_two_pinned_tabs(browser, tmp_path):
@@ -9150,7 +9270,7 @@ def test_dockview_close_lower_side_yochat_compacts_leaf_without_revealing_source
     assert after_drag == {"chatSourceExists": False, "placeholders": [], "chatRole": "side"}, after_drag
     browser.execute_script(
         """
-        document.querySelector('.dockview-pane-tab[data-pane-tab="__chat__"] [data-pane-tab-close]')?.click();
+        document.querySelector('.dockview-pane-tab[data-pane-tab="__chat__"] [data-pane-tab-minimize]')?.click();
         """
     )
     WebDriverWait(browser, 5).until(
@@ -9584,7 +9704,7 @@ def test_dockview_minimizing_finder_tab_preserves_triplet_home_width(browser, tm
     browser.execute_script(
         """
         document.querySelector(
-          '.dockview-pane-tab[data-pane-tab="__finder__"] [data-pane-tab-close]'
+          '.dockview-pane-tab[data-pane-tab="__finder__"] [data-pane-tab-minimize]'
         )?.click();
         """
     )
@@ -11289,9 +11409,9 @@ def test_dockview_tabber_normal_shows_one_pane_and_hides_drop_prompt(browser, tm
           await wait(() => tabberNormalSelections?.length === 1 && tabberNormalSelections[0] === '1' && panelNodes.get('1'), {description: 'reopen retained terminal'});
           const reopenedIdentity = terminals.get('1') === terminal1;
       const normal = {dropPromptHidden, visibleDropPrompt, utilityTabsAtBottom, utilityLabels, switched, deselected: tabberNormalSelections.length === 1 && tabberNormalSelections[0] === '1', reopenedIdentity,
-            headerless: dockviewLayoutState.api.groups.every(group => group.panels.length === 1)
-              && dockviewLayoutState.api.groups.filter(group => group.panels.some(panel => panel.id !== '__tabber__'))
-                .every(group => group.header.hidden)};
+            singleItemGroups: dockviewLayoutState.api.groups.every(group => group.panels.length === 1),
+            contentTabStripHidden: !document.querySelector('.dockview-pane-tab[data-pane-tab="1"]:not([hidden])'),
+            frameControlsVisible: Boolean(document.querySelector('.dockview-pane-header-actions [data-pane-close="1"]')?.getClientRects().length)};
           document.querySelector('[data-tabber-advanced]')?.click();
           await wait(() => tabberIsAdvanced() && tabDragAllowed(), {description: 'Advanced mode is enabled'});
           await wait(() => fileSurfaceItems.every(itemInLayout), {description: 'Advanced restores Finder, Differ, and Tabber tabs'}).catch(() => false);
@@ -11316,7 +11436,254 @@ def test_dockview_tabber_normal_shows_one_pane_and_hides_drop_prompt(browser, tm
     assert result["normal"]["switched"]["terminalIdentityRetained"] is True, result
     assert result["normal"]["deselected"] is True and result["normal"]["reopenedIdentity"] is True, result
     assert all(surface["inLayout"] and surface["slot"] for surface in result["advancedFileSurfaces"]), result
-    assert result["normal"]["headerless"] is True and result["advancedParity"] is True, result["advancedState"]
+    assert result["normal"]["singleItemGroups"] and result["normal"]["contentTabStripHidden"], result
+    assert result["normal"]["frameControlsVisible"] and result["advancedParity"], result
+
+
+def test_tabber_and_pane_tabs_share_window_description_and_repo_status(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=tabber,1&layout=row@22(side,main)&tabs=side:@side-left,tabber;main:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const wait = window.__yomuxTestWaitFor;
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const advancedControl = document.querySelector('[data-tabber-advanced]');
+          if (!tabberIsAdvanced()) {
+            advancedControl.click();
+            await wait(() => tabberIsAdvanced(), {description: 'Advanced Tabber'});
+          }
+          const base = transcriptMetadataState.payload.sessions['1'];
+          const launchPath = '/workspace/yomux/yo7110';
+          const pane = {...base.panes[0], window: '0', window_index: 0, pane: '0', pane_index: 0,
+            pane_id: '%repo', target: '%repo', current_path: launchPath, window_name: 'claude',
+            active: true, window_active: true};
+          const unassigned = {...pane, window: '1', window_index: 1, window_active: false,
+            pane_id: '%unassigned', target: '%unassigned'};
+          const description = '[AI summary] Stage only the 29 tracked changes after verification';
+          transcriptMetadataState.payload.sessions['1'] = {
+            ...base,
+            panes: [pane, unassigned],
+            selected_pane: pane,
+            agents: [],
+            window_metadata: [
+              {window_index: 0, window_id: '@repo', description, description_manual: false},
+              {window_index: 1, window_id: '@unassigned', description: '[AI summary] Inspect the inactive window'},
+            ],
+            work_graph: {
+              version: 1, tmux_sessions: {}, tmux_windows: {}, runtime_actors: {},
+              tmux_panes: {
+                pane: {id: 'pane', target: '%repo', active: true, current_path: launchPath,
+                  project_path: '/repo', path_observation_ids: ['observation', 'observation2']},
+                unassigned: {id: 'unassigned', target: '%unassigned', active: true, current_path: launchPath,
+                  project_path: '', path_observation_ids: []},
+              },
+              path_observations: {
+                observation: {id: 'observation', source: 'window-project', path: '/repo', git_worktree_id: 'worktree'},
+                observation2: {id: 'observation2', path: '/repo/other', git_worktree_id: 'worktree2'},
+              },
+              git_worktrees: {
+                worktree2: {id: 'worktree2', root: '/repo/other', local_repository_id: 'local2',
+                  current_branch_id: 'branch2', git: {root: '/repo/other', ahead: 0, behind: 0, dirty_count: 0}},
+                worktree: {id: 'worktree', root: '/repo', local_repository_id: 'local',
+                  current_branch_id: 'branch', git: {root: '/repo', ahead: 2, behind: 1, dirty_count: 3,
+                    worktree: {name: 'checkout', path: '/repo', parent_root: '/parent'}}},
+              },
+              hosted_repositories: {},
+              local_branches: {
+                branch: {id: 'branch', name: 'feature/tabber'},
+                branch2: {id: 'branch2', name: 'feature/other'},
+              },
+              local_repositories: {local: {id: 'local', local_branch_ids: ['branch']}, local2: {id: 'local2', local_branch_ids: ['branch2']}},
+              pull_requests: {}, linear_issues: {}, worktree_branch_activity: {},
+            },
+          };
+          const primaryRepo = sessionWorkSummary('1', transcriptMetadataState.payload.sessions['1']).git?.root;
+          const projectMeta = projectMetaSelection('1', transcriptMetadataState.payload.sessions['1']).git?.root;
+          const finderContext = fileExplorerSyncSessionContext('1');
+          showSessionRenameDialog('1', 0, '@repo');
+          const renameValue = document.querySelector('.session-rename-input')?.value || '';
+          closeSessionRenameDialog();
+          renderPaneTabStrips();
+          refreshTabberPanels();
+          await wait(() => document.querySelector('.pane-tab[data-pane-tab="1"] .tab-inline-detail')
+            ?.textContent.includes('Stage only the 29 tracked changes'), {description: 'pane tab receives the window description'});
+          const paneTab = document.querySelector('.pane-tab[data-pane-tab="1"] .tab-inline-detail')?.textContent.trim() || '';
+          const advancedDescription = paneTab.startsWith('[AI summary]');
+          const tab = document.querySelector('.pane-tab[data-pane-tab="1"]');
+          const {left, bottom} = tab.getBoundingClientRect();
+          autoApproveStates.set('1', {agent_windows: [{kind: 'codex', window_index: 0, state: 'working',
+            pane_target: '%repo', pid: 123, transcript: '/workspace/session.jsonl', session_id: 'fixture-session',
+            status_observed_at: Date.now() / 1000}]});
+          tab.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: left, clientY: bottom}));
+          const descriptionAction = document.querySelector('.session-context-menu .tab-action-description');
+          const paneInfoIcon = descriptionAction?.querySelector('.context-menu-icon svg')?.outerHTML || '';
+          const menuDescription = descriptionAction?.textContent.trim() || '';
+          descriptionAction.click();
+          const popover = document.querySelector('.tab-description-popover');
+          await wait(() => getComputedStyle(popover).opacity === '1', {description: 'Details opening transition settles'});
+          const readDetail = (popover) => ({
+            title: popover.querySelector('.popover-subtitle-text')?.textContent.trim() || '',
+            transcript: popover.textContent.includes('/workspace/session.jsonl'),
+            text: popover.textContent,
+            header: popover.firstElementChild,
+            rect: popover.getBoundingClientRect().toJSON(),
+          });
+          const initialDetail = readDetail(popover);
+          const windowMetadata = transcriptMetadataState.payload.sessions['1'].window_metadata[0];
+          windowMetadata.description = '[AI summary] A newer summary arrived';
+          autoApproveStates.set('1', {agent_windows: []});
+          refreshPaneTabSessionPopovers(['1']);
+          renderPaneTabStrips({renderAttached: false});
+          await frame();
+          const heldDetail = readDetail(popover);
+          closeOtherSessionPopovers(null, {force: true});
+          tab.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: left, clientY: bottom}));
+          document.querySelector('.session-context-menu .tab-action-description').click();
+          const reopenedPopover = document.querySelector('.tab-description-popover');
+          const reopenedDetail = readDetail(reopenedPopover);
+          const copyValues = [];
+          const originalWrite = navigator.clipboard.writeText;
+          navigator.clipboard.writeText = async value => { copyValues.push(value); };
+          try {
+            for (const label of [t('common.field.path'), t('popover.worktree')]) {
+              const row = [...reopenedPopover.querySelectorAll('.popover-row')]
+                .find(row => row.querySelector('.popover-label')?.textContent === label);
+              const button = row?.querySelector('[data-copy-path]');
+              if (!button) throw new Error('Missing copy control for ' + label);
+              button.click();
+            }
+          } finally {
+            navigator.clipboard.writeText = originalWrite;
+          }
+          const stayedOpenOnCopy = reopenedPopover.isConnected && reopenedPopover.classList.contains('popover-open');
+          closeOtherSessionPopovers(null, {force: true});
+          windowMetadata.description = description;
+          closeSessionContextMenu();
+          const inactiveTabberDetails = () => {
+            const row = document.querySelector('#panel-__tabber__ .file-tree-row[data-tabber-session="1"][data-tabber-window="1"]');
+            if (!row) throw new Error('Inactive Tabber row is missing');
+            const activeBefore = visualActivePaneItem();
+            row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 50, clientY: 100}));
+            const action = document.querySelector('.session-context-menu button.tab-action-description');
+            const menu = action?.textContent.trim() || '';
+            action?.click();
+            const detail = document.querySelector('.tab-description-popover');
+            const text = detail?.textContent || '';
+            const title = detail?.querySelector('.popover-subtitle-text')?.textContent.trim() || '';
+            const sameTab = activeBefore === visualActivePaneItem();
+            document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true}));
+            return {menu, title, sameTab, closed: !detail?.isConnected,
+              leaked: text.includes('feature/tabber') || text.includes('/repo') || text.includes('yo7110')};
+          };
+          refreshTabberPanels();
+          const advancedInactive = inactiveTabberDetails();
+          advancedControl.click();
+          await wait(() => !tabberIsAdvanced(), {description: 'Normal Tabber'});
+          refreshTabberPanels();
+          await frame();
+          const row = document.querySelector('#panel-__tabber__ .file-tree-row[data-tabber-session="1"][data-tabber-window="0"]');
+          if (!row) throw new Error('Normal Tabber row for window 0 is missing');
+          const dirty = row.querySelector('.tabber-repo-status .file-tree-repo-dirty');
+          row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 50, clientY: 100}));
+          const rowAction = document.querySelector('.session-context-menu .tab-action-description');
+          const rowMenu = rowAction?.textContent.trim() || '';
+          const rowInfoIcon = rowAction?.querySelector('.context-menu-icon svg')?.outerHTML || '';
+          rowAction?.click();
+          const rowDetail = document.querySelector('.session-popover.popover-open .popover-subtitle-text')?.textContent.trim() || '';
+          const rowCopyPath = document.querySelector('.tab-description-popover [data-copy-path="/repo"]')?.dataset.copyPath;
+          closeOtherSessionPopovers(null, {force: true});
+          closeSessionContextMenu();
+          const unknownRow = document.querySelector('#panel-__tabber__ .file-tree-row[data-tabber-session="1"][data-tabber-window="1"]');
+          if (!unknownRow) throw new Error('Normal Tabber row for window 1 is missing');
+          const normalInactive = inactiveTabberDetails();
+          const oldPath = '/repo';
+          const newPath = '/workspace/parser-toolkits__610-pythonic-negative__ABC-3425';
+          pane.current_path = newPath;
+          const staleGraph = transcriptMetadataState.payload.sessions['1'].work_graph;
+          delete staleGraph.tmux_panes.pane.project_path;
+          staleGraph.path_observations.observation = {...staleGraph.path_observations.observation, source: 'pane-cwd', path: oldPath};
+          staleGraph.path_observations.observation2 = {...staleGraph.path_observations.observation2, source: 'actor-cwd'};
+          const afterMove = sessionTabWorkSummary('1', transcriptMetadataState.payload.sessions['1'], {windowIndex: 0});
+          const movedMenu = tabMenuDetailText('1', transcriptMetadataState.payload.sessions['1'], {windowIndex: 0});
+          done({
+            paneTab,
+            primaryRepo,
+            projectMeta,
+            finderContext,
+            advancedInactive,
+            normalInactive,
+            unknownBadge: Boolean(unknownRow.querySelector('.tabber-repo-status')),
+            menuDescription,
+            initialDetail: initialDetail.title,
+            initialTranscript: initialDetail.transcript,
+            heldDetail: heldDetail.title,
+            stableDetail: heldDetail.text === initialDetail.text && heldDetail.header === initialDetail.header,
+            detailTextChanged: heldDetail.text !== initialDetail.text,
+            detailHeaderReplaced: heldDetail.header !== initialDetail.header,
+            initialDetailRect: initialDetail.rect,
+            heldDetailRect: heldDetail.rect,
+            reopenedDetail: reopenedDetail.title,
+            reopenedTranscript: reopenedDetail.transcript,
+            copyValues,
+            stayedOpenOnCopy,
+            rowMenu,
+            rowInfoIcon,
+            paneInfoIcon,
+            rowDetail,
+            rowCopyPath,
+            movedMenu,
+            movedPath: afterMove.selectedPath,
+            renameValue,
+            advancedDescription,
+            tabberDescription: row.querySelector('.tabber-normal-description')?.textContent.trim() || '',
+            branch: row.querySelector('.tabber-repo-status .file-tree-repo-branch')?.textContent.trim() || '',
+            markers: [...row.querySelectorAll('.tabber-repo-status .file-tree-repo-meta > span')].map(node => node.textContent),
+            dirtyColor: dirty ? getComputedStyle(dirty).color : '',
+            rowTitle: row.dataset.tabberTitle || '',
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in result, result
+    assert result["paneTab"] == "Stage only the 29 tracked changes after verification", result
+    assert result["primaryRepo"] == "/repo", result
+    assert result["projectMeta"] == "/repo", result
+    assert result["finderContext"] == {"repository": "/repo", "cwd": "/repo"}, result
+    assert not result["unknownBadge"], result
+    for detail in (result["advancedInactive"], result["normalInactive"]):
+        assert "Inspect the inactive window" in detail["menu"], detail
+        assert detail["title"] == "Inspect the inactive window", detail
+        assert detail["sameTab"] and detail["closed"] and not detail["leaked"], detail
+    assert result["menuDescription"].startswith(f"More desc: 1 — {result['paneTab']}"), result
+    assert result["initialDetail"] == result["heldDetail"] == result["paneTab"], result
+    assert result["stableDetail"], result
+    assert result["initialDetailRect"] == result["heldDetailRect"], (result["initialDetailRect"], result["heldDetailRect"])
+    assert result["initialTranscript"] and not result["reopenedTranscript"], result
+    assert result["copyValues"] == ["/repo", "/repo"] and result["stayedOpenOnCopy"], result
+    assert result["reopenedDetail"] == "A newer summary arrived", result
+    assert "feature/tabber" in result["menuDescription"] and "feature/other" in result["menuDescription"], result
+    assert "/repo" in result["menuDescription"] and "/repo/other" in result["menuDescription"], result
+    assert "yo7110" not in result["menuDescription"] and "yo7110" not in result["rowTitle"], result
+    assert result["rowMenu"] == result["menuDescription"], result
+    assert result["rowInfoIcon"] and result["rowInfoIcon"] == result["paneInfoIcon"], result
+    assert result["rowDetail"] == result["paneTab"], result
+    assert result["rowCopyPath"] == "/repo", result
+    assert result["movedPath"] == "/workspace/parser-toolkits__610-pythonic-negative__ABC-3425", result
+    assert "feature/tabber" not in result["movedMenu"] and "feature/other" in result["movedMenu"], result
+    assert result["renameValue"] == "[AI summary] Stage only the 29 tracked changes after verification", result
+    assert result["advancedDescription"] is False, result
+    assert result["tabberDescription"] == "[AI summary] Stage only the 29 tracked changes after verification", result
+    assert result["branch"] == "⎇ feature/tabber", result
+    assert result["markers"] == ["↑2", "↓1", "●3"], result
+    assert result["dirtyColor"] and result["dirtyColor"] != "rgb(0, 0, 0)", result
+    assert "feature/tabber" in result["rowTitle"] and "/repo" in result["rowTitle"], result
 
 
 def test_dockview_tabber_normal_shows_recency_for_agent_and_bash_windows(browser, tmp_path):

@@ -97,7 +97,7 @@ function sidePanesAvailable(viewport = nativeViewport({widthOnly: true})) {
 }
 
 function sidePaneConstrainedMode(viewport) {
-  return !sidePanesAvailable(viewport);
+  return !bootstrap.guestWorkspace && !sidePanesAvailable(viewport);
 }
 
 function paneRoleAllowsItemTransfer(item, sourceSlot = null, targetSlot = null, slots = layoutSlots, options = {}) {
@@ -1158,6 +1158,62 @@ function isPdfSidebarView(value) {
   return Number.isInteger(value) && value >= 1 && value <= 4;
 }
 
+function normalizedPdfViewport(value) {
+  if (!value || !Number.isSafeInteger(value.page) || value.page < 1
+      || !Number.isSafeInteger(value.activePage) || value.activePage < 1
+      || !Number.isFinite(value.left) || Math.abs(value.left) > 1e6
+      || !Number.isFinite(value.top) || Math.abs(value.top) > 1e6) return null;
+  const zoom = typeof value.zoom === 'string' ? value.zoom : '';
+  const scale = Number(zoom);
+  if (!/^(auto|page-actual|page-fit|page-width|page-height)$/.test(zoom)
+      && (!Number.isFinite(scale) || scale < 0.1 || scale > 10 || String(scale) !== zoom)) return null;
+  const viewport = {page: value.page, activePage: value.activePage, left: Math.round(value.left), top: Math.round(value.top), zoom};
+  if ([0, 90, 180, 270].includes(value.rotation)) viewport.rotation = value.rotation;
+  if ([0, 1, 2, 3].includes(value.scrollMode)) viewport.scrollMode = value.scrollMode;
+  if ([0, 1, 2].includes(value.spreadMode)) viewport.spreadMode = value.spreadMode;
+  return viewport;
+}
+
+function pdfReloadLayoutUrl() {
+  const url = new URL(location.href);
+  // A reload can target the previous state snapshot while the URL timer finishes.
+  url.searchParams.delete('state');
+  return url.href;
+}
+
+function storePdfReloadViewport(item, viewport) {
+  const saved = safeJsonParse(sessionStorageGet(pdfReloadViewportStorageKey), null);
+  const url = viewport ? pdfReloadLayoutUrl() : saved?.url;
+  const viewports = {...(saved && saved.url === url ? saved.viewports : {})};
+  if (viewport) viewports[item] = viewport;
+  else if (viewports[item]) delete viewports[item];
+  else return;
+  if (Object.keys(viewports).length) {
+    sessionStorageSet(pdfReloadViewportStorageKey, JSON.stringify({url, viewports}));
+  } else sessionStorageRemove(pdfReloadViewportStorageKey);
+}
+
+function forgetFileEditorViewState(item) {
+  if (fileEditorViewState.get(item)?.pdfViewport) storePdfReloadViewport(item, null);
+  fileEditorViewState.delete(item);
+}
+
+function applyPdfViewportAfterReload(state) {
+  const raw = sessionStorageGet(pdfReloadViewportStorageKey);
+  if (!raw) return;
+  sessionStorageRemove(pdfReloadViewportStorageKey);
+  if (globalThis.performance?.getEntriesByType?.('navigation')[0]?.type !== 'reload') return;
+  const saved = safeJsonParse(raw, null);
+  if (saved?.url !== pdfReloadLayoutUrl() || !Array.isArray(state?.editor?.modes)) return;
+  for (const entry of state.editor.modes) {
+    if (typeof entry?.path !== 'string') continue;
+    const viewport = normalizedPdfViewport(saved.viewports?.[entry.item || fileEditorItemFor(entry.path)]);
+    if (!viewport) continue;
+    entry.pdfViewport = viewport;
+    entry.pdfPage = viewport.activePage;
+  }
+}
+
 function layoutUrlEditorModesSnapshot() {
   const modes = [];
   const seen = new Set();
@@ -1176,6 +1232,8 @@ function layoutUrlEditorModesSnapshot() {
     if (Number.isSafeInteger(viewState?.pdfPage) && viewState.pdfPage > 0) entry.pdfPage = viewState.pdfPage;
     if (isPdfSidebarView(viewState?.pdfSidebarView)) entry.pdfSidebarView = viewState.pdfSidebarView;
     if (typeof viewState?.pdfSidebarOpen === 'boolean') entry.pdfSidebarOpen = viewState.pdfSidebarOpen;
+    const pdfViewport = normalizedPdfViewport(viewState?.pdfViewport);
+    if (pdfViewport) entry.pdfViewport = pdfViewport;
     if (viewState) {
       entry.viewState = {
         top: Math.max(0, Math.round(Number(viewState.scrollTop || 0))),
@@ -1240,6 +1298,8 @@ function applyLayoutUrlEditorModeEntry(entry = {}) {
   if (Number.isSafeInteger(entry.pdfPage) && entry.pdfPage > 0) pdfState.pdfPage = entry.pdfPage;
   if (isPdfSidebarView(entry.pdfSidebarView)) pdfState.pdfSidebarView = entry.pdfSidebarView;
   if (typeof entry.pdfSidebarOpen === 'boolean') pdfState.pdfSidebarOpen = entry.pdfSidebarOpen;
+  const pdfViewport = normalizedPdfViewport(entry.pdfViewport);
+  if (pdfViewport) pdfState.pdfViewport = pdfViewport;
   if (Object.keys(pdfState).length) {
     const viewKey = cleanItem || fileEditorItemFor(path);
     fileEditorViewState.set(viewKey, {...fileEditorViewState.get(viewKey), ...pdfState});
@@ -1540,6 +1600,7 @@ function applyLayoutUrlStateSeed(state) {
 
 function maybeAdoptLayoutStateDeepLink(params) {
   const state = layoutUrlStateFromParams(params);
+  applyPdfViewportAfterReload(state);
   if (!state) return;
   applyLayoutUrlStateSeed(state);
 }
@@ -1725,6 +1786,7 @@ function availableLayoutModes() {
 }
 
 function initialLayoutSlots() {
+  if (bootstrap.guestWorkspace) return layoutFromSessionList([tabberItemId]);
   const params = new URLSearchParams(location.search);
   maybeAdoptFileExplorerModeDeepLink(params);
   maybeAdoptLayoutStateDeepLink(params);
@@ -3392,6 +3454,7 @@ function updateBrowserFavicon(options = {}) {
 function updateDocumentTitle() {
   const counts = globalActivityCounts();
   updateBrowserFavicon({counts});
+  if (bootstrap.guestWorkspace) return;
   const count = runningAgentCount(counts);
   if (count > 0) {
     documentTitleIdleSinceMs = null;
@@ -7347,6 +7410,10 @@ function applyLayoutSlots(nextSlots, options = {}) {
     updateStatus();
   }
   if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  const previousFiles = new Set(previousActive.filter(isFileEditorItem).map(fileItemPath));
+  const shownFiles = new Set(activeSessions.filter(item => previousItems.has(item) && isFileEditorItem(item)).map(fileItemPath));
+  const reopenedFiles = [...shownFiles].filter(path => !previousFiles.has(path) && fileState.get(path)?.kind === 'text');
+  if (reopenedFiles.length) void refreshOpenFilesIfChanged({paths: reopenedFiles, fresh: true, activated: true});
 }
 
 function cleanupRemovedDynamicLayoutItems(previousItems, nextItems) {
@@ -7355,16 +7422,20 @@ function cleanupRemovedDynamicLayoutItems(previousItems, nextItems) {
     return;
   }
   for (const item of previousItems || []) {
-    if (!dynamicVirtualLayoutItems.has(item) || nextItems?.has(item)) continue;
-    const panel = panelNodes.get(item);
-    if (panel) removePanelForItem(item);
-    else tabTypeForItem(item)?.cleanup?.(item, null);
-    dynamicVirtualLayoutItems.delete(item);
-    paneViewState.delete(item);
-    tabLastActivatedAt.delete(item);
-    tabActivationOrder.delete(item);
+    if (nextItems?.has(item) || gitDiffItemPath(item)) continue;
+    retireDynamicLayoutItem(item);
   }
   syncFileLayoutItems();
+}
+
+function retireDynamicLayoutItem(item) {
+  if (!dynamicVirtualLayoutItems.delete(item)) return false;
+  if (panelNodes.has(item)) removePanelForItem(item);
+  else tabTypeForItem(item)?.cleanup?.(item, null);
+  paneViewState.delete(item);
+  tabLastActivatedAt.delete(item);
+  tabActivationOrder.delete(item);
+  return true;
 }
 
 function layoutRenderRequest(request = {}) {
@@ -7526,6 +7597,7 @@ function flushPendingLayoutRender(reason = 'drag-flush') {
 }
 
 function updateActiveSessionParam() {
+  if (bootstrap.guestWorkspace) return updateShareWorkspaceURL();
   const params = new URLSearchParams(location.search);
   params.delete('active');
   params.delete('sessions');

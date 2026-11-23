@@ -2282,6 +2282,10 @@ function dockviewLoadLayout(slots = layoutSlots, options = {}) {
     }
     const fromJsonPerf = clientPerfStart('dockviewFromJson');
     try {
+      // Dockview moves retained panels to a temporary group before invoking pool callbacks.
+      for (const [item, panel] of panelNodes) {
+        if (panel.isConnected && panel.getClientRects().length) captureDockviewPaneBeforeDetach(item);
+      }
       api.fromJSON(dockviewJsonFromLayoutSlots(slots), {reuseExistingPanels: true});
     } finally {
       clientPerfEnd(fromJsonPerf, {nodes: items.length});
@@ -2341,7 +2345,7 @@ function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
       title: t('pane.empty'),
       renderer: dockviewPanelRenderer,
       params: {item},
-      minimumWidth: minSplitPaneWidthPx(),
+      minimumWidth: minWidthForLayoutItem(item),
       minimumHeight: minSplitPaneHeightPx(),
     };
   }
@@ -2435,10 +2439,7 @@ function dockviewSerializedLeaf(slot, slots, weight = SERIALIZED_WEIGHT_BASE) {
       // explicitly tab-free.
       views: placeholder ? [dockviewEmptyPaneItem(groupId)] : tabs.slice(),
       activeView: placeholder ? dockviewEmptyPaneItem(groupId) : (activeItemForSide(slot, slots) || tabs[0]),
-      // The Dockview group header is the only tab strip when an inner panel head is hidden.
-      // A singleton Finder used to suppress it as a legacy reserved-pane optimization, leaving
-      // no visible route to the other independent triplet tabs after they are added.
-      hideHeader: placeholder || normalTabberPaneHeaderHidden(slot, slots),
+      hideHeader: placeholder,
     },
     size: Math.max(1, Math.round(weight)),
     visible: true,
@@ -2805,7 +2806,8 @@ function dockviewHeaderActionsHtml(item, slot = slotForItem(item)) {
     ? paneTabs(slot).includes(tabberItemId)
     : item === tabberItemId && tabberSidebarSinglePane;
   if (tabberHomeNavigation) {
-    const modeControl = `<label class="tabber-advanced-control"><input type="checkbox" data-tabber-advanced aria-label="Advanced"${tabberIsAdvanced() ? ' checked' : ''}> Advanced</label>`;
+    const modeControl = bootstrap.guestWorkspace ? '' :
+      `<label class="tabber-advanced-control"><input type="checkbox" data-tabber-advanced aria-label="Advanced"${tabberIsAdvanced() ? ' checked' : ''}> Advanced</label>`;
     return modeControl + paneFrameControlsGroupHtml(item, {
       slot,
       actions: false,
@@ -2835,9 +2837,6 @@ function dockviewHeaderActionsHtml(item, slot = slotForItem(item)) {
       popout: paneCanPopout(item),
       minimize: true,
       expand: true,
-      close: true,
-      closeTitle: t('editor.closePane'),
-      closeLabel: t('editor.closePane'),
     });
   }
   if (isVirtualItem(item)) return virtualPanelControlsHtml(item, {popout: paneCanPopout(item)});
@@ -2845,11 +2844,10 @@ function dockviewHeaderActionsHtml(item, slot = slotForItem(item)) {
 }
 
 function handleDockviewHeaderActionClick(event, fallbackItem = '') {
+  if (handlePaneFrameActionClick(event, fallbackItem)) return;
   const button = event.target?.closest?.('button');
   if (!button) return;
-  const item = button.dataset.tab || button.dataset.windowSession || button.dataset.detailToggle
-    || button.dataset.paneActions || button.dataset.paneMinimize || button.dataset.paneExpand
-    || button.dataset.panePopout || button.dataset.paneClose || fallbackItem;
+  const item = button.dataset.tab || button.dataset.windowSession || button.dataset.detailToggle || fallbackItem;
   if (!item) return;
   if (button.dataset.tab !== undefined) {
     event.preventDefault();
@@ -2871,36 +2869,6 @@ function handleDockviewHeaderActionClick(event, fallbackItem = '') {
     const panel = document.getElementById(panelDomId(item));
     if (panel) setPanelDetailsCollapsed(panel, !panel.classList.contains('details-collapsed'));
     return;
-  }
-  if (button.dataset.paneActions !== undefined) {
-    event.preventDefault();
-    event.stopPropagation();
-    const rect = button.getBoundingClientRect();
-    showSessionContextMenu(button.dataset.paneActions || item, rect.left, rect.bottom + 4);
-    return;
-  }
-  if (button.dataset.paneMinimize !== undefined) {
-    event.preventDefault();
-    event.stopPropagation();
-    minimizePaneFromLayout(button.dataset.paneMinimize || item);
-    return;
-  }
-  if (button.dataset.paneExpand !== undefined) {
-    event.preventDefault();
-    event.stopPropagation();
-    expandPaneFromLayout(button.dataset.paneExpand || item);
-    return;
-  }
-  if (button.dataset.panePopout !== undefined) {
-    event.preventDefault();
-    event.stopPropagation();
-    openPanePopout(button.dataset.panePopout || item);
-    return;
-  }
-  if (button.dataset.paneClose !== undefined) {
-    event.preventDefault();
-    event.stopPropagation();
-    closePaneFrameItem(button.dataset.paneClose || item);
   }
 }
 
@@ -2982,17 +2950,19 @@ function createDockviewTabRenderer() {
   let api = null;
   let disposables = [];
   const render = () => {
-    if (!tabberIsAdvanced() && !paneTabs(slotForItem(item)).includes(tabberItemId)) {
+    const hasItem = item && !dockviewEmptyPaneSlot(item);
+    if (hasItem && element.dataset.paneTab !== item) element.dataset.paneTab = item;
+    if (normalTabberPaneTabStripHidden(slotForItem(item))) {
       cleanupDetachedPaneTabPopover(element);
       element.hidden = true;
       element.replaceChildren();
       return;
     }
     element.hidden = false;
-    if (item && !dockviewEmptyPaneSlot(item)) syncDockviewTabShell(element, item, api);
+    if (hasItem) syncDockviewTabShell(element, item, api);
     if (dockviewLayoutState.applyingFromLayout) {dockviewLayoutState.tabRenderPending = true; return;}
     if (!item) return;
-    if (dockviewEmptyPaneSlot(item)) {
+    if (!hasItem) {
       element.hidden = true;
       element.replaceChildren();
       return;
@@ -3024,7 +2994,7 @@ function createDockviewTabRenderer() {
   element.__yomuxDockviewRefresh = render;
   bindPaneTabDismissInteraction(element);
   element.addEventListener('pointerdown', event => {
-    if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) event.stopPropagation();
+    if (event.target.closest('[data-auto-session]')) event.stopPropagation();
     else {
       captureDockviewPreviousPaneBeforeTabActivation(element, item);
       dockviewSetPendingUserPanelActivation(item);
@@ -3033,7 +3003,7 @@ function createDockviewTabRenderer() {
     }
   });
   element.addEventListener('mousedown', event => {
-    if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) return;
+    if (event.target.closest('[data-auto-session]')) return;
     if (dockviewLayoutState.pendingUserPanelActivation !== item) {
       captureDockviewPreviousPaneBeforeTabActivation(element, item);
     }
@@ -3042,14 +3012,6 @@ function createDockviewTabRenderer() {
     event.preventDefault();
   });
   element.addEventListener('click', async event => {
-    const close = event.target.closest('[data-pane-tab-close]');
-    if (close) {
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation?.();
-      closeLayoutTabItem(item);
-      return;
-    }
     const autoTarget = event.target.closest('[data-auto-session]');
     if (autoTarget) {
       event.preventDefault();
@@ -3071,7 +3033,7 @@ function createDockviewTabRenderer() {
     api?.setActive?.();
   });
   element.addEventListener('dblclick', event => {
-    if (isHistoricalFileEditorItem(item) || event.target.closest('[data-auto-session], [data-pane-tab-close]')) return;
+    if (isHistoricalFileEditorItem(item) || event.target.closest(paneTabInteractiveSelector)) return;
     event.preventDefault();
     event.stopPropagation();
     beginPaneTabRename(element, item);
@@ -3132,7 +3094,6 @@ function dockviewClearPreActivationCapture(item = '') {
 }
 
 function syncDockviewTabShell(tab, item, api = null) {
-  tab.dataset.paneTab = item;
   tab.classList.toggle('tab-activation-pending', dockviewLayoutState.tabActivationPerf?.item === item);
   syncDockviewTabActiveClass(tab, api);
   tab.classList.toggle('tmux-pane-tab-token', isTmuxSession(item));
@@ -3224,7 +3185,7 @@ function dockviewSyncGroupHeaders() {
   for (const group of api?.groups || []) {
     const slot = dockviewLayoutState.groupSlots.get(dockviewGroupId(group));
     if (!slot || !group.header) continue;
-    const hidden = paneIsPlaceholder(slot) || normalTabberPaneHeaderHidden(slot);
+    const hidden = paneIsPlaceholder(slot);
     if (group.header.hidden === hidden) continue;
     group.header.hidden = hidden;
     changed = true;

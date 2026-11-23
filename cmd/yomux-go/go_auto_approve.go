@@ -33,6 +33,7 @@ import (
 const (
 	goYoloPollInterval         = 500 * time.Millisecond
 	goYoloCapacityRetryDelay   = 10 * time.Second
+	goYoloServerErrorDelay     = time.Second
 	goYoloApprovalRetryDelay   = 3 * time.Second
 	goYoloCaptureTimeout       = 2 * time.Second
 	goYoloManualApprovalAction = "left prompt for manual approval"
@@ -85,7 +86,8 @@ func goCapacityRecoveryAllowed(agentState, visible string) bool {
 }
 
 func goCapacityNoticeCurrent(visible string) bool {
-	return stats.CapacityNoticeCurrent(visible)
+	notice, _ := stats.CodexRecoveryNotice(visible)
+	return notice != ""
 }
 
 func goCapacityRetryDue(now, lastSent time.Time) bool {
@@ -98,6 +100,12 @@ type goYoloCapacityRecovery struct {
 	pastedAt        time.Time
 	sessionIdentity string
 	processIdentity string
+	notice          string
+}
+
+type goYoloServerErrorObservation struct {
+	notice string
+	since  time.Time
 }
 
 type goYoloWorker struct {
@@ -133,6 +141,7 @@ type goYoloStore struct {
 	closed            bool
 	lastSent          map[string]time.Time
 	capacityRecovery  map[string]goYoloCapacityRecovery
+	serverErrorSeen   map[string]goYoloServerErrorObservation
 }
 
 func newGoYoloStore(configDir string) (*goYoloStore, error) {
@@ -140,7 +149,8 @@ func newGoYoloStore(configDir string) (*goYoloStore, error) {
 		path:    filepath.Join(configDir, "go-yolo-enabled.json"),
 		enabled: make(map[string]bool), identities: make(map[string]string), agentIDs: make(map[string]map[string]string), workers: make(map[string]*goYoloWorker), lockOwners: make(map[string]map[string]any), transitions: make(map[string]*sync.Mutex),
 		lastSent: make(map[string]time.Time), capacityRecovery: make(map[string]goYoloCapacityRecovery), lastAction: make(map[string]string), lastError: make(map[string]string),
-		lastPrompt: make(map[string]string), lastPromptAt: make(map[string]time.Time), approved: make(map[string]int), declined: make(map[string]int), blocked: make(map[string]int),
+		serverErrorSeen: make(map[string]goYoloServerErrorObservation),
+		lastPrompt:      make(map[string]string), lastPromptAt: make(map[string]time.Time), approved: make(map[string]int), declined: make(map[string]int), blocked: make(map[string]int),
 		attempts: make(map[string]int), failures: make(map[string]int), lastAttempt: make(map[string]time.Time), lastSuccess: make(map[string]time.Time), metadataRefreshAt: make(map[string]time.Time),
 	}
 	data, err := os.ReadFile(store.path)
@@ -265,6 +275,7 @@ func (store *goYoloStore) setIfIdentity(session, expectedIdentity string, enable
 	if err := store.persistState(newEnabled, newIdentities, newAgentIDs); err != nil {
 		return err
 	}
+	identityChanged := store.identities[session] != newIdentities[session]
 	store.enabled = newEnabled
 	store.identities = newIdentities
 	store.agentIDs = newAgentIDs
@@ -282,10 +293,21 @@ func (store *goYoloStore) setIfIdentity(session, expectedIdentity string, enable
 				delete(store.lastPromptAt, key)
 			}
 		}
+	}
+	if !enabled || identityChanged {
 		for target := range store.lastSent {
 			if strings.HasPrefix(target, session+"\x00") {
 				delete(store.lastSent, target)
+			}
+		}
+		for target := range store.capacityRecovery {
+			if strings.HasPrefix(target, session+"\x00") {
 				delete(store.capacityRecovery, target)
+			}
+		}
+		for target := range store.serverErrorSeen {
+			if strings.HasPrefix(target, session+"\x00") {
+				delete(store.serverErrorSeen, target)
 			}
 		}
 	}
@@ -771,6 +793,7 @@ func (s *server) goYoloGuardedSendKeys(ctx context.Context, session, target, exp
 	if ctx.Err() != nil || s.yolo == nil || !s.yolo.isEnabled(session) {
 		return goYoloKeyDelivery{}, nil
 	}
+	var recoveryNotice string
 	guard := func() (bool, error) {
 		sessionIdentity, sessionErr := s.goYoloSessionIdentity(ctx, session)
 		targetIdentity, targetErr := s.goYoloPaneSessionIdentity(ctx, target)
@@ -793,7 +816,11 @@ func (s *server) goYoloGuardedSendKeys(ctx context.Context, session, target, exp
 		// particular, never clear or submit a draft that appeared during the
 		// preceding identity and status checks.
 		visible, captureErr := s.goYoloCapture(ctx, target)
-		return captureErr == nil && screenGuard(visible) && ctx.Err() == nil && s.yolo.isEnabled(session), captureErr
+		if captureErr != nil || !screenGuard(visible) || ctx.Err() != nil || !s.yolo.isEnabled(session) {
+			return false, captureErr
+		}
+		recoveryNotice, _ = stats.CodexRecoveryNotice(visible)
+		return true, nil
 	}
 	if len(keys) == 2 && keys[0] == "continue" {
 		pasted, err := s.pasteTerminalText(ctx, target, keys[0], guard)
@@ -803,7 +830,8 @@ func (s *server) goYoloGuardedSendKeys(ctx context.Context, session, target, exp
 		// Paste and submission are separate writes. Reuse every ownership and
 		// admission check before Return, including the exact pasted composer.
 		submission, err := s.goYoloGuardedSendKeys(ctx, session, target, expectedIdentity, agent, []string{"Enter"}, allowedStates, func(screen string) bool {
-			return slices.Equal(goCapacityRecoveryKeys("idle", screen, true), []string{"Enter"})
+			notice, _ := stats.CodexRecoveryNotice(screen)
+			return notice == recoveryNotice && slices.Equal(goCapacityRecoveryKeys("idle", screen, true), []string{"Enter"})
 		})
 		return goYoloKeyDelivery{pasted: true, keysAttempted: submission.keysAttempted, keysSent: submission.keysSent}, err
 	} else if allowed, err := guard(); err != nil || !allowed {
@@ -1237,6 +1265,7 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 		liveState, statusFresh := s.goYoloAgentStatusNow(ctx, agent)
 		if statusFresh && liveState == "working" {
 			s.yolo.mu.Lock()
+			delete(s.yolo.serverErrorSeen, key)
 			delivery, delivered := s.yolo.capacityRecovery[key]
 			delivery.pending = false
 			if delivered {
@@ -1254,8 +1283,8 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 					delete(s.yolo.capacityRecovery, key)
 					delete(s.yolo.lastSent, key)
 					s.yolo.mu.Unlock()
-					s.yolo.record(session, "submitted continue for the capacity notice; agent working confirmed", "", false, true)
-					s.publishGoYoloAuditEvent(session, "yolo_capacity_recovery_resumed", "agent resumed work after capacity recovery delivery", map[string]any{"attempted": false, "succeeded": true})
+					s.yolo.record(session, "submitted continue for the Codex error; agent working confirmed", "", false, true)
+					s.publishGoYoloAuditEvent(session, "yolo_capacity_recovery_resumed", "agent resumed work after Codex recovery delivery", map[string]any{"attempted": false, "succeeded": true})
 					s.publishGoYoloState(session)
 				}
 			}
@@ -1264,6 +1293,7 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 		if !statusFresh || liveState != state {
 			s.yolo.mu.Lock()
 			delete(s.yolo.capacityRecovery, key)
+			delete(s.yolo.serverErrorSeen, key)
 			s.yolo.mu.Unlock()
 			s.recordGoYoloStatus(session, "suspended: current agent status could not be confirmed", "", false, false)
 			continue
@@ -1275,6 +1305,7 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 			s.yolo.mu.Lock()
 			delete(s.yolo.capacityRecovery, key)
 			delete(s.yolo.lastSent, key)
+			delete(s.yolo.serverErrorSeen, key)
 			s.yolo.mu.Unlock()
 			continue
 		}
@@ -1287,10 +1318,11 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 			s.publishGoYoloState(session)
 		}
 		prompt := yolo.ClassifyPrompt(visible, "")
-		if (prompt.ManualApproval || state != "blocked" && prompt.Actionable) && strings.EqualFold(string(prompt.Agent), kind) {
+		if state != "blocked" && prompt.Actionable && strings.EqualFold(string(prompt.Agent), kind) {
 			s.yolo.mu.Lock()
 			delete(s.yolo.capacityRecovery, key)
 			delete(s.yolo.lastSent, key)
+			delete(s.yolo.serverErrorSeen, key)
 			s.yolo.mu.Unlock()
 			if err := s.goYoloApprovalCycle(ctx, session, target, expectedIdentity, agent, prompt); err != nil {
 				return err
@@ -1300,9 +1332,10 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 		if kind != "codex" {
 			continue
 		}
+		notice, serverError := stats.CodexRecoveryNotice(visible)
 		s.yolo.mu.Lock()
 		pendingOwner := s.yolo.capacityRecovery[key]
-		pending := pendingOwner.pending && pendingOwner.sessionIdentity == expectedIdentity && pendingOwner.processIdentity == processIdentity
+		pending := pendingOwner.pending && pendingOwner.notice == notice && pendingOwner.sessionIdentity == expectedIdentity && pendingOwner.processIdentity == processIdentity
 		s.yolo.mu.Unlock()
 		if pending && !pendingOwner.pastedAt.IsZero() {
 			if time.Since(pendingOwner.pastedAt) >= goYoloCapacityRetryDelay {
@@ -1312,7 +1345,7 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 				s.recordGoYoloStatus(session, "suspended: pasted recovery text could not be confirmed", "", false, false)
 				continue
 			}
-			if draft, valid := goComposerDraft(visible); valid && draft == "" && goCapacityNoticeCurrent(visible) {
+			if draft, valid := goComposerDraft(visible); valid && draft == "" {
 				continue
 			}
 		}
@@ -1329,29 +1362,48 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 		if len(keys) == 0 {
 			s.yolo.mu.Lock()
 			delete(s.yolo.capacityRecovery, key)
-			s.yolo.mu.Unlock()
-			if !goCapacityNoticeCurrent(visible) {
-				s.yolo.mu.Lock()
+			delete(s.yolo.serverErrorSeen, key)
+			if notice == "" {
 				delete(s.yolo.lastSent, key)
-				delete(s.yolo.capacityRecovery, key)
-				s.yolo.mu.Unlock()
 			}
+			s.yolo.mu.Unlock()
 			continue
 		}
+		now := time.Now()
 		s.yolo.mu.Lock()
 		lastSent := s.yolo.lastSent[key]
+		seen := s.yolo.serverErrorSeen[key]
+		if serverError && seen.notice != notice {
+			seen = goYoloServerErrorObservation{notice: notice, since: now}
+			s.yolo.serverErrorSeen[key] = seen
+		} else if !serverError {
+			if seen.notice != "" {
+				lastSent = time.Time{}
+				delete(s.yolo.lastSent, key)
+			}
+			delete(s.yolo.serverErrorSeen, key)
+		}
 		s.yolo.mu.Unlock()
-		if !goCapacityRetryDue(time.Now(), lastSent) {
+		if serverError {
+			if now.Sub(seen.since) < goYoloServerErrorDelay || now.Sub(lastSent) < goYoloServerErrorDelay {
+				continue
+			}
+		} else if !goCapacityRetryDue(now, lastSent) {
 			continue
 		}
 		// Capture again immediately before sending so an approval or question that
-		// replaced the capacity notice cannot inherit this retry decision.
+		// replaced the notice cannot inherit this retry decision.
+		guard := func(screen string) bool {
+			current, _ := stats.CodexRecoveryNotice(screen)
+			return current == notice && slices.Equal(keys, goCapacityRecoveryKeys(state, screen, pending))
+		}
 		latest, err := s.goYoloCapture(ctx, target)
-		if err != nil || !slices.Equal(keys, goCapacityRecoveryKeys(state, latest, pending)) {
-			if err == nil && !goCapacityNoticeCurrent(latest) {
+		if err != nil || !guard(latest) {
+			if current, _ := stats.CodexRecoveryNotice(latest); err == nil && current != notice {
 				s.yolo.mu.Lock()
 				delete(s.yolo.lastSent, key)
 				delete(s.yolo.capacityRecovery, key)
+				delete(s.yolo.serverErrorSeen, key)
 				s.yolo.mu.Unlock()
 			}
 			continue
@@ -1373,20 +1425,18 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 			s.yolo.mu.Unlock()
 			// Keep worker attempt counters limited to terminal input. The audit
 			// event still records this intended action with attempted=false.
-			s.yolo.record(session, "dry-run: would submit continue for the current capacity notice", "", false, false)
-			s.publishGoYoloAuditEvent(session, "yolo_capacity_recovery_dry_run", "dry-run: would submit continue for the current capacity notice", map[string]any{"attempted": false, "succeeded": false})
+			s.yolo.record(session, "dry-run: would submit continue for the current Codex error", "", false, false)
+			s.publishGoYoloAuditEvent(session, "yolo_capacity_recovery_dry_run", "dry-run: would submit continue for the current Codex error", map[string]any{"attempted": false, "succeeded": false})
 			s.publishGoYoloState(session)
 			continue
 		}
-		delivery, err := s.goYoloGuardedSendKeys(ctx, session, target, expectedIdentity, agent, keys, []string{"idle", "blocked"}, func(screen string) bool {
-			return slices.Equal(keys, goCapacityRecoveryKeys(state, screen, pending))
-		})
+		delivery, err := s.goYoloGuardedSendKeys(ctx, session, target, expectedIdentity, agent, keys, []string{"idle", "blocked"}, guard)
 		if delivery.pasted {
 			s.yolo.mu.Lock()
 			if s.yolo.enabled[session] && s.yolo.identities[session] == expectedIdentity && s.yolo.agentIDs[session][target] == processIdentity {
 				s.yolo.capacityRecovery[key] = goYoloCapacityRecovery{
 					sessionIdentity: expectedIdentity, processIdentity: processIdentity,
-					pending: true, pastedAt: time.Now(),
+					pending: true, pastedAt: time.Now(), notice: notice,
 				}
 			}
 			s.yolo.mu.Unlock()
@@ -1397,37 +1447,39 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 			s.yolo.mu.Unlock()
 		}
 		if err != nil {
-			s.yolo.record(session, "capacity recovery submission failed", err.Error(), delivery.keysAttempted, false)
-			s.publishGoYoloAuditEvent(session, "yolo_capacity_recovery_failed", "capacity recovery submission failed", map[string]any{"error": err.Error(), "attempted": delivery.keysAttempted, "succeeded": false})
+			s.yolo.record(session, "Codex recovery submission failed", err.Error(), delivery.keysAttempted, false)
+			s.publishGoYoloAuditEvent(session, "yolo_capacity_recovery_failed", "Codex recovery submission failed", map[string]any{"error": err.Error(), "attempted": delivery.keysAttempted, "succeeded": false})
 			s.publishGoYoloState(session)
-			return fmt.Errorf("send capacity recovery: %w", err)
+			return fmt.Errorf("send Codex recovery: %w", err)
 		}
 		if !delivery.keysSent {
 			if delivery.pasted {
-				s.recordGoYoloStatus(session, "capacity recovery text pasted; submission not yet confirmed", "", false, false)
+				s.recordGoYoloStatus(session, "Codex recovery text pasted; submission not yet confirmed", "", false, false)
 			}
 			continue
 		}
 		responseScreen, responseCaptureErr := s.goYoloCapture(ctx, target)
 		draft, validDraft := goComposerDraft(responseScreen)
+		responseNotice, _ := stats.CodexRecoveryNotice(responseScreen)
 		s.yolo.mu.Lock()
 		s.yolo.capacityRecovery[key] = goYoloCapacityRecovery{
 			sessionIdentity: expectedIdentity, processIdentity: processIdentity,
-			pending: responseCaptureErr == nil && validDraft && draft == "continue" && goCapacityNoticeCurrent(responseScreen),
+			pending: responseCaptureErr == nil && validDraft && draft == "continue" && responseNotice == notice,
+			notice:  notice,
 		}
 		s.yolo.mu.Unlock()
 		responseState, responseStatusFresh := s.goYoloAgentStatusNow(ctx, agent)
-		if responseCaptureErr != nil || !responseStatusFresh || responseState != "working" || goCapacityNoticeCurrent(responseScreen) {
-			s.yolo.record(session, "capacity recovery submission sent; agent response not yet confirmed", "", true, false)
-			s.publishGoYoloAuditEvent(session, "yolo_capacity_recovery_attempt", "submitted continue for the current capacity notice; response not yet confirmed", map[string]any{"attempted": true, "succeeded": false})
+		if responseCaptureErr != nil || !responseStatusFresh || responseState != "working" || responseNotice != "" {
+			s.yolo.record(session, "Codex recovery submission sent; agent response not yet confirmed", "", true, false)
+			s.publishGoYoloAuditEvent(session, "yolo_capacity_recovery_attempt", "submitted continue for the current Codex error; response not yet confirmed", map[string]any{"attempted": true, "succeeded": false})
 			s.publishGoYoloState(session)
 			continue
 		}
 		s.yolo.mu.Lock()
 		delete(s.yolo.capacityRecovery, key)
 		s.yolo.mu.Unlock()
-		s.yolo.record(session, "submitted continue for the current capacity notice", "", true, true)
-		s.publishGoYoloAuditEvent(session, "yolo_capacity_recovery_attempt", "submitted continue for the current capacity notice", map[string]any{"attempted": true, "succeeded": true})
+		s.yolo.record(session, "submitted continue for the current Codex error", "", true, true)
+		s.publishGoYoloAuditEvent(session, "yolo_capacity_recovery_attempt", "submitted continue for the current Codex error", map[string]any{"attempted": true, "succeeded": true})
 		s.publishGoYoloState(session)
 	}
 	s.yolo.mu.Lock()
@@ -1435,6 +1487,11 @@ func (s *server) goYoloCycle(ctx context.Context, session string) error {
 		if strings.HasPrefix(key, session+"\x00") && !seenTargets[key] {
 			delete(s.yolo.lastSent, key)
 			delete(s.yolo.capacityRecovery, key)
+		}
+	}
+	for key := range s.yolo.serverErrorSeen {
+		if strings.HasPrefix(key, session+"\x00") && !seenTargets[key] {
+			delete(s.yolo.serverErrorSeen, key)
 		}
 	}
 	s.yolo.mu.Unlock()
@@ -1467,10 +1524,6 @@ func goYoloActionOption(prompt yolo.Prompt, action yolo.Action) int {
 }
 
 func (s *server) goYoloApprovalCycle(ctx context.Context, session, target, expectedIdentity string, agent map[string]any, prompt yolo.Prompt) error {
-	if prompt.ManualApproval {
-		s.recordGoYoloStatus(session, goYoloManualApprovalAction+": "+prompt.Reason, "", false, false)
-		return nil
-	}
 	key := session + "\x00" + target
 	s.yolo.mu.Lock()
 	lastHash := s.yolo.lastPrompt[key]
@@ -1482,7 +1535,7 @@ func (s *server) goYoloApprovalCycle(ctx context.Context, session, target, expec
 		s.publishGoYoloState(session)
 		return nil
 	}
-	decision := yolo.LoadAndEvaluate(rulesPath, prompt.RuleInput, false)
+	decision := yolo.LoadAndEvaluatePrompt(rulesPath, prompt, false)
 	activeAction := decision.Action == yolo.Approve || decision.Action == yolo.Decline
 	if prompt.Hash == lastHash && !lastAt.IsZero() && (!activeAction || time.Since(lastAt) < goYoloApprovalRetryDelay) {
 		return nil
@@ -1800,7 +1853,10 @@ func (s *server) goYoloCapture(ctx context.Context, target string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	return string(output), nil
+	return stats.CodexRecoveryCapture(string(output), func() (string, error) {
+		styled, err := s.tmuxCommandContext(commandContext, "capture-pane", "-t", target, "-p", "-J", "-e").Output()
+		return string(styled), err
+	})
 }
 
 func (s *server) autoApprove(w http.ResponseWriter, r *http.Request) {

@@ -269,36 +269,51 @@ function bindFileExplorerChangesResizer(panel) {
   const handle = panel?.querySelector?.('[data-file-explorer-changes-resizer]');
   const pane = panel?.querySelector?.('.file-explorer-pane');
   if (!handle || !pane) return null;
-  return bindScopedOnce(handle, 'file-explorer-changes-resizer', scope => {
-  scope.ownEvent('pointerdown', handle, 'pointerdown', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    const pointerId = event.pointerId;
-    handle.setPointerCapture?.(pointerId);
-    pane.classList.add('resizing-changes');
-    document.body?.classList.add('resizing-file-explorer-changes');
-    const move = moveEvent => {
-      const rect = pane.getBoundingClientRect();
-      const height = Math.max(1, rect.height);
-      const styles = getComputedStyle(pane);
-      const minBlock = Number.parseFloat(styles.getPropertyValue('--file-explorer-changes-min-block-size')) || 96;
-      const bottomHeight = Math.max(minBlock, rect.bottom - moveEvent.clientY);
-      const minFraction = Math.min(0.68, minBlock / height);
-      const fraction = Math.max(minFraction, Math.min(0.68, bottomHeight / height));
-      pane.style.setProperty('--file-explorer-changes-size', `${Math.round(fraction * 1000) / 10}%`);
-    };
-    const done = () => {
-      pane.classList.remove('resizing-changes');
-      document.body?.classList.remove('resizing-file-explorer-changes');
-      try { handle.releasePointerCapture?.(pointerId); } catch (_) {}
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', done);
-      window.removeEventListener('pointercancel', done);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', done);
-    window.addEventListener('pointercancel', done);
+  return bindFileExplorerRowResizer(handle, pane, moveEvent => {
+    const rect = pane.getBoundingClientRect();
+    const height = Math.max(1, rect.height);
+    const styles = getComputedStyle(pane);
+    const minBlock = Number.parseFloat(styles.getPropertyValue('--file-explorer-changes-min-block-size')) || 96;
+    const bottomHeight = Math.max(minBlock, rect.bottom - moveEvent.clientY);
+    const minFraction = Math.min(0.68, minBlock / height);
+    const fraction = Math.max(minFraction, Math.min(0.68, bottomHeight / height));
+    pane.style.setProperty('--file-explorer-changes-size', `${Math.round(fraction * 1000) / 10}%`);
   });
+}
+
+function bindFileExplorerRowResizer(handle, pane, onMove) {
+  return bindScopedOnce(handle, 'file-explorer-row-resizer', scope => {
+    let finish = null;
+    scope.ownEvent('pointerdown', handle, 'pointerdown', event => {
+      if (event.button !== 0 || finish) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const pointerId = event.pointerId;
+      const grabOffset = event.clientY - handle.getBoundingClientRect().top;
+      handle.setPointerCapture?.(pointerId);
+      pane.classList.add('resizing-changes');
+      document.body?.classList.add('resizing-file-explorer-changes');
+      const move = moveEvent => {
+        if (moveEvent.pointerId === pointerId && handle.isConnected) onMove(moveEvent, grabOffset);
+      };
+      const done = endEvent => {
+        if (endEvent && endEvent.pointerId !== pointerId) return;
+        finish = null;
+        pane.classList.remove('resizing-changes');
+        document.body?.classList.remove('resizing-file-explorer-changes');
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', done);
+        window.removeEventListener('pointercancel', done);
+        handle.removeEventListener('lostpointercapture', done);
+        if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
+      };
+      finish = done;
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', done);
+      window.addEventListener('pointercancel', done);
+      handle.addEventListener('lostpointercapture', done);
+    });
+    return () => finish?.();
   });
 }
 

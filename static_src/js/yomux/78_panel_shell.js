@@ -274,8 +274,8 @@ function pruneSmallLayoutSlots() {
 
 function minWidthForLayoutItem(item) {
   const type = tabTypeForItem(item);
-  if (type?.minWidth) return type.minWidth(item);
-  return minSplitPaneWidthPx();
+  const width = type?.minWidth ? type.minWidth(item) : minSplitPaneWidthPx();
+  return bootstrap.guestWorkspace ? Math.min(width, rootCssLengthPx('--share-guest-pane-min-inline-size') || width) : width;
 }
 
 function minWidthForSidePaneItem(item) {
@@ -493,7 +493,7 @@ function updatePaneTabStrip(panel, side) {
   if (!strip) return;
   const stack = paneTabs(side);
   strip.dataset.side = side;
-  strip.hidden = normalTabberPaneHeaderHidden(side);
+  strip.hidden = normalTabberPaneTabStripHidden(side);
   if (strip.hidden) {
     strip.replaceChildren();
     return;
@@ -605,32 +605,45 @@ function syncPaneTabPinnedIcon(tab, item) {
 }
 
 function syncPaneTabDismissControl(tab, item) {
-  const existing = tab.querySelector(':scope > [data-pane-tab-close]');
-  const nextHtml = paneTabDismissControlHtml(item);
-  if (!nextHtml) {
+  const existing = tab.querySelector(':scope > .pane-tab-dismiss-controls');
+  const nextButtons = paneTabDismissButtonsHtml(item);
+  if (!nextButtons) {
     existing?.remove();
     return;
   }
-  if (existing) return;
-  tab.insertAdjacentHTML('beforeend', nextHtml);
+  if (existing) setInnerHtmlIfChanged(existing, nextButtons);
+  else tab.insertAdjacentHTML('beforeend', paneTabDismissControlHtml(item));
 }
+
+const paneTabDismissSelector = '[data-pane-tab-minimize], [data-pane-tab-close]';
+const paneTabInteractiveSelector = `[data-auto-session], ${paneTabDismissSelector}`;
 
 function bindPaneTabDismissInteraction(tab) {
   for (const type of ['pointerdown', 'mousedown']) {
     tab.addEventListener(type, event => {
-      if (!event.target.closest('[data-pane-tab-close]')) return;
+      if (!event.target.closest(paneTabDismissSelector)) return;
       // Dismissal must not transfer content focus to chrome that is about to disappear.
       event.preventDefault();
-      event.stopPropagation();
-    });
+      event.stopImmediatePropagation();
+    }, true);
   }
   tab.addEventListener('keydown', event => {
-    const close = event.target.closest('[data-pane-tab-close]');
-    if (!close || !['Enter', ' '].includes(event.key)) return;
+    const button = event.target.closest(paneTabDismissSelector);
+    if (!button || !['Enter', ' '].includes(event.key)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    close.click();
-  });
+    button.click();
+  }, true);
+  tab.addEventListener('click', event => {
+    const button = event.target.closest(paneTabDismissSelector);
+    if (!button) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const item = tab.dataset.paneTab;
+    if (!item || button.disabled) return;
+    if (button.dataset.paneTabMinimize !== undefined) removeSessionFromLayout(item);
+    else closePaneFrameItem(item);
+  }, true);
 }
 
 function syncPaneTabPinnedChrome(tab, item) {
@@ -672,22 +685,24 @@ function restorePaneTabPopover(strip, item) {
   tab.classList.add('popover-open');
 }
 
-function paneTabDismissControlHtml(item) {
-  const type = tabTypeForItem(item);
-  const isLegacyFiles = type?.key === 'files';
-  const isEditor = isFileEditorItem(item);
-  if (isLegacyFiles || (tabIsPinned(item) && !isEditor)) return '';
-  const closeLabel = isEditor
-    ? t('finder.close', {name: itemLabel(item)})
-    : t('finder.hideFromLayout', {name: itemLabel(item)});
-  const controlKind = isEditor ? 'close' : 'minimize';
-  return toolbarButtonHtml({
-    className: `pane-tab-close ${platformWindowControlClass(controlKind)}`,
-    action: 'pane-tab-close',
-    dataset: {paneTabClose: ''},
-    title: closeLabel,
-    ariaLabel: closeLabel,
+function paneTabDismissButtonsHtml(item) {
+  const canClose = paneItemHasCloseAction(item);
+  if (tabTypeForItem(item)?.key === 'files' || (tabIsPinned(item) && !canClose)) return '';
+  const buttonHtml = (kind, dataset, label, disabled = false) => toolbarButtonHtml({
+    className: `pane-tab-close ${platformWindowControlClass(kind)}`,
+    dataset,
+    title: disabled ? t('menu.common.adminOnly') : label,
+    ariaLabel: label,
+    disabled,
   });
+  const minimize = buttonHtml('minimize', {paneTabMinimize: ''}, t('finder.hideFromLayout', {name: itemLabel(item)}));
+  const close = canClose ? buttonHtml('close', {paneTabClose: ''}, paneFrameCloseLabel(item), paneItemCloseDisabled(item)) : '';
+  return minimize + close;
+}
+
+function paneTabDismissControlHtml(item) {
+  const buttons = paneTabDismissButtonsHtml(item);
+  return buttons ? `<span class="pane-tab-dismiss-controls">${buttons}</span>` : '';
 }
 
 // the inner markup of a pane tab — pin icon + row (virtual rowHtml or tmux) + optional dismiss control +
@@ -807,10 +822,6 @@ function createPaneTab(side, item, displayContext = {}) {
   tab.addEventListener('pointerdown', event => {
     dragTimingReset();           // S14: starts the opt-in drag-timing window (no-op unless the flag is on)
     dragTimingMark('pointerdown');
-    if (event.target.closest('[data-pane-tab-close]')) {
-      event.stopPropagation();
-      return;
-    }
     const autoTarget = event.target.closest('[data-auto-session]');
     if (!autoTarget) return;
     event.preventDefault();
@@ -818,9 +829,6 @@ function createPaneTab(side, item, displayContext = {}) {
     if (item === activeItemForSide(side)) setFocusedPanelItem(item, {userInitiated: true});
   });
   bindActionDispatcher(tab, {
-    'pane-tab-close': () => {
-      closeLayoutTabItem(item);
-    },
     'pane-tab-auto-approve': async (_event, autoTarget) => {
       const shouldRefocus = item === activeItemForSide(side);
       await toggleAutoApprove(autoTarget.dataset.autoSession);
@@ -834,18 +842,18 @@ function createPaneTab(side, item, displayContext = {}) {
   });
   bindTabActivation(tab, () => activatePaneTab(side, item, {userInitiated: true}), {
     stopPropagation: true,
-    ignore: event => Boolean(event.target.closest('[data-auto-session], [data-pane-tab-close]')),
+    ignore: event => Boolean(event.target.closest(paneTabInteractiveSelector)),
   });
   if (isEditor && !isHistoricalFileEditorItem(item)) {
     tab.addEventListener('dblclick', event => {
-      if (event.target.closest('[data-pane-tab-close]')) return;
+      if (event.target.closest(paneTabDismissSelector)) return;
       event.preventDefault();
       event.stopPropagation();
       beginPaneTabRename(tab, item);
     });
   } else if (!isVirtual) {
     tab.addEventListener('dblclick', event => {
-      if (event.target.closest('[data-auto-session], [data-pane-tab-close]')) return;
+      if (event.target.closest(paneTabInteractiveSelector)) return;
       event.preventDefault();
       event.stopPropagation();
       beginPaneTabRename(tab, item);
@@ -1066,7 +1074,7 @@ function paneInfoTabHtml(item = infoItemId, options = {}) {
 }
 
 function fileExplorerPaneTabHtml(item = fileExplorerItemId, options = {}) {
-  if (item === tabberItemId && !tabberIsAdvanced()) {
+  if (item === tabberItemId && !tabberIsAdvanced() && options.menu !== true) {
     return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}</span>`;
   }
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(itemLabel(item))}</span></span>`;
@@ -1369,7 +1377,7 @@ function bindPanelShell(panel, session) {
       // Toggling YO changes the tab's state and can rebuild its chrome. Do not rebuild on pointerdown
       // before its shared click dispatcher receives the same control.
       if (autoTarget) return;
-      const chromeTarget = event.target?.closest?.(`[data-window-dir], [data-window-index], [data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-detail-toggle], ${repoSelectorControlSelector}`);
+      const chromeTarget = event.target?.closest?.(`[data-window-dir], [data-window-index], [data-detail-toggle], ${paneFrameActionSelector}, ${repoSelectorControlSelector}`);
       if (windowTarget) {
         // Run the original target before polling or focus-side updates can replace it.
         // The marker suppresses the later delegated click if the browser still emits one.
@@ -1419,29 +1427,35 @@ function eventTargetIsTerminalFocusSurface(target) {
   return Boolean(target?.closest?.('.terminal, .xterm'));
 }
 
+const paneFrameActionSelector = '[data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-popout], [data-pane-close]';
+
+function handlePaneFrameActionClick(event, fallbackItem) {
+  const button = event.target?.closest?.(paneFrameActionSelector);
+  if (!button) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  if (button.disabled) return true;
+  const {paneActions, paneMinimize, paneExpand, panePopout, paneClose} = button.dataset;
+  if (paneActions !== undefined) {
+    const rect = button.getBoundingClientRect();
+    showSessionContextMenu(paneActions || fallbackItem, rect.left, rect.bottom + 4);
+  } else if (paneMinimize !== undefined) {
+    minimizePaneFromLayout(paneMinimize || fallbackItem);
+  } else if (paneExpand !== undefined) {
+    expandPaneFromLayout(paneExpand || fallbackItem);
+  } else if (panePopout !== undefined) {
+    openPanePopout(panePopout || fallbackItem);
+  } else if (paneClose !== undefined) {
+    closePaneFrameItem(paneClose || fallbackItem);
+  }
+  return true;
+}
+
 function bindPaneFrameControls(panel, session) {
   if (!panel) return null;
   return bindOnce(panel, 'pane-frame-controls', () => {
-    const handleClick = async event => {
-      const button = event.target.closest('[data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close]');
-      if (!button || !panel.contains(button)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation?.();
-      if (button.dataset.paneActions !== undefined) {
-        const rect = button.getBoundingClientRect();
-        showSessionContextMenu(button.dataset.paneActions || session, rect.left, rect.bottom + 4);
-        return;
-      }
-      if (button.dataset.paneMinimize !== undefined) {
-        minimizePaneFromLayout(button.dataset.paneMinimize || session);
-        return;
-      }
-      if (button.dataset.paneExpand !== undefined) {
-        expandPaneFromLayout(button.dataset.paneExpand || session);
-        return;
-      }
-      if (button.dataset.paneClose !== undefined) closePaneFrameItem(button.dataset.paneClose || session);
+    const handleClick = event => {
+      if (handlePaneFrameActionClick(event, session)) event.stopImmediatePropagation?.();
     };
     panel.addEventListener('click', handleClick, true);
     return () => panel.removeEventListener('click', handleClick, true);
@@ -2090,10 +2104,16 @@ function tmuxWindowRecords(panes) {
     const indexText = String(pane.window);
     const existing = byIndex.get(index);
     const active = pane.window_active === true;
-    const record = existing || {index, indexText, windowId: String(pane.window_id || ''), name: tmuxWindowDisplayName(pane), pid: tmuxWindowProcessPid(pane), active: false};
-    if (!existing || active || !record.name) {
+    const activePane = pane.active === true;
+    const record = existing || {
+      index, indexText, windowId: String(pane.window_id || ''), name: tmuxWindowDisplayName(pane), pid: tmuxWindowProcessPid(pane),
+      paneTarget: String(pane.target || pane.pane_id || ''), currentPath: String(pane.current_path || ''), active: false,
+    };
+    if (!existing || activePane || (!record.paneTarget && pane.target) || !record.name) {
       record.name = tmuxWindowDisplayName(pane);
       record.pid = tmuxWindowProcessPid(pane);
+      record.paneTarget = String(pane.target || pane.pane_id || '');
+      record.currentPath = String(pane.current_path || '');
     }
     record.active = record.active || active;
     byIndex.set(index, record);
@@ -2116,13 +2136,13 @@ function tmuxWindowRecords(panes) {
   }));
 }
 
-function sessionMetadataForLayoutItem(session, fallback = null) {
+function sessionMetadataForLayoutItem(session, fallback = null, windowIndex = null) {
   const direct = transcriptMetadataState.payload.sessions?.[session];
   const view = tabberViewDescriptorForSession(session);
-  if (!view) return fallback || direct || null;
-  const source = view.sourceSession ? transcriptMetadataState.payload.sessions?.[view.sourceSession] : null;
+  const index = windowIndex ?? view?.windowIndex;
+  if (index == null) return fallback || direct || null;
+  const source = view?.sourceSession ? transcriptMetadataState.payload.sessions?.[view.sourceSession] : fallback || direct;
   if (!source) return fallback || direct || null;
-  const index = Number(view.windowIndex);
   const panes = (Array.isArray(source.panes) ? source.panes : [])
     .filter(pane => tmuxWindowNumber(pane.window) === index)
     .map(pane => ({...pane, window_active: true}));
@@ -2130,9 +2150,9 @@ function sessionMetadataForLayoutItem(session, fallback = null) {
     .filter(agent => tmuxWindowNumber(agent.window ?? agent.window_index) === index);
   return {
     ...source,
-    ...(direct || {}),
+    ...(view ? direct : null),
     session: String(session),
-    label: view.label || direct?.label || source.label,
+    label: view?.label || direct?.label || source.label,
     panes,
     agents,
     selected_pane: panes.find(pane => pane.active === true) || panes[0] || null,

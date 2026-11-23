@@ -727,6 +727,7 @@ function fetchApiRequestWithTiming(url, options, timingWindow) {
 }
 
 async function apiFetch(url, options = {}, internalOptions = {}) {
+  if (bootstrap.guestWorkspace) return shareWorkspaceFetch(url, options);
   if (terminalAuthenticationActive() && String(url || '').split(/[?#]/, 1)[0].startsWith('/api/')) {
     const route = typeof registeredCommandRouteForRequest === 'function'
       ? registeredCommandRouteForRequest(url, options)
@@ -3336,40 +3337,26 @@ function graphTmuxPaneIdsForTarget(graph, tmuxTarget = '') {
   const panes = Object.values(graph?.tmux_panes || {});
   if (target) {
     const match = panes.find(pane => String(pane?.target || '') === target || String(pane?.id || '') === target);
-    if (match?.id) return [match.id];
+    return match?.id ? [match.id] : [];
   }
   const active = panes.filter(pane => pane?.active === true || pane?.window_active === true).map(pane => pane.id).filter(Boolean);
   return active.length ? active : panes.map(pane => pane?.id).filter(Boolean);
 }
 
-function graphObservationIdsForTmuxPaneIds(graph, tmuxPaneIds = []) {
+function graphObservationIdsForTmuxPaneIds(graph, tmuxPaneIds = [], currentPath = '') {
   const ids = new Set();
+  const add = id => {
+    const observation = graph.path_observations?.[id];
+    // The live tmux snapshot can arrive before Git enrichment for the new directory.
+    if (currentPath && observation?.source === 'pane-cwd'
+        && repoRootKey(observation.path) !== repoRootKey(currentPath)) return;
+    ids.add(id);
+  };
   for (const pane of graphEntityValues(graph, 'tmux_panes', tmuxPaneIds)) {
-    for (const id of pane.path_observation_ids || []) ids.add(id);
+    for (const id of pane.path_observation_ids || []) add(id);
     for (const actor of graphEntityValues(graph, 'runtime_actors', pane.runtime_actor_ids)) {
-      for (const id of actor.path_observation_ids || []) ids.add(id);
+      for (const id of actor.path_observation_ids || []) add(id);
     }
-  }
-  return [...ids];
-}
-
-function focusedRepositoryIdsForTmuxTarget(info, tmuxTarget = '') {
-  const graph = sessionWorkGraph(info);
-  if (!graph) return [];
-  const ids = new Set();
-  for (const observation of graphEntityValues(graph, 'path_observations', graphObservationIdsForTmuxPaneIds(graph, graphTmuxPaneIdsForTarget(graph, tmuxTarget)))) {
-    const worktree = graph.git_worktrees?.[observation.git_worktree_id];
-    if (worktree?.local_repository_id) ids.add(worktree.local_repository_id);
-  }
-  return [...ids];
-}
-
-function focusedGitWorktreeIdsForTmuxTarget(info, tmuxTarget = '') {
-  const graph = sessionWorkGraph(info);
-  if (!graph) return [];
-  const ids = new Set();
-  for (const observation of graphEntityValues(graph, 'path_observations', graphObservationIdsForTmuxPaneIds(graph, graphTmuxPaneIdsForTarget(graph, tmuxTarget)))) {
-    if (observation.git_worktree_id) ids.add(observation.git_worktree_id);
   }
   return [...ids];
 }
@@ -3379,27 +3366,6 @@ function branchIdsForGitWorktree(info, gitWorktreeId) {
   const worktree = graph?.git_worktrees?.[gitWorktreeId];
   const repository = graph?.local_repositories?.[worktree?.local_repository_id];
   return repository?.local_branch_ids ? [...repository.local_branch_ids] : [];
-}
-
-function focusedBranchIdsForTmuxTarget(info, tmuxTarget = '') {
-  const graph = sessionWorkGraph(info);
-  if (!graph) return [];
-  const ids = new Set();
-  for (const worktreeId of focusedGitWorktreeIdsForTmuxTarget(info, tmuxTarget)) {
-    const branchId = graph.git_worktrees?.[worktreeId]?.current_branch_id;
-    if (branchId) ids.add(branchId);
-  }
-  return [...ids];
-}
-
-function pullRequestIdsForTmuxTarget(info, tmuxTarget = '') {
-  const graph = sessionWorkGraph(info);
-  if (!graph) return [];
-  const ids = new Set();
-  for (const branch of graphEntityValues(graph, 'local_branches', focusedBranchIdsForTmuxTarget(info, tmuxTarget))) {
-    for (const prId of branch.pull_request_ids || []) ids.add(prId);
-  }
-  return [...ids];
 }
 
 function graphBranchSummary(graph, branchId, currentBranchId = '') {
@@ -3435,6 +3401,7 @@ function graphRepoSummary(graph, worktree) {
     root,
     cwd: root,
     branch: String(currentBranch?.name || ''),
+    detached: Boolean(worktree?.git?.head_sha && !worktree.git.branch && !currentBranch?.name),
     // Branch identity belongs to the LocalGitRepository, while checkout state belongs to this
     // GitWorktree. Repositories can share branches across linked worktrees with different dirty
     // and ahead/behind state, so never project those worktree fields from the branch record.
@@ -3451,25 +3418,82 @@ function graphRepoSummary(graph, worktree) {
   };
 }
 
+function tmuxWindowMetadataForIndex(info, windowIndex) {
+  if (windowIndex == null) return null;
+  const index = Number(windowIndex);
+  if (!Number.isSafeInteger(index) || index < 0) return null;
+  return (Array.isArray(info?.window_metadata) ? info.window_metadata : [])
+    .find(window => Number(window?.window_index) === index) || null;
+}
+
+function tmuxWindowDescriptionForIndex(info, windowIndex, options = {}) {
+  const metadata = tmuxWindowMetadataForIndex(info, windowIndex);
+  const description = String(metadata?.description || '').trim();
+  if (options.omitAutoSummaryPrefix !== true || metadata?.description_manual === true) return description;
+  return description.replace(/^\[AI summary\]\s*/i, '').trim();
+}
+
 function sessionWorkSummary(session, info = {}, options = {}) {
   const graph = sessionWorkGraph(info);
   const target = String(options.tmuxTarget || options.target || info?.selected_pane?.target || '');
   if (graph) {
     const repositories = Object.values(graph.git_worktrees || {}).map(worktree => graphRepoSummary(graph, worktree)).filter(repo => repo.root);
-    const focusedWorktreeIds = focusedGitWorktreeIdsForTmuxTarget(info, target);
-    const focusedRepositoryIds = focusedRepositoryIdsForTmuxTarget(info, target);
-    const focusedBranchIds = focusedBranchIdsForTmuxTarget(info, target);
-    const pullRequestIds = pullRequestIdsForTmuxTarget(info, target);
-    const focusedRepo = repositories.find(repo => focusedWorktreeIds.includes(repo.worktree_id)) || repositories.find(repo => focusedRepositoryIds.includes(repo.local_repository_id)) || repositories[0] || null;
-    const observations = graphEntityValues(graph, 'path_observations', graphObservationIdsForTmuxPaneIds(graph, graphTmuxPaneIdsForTarget(graph, target)));
-    const selectedPath = observations.sort((left, right) => Number(right?.last_observed_at || 0) - Number(left?.last_observed_at || 0)).find(observation => observation?.path)?.path || focusedRepo?.cwd || '';
+    const paneIds = graphTmuxPaneIdsForTarget(graph, target);
+    const pane = target ? graph.tmux_panes?.[paneIds[0]] : null;
+    const observedPath = options.currentPath;
+    const projectPath = pane?.project_path;
+    const inheritedCwdChanged = projectPath === '' && observedPath
+      && repoRootKey(observedPath) !== repoRootKey(pane.current_path);
+    const currentPath = (inheritedCwdChanged ? observedPath : projectPath ?? observedPath) || '';
+    const observations = graphEntityValues(graph, 'path_observations', graphObservationIdsForTmuxPaneIds(graph, paneIds, observedPath));
+    const focusedWorktreeIds = [...new Set(observations.map(observation => observation.git_worktree_id).filter(Boolean))];
+    const focusedRepositoryIds = [...new Set(focusedWorktreeIds.map(id => graph.git_worktrees[id]?.local_repository_id).filter(Boolean))];
+    const focusedBranchIds = [...new Set(focusedWorktreeIds.map(id => graph.git_worktrees[id]?.current_branch_id).filter(Boolean))];
+    const pullRequestIds = [...new Set(focusedBranchIds.flatMap(id => graph.local_branches[id]?.pull_request_ids || []))];
+    const repositoriesByWorktree = new Map(repositories.map(repo => [repo.worktree_id, repo]));
+    const focusedRepositories = focusedWorktreeIds.map(id => repositoriesByWorktree.get(id)).filter(Boolean);
+    const currentRoot = currentPath && focusedRepoRootForSync(currentPath, focusedRepositories.map(repo => repo.root));
+    const focusedRepo = currentPath
+      ? focusedRepositories.find(repo => repo.root === currentRoot) || null
+      : focusedRepositories[0] || (!target ? repositories[0] || null : null);
+    const focusedPaths = [...new Set(observations
+      .slice()
+      .sort((left, right) => Number(right?.last_observed_at || 0) - Number(left?.last_observed_at || 0))
+      .map(observation => String(observation?.path || '').trim())
+      .filter(Boolean))];
+    const selectedPath = currentPath || focusedPaths[0] || (!target ? focusedRepo?.cwd || '' : '');
     const pullRequests = graphEntityValues(graph, 'pull_requests', pullRequestIds)
       .sort((left, right) => Number(right?.updated_at || right?.updated_ts || 0) - Number(left?.updated_at || left?.updated_ts || 0) || Number(left?.number || 0) - Number(right?.number || 0));
     const linearIssues = graphEntityValues(graph, 'linear_issues', [...new Set(graphEntityValues(graph, 'local_branches', focusedBranchIds).flatMap(branch => branch.linear_issue_ids || []))]);
     const focusedPullRequest = pullRequests.length === 1 ? pullRequests[0] : null;
-    return {graph, graphBacked: true, repositories, focusedWorktreeIds, focusedRepositoryIds, focusedBranchIds, pullRequestIds, pullRequests, focusedPullRequest, linearIssues, selectedRepo: focusedRepo, git: focusedRepo ? gitFromRepoSummary(focusedRepo) : null, selectedPath};
+    return {graph, graphBacked: true, target, repositories, focusedWorktreeIds, focusedRepositoryIds, focusedRepositories, focusedPaths, focusedBranchIds, pullRequestIds, pullRequests, focusedPullRequest, linearIssues, selectedRepo: focusedRepo, git: focusedRepo ? gitFromRepoSummary(focusedRepo) : null, selectedPath};
   }
-  return {graph: null, graphBacked: false, repositories: [], focusedWorktreeIds: [], focusedRepositoryIds: [], focusedBranchIds: [], pullRequestIds: [], pullRequests: [], focusedPullRequest: null, linearIssues: [], selectedRepo: null, git: null, selectedPath: info?.selected_pane?.current_path || ''};
+  return {graph: null, graphBacked: false, target, repositories: [], focusedWorktreeIds: [], focusedRepositoryIds: [], focusedRepositories: [], focusedPaths: [], focusedBranchIds: [], pullRequestIds: [], pullRequests: [], focusedPullRequest: null, linearIssues: [], selectedRepo: null, git: null, selectedPath: options.currentPath ?? info?.selected_pane?.current_path ?? ''};
+}
+
+function paneTabWorkContext(session, info = {}, options = {}) {
+  const view = typeof tabberViewDescriptorForSession === 'function' ? tabberViewDescriptorForSession(session) : null;
+  const sourceSession = view?.sourceSession || session;
+  const sourceInfo = view
+    ? (transcriptMetadataState.payload.sessions?.[sourceSession] || info)
+    : info;
+  const windowIndex = options.windowIndex ?? view?.windowIndex ?? null;
+  const pane = windowIndex == null
+    ? terminalDisplayPane(sourceInfo, sourceSession)
+    : terminalDisplayPaneForWindowIndex(sourceInfo, windowIndex);
+  const resolvedWindowIndex = windowIndex ?? tmuxWindowNumber(pane?.window ?? pane?.window_index);
+  const tmuxTarget = String(pane?.target || pane?.pane_id || (windowIndex == null ? '' : `unresolved-window:${windowIndex}`)).trim();
+  const workInfo = pane === sourceInfo?.selected_pane ? sourceInfo : {...sourceInfo, selected_pane: pane || {target: tmuxTarget}};
+  return {sourceSession, sourceInfo, workInfo, windowIndex: resolvedWindowIndex, pane, tmuxTarget};
+}
+
+function sessionTabWorkSummary(session, info = {}, options = {}) {
+  const context = paneTabWorkContext(session, info, options);
+  const target = options.tmuxTarget === undefined ? context.tmuxTarget : options.tmuxTarget;
+  const panes = context.sourceInfo?.panes;
+  const currentPath = target === context.tmuxTarget
+    && (!panes?.length || panes.includes(context.pane)) ? options.currentPath || context.pane?.current_path || '' : '';
+  return sessionWorkSummary(context.sourceSession, context.workInfo, {...options, tmuxTarget: target, currentPath});
 }
 
 // Normalized view of a session's transcript metadata. A schema-valid graph is authoritative even
@@ -8292,16 +8316,31 @@ function installTerminalContextMenu(session, term, container) {
   });
 }
 
-function openTabDescriptionPopover(item, anchor) {
+function openTabDescriptionPopover(item, anchor, options = {}) {
   if (!anchor?.isConnected) return false;
-  const popover = typeof paneTabPopoverForAnchor === 'function' ? paneTabPopoverForAnchor(anchor) : null;
+  const isTerminal = isTmuxSession(item);
+  const attached = !isTerminal && paneTabPopoverForAnchor(anchor);
+  const popover = attached || (isTerminal
+    ? tabSessionDescriptionPopover(item, options)
+    : sessionPopoverNodeFromHtml(isFileEditorItem(item) ? filePopoverHtml(item)
+      : `<div class="session-popover"><div class="popover-title">${esc(itemLabel(item))}</div><div class="popover-subtitle-text">${esc(options.description)}</div></div>`));
   if (!popover) return false;
   closeSessionContextMenu();
   closeOtherSessionPopovers(anchor, {force: true});
-  if (typeof positionPaneTabPopover === 'function') positionPaneTabPopover(anchor, popover);
-  anchor.classList.add('popover-open');
+  if (!attached) {
+    appOverlayRootElement().appendChild(popover);
+    popover.classList.add('pane-tab-detached-popover', 'tab-description-popover');
+    popover.setAttribute('role', 'dialog');
+    popover.setAttribute('aria-label', t('common.details'));
+    popover.tabIndex = -1;
+    tabDescriptionOverlay.open(popover, {trigger: anchor, removeOnClose: true});
+  } else {
+    anchor.classList.add('popover-open');
+  }
+  positionPaneTabPopover(anchor, popover);
   popover.classList.add('popover-open');
-  if (typeof maybeLoadFileTabForPopover === 'function') maybeLoadFileTabForPopover(anchor, item);
+  if (attached) maybeLoadFileTabForPopover(anchor, item);
+  else popover.focus({preventScroll: true});
   return true;
 }
 
@@ -8318,10 +8357,12 @@ function showTabContextMenu(item, x, y, options = {}) {
   const appendDescription = () => {
     const info = transcriptMetadataState.payload.sessions?.[item];
     const tab = itemLabel(item);
-    const rawDescription = tabMenuDetailText(item, info);
+    const rawDescription = tabMenuDetailText(item, info, {windowIndex: options.descriptionWindow});
     const description = rawDescription && rawDescription !== tab ? rawDescription : t('common.notAvailable');
     const text = t('tab.actions.moreDescription', {tab, description});
-    appendContextMenuButton(menu, text, () => openTabDescriptionPopover(item, options.tab), closeSessionContextMenu, {
+    const detailOptions = {windowIndex: options.descriptionWindow, windowId: options.descriptionWindowId,
+      description: isTmuxSession(item) ? sessionTabDetailDescription(item, info, {windowIndex: options.descriptionWindow}) : description};
+    appendContextMenuButton(menu, text, () => openTabDescriptionPopover(item, options.tab, detailOptions), closeSessionContextMenu, {
       className: 'tab-action-description',
       ariaLabel: text,
       title: t('common.details'),
@@ -8332,7 +8373,7 @@ function showTabContextMenu(item, x, y, options = {}) {
     menu.replaceChildren();
     const sourceSlot = options.sourceSlot || slotForItem(item);
     if (options.tab && options.descriptionWindow == null) appendTabSplitCommands(menu, item, options);
-    if (!slotIsSidePane(sourceSlot) && options.descriptionWindow == null) appendDescription();
+    if (options.descriptionWindow != null || !slotIsSidePane(sourceSlot)) appendDescription();
     if (isTmuxSession(item) && options.descriptionWindow == null) {
       const rename = tmuxSessionActionCommands(item, {
         includeYolo: false,
@@ -8453,10 +8494,10 @@ function appendTabActionCommands(menu, item, options = {}) {
       appendContextMenuButton(menu, t('tab.popout'), () => openPanePopout(item), closeSessionContextMenu, {iconHtml: fileContextMenuIcon('open')});
     }
   }
-  if (isFileEditorItem(item) || item === differItemId) {
+  if (isFileEditorItem(item) || gitDiffItemPath(item) || item === differItemId) {
     appendContextMenuButton(
       menu,
-      isFileEditorItem(item) ? t('finder.close', {name: itemLabel(item)}) : t('common.close'),
+      item === differItemId ? t('common.close') : paneFrameCloseLabel(item),
       () => closeLayoutTabItem(item),
       closeSessionContextMenu,
       {iconHtml: fileContextMenuIcon('close')},

@@ -119,6 +119,7 @@ async function runGitDiffHistorySuite() {
       const context = {
         AbortController, TextDecoder, console,
         apiFetch: async () => ({ok: true, body}),
+        gitDiffRequestOptions: {abortRetirementReason: 'fixture_git_diff_retired'},
         createFileQuickOpenSseParser: loadYomux().fileQuickOpenSseParserForTest,
         fileQuickOpenSseStreamOptions: options => options,
         fileQuickOpenSearchQueryString: () => '', fileQuickOpenState: {requestId: 1},

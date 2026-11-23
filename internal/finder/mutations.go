@@ -393,14 +393,18 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 	if len(expectedFileIDs) > 0 {
 		expectedFileID = expectedFileIDs[0]
 	}
-	return s.write(ctx, raw, content, expectedMtime, expectedFileID, false)
+	return s.write(ctx, raw, content, expectedMtime, nil, expectedFileID, false)
+}
+
+func (s *Service) WriteExact(ctx context.Context, raw, content string, expectedMtimeNS int64, expectedFileID string) (map[string]any, *Error) {
+	return s.write(ctx, raw, content, nil, &expectedMtimeNS, expectedFileID, false)
 }
 
 func (s *Service) CreateFile(ctx context.Context, raw, content string) (map[string]any, *Error) {
-	return s.write(ctx, raw, content, nil, "", true)
+	return s.write(ctx, raw, content, nil, nil, "", true)
 }
 
-func (s *Service) write(ctx context.Context, raw, content string, expectedMtime *int64, expectedFileID string, createOnly bool) (map[string]any, *Error) {
+func (s *Service) write(ctx context.Context, raw, content string, expectedMtime, expectedMtimeNS *int64, expectedFileID string, createOnly bool, grants ...*GrantedFile) (map[string]any, *Error) {
 	if err := s.openFileMutationMu.LockContext(ctx, s.stop); err != nil {
 		return nil, cancelled(raw)
 	}
@@ -409,6 +413,10 @@ func (s *Service) write(ctx context.Context, raw, content string, expectedMtime 
 		return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "content_too_large", MessageKey: "fs.error.contentTooLarge", Path: raw, Message: fmt.Sprintf("content is too large (max %d bytes)", MaxWriteBytes)}
 	}
 	parent, finderErr := s.openMutationParent(raw)
+	if finderErr == nil && len(grants) > 0 {
+		parent.Close()
+		parent, finderErr = grants[0].mutationParent(ctx)
+	}
 	if finderErr != nil {
 		if expectedFileID != "" && finderErr.Status == http.StatusNotFound {
 			return nil, changed(raw)
@@ -416,6 +424,10 @@ func (s *Service) write(ctx context.Context, raw, content string, expectedMtime 
 		return nil, finderErr
 	}
 	defer parent.Close()
+	reservation := s.writeReservations[filepath.Join(parent.resolvedParent, parent.name)]
+	if reservation != nil && (len(grants) == 0 || grants[0] != reservation) {
+		return nil, &Error{Status: 409, Code: "collaboration_owns_save", Message: "Shared editing owns this file's saves"}
+	}
 	requested := parent.requested
 	if err := ctx.Err(); err != nil {
 		return nil, cancelled(requested)
@@ -438,7 +450,13 @@ func (s *Service) write(ctx context.Context, raw, content string, expectedMtime 
 			return nil, failure
 		}
 	}
-	if expectedMtime != nil && existing != nil && !mtimeMatches(*expectedMtime, existing.ModTime().UnixNano(), existing.ModTime().Unix()) {
+	versionChanged := func(info os.FileInfo) bool {
+		if expectedMtimeNS != nil {
+			return info == nil || info.ModTime().UnixNano() != *expectedMtimeNS || fileID(info) != expectedFileID
+		}
+		return expectedMtime != nil && info != nil && !writeVersionMatches(*expectedMtime, info, len(grants) > 0)
+	}
+	if versionChanged(existing) {
 		return nil, changed(requested)
 	}
 	mode := uint32(0o600)
@@ -487,7 +505,7 @@ func (s *Service) write(ctx context.Context, raw, content string, expectedMtime 
 		if failure := contentWriteAccessAt(parent.directory, parent.name, requested, current); failure != nil {
 			return nil, failure
 		}
-		if expectedMtime != nil && !mtimeMatches(*expectedMtime, current.ModTime().UnixNano(), current.ModTime().Unix()) {
+		if versionChanged(current) {
 			return nil, changed(requested)
 		}
 	}
@@ -517,10 +535,8 @@ func (s *Service) write(ctx context.Context, raw, content string, expectedMtime 
 		if failure := contentWriteAccessAt(parent.directory, quarantine, requested, quarantinedInfo); failure != nil {
 			return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, failure))
 		}
-		if expectedMtime != nil {
-			if !mtimeMatches(*expectedMtime, quarantinedInfo.ModTime().UnixNano(), quarantinedInfo.ModTime().Unix()) {
-				return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, changed(requested)))
-			}
+		if versionChanged(quarantinedInfo) {
+			return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, changed(requested)))
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, filesystemError(requested, restoreMutationFailure(parent, quarantine, cancelled(requested)))
@@ -547,19 +563,43 @@ func (s *Service) write(ctx context.Context, raw, content string, expectedMtime 
 	if rotationErr := s.rotateOpenFileDescriptors(requested, filepath.Join(parent.resolvedParent, parent.name), existing, file); rotationErr != nil {
 		return nil, filesystemError(requested, rotationErr)
 	}
+	s.advanceGrantedFiles(filepath.Join(parent.resolvedParent, parent.name), existing, stat)
 	s.noteChange([]string{requested}, "write")
 	return result, nil
 }
 
 // preparedRename keeps both authorized parents live through publication.
 type preparedRename struct {
-	source *mutationParent
-	target *mutationParent
+	source           *mutationParent
+	target           *mutationParent
+	replacement      *mutationParent
+	replacementToken string
 }
 
-func (p *preparedRename) Close() { p.source.Close(); p.target.Close() }
+func (p *preparedRename) Close() {
+	p.source.Close()
+	p.target.Close()
+	if p.replacement != nil {
+		p.replacement.Close()
+	}
+}
 
 func (s *Service) prepareRename(ctx context.Context, raw, targetPath string) (*preparedRename, *Error) {
+	return s.prepareRenameWithReplacement(ctx, raw, targetPath, "")
+}
+
+func moveConflictStamp(path string, info os.FileInfo) string {
+	stat := info.Sys().(*syscall.Stat_t)
+	return fmt.Sprintf("%q:%v:%d", path, identityFor(info), statCTime(stat))
+}
+
+func (p *preparedRename) conflictToken(source, target os.FileInfo) string {
+	from := moveConflictStamp(filepath.Join(p.source.resolvedParent, p.source.name), source)
+	to := moveConflictStamp(filepath.Join(p.target.resolvedParent, p.target.name), target)
+	return fmt.Sprintf("replace:%x", sha256.Sum256([]byte(from+"\n"+to)))
+}
+
+func (s *Service) prepareRenameWithReplacement(ctx context.Context, raw, targetPath string, approval string) (*preparedRename, *Error) {
 	parent, finderErr := s.openMutationParent(raw)
 	if finderErr != nil {
 		return nil, finderErr
@@ -581,7 +621,38 @@ func (s *Service) prepareRename(ctx context.Context, raw, targetPath string) (*p
 		plan.Close()
 		return nil, invalid(raw, "cannot move an item into itself or its descendants")
 	}
-	if _, err := lstatAt(target.directory, target.name); err == nil {
+	if target.targetIdentity != nil {
+		targetInfo, statErr := s.requireMutationTarget(target, false)
+		if statErr != nil {
+			plan.Close()
+			return nil, statErr
+		}
+		token := plan.conflictToken(info, targetInfo)
+		if approval != token {
+			conflict := targetExists(targetPath)
+			conflict.Details = map[string]any{
+				"path":        targetPath,
+				"source":      raw,
+				"source_kind": entryKind(info.Mode()),
+				"target_kind": entryKind(targetInfo.Mode()),
+				"replacement": token,
+			}
+			plan.Close()
+			return nil, conflict
+		}
+		replacement, replaceErr := s.openMutationParent(targetPath)
+		if replaceErr != nil {
+			plan.Close()
+			return nil, replaceErr
+		}
+		if replacement.targetIdentity == nil || !sameDescriptorIdentity(*replacement.targetIdentity, *target.targetIdentity) {
+			replacement.Close()
+			plan.Close()
+			return nil, changed(targetPath)
+		}
+		plan.replacement = replacement
+		plan.replacementToken = token
+	} else if _, err := lstatAt(target.directory, target.name); err == nil {
 		plan.Close()
 		return nil, targetExists(targetPath)
 	} else if !os.IsNotExist(err) {
@@ -609,6 +680,9 @@ func (s *Service) Rename(ctx context.Context, raw, newName string) (map[string]a
 }
 
 func (s *Service) commitRename(ctx context.Context, plan *preparedRename) (map[string]any, *Error) {
+	if plan.replacement != nil {
+		return s.commitReplacementRename(ctx, plan)
+	}
 	if err := s.openFileMutationMu.LockContext(ctx, s.stop); err != nil {
 		return nil, cancelled(plan.source.requested)
 	}
@@ -700,9 +774,217 @@ func (s *Service) commitRename(ctx context.Context, plan *preparedRename) (map[s
 	return map[string]any{"path": target.requested, "old_path": requested, "name": target.name}, nil
 }
 
+func (s *Service) commitReplacementRename(ctx context.Context, plan *preparedRename) (map[string]any, *Error) {
+	if err := s.openFileMutationMu.LockContext(ctx, s.stop); err != nil {
+		return nil, cancelled(plan.source.requested)
+	}
+	defer s.openFileMutationMu.Unlock()
+	parent, target, replaced := plan.source, plan.target, plan.replacement
+	requested := parent.requested
+	if err := ctx.Err(); err != nil {
+		return nil, cancelled(requested)
+	}
+	if _, finderErr := s.requireMutationTarget(parent, false); finderErr != nil {
+		return nil, finderErr
+	}
+	if _, finderErr := s.requireMutationTarget(replaced, false); finderErr != nil {
+		return nil, finderErr
+	}
+	resolvedReplacement := filepath.Join(replaced.resolvedParent, replaced.name)
+	if s.openFilePathRegistered(replaced.requested, resolvedReplacement, *replaced.targetIdentity, replaced.targetIdentity.mode.IsDir()) {
+		return nil, &Error{Status: http.StatusConflict, Code: "open_file_conflict", MessageKey: "fs.error.targetExists", Path: replaced.requested, Message: "destination is open in a file editor"}
+	}
+	gitPlan, err := prepareGitRename(ctx, filepath.Join(parent.resolvedParent, parent.name))
+	if err != nil {
+		if errors.Is(err, errGitIndexChanged) {
+			return nil, gitIndexChanged(requested, err)
+		}
+		return nil, filesystemError(requested, err)
+	}
+	defer gitPlan.close()
+	if gitPlan != nil {
+		root, rootErr := gitRenameRoot(ctx, target.resolvedParent)
+		if rootErr != nil {
+			return nil, filesystemError(target.requested, rootErr)
+		}
+		if root != gitPlan.root {
+			gitPlan.close()
+			gitPlan = nil
+		}
+	}
+	if finderErr := checkGitRenameDestination(ctx, target); finderErr != nil {
+		return nil, finderErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, cancelled(requested)
+	}
+	sourceInfo, finderErr := s.requireMutationTarget(parent, false)
+	if finderErr != nil {
+		return nil, finderErr
+	}
+	targetInfo, finderErr := s.requireMutationTarget(replaced, false)
+	if finderErr != nil {
+		return nil, finderErr
+	}
+	if plan.conflictToken(sourceInfo, targetInfo) != plan.replacementToken {
+		return nil, changed(target.requested)
+	}
+	replacedQuarantine, finderErr := s.quarantineMutationTarget(replaced)
+	if finderErr != nil {
+		return nil, finderErr
+	}
+	sourceQuarantine, finderErr := s.quarantineMutationTarget(parent)
+	if finderErr != nil {
+		return nil, filesystemError(requested, restoreMutationFailure(replaced, replacedQuarantine, finderErr))
+	}
+	restoreBoth := func(cause *Error) (map[string]any, *Error) {
+		restoreSource := restoreMutationFailure(parent, sourceQuarantine, cause)
+		restoreTarget := restoreMutationFailure(replaced, replacedQuarantine, restoreSource)
+		return nil, filesystemError(requested, restoreTarget)
+	}
+	if err := ctx.Err(); err != nil {
+		return restoreBoth(cancelled(requested))
+	}
+	if err := renameBetweenNoReplace(parent.directory, sourceQuarantine, target.directory, target.name); err != nil {
+		if errors.Is(err, syscall.EEXIST) {
+			return restoreBoth(targetExists(target.requested))
+		}
+		if errors.Is(err, syscall.EXDEV) {
+			return restoreBoth(invalid(target.requested, "moves across filesystems are not supported; source was preserved"))
+		}
+		return restoreBoth(filesystemError(target.requested, err))
+	}
+	if gitPlan != nil {
+		newRelative, relativeErr := filepath.Rel(gitPlan.root, filepath.Join(target.resolvedParent, target.name))
+		if relativeErr != nil {
+			return restoreBoth(filesystemError(target.requested, relativeErr))
+		}
+		publish := gitPlan.publish
+		if s.publishGitRename != nil {
+			publish = func(ctx context.Context, path string) error { return s.publishGitRename(ctx, gitPlan, path) }
+		}
+		if publishErr := publish(ctx, newRelative); publishErr != nil {
+			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			rollbackErr := gitPlan.rollback(rollbackCtx, newRelative)
+			moveBackErr := renameBetweenNoReplace(target.directory, target.name, parent.directory, parent.name)
+			if rollbackErr != nil || moveBackErr != nil {
+				cause := fmt.Errorf("Git rename failed: %w", publishErr)
+				if rollbackErr != nil {
+					cause = errors.Join(cause, fmt.Errorf("index rollback: %w", rollbackErr))
+				}
+				if moveBackErr != nil {
+					cause = mutationRecoveryFailure(target.requested, errors.Join(cause, fmt.Errorf("filesystem rollback: %w", moveBackErr)))
+					return nil, filesystemError(requested, cause)
+				}
+				if restoreErr := restoreMutationFailure(replaced, replacedQuarantine, cause); restoreErr != nil {
+					return nil, filesystemError(requested, restoreErr)
+				}
+				return nil, filesystemError(requested, cause)
+			}
+			restoreErr := restoreMutationFailure(replaced, replacedQuarantine, publishErr)
+			if restoreErr != nil {
+				return nil, filesystemError(requested, restoreErr)
+			}
+			if errors.Is(publishErr, errGitIndexChanged) {
+				return nil, gitIndexChanged(requested, publishErr)
+			}
+			return nil, filesystemError(requested, publishErr)
+		}
+	}
+	s.reconcileOpenFilesWithinMutation(plan)
+	s.noteChange([]string{requested, target.requested}, "rename")
+	backup := &mutationParent{directory: replaced.directory, requested: replaced.requested, resolvedParent: replaced.resolvedParent, name: replacedQuarantine, targetIdentity: replaced.targetIdentity}
+	cleanup, cleanupErr := (&Deletion{service: s, parent: backup}).Delete(context.WithoutCancel(ctx), true)
+	backup.Close()
+	if cleanupErr != nil || cleanup["deleted"] != true {
+		failure := cleanupErr
+		if failure == nil {
+			failure = filesystemError(replaced.requested, errors.New("replacement completed but old item cleanup is pending"))
+		}
+		return map[string]any{"path": target.requested, "old_path": requested, "name": target.name, "replacement_cleanup": replacedQuarantine}, failure
+	}
+	return map[string]any{"path": target.requested, "old_path": requested, "name": target.name}, nil
+}
+
+func (s *Service) openFilePathRegistered(path, resolvedPath string, identity descriptorIdentity, recursive bool) bool {
+	path = filepath.Clean(path)
+	resolvedPath = filepath.Clean(resolvedPath)
+	identityID := fmt.Sprintf("%d:%d", identity.dev, identity.ino)
+	matches := func(registered string) bool {
+		registered = filepath.Clean(registered)
+		return registered == path || (recursive && strings.HasPrefix(registered, path+string(filepath.Separator)))
+	}
+	matchesResolved := func(registered string) bool {
+		registered = filepath.Clean(registered)
+		return registered == resolvedPath || (recursive && strings.HasPrefix(registered, resolvedPath+string(filepath.Separator)))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, entry := range s.openFiles {
+		registeredResolved := filepath.Join(entry.scope.resolved, filepath.Base(entry.path))
+		if relative, err := filepath.Rel(entry.scope.path, entry.path); err == nil && relative != "." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && relative != ".." {
+			registeredResolved = filepath.Join(entry.scope.resolved, relative)
+		}
+		if entry.fileID == identityID || matches(entry.path) || matches(entry.origin) || matchesResolved(registeredResolved) {
+			return true
+		}
+	}
+	for _, watch := range s.watches {
+		for _, registered := range watch.OpenFiles {
+			if matches(registered) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Move preflights the complete bounded selection before the first namespace mutation.
 // Runtime failures stop the batch and retain the successful mappings in its receipt.
 func (s *Service) Move(ctx context.Context, paths []string, destination string) (map[string]any, *Error) {
+	return s.MoveWithConflictResolutions(ctx, paths, destination, nil)
+}
+
+func (s *Service) findAvailableCopyName(ctx context.Context, targetPath string, reserved map[string]bool) (string, *Error) {
+	if err := ctx.Err(); err != nil {
+		return "", cancelled(targetPath)
+	}
+	target, finderErr := s.openMutationParent(targetPath)
+	if finderErr != nil {
+		return "", finderErr
+	}
+	defer target.Close()
+	if target.targetIdentity == nil && !reserved[filepath.Join(target.resolvedParent, target.name)] {
+		return target.name, nil
+	}
+	name := target.name
+	extension := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, extension)
+	if stem == "" {
+		stem, extension = name, ""
+	}
+	for sequence := 1; sequence <= 10000; sequence++ {
+		suffix := " copy"
+		if sequence > 1 {
+			suffix = fmt.Sprintf(" copy %d", sequence)
+		}
+		candidate := stem + suffix + extension
+		if reserved[filepath.Join(target.resolvedParent, candidate)] {
+			continue
+		}
+		if _, err := lstatAt(target.directory, candidate); os.IsNotExist(err) {
+			return candidate, nil
+		} else if err != nil {
+			return "", filesystemError(filepath.Join(filepath.Dir(targetPath), candidate), err)
+		}
+	}
+	return "", filesystemError(targetPath, errors.New("unable to find an available copy name"))
+}
+
+// MoveWithConflictResolutions applies a user's explicit choice to each source path.
+// A missing choice stops at the first destination collision.
+func (s *Service) MoveWithConflictResolutions(ctx context.Context, paths []string, destination string, resolutions map[string]string) (map[string]any, *Error) {
 	if len(paths) == 0 || len(paths) > MaxBatchRequests {
 		return nil, invalid(destination, "invalid move selection size")
 	}
@@ -713,6 +995,10 @@ func (s *Service) Move(ctx context.Context, paths []string, destination string) 
 		}
 	}()
 	seen := make(map[string]bool)
+	reservedTargets := make(map[string]bool)
+	reservedRequestedTargets := make(map[string]bool)
+	var conflict *Error
+	replacements := make(map[string]string)
 	for _, path := range paths {
 		if !filepath.IsAbs(path) || !filepath.IsAbs(destination) {
 			return nil, invalid(path, "move paths must be absolute")
@@ -732,11 +1018,42 @@ func (s *Service) Move(ctx context.Context, paths []string, destination string) 
 		if covered {
 			continue
 		}
-		plan, finderErr := s.prepareRename(ctx, path, filepath.Join(destination, filepath.Base(path)))
+		targetName := filepath.Base(path)
+		resolution := resolutions[path]
+		replace := strings.HasPrefix(resolution, "replace:")
+		if resolution == "keep_both" {
+			var nameErr *Error
+			targetName, nameErr = s.findAvailableCopyName(ctx, filepath.Join(destination, targetName), reservedTargets)
+			if nameErr != nil {
+				return nil, nameErr
+			}
+		} else if resolution != "" && !replace {
+			return nil, invalid(path, "unsupported move conflict resolution")
+		} else if replace && reservedRequestedTargets[filepath.Join(destination, targetName)] {
+			var nameErr *Error
+			targetName, nameErr = s.findAvailableCopyName(ctx, filepath.Join(destination, targetName), reservedTargets)
+			if nameErr != nil {
+				return nil, nameErr
+			}
+		}
+		plan, finderErr := s.prepareRenameWithReplacement(ctx, path, filepath.Join(destination, targetName), resolution)
 		if finderErr != nil {
+			if token, ok := finderErr.Details["replacement"].(string); ok {
+				if conflict == nil {
+					conflict = finderErr
+				}
+				replacements[path] = token
+				continue
+			}
 			return nil, finderErr
 		}
+		reservedTargets[filepath.Join(plan.target.resolvedParent, plan.target.name)] = true
+		reservedRequestedTargets[filepath.Join(destination, targetName)] = true
 		plans = append(plans, plan)
+	}
+	if conflict != nil {
+		conflict.Details["replacements"] = replacements
+		return nil, conflict
 	}
 	// Different source directories can contain the same basename.
 	targets := make(map[string]bool)
@@ -751,6 +1068,9 @@ func (s *Service) Move(ctx context.Context, paths []string, destination string) 
 	for index, plan := range plans {
 		result, finderErr := s.commitRename(ctx, plan)
 		if finderErr != nil {
+			if result != nil && result["old_path"] != nil && result["path"] != nil {
+				moved = append(moved, result)
+			}
 			unattempted := make([]string, 0, len(plans)-index-1)
 			for _, pending := range plans[index+1:] {
 				unattempted = append(unattempted, pending.source.requested)
@@ -2051,4 +2371,11 @@ func parsePasteUploadName(name string) (string, int, string, bool) {
 		return "", 0, "", false
 	}
 	return name[:8], sequence, suffix, true
+}
+
+func writeVersionMatches(expected int64, info os.FileInfo, strict bool) bool {
+	if strict {
+		return expected == info.ModTime().UnixNano()
+	}
+	return mtimeMatches(expected, info.ModTime().UnixNano(), info.ModTime().Unix())
 }

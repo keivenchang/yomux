@@ -13,7 +13,7 @@ This file exercises Markdown Preview itself.
 - [ ] Toggle from Preview.
 - [x] Already checked.
 
-![Status card](./assets/status-card.svg "Local SVG image")
+![Status card](./31-assets/status-card.svg "Local SVG image")
 
 ```mermaid
 flowchart LR
@@ -27,7 +27,7 @@ const sample = "markdown renderer";
 console.log(sample);
 ```
 
-Relative link: [notes](./notes(2026).md)
+Relative link: [notes](./24-notes(2026).md)
 
 <script>alert("blocked")</script>
 

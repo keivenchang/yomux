@@ -90,7 +90,7 @@ test('Dockview center-drops an allowed Differ into the triplet home through the 
 });
 
 test('Vertical Side Pane tab menus omit More desc and reuse the shared directional Move row', () => {
-  assert.match(coreUtils, /if \(!slotIsSidePane\(sourceSlot\) && options.descriptionWindow == null\) appendDescription\(\)/);
+  assert.match(coreUtils, /if \(options.descriptionWindow != null \|\| !slotIsSidePane\(sourceSlot\)\) appendDescription\(\)/);
   assert.match(coreUtils, /showTabContextMenu\(item, x, y, options = \{\}\)[\s\S]*appendTabSplitCommands\(menu, item, options\)/);
   assert.doesNotMatch(coreUtils, /vertical-side-pane-edge-move|appendVerticalSidePaneEdgeMoveCommand/);
 });
@@ -113,7 +113,9 @@ test('Dockview file surfaces inherit the common outer header controls and never 
   assert.match(terminalFacade, /function virtualPanelInnerControlsHtml\(session, options = \{\}\)[\s\S]*dockviewLayoutEnabled\(\) \? '' : virtualPanelControlsHtml\(session, options\)/);
   assert.ok(dockview.includes('function dockviewHeaderActionsHtml(item, slot = slotForItem(item))') && dockview.includes('if (isVirtualItem(item)) return virtualPanelControlsHtml(item'), 'Dockview virtual panels use the shared outer header controls');
   assert.match(dockview, /function hideDockviewInnerPaneTabs\(panel\)[\s\S]*head\.querySelector\('\.virtual-panel-controls'\)[\s\S]*controls\.remove\(\)/);
-  assert.match(shell, /function paneTabDismissControlHtml\(item\)[\s\S]*const isLegacyFiles = type\?\.key === 'files'[\s\S]*if \(isLegacyFiles \|\| \(tabIsPinned\(item\) && !isEditor\)\) return ''/);
+  const dismiss = shell.slice(shell.indexOf('function paneTabDismissButtonsHtml('), shell.indexOf('function paneTabInnerHtml('));
+  assert.match(dismiss, /const canClose = paneItemHasCloseAction\(item\)/);
+  assert.match(dismiss, /paneTabMinimize:[\s\S]*paneTabClose:[\s\S]*return minimize \+ close/);
   assert.match(shell, /function paneTabInnerHtml\(item, rowOptions = \{\}\)[\s\S]*html \+= paneTabDismissControlHtml\(item\)/);
 });
 

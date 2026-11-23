@@ -182,7 +182,9 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(layoutItemsAfterQueryRoundTrip(api, opened), [item], 'the real query decoder and per-tab decoder preserve the canonical encoded item exactly');
     api.applyLayoutSlotsForTest(opened, {focusSession: item, prune: false});
     assert.deepStrictEqual([api.dynamicVirtualLayoutItemsForTest().includes(item), api.gitDiffTabStateForTest(item)?.head], [true, 'a'.repeat(40)], 'URL restoration registers the item and preserves its history state');
-    api.applyLayoutSlotsForTest(api.layoutWithoutItem(item), {prune: false});
+    api.minimizePaneFromLayout(item);
+    assert.deepStrictEqual([api.itemInLayout(item), api.dynamicVirtualLayoutItemsForTest().includes(item), api.gitDiffTabStateForTest(item)?.head], [false, true, 'a'.repeat(40)], 'minimize keeps the open Repo Diff and its history in Tabber');
+    api.closePaneFrameItem(item);
     assert.deepStrictEqual([api.dynamicVirtualLayoutItemsForTest().includes(item), api.gitDiffTabStateForTest(item)], [false, null], 'closing the last layout owner disposes the item and retained history state');
     assert.equal(api.resolveLayoutItem(item), item, 'Back or URL restore can recreate a disposed encoded item');
   });
@@ -896,7 +898,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(panelSource.includes("t('terminal.window.title', {name: label})") && panelSource.includes("t('terminal.window.previous')") && panelSource.includes("t('terminal.window.next')"), 'tmux direct and step controls localize from one window-label family');
     assert.ok(panelSource.includes("t('terminal.window.unnamed', {index: pane?.window ?? ''})") && panelSource.includes("t('terminal.window.pid', {pid: Math.floor(value)})"), 'tmux window fallbacks and PID metadata use semantic locale keys');
     assert.ok(panelSource.includes("window.prompt(t('common.renameNamed', {name: currentName}), currentName)"), 'fallback file rename prompt reuses the existing localized rename title');
-    assert.ok(panelSource.includes("t('finder.close', {name: itemLabel(item)})") && panelSource.includes("t('finder.hideFromLayout', {name: itemLabel(item)})") && panelSource.includes('title: closeLabel') && panelSource.includes('ariaLabel: closeLabel'), 'pane-tab close and hide labels share existing localized templates for title and aria text');
+    assert.ok(panelSource.includes('paneFrameCloseLabel(item)') && panelSource.includes("t('finder.hideFromLayout', {name: itemLabel(item)})") && panelSource.includes('ariaLabel: label'), 'pane-tab close and hide labels share existing localized templates for title and aria text');
     assert.equal(/`(?:Close|hide|Hide) \$\{itemLabel\(item\)\}/.test(panelSource), false, 'pane-tab controls retain no raw-English close or hide label');
     assert.ok(fileActionsSource.includes("fileErrorMessageSnapshot(null, 'common.pathNotFound', {path: normalized})"), 'file inspection retains the shared missing-path locale descriptor for relocalization');
     assert.equal(fileActionsSource.includes('`path not found: ${path}`'), false, 'file inspection retains no raw-English missing-path copy');
@@ -906,8 +908,8 @@ async function runLayoutRestoreSuite() {
     const codeMirrorEditorSource = fs.readFileSync('static_src/js/yomux/92_codemirror_editor.js', 'utf8');
     assert.ok(/_cmLocaleCompartment[\s\S]*reconfigureCodeMirrorPanelLocale/.test(codeMirrorEditorSource), 'mounted CodeMirror editors reconfigure localized phrases without rebuilding the editor');
     assert.ok(/function trackCodeMirrorViews\(panel, api, views\)[\s\S]*panel\._cmViews = views\.filter\(Boolean\)/.test(codeMirrorEditorSource)
-      && (codeMirrorEditorSource.match(/Array\.isArray\(panel\?\._cmViews\)/g) || []).length === 3
-      && !/_cm(?:Theme|EditorOption|Locale)Views/.test(codeMirrorEditorSource), 'theme, editor-option, and locale compartments consume one shared live CodeMirror view list');
+      && (codeMirrorEditorSource.match(/Array\.isArray\(panel\?\._cmViews\)/g) || []).length === 4
+      && !/_cm(?:Theme|Blame|EditorOption|Locale)Views/.test(codeMirrorEditorSource), 'theme, blame, editor-option, and locale compartments consume one shared live CodeMirror view list');
     const preservationSource = codeMirrorEditorSource.slice(codeMirrorEditorSource.indexOf('function updateCodeMirrorViewPreservingState('), codeMirrorEditorSource.indexOf('\nfunction syncCodeMirrorDocument('));
     assert.ok(/function updateCodeMirrorViewPreservingState[\s\S]*view\.scrollSnapshot[\s\S]*update\(selection, scrollSnapshot\)[\s\S]*view\.dispatch\(\{selection/.test(preservationSource) && /function syncCodeMirrorDocument[\s\S]*updateCodeMirrorViewPreservingState[\s\S]*scrollSnapshot[\s\S]*function reconfigureCodeMirrorPanelLocale[\s\S]*updateCodeMirrorViewPreservingState[\s\S]*scrollSnapshot/.test(codeMirrorEditorSource), 'document sync and locale compartment refresh share one atomic selection/scroll preservation parent');
     assert.equal(/requestMeasure|requestAnimationFrame/.test(preservationSource), false, 'passive CodeMirror preservation has no deferred scroll restore race');
@@ -1841,6 +1843,9 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.previewKindForPath('/repo/photo.avif'), 'image', 'AVIF paths are image Preview candidates');
     assert.equal(api.previewKindForPath('/repo/spec.pdf'), 'pdf', 'PDF paths route to raw PDF Preview');
     assert.equal(api.previewKindForPath('/repo/chart.mmd'), 'mermaid', 'Mermaid source files route to Mermaid Preview');
+    assert.equal(api.previewKindForPath('/repo/chart.dot'), 'graphviz');
+    assert.equal(api.previewKindForPath('/repo/chart.gv'), 'graphviz');
+    assert.equal(api.previewKindForPath('/repo/data.sqlite3'), 'sqlite');
     assert.equal(api.previewKindForPath('/repo/config.json'), 'structured', 'JSON paths route to structured Preview');
     assert.equal(api.previewKindForPath('/repo/events.jsonl'), 'table', 'JSONL paths route to table Preview');
     assert.equal(api.previewKindForPath('/repo/events.ndjson'), 'table', 'NDJSON paths route to table Preview');
@@ -1884,20 +1889,22 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.previewRendererForPath('/repo/photo.tiff').id, 'unsupported-image', 'recognized image fallbacks are registry-owned');
     assert.equal(api.previewRendererForPath('/repo/archive.zip').id, 'unsupported-archive', 'recognized archive fallbacks are registry-owned');
     const previewRendererSamples = {
-      'examples/preview/10-markdown.md': 'markdown',
-      'examples/preview/11-html.html': 'html',
-      'examples/preview/12-image.svg': 'image',
-      'examples/preview/13-pdf.pdf': 'pdf',
-      'examples/preview/14-mermaid.mmd': 'mermaid',
-      'examples/preview/15-structured.json': 'structured',
-      'examples/preview/16-structured.jsonl': 'json-lines-table',
-      'examples/preview/17-notebook.ipynb': 'structured',
-      'examples/preview/18-structured.yaml': 'structured',
-      'examples/preview/19-structured.toml': 'structured',
-      'examples/preview/20-structured.drawio': 'structured',
-      'examples/preview/21-config.properties': 'structured',
-      'examples/preview/22-table.csv': 'table',
-      'examples/preview/23-table.tsv': 'table',
+      'examples/10-markdown.md': 'markdown',
+      'examples/11-html.html': 'html',
+      'examples/12-image.svg': 'image',
+      'examples/13-pdf.pdf': 'pdf',
+      'examples/14-mermaid.mmd': 'mermaid',
+      'examples/15-structured.json': 'structured',
+      'examples/16-structured.jsonl': 'json-lines-table',
+      'examples/17-notebook.ipynb': 'structured',
+      'examples/18-structured.yaml': 'structured',
+      'examples/19-structured.toml': 'structured',
+      'examples/20-structured.drawio': 'structured',
+      'examples/21-config.properties': 'structured',
+      'examples/22-table.csv': 'table',
+      'examples/23-table.tsv': 'table',
+      'examples/28-diagram.dot': 'graphviz',
+      'examples/29-database.sqlite': 'sqlite',
     };
     for (const [samplePath, rendererId] of Object.entries(previewRendererSamples)) {
       assert.equal(fs.existsSync(samplePath), true, `${rendererId} renderer has an example file`);
@@ -1926,17 +1933,16 @@ async function runLayoutRestoreSuite() {
     assert.equal(wideJsonl.columns.length, 40, 'JSONL column count is capped');
     assert.equal(wideJsonl.overflowColumns.length, 4, 'JSONL retains overflow keys behind one affordance');
     [
-      'examples/preview/24-audio.wav',
-      'examples/preview/25-video.mp4',
-      'examples/preview/26-text.log',
-      'examples/preview/27-diff.patch',
-      'examples/preview/28-diagram.dot',
-      'examples/preview/29-plantuml.puml',
-      'examples/preview/30-unsupported-image.tiff',
-      'examples/preview/31-unsupported-document.xlsx',
-      'examples/preview/32-unsupported-data.parquet',
-      'examples/preview/33-unsupported-archive.zip',
-      'examples/preview/34-unsupported.unknown',
+      'examples/36-audio.wav',
+      'examples/37-video.mp4',
+      'examples/38-text.log',
+      'examples/39-diff.patch',
+      'examples/40-plantuml.puml',
+      'examples/41-unsupported-image.tiff',
+      'examples/42-unsupported-document.xlsx',
+      'examples/43-unsupported-data.parquet',
+      'examples/44-unsupported-archive.zip',
+      'examples/45-unsupported.unknown',
     ].forEach(samplePath => {
       assert.equal(fs.existsSync(samplePath), false, `${samplePath} stays out of the curated preview sample set`);
     });
@@ -2108,6 +2114,7 @@ async function runLayoutRestoreSuite() {
     const codeMirrorBundlePackage = JSON.parse(fs.readFileSync('tools/codemirror-bundle/package.json', 'utf8'));
     const codeMirrorBundleLock = JSON.parse(fs.readFileSync('tools/codemirror-bundle/package-lock.json', 'utf8'));
     const codeMirrorDirectVersions = {
+      '@codemirror/collab': '6.1.1',
       '@codemirror/commands': '6.10.3',
       '@codemirror/lang-css': '6.3.1',
       '@codemirror/lang-html': '6.4.11',
@@ -2393,7 +2400,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(diffExpandButton.hidden, false, 'Expand unchanged is shown only for an active loaded diff');
     assert.equal(diffExpandButton.disabled, false, 'Expand unchanged is clickable for an active loaded diff');
     assert.equal(diffExpandButton.attributes['aria-pressed'], 'false', 'Expand unchanged reflects the persisted toggle state');
-    assert.ok(/updateFileEditorDiffExpandButton\(diffExpandButton, path, state, item\);\s*if \(popoutPreviewButton\)/.test(source), 'rendering leaves Expand unchanged visibility owned by its dedicated updater');
+    assert.ok(/updateFileEditorDiffExpandButton\(diffExpandButton, path, state, item\);\s*syncEditorDiffRefPanel/.test(source), 'rendering leaves Expand unchanged visibility owned by its dedicated updater');
     const noHistoryPath = '/repo/app/DOIT.37.md';
     api.setOpenFileStateForTest(noHistoryPath, {kind: 'text', gitTracked: true, gitHasHistory: false, gitHistory: []});
     assert.deepStrictEqual([...api.fileDiffRefHistoryItems(noHistoryPath)], [], 'file editor ref history is empty when the file has no file-level history');
@@ -2731,7 +2738,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function fileEntryChanged[\s\S]*?state\.size == null \|\| entry\.size == null\) return true/.test(source), '#88: unknown-size equal-mtime entries are treated as changed');
     // #73: the item-keyed editor maps are cleaned up on close + migrated on rename (no unbounded growth),
     // and the per-pane LRU timestamp survives a session rename.
-    assert.ok(/function removeFilePanelOwner[\s\S]*?fileEditorViewState\.delete\(item\)[\s\S]*?tabLastActivatedAt\.delete\(item\)/.test(source), '#73: editor view-state + LRU timestamp are dropped on tab close');
+    assert.ok(/function removeFilePanelOwner[\s\S]*?forgetFileEditorViewState\(item\)[\s\S]*?tabLastActivatedAt\.delete\(item\)/.test(source), '#73: editor view-state + LRU timestamp are dropped on tab close');
+    assert.ok(/function forgetFileEditorViewState\(item\) \{[^}]*storePdfReloadViewport\(item, null\)[^}]*fileEditorViewState\.delete\(item\)/.test(source), 'closing a PDF retires its browser reload checkpoint');
     assert.ok(/function renameOpenFilePath[\s\S]*?for \(const map of \[state\.viewMode, state\.previewZoom, fileEditorViewState, fileEditorDiffExpandOverrides, tabLastActivatedAt, tabActivationOrder\]\)[\s\S]*?map\.set\(newKey, map\.get\(oldKey\)\)/.test(source), '#73: editor view-state, LRU timestamp, and activation order are migrated on rename');
     assert.ok(/function replaceSessionMetadata[\s\S]*?tabLastActivatedAt,\s*tabActivationOrder,\s*\n\s*\]\)/.test(source), '#73: the LRU timestamp and activation order are rekeyed across a session rename');
     const infoCss = fs.readFileSync('static/yomux.css', 'utf8');
@@ -2847,7 +2855,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(refreshStart > 0 && refreshEnd > refreshStart, 'could not locate refreshOpenFilesIfChanged body');
     const refreshBody = source.slice(refreshStart, refreshEnd);
     assert.ok(refreshBody.includes('const fetched = await fetchFileEntryStatus(path, {fresh: requested && options.fresh === true});'), 'open-file refresh uses a structured file lookup');
-    assert.ok(refreshBody.includes('refreshOpenFileFromFetchedStatus(path, state, fetched, relocationRevision)'), 'open-file polling routes structured status and its relocation fence through the shared refresh helper');
+    assert.ok(refreshBody.includes('refreshOpenFileFromFetchedStatus(path, state, fetched, relocationRevision, options)'), 'open-file polling routes structured status and its relocation fence through the shared refresh helper');
     const statusRefreshStart = source.indexOf('async function refreshOpenFileFromFetchedStatus(');
     const statusRefreshEnd = source.indexOf('async function refreshOpenFilesIfChanged(', statusRefreshStart);
     assert.ok(statusRefreshStart > 0 && statusRefreshEnd > statusRefreshStart, 'could not locate refreshOpenFileFromFetchedStatus body');
@@ -3682,8 +3690,15 @@ async function runLayoutRestoreSuite() {
     const api = loadYomux('', ['1']);
     const css = fs.readFileSync('static/yomux.css', 'utf8');
     api.setFileExplorerRepoInfoForTest('/repo/app', {root: '/repo/app', name: 'app', branch: 'feature/x', upstream: 'origin/feature/x', ahead: 2, behind: 1, dirty_count: 3});
-    const sync = api.fileTreeRepoSyncMeta('/repo/app').map(part => part.text);
+    const status = api.fileTreeRepoStatus('/repo/app');
+    const sync = status.sync.map(part => part.text);
+    assert.equal(status.branch, 'feature/x', 'Finder and Tabber share branch normalization');
     assert.deepStrictEqual([...sync], ['↑2', '↓1', '●3'], 'repo sync meta shows ahead/behind/dirty markers');
+    const clean = api.gitRepositoryStatusParts({branch: 'main', ahead: 0, behind: 0, dirty_count: 0}, {includeClean: true});
+    assert.equal(clean.branch, 'main');
+    assert.deepStrictEqual([...clean.sync.map(part => part.text)], ['✓'], 'Tabber marks a verified clean worktree through the shared status owner');
+    const unknown = api.gitRepositoryStatusParts({branch: 'main', ahead: 0, behind: 0, dirty_count: null}, {includeClean: true});
+    assert.deepStrictEqual([...unknown.sync], [], 'unknown repository status never appears clean');
     const parts = api.fileTreeDisplayParts('/repo/app', {kind: 'dir', is_repo: true, name: 'app'});
     assert.ok(parts.html.includes('file-tree-repo-branch') && parts.html.includes('feature/x'), 'repo dir annotation shows the branch');
     assert.ok(parts.html.includes('file-tree-repo-ahead') && parts.html.includes('↑2'), 'repo dir annotation shows ahead count inline');
@@ -3749,8 +3764,10 @@ async function runLayoutRestoreSuite() {
     rawPinnedSlots.left = {tabs: ['2', '1', '3'], active: '3'};
     assert.deepStrictEqual([...api.normalizeLayoutSlots(rawPinnedSlots).left.tabs], ['1', '2', '3'], 'raw layout normalization also enforces pinned-first ordering');
     assert.ok(api.pinnedTabIconHtml('1').includes('pane-tab-pin-icon'), 'pinned tabs render a pin icon helper');
-    assert.equal(api.paneTabDismissControlHtml('1'), '', 'a pinned tmux tab never renders the inline minimize button');
-    assert.ok(api.paneTabDismissControlHtml('2').includes('pc-minimize'), 'an unpinned tmux tab retains the inline minimize button');
+    for (const item of ['1', '2']) {
+      const controls = api.paneTabDismissControlHtml(item);
+      assert.match(controls, /data-pane-tab-minimize[\s\S]*data-pane-tab-close/, 'pinned and unpinned terminals show minimize before kill');
+    }
     assert.deepStrictEqual([...api.tabsToEvictForCap(['1', '2', '3', '4'], '4')], ['3', '2'], 'LRU eviction skips pinned tabs');
     api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 3}});
     rawPinnedSlots.left = {tabs: ['1', '2', '3'], active: '3'};
@@ -5296,7 +5313,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('function setLimitedMapEntry'), 'long-lived frontend maps share a bounded LRU setter');
     assert.ok(source.includes('fileExplorerMemoryCacheLimit = 512'), 'file explorer memory caches are capped');
     assert.ok(source.includes('commandPaletteRecentKeyLimit = 100'), 'command palette recent-key cache is capped');
-    assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-text,\s*\.file-tree-row\.tabber-row \.tabber-normal-description,\s*\.command-palette-group,\s*\.repo-chip-menu \.repo-chip-branch[\s\S]*?overflow:\s*hidden;[\s\S]*?text-overflow:\s*ellipsis;[\s\S]*?white-space:\s*nowrap;/.test(css), 'advanced window labels and Normal Tabber descriptions use the shared single-line ellipsis owner');
+    assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-text,\s*\.file-tree-row\.tabber-row \.tabber-normal-description,\s*\.file-tree-row\.tabber-row \.tabber-repo-status > \.file-tree-repo-branch,\s*\.command-palette-group,\s*\.repo-chip-menu \.repo-chip-branch[\s\S]*?overflow:\s*hidden;[\s\S]*?text-overflow:\s*ellipsis;[\s\S]*?white-space:\s*nowrap;/.test(css), 'advanced window labels, Normal Tabber descriptions, and repository branch labels use the shared single-line ellipsis owner');
     // The preview fixture above asserts restored vertical and horizontal scroll state.  Avoid
     // coupling that behavior to one helper call spelling.
     assert.equal(source.includes("const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});\n  installCodeMirrorDiffResizeObserver"), false, 'diff resize observer is not installed before the rebuild decision');

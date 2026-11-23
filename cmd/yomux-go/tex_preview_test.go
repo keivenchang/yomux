@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -66,7 +67,7 @@ func TestTeXCompilerArchiveVerification(t *testing.T) {
 }
 
 func TestTeXRoutesRequireAdminAndSameOrigin(t *testing.T) {
-	for _, route := range []struct{ method, path string }{{"GET", "/api/tex/compiler"}, {"POST", "/api/tex/compiler/install"}, {"POST", "/api/tex/preview"}} {
+	for _, route := range []struct{ method, path string }{{"DELETE", "/api/tex/compiler"}, {"GET", "/api/tex/compiler"}, {"POST", "/api/tex/compiler/install"}, {"POST", "/api/tex/preview"}} {
 		for _, role := range []string{"readonly", "admin"} {
 			s := &server{}
 			reached := false
@@ -233,5 +234,68 @@ waitForEngine:
 	command, err := texSandboxCommand(context.Background(), "/compiler", []string{"--untrusted"}, "/job", "/cache", "/project")
 	if err != nil || strings.Contains(strings.Join(command.Args, " "), "--ro-bind / /") || !strings.Contains(strings.Join(command.Args, " "), "--ro-bind /project /project") {
 		t.Fatalf("sandbox: %v %v", command, err)
+	}
+}
+
+func TestTeXCleanupAuthorizationPreservesJob(t *testing.T) {
+	for _, test := range []struct {
+		role, origin string
+		status       int
+		removed      bool
+	}{
+		{"readonly", "http://example.com", 403, false},
+		{"admin", "http://example.com", 204, true},
+		{"admin", "https://other.example", 403, false},
+	} {
+		t.Run(test.role+test.origin, func(t *testing.T) {
+			const job = "fixture-job-123456"
+			s := &server{httpMode: true, texProgress: map[string]texProgressState{job: {Phase: "done"}}}
+			request := httptest.NewRequest("DELETE", "http://example.com/api/tex/compiler?job_id="+job, nil)
+			request.Header.Set("Origin", test.origin)
+			request = request.WithContext(context.WithValue(request.Context(), authContextKey{}, authUser{username: "fixture", role: test.role}))
+			response := httptest.NewRecorder()
+			s.protected(http.HandlerFunc(s.texCompilerStatus)).ServeHTTP(response, request)
+			_, exists := s.texProgress[job]
+			if response.Code != test.status || exists == test.removed {
+				t.Fatalf("status=%d job exists=%t", response.Code, exists)
+			}
+		})
+	}
+}
+
+func TestTeXSourceMapIgnoresEmptyReferenceBoxes(t *testing.T) {
+	const records = "SyncTeX Version:1\nInput:1:texput\nContent:\n" +
+		"{1\n(1,9:1200,1300:400,500,0\n}\n" +
+		"{2\ng1,33:1200,1300\n}\n" +
+		"{3\n(1,8:14108797,12902310:0,623900,267389\n(1,58:1200,1300:400,500,0\n}\n"
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write([]byte(records)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "texput.synctex.gz")
+	if err := os.WriteFile(path, compressed.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	pages, err := readTexSyncPages(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const job = "fixture-source-map"
+	s := &server{config: t.TempDir(), texProgress: map[string]texProgressState{job: {SyncPages: pages}}}
+	response := httptest.NewRecorder()
+	s.texCompilerStatus(response, httptest.NewRequest(http.MethodGet, "/api/tex/compiler?job_id="+job+"&sync=1", nil))
+	var status struct {
+		Pages []texSyncPage `json:"sync_pages"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	want := []texSyncPage{{Line: 9, Page: 1}, {Line: 33, Page: 2}, {Line: 58, Page: 3}}
+	if response.Code != http.StatusOK || !slices.Equal(status.Pages, want) {
+		t.Fatalf("status=%d source map=%v want=%v", response.Code, status.Pages, want)
 	}
 }

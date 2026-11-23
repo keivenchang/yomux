@@ -1,0 +1,108 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved. */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
+'use strict';
+window.YOmuxShare = (() => {
+  async function request(url, options = {}) {
+    const response = await fetch(url, {credentials: 'same-origin', cache: 'no-store', ...options});
+    const body = await response.json();
+    if (!response.ok) throw Object.assign(new Error(body.error || 'Request failed'), {status: response.status, appearance: body.appearance});
+    return body;
+  }
+  function post(url, body) { return request(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)}); }
+  function randomID() { return crypto.randomUUID(); }
+  function guestName() { const n = new Uint32Array(1); crypto.getRandomValues(n); return `Guest${String(n[0] % 10000).padStart(4, '0')}`; }
+  function presenceExtension(api) {
+    const effect = api.StateEffect.define();
+    class RemoteCaret extends api.WidgetType {
+      constructor(name, hue) { super(); this.name = name; this.hue = hue; }
+      eq(other) { return this.name === other.name && this.hue === other.hue; }
+      toDOM() {
+        const caret = document.createElement('span');
+        caret.className = 'share-remote-caret';
+        caret.dataset.shareCaretName = this.name;
+        caret.style.setProperty('--share-participant-hue', this.hue);
+        return caret;
+      }
+    }
+    const field = api.StateField.define({
+      create: () => api.Decoration.none,
+      update(value, tr) {
+        value = value.map(tr.changes);
+        for (const item of tr.effects) if (item.is(effect)) {
+          const ranges = [];
+          for (const presence of item.value) {
+            const anchor = Math.min(tr.newDoc.length, Math.max(0, presence.anchor));
+            const head = Math.min(tr.newDoc.length, Math.max(0, presence.head));
+            const hue = shareParticipantHue(presence.name, presence.hue);
+            if (head !== anchor) ranges.push(api.Decoration.mark({class: 'share-remote-selection', attributes: {style: `--share-participant-hue: ${hue}`}}).range(Math.min(anchor, head), Math.max(anchor, head)));
+            ranges.push(api.Decoration.widget({widget: new RemoteCaret(presence.name, hue), side: 1}).range(head));
+          }
+          value = api.Decoration.set(ranges, true);
+        }
+        return value;
+      },
+      provide: owner => api.EditorView.decorations.from(owner),
+    });
+    return {effect, field};
+  }
+  async function connect(view, url, options = {}) {
+    const api = window.YOmuxCodeMirror;
+    const client = randomID();
+    const endpoint = new URL(url, location.origin); endpoint.searchParams.set('client', client);
+    const initialURL = new URL(endpoint); initialURL.searchParams.set('initial', '1');
+    const admission = new api.Compartment();
+    view.dispatch({effects:api.StateEffect.appendConfig.of(admission.of(api.EditorState.readOnly.of(true)))});
+    const alive = () => options.alive?.() !== false;
+    function releaseAdmission() { if (alive()) view.dispatch({effects: admission.reconfigure([])}); }
+    let initial;
+    try { initial = await request(initialURL); } catch (error) { releaseAdmission(); throw error; }
+    if (!alive() || options.current?.() === false) { releaseAdmission(); return null; }
+
+    if (initial.active === false && initial.text === undefined) {releaseAdmission();return null;}
+    if (options.requireText !== undefined && initial.text !== options.requireText) {releaseAdmission();throw new Error('Save or reload the host draft before collaborating');}
+    endpoint.searchParams.set('session',initial.session);
+    const presence = presenceExtension(api);
+    const compartment = new api.Compartment();
+    view.dispatch({changes: {from: 0, to: view.state.doc.length, insert: initial.text}, annotations:api.Transaction.addToHistory.of(false)});
+    view.dispatch({effects: [admission.reconfigure([]), api.StateEffect.appendConfig.of(compartment.of([api.collab({startVersion: initial.version, clientID: initial.clientID}), presence.field]))]});
+    let closed = false, busy = false, timer = null, settled = Promise.resolve(), resolveSettled = null;
+    const ids = new WeakMap();
+    function opID(update) { let id = ids.get(update.origin); if (!id) { id = randomID(); ids.set(update.origin, id); } return id; }
+    async function tick() {
+      if (closed) return;
+      if (busy) return settled;
+      busy = true;
+      settled=new Promise(resolve=>{resolveSettled=resolve;});
+      try {
+        const version = api.getSyncedVersion(view.state);
+        const pending = api.sendableUpdates(view.state).slice(0, 256);
+        const selection = view.state.selection.main;
+        const response = await post(endpoint, {version, updates: pending.map(update => ({changes: update.changes.toJSON(), id: opID(update)})), anchor: selection.anchor, head: selection.head, focused: view.hasFocus && !document.hidden});
+        if (closed) return;
+        if (response.updates.length) view.dispatch(api.receiveUpdates(view.state, response.updates.map(update => ({...update, changes: api.ChangeSet.fromJSON(update.changes)}))));
+        // Server positions are at the accepted revision; map through this editor's
+        // outstanding local changes before drawing another editor's selection.
+        const outstanding = api.sendableUpdates(view.state);
+        const peers = response.presence.filter(peer => peer.clientID !== initial.clientID).map(peer => {
+          let {anchor, head} = peer;
+          for (const local of outstanding) { anchor = local.changes.mapPos(anchor); head = local.changes.mapPos(head); }
+          return {...peer, anchor, head};
+        });
+        view.dispatch({effects: presence.effect.of(peers)});
+        options.onState?.({...response,saved:response.saved && api.sendableUpdates(view.state).length===0}, view.state.doc.toString());
+        if (!response.active) stop();
+      } catch (error) {
+        options.onError?.(error);
+        if (closed) return;
+        if (error.status === 410 || error.status === 401 || error.status === 403 || ['document_session_changed', 'permission_changed'].includes(error.message)) {
+          options.onEnd?.(error);
+          stop();
+        }
+      } finally { busy = false; resolveSettled(); if (!closed) timer = setTimeout(tick, 503); }
+    }
+    function stop() { if(closed)return; closed = true; clearTimeout(timer); if (alive()) view.dispatch({effects: compartment.reconfigure([])}); }
+    tick();
+    return {stop, session:initial.session, pending:()=>closed?0:api.sendableUpdates(view.state).length, text:()=>view.state.doc.toString(), flush:async()=>{await tick();if(!closed && api.sendableUpdates(view.state).length)await tick();return !closed && api.sendableUpdates(view.state).length===0;}, resolve: () => post(endpoint, {version: api.getSyncedVersion(view.state), updates: [], resolve: 'resume'})};
+  }
+  return {request, post, connect, randomID, guestName};
+})();

@@ -149,6 +149,13 @@ button.topbar-status-surface {
 .topbar-status-surface[hidden] {
   display: none;
 }
+.share-expiry-countdown {
+  display: inline-block;
+  padding: var(--space-3) var(--space-6);
+  color: var(--text);
+  font-size: var(--ui-font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
 /* The one backend-health control: permanently mounted and a FIXED icon-sized square, so a health
    transition repaints one slot instead of inserting or removing a text pill. Its outer box is the
    same in every state -- box-sizing:border-box with a fixed inline and block size and a constant 1px
@@ -998,6 +1005,9 @@ body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-ro
 }
 .app-menu-ui-icon-notify {
   --app-menu-ui-icon: var(--icon-notify);
+}
+.app-menu-ui-icon-share {
+  --app-menu-ui-icon: var(--icon-share);
 }
 .app-menu-ui-icon-refresh {
   --app-menu-ui-icon: var(--icon-refresh);

@@ -57,6 +57,29 @@
 .pdf-preview-body > .file-editor-preview-fallback .file-editor-empty-detail {
   margin-top: 0;
 }
+.pdf-preview-status-host {
+  position: relative;
+}
+.pdf-preview-staged-frame {
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+}
+.pdf-preview-update-status {
+  position: absolute;
+  inset-inline-end: var(--space-8);
+  inset-block-end: var(--space-8);
+  z-index: var(--z-inline-control);
+  max-width: min(28rem, 85%);
+  max-height: 45%;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: var(--space-8) var(--space-12);
+  border: 1px solid var(--editor-scheme-line);
+  border-radius: var(--radius-sm);
+  background: var(--editor-scheme-panel2);
+  box-shadow: 0 2px 8px var(--paint-shadow-35);
+}
 .image-preview-body,
 .file-editor-image-panel {
   background-color: var(--image-preview-checker-bg);
@@ -417,25 +440,6 @@ body.editor-theme-light .file-editor-image-panel {
   height: 8px;
   background: currentColor;
 }
-.file-editor-icon-popout-preview::before {
-  content: "";
-  position: absolute;
-  top: 52%;
-  left: 48%;
-  width: 10px;
-  height: 8px;
-  border: 1.5px solid currentColor;
-  border-radius: 2px;
-  transform: translate(-50%, -50%);
-}
-.file-editor-icon-popout-preview::after {
-  content: "↗";
-  position: absolute;
-  top: 0;
-  right: 0;
-  font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
-  color: currentColor;
-}
 .file-editor-icon-theme::before {
   width: 12px;
   height: 12px;
@@ -538,6 +542,9 @@ body.editor-theme-light .file-editor-image-panel {
   display: grid;
   gap: var(--space-6);
 }
+.finder-move-conflict-message + .finder-move-comparison {
+  margin-top: 1.35em;
+}
 .finder-move-comparison + .finder-move-comparison {
   margin-top: var(--space-12);
   padding-top: var(--space-12);
@@ -548,12 +555,28 @@ body.editor-theme-light .file-editor-image-panel {
   font-family: var(--mono-font);
   min-width: 0;
 }
+.finder-move-kind {
+  display: block;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--ui-font);
+  margin-bottom: var(--space-4);
+}
 .finder-move-target strong {
   font-weight: 700;
+}
+.finder-move-diff {
+  color: var(--active-accent-bright);
 }
 .finder-move-arrow {
   font-size: 1.2em;
   line-height: 1;
+}
+.finder-move-apply-all {
+  padding-top: var(--space-8);
+  color: var(--pc-control-fg);
+}
+.finder-move-apply-all input {
+  margin: 0;
 }
 
 .drop-action-result pre {
@@ -600,6 +623,16 @@ body.editor-theme-light .file-editor-image-panel {
   margin: 0 0 var(--space-6);
   color: var(--good);
   font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.file-editor-merge-draft {
+  display: grid;
+  gap: var(--space-4);
+  margin-top: var(--space-8);
+}
+.file-editor-merge-draft textarea {
+  min-height: 10em;
+  resize: vertical;
+  font-family: var(--mono-font);
 }
 .file-editor-conflict-compare pre {
   min-height: 220px;
@@ -797,6 +830,35 @@ body.editor-theme-light .file-editor-image {
   font-family: var(--ui-font);
   font-size: var(--editor-preview-font-size);
   line-height: 1.35;
+}
+.office-preview-body {
+  padding: 0;
+  overflow: hidden;
+}
+.office-preview,
+.office-preview-viewer {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.office-preview {
+  height: 100%;
+}
+.office-preview-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 var(--space-8);
+  padding-inline: var(--space-8);
+  background: var(--editor-scheme-panel2);
+}
+.office-preview-viewer {
+  flex: 1 1 0;
+  overflow: auto;
+}
+.office-preview-viewer.pdf-preview-body {
+  gap: 0;
 }
 .prosemirror-editor {
   min-height: 100%;
@@ -1519,6 +1581,7 @@ body.resizing-file-explorer-changes {
    one every other pane boundary shows); on hover/resize it brightens + thickens (--pane-resizer-hover-bg
    + --drop-outline-shadow). The 6px element stays as the comfortable grab zone; the visible line is the
    centered ::before. Light/dark flip automatically via the tokens (no hardcoded hex). */
+.share-sidebar-resizer,
 .file-explorer-changes-resizer {
   position: relative;
   z-index: var(--z-panel-resizer-inline);
@@ -1529,6 +1592,7 @@ body.resizing-file-explorer-changes {
   user-select: none;
   background: transparent;
 }
+.share-sidebar-resizer::before,
 .file-explorer-changes-resizer::before {
   content: "";
   position: absolute;
@@ -1538,6 +1602,9 @@ body.resizing-file-explorer-changes {
   background: var(--pane-resizer-bg);
   transition: background var(--motion-interaction-fast) ease, box-shadow var(--motion-interaction-fast) ease, height var(--motion-interaction-fast) ease, top var(--motion-interaction-fast) ease;
 }
+.share-sidebar-resizer:hover::before,
+.share-sidebar-resizer:focus-visible::before,
+.share-sidebar-conversations.resizing-changes .share-sidebar-resizer::before,
 .file-explorer-changes-resizer:hover::before,
 .file-explorer-changes-resizer:focus-visible::before,
 .file-explorer-pane.resizing-changes .file-explorer-changes-resizer::before {
@@ -1929,6 +1996,16 @@ body :is(
 .file-editor-diff-codemirror .cm-content .cm-activeLine {
   background: var(--diff-full-line-bg, transparent);
 }
+/* CodeMirror normally draws selection behind the text. Diff line fills cover that layer. */
+.file-editor-diff-codemirror .cm-selectionLayer {
+  z-index: var(--z-inline-control) !important;
+  pointer-events: none;
+}
+/* Native drag ranges still need paint above the red and green backgrounds. */
+.file-editor-diff-codemirror .cm-editor .cm-content :is(.cm-line, .cm-deletedChunk)::selection,
+.file-editor-diff-codemirror .cm-editor .cm-content :is(.cm-line, .cm-deletedChunk) ::selection {
+  background: var(--text-selection-bg) !important;
+}
 /* Extend the colored line band to both editor edges. This box-shadow + clip-path full-bleed trick is
    ONLY safe on BLOCK-level line elements (.cm-changedLine / .cm-deletedChunk / .cm-insertedChunk /
    .cm-inlineChangedLine). It must NOT be applied to .cm-insertedLine / .cm-deletedLine: in
@@ -1979,6 +2056,7 @@ body :is(
 .file-editor-diff-codemirror .cm-deletedChunk {
   position: relative;
   padding-inline-end: 58px;
+  user-select: text;
 }
 .file-editor-readonly .cm-chunkButtons { display: none; }
 .file-editor-diff-codemirror .cm-deletedChunk .cm-chunkButtons {
@@ -2172,6 +2250,48 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-toolbar-separator[hidden] {
   display: none;
 }
+button:is(.file-editor-gutter-panel, .file-editor-review-panel),
+.file-editor-review-toolbar button {
+  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  border-radius: var(--radius-sm);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--pane-ctl-border, var(--pane-tab-control-border)) 45%, transparent);
+}
+button.file-editor-review-panel,
+.file-editor-review-toolbar button {
+  flex: 0 0 auto;
+  justify-content: center;
+  width: 20px;
+  min-width: 20px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.file-editor-review-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-6);
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+  background: var(--pane-bar-bg);
+}
+.file-editor-review-toolbar[hidden] {
+  display: none;
+}
+.file-editor-review-toolbar .file-editor-review-reset {
+  width: auto;
+  padding-inline: var(--space-4);
+  white-space: nowrap;
+}
+.file-editor-review-status {
+  flex: 0 1 auto;
+  max-width: min(26ch, 30vw);
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+}
 .file-editor-preview-font-panel {
   height: 20px;
   flex: 0 0 auto;
@@ -2210,8 +2330,6 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-theme-panel,
 .file-editor-reload-panel,
 .file-editor-upload-panel,
-.file-editor-popout-preview-panel,
-.file-editor-popout-editor-panel,
 .file-editor-blame-panel,
 .file-editor-save-panel {
   height: 20px;
@@ -2230,8 +2348,6 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-find-panel,
 .file-editor-diff-expand-panel,
 .file-editor-upload-panel,
-.file-editor-popout-preview-panel,
-.file-editor-popout-editor-panel,
 .file-editor-blame-panel,
 .file-editor-theme-panel {
   min-width: 20px;
@@ -2285,13 +2401,13 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-mode-control-panel button:hover,
 .file-editor-preview-font-panel button:not(:disabled):hover,
 .file-editor-gutter-panel:hover,
+.file-editor-review-panel:hover,
+.file-editor-review-toolbar button:not(:disabled):is(:hover, :focus-visible),
 .file-editor-wrap-panel:hover,
 .file-editor-find-panel:hover,
 .file-editor-blame-panel:not([aria-pressed="true"]):not(:disabled):hover,
 .file-editor-diff-panel:not([aria-pressed="true"]):hover,
 .file-editor-diff-expand-panel:not([aria-pressed="true"]):hover,
-.file-editor-popout-preview-panel:hover,
-.file-editor-popout-editor-panel:hover,
 .file-editor-theme-panel:hover,
 .file-editor-reload-panel:hover,
 .file-editor-preview-find-panel button:not(:disabled):is(:hover, :focus-visible),
@@ -2313,6 +2429,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-mode-control-panel button.active,
 .file-editor-gutter-panel.active,
 .file-editor-gutter-panel[aria-pressed="true"],
+.file-editor-review-panel[aria-pressed="true"],
 .file-editor-wrap-panel.active,
 .file-editor-wrap-panel[aria-pressed="true"],
 .file-editor-find-panel[aria-pressed="true"],
@@ -3283,6 +3400,18 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   color: var(--muted);
   font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
+.sqlite-preview-result select {
+  max-width: 100%;
+}
+.sqlite-preview-result details pre {
+  overflow: auto;
+}
+.sqlite-preview-pages {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  margin-block: var(--space-8);
+}
 .file-editor-preview-error {
   margin: 0 0 var(--space-8);
   padding: var(--space-8) var(--space-10);
@@ -3403,6 +3532,32 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   font-family: inherit;
   font-size: inherit;
 }
+.tex-preview-progress-bar {
+  display: block;
+  width: 100%;
+  height: 0.45rem;
+  margin-top: var(--space-12);
+  accent-color: var(--accent);
+}
+.tex-preview-progress-message {
+  margin-top: var(--space-6);
+}
+.tex-preview-progress-elapsed {
+  margin-top: var(--space-3);
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+}
+.tex-preview-progress-output {
+  max-height: 12rem;
+  overflow: auto;
+  margin: var(--space-12) 0 0;
+  padding: var(--space-6);
+  background: var(--panel2);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-xs);
+  line-height: 1.4;
+  text-align: left;
+}
 .tex-preview-instructions {
   margin: var(--space-12) 0;
   font-family: var(--mono-font);
@@ -3411,6 +3566,150 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 }
 .tex-preview-actions {
   margin-top: var(--space-12);
+}
+.tex-preview-install-row {
+  margin-top: var(--space-12);
+}
+.file-editor-primary-action,
+.tex-preview-install-button {
+  min-height: 2.5rem;
+  padding: var(--space-8) var(--space-12);
+  border: 1px solid var(--active-control-border);
+  border-radius: var(--radius-md);
+  background: var(--active-control-bg);
+  color: var(--active-control-text);
+  font-weight: 700;
+  box-shadow: 0 2px 10px rgb(var(--active-accent-rgb) / 0.24);
+}
+.file-editor-primary-action:hover,
+.file-editor-primary-action:focus-visible,
+.tex-preview-install-button:hover,
+.tex-preview-install-button:focus-visible {
+  filter: brightness(1.08);
+  box-shadow: 0 3px 14px rgb(var(--active-accent-rgb) / 0.34);
+}
+.file-editor-primary-action:focus-visible,
+.tex-preview-install-button:focus-visible {
+  outline: 2px solid var(--active-control-border);
+  outline-offset: 2px;
+}
+.cm-content .share-remote-caret {
+  position: relative;
+  display: inline-block;
+  inline-size: 0;
+  block-size: 0;
+  vertical-align: baseline;
+}
+.cm-content .share-remote-caret::before {
+  content: "";
+  position: absolute;
+  inset-block: auto -.18em;
+  inset-inline-start: -3px;
+  inline-size: 8px;
+  block-size: 1.16em;
+  background: linear-gradient(to right, transparent 3px, currentColor 3px 6px, transparent 6px);
+}
+.share-caret-label {
+  position: fixed;
+  box-sizing: border-box;
+  inline-size: max-content;
+  max-inline-size: min(20ch, var(--popover-max-inline-size), var(--share-caret-label-room, 100vw));
+  padding: 0 var(--space-4);
+  border: 2px solid currentColor;
+  border-radius: var(--radius-control);
+  font: 600 var(--ui-font-size-xs)/1.25 var(--ui-font);
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+.share-chat-message .share-chat-author,
+.cm-content .share-remote-caret {
+  color: hsl(var(--share-participant-hue) 76% var(--share-participant-lightness, 62%));
+}
+.theme-light {
+  --share-participant-lightness: 35%;
+}
+.share-remote-selection {
+  background-color: hsl(var(--share-participant-hue) 76% var(--share-participant-lightness, 62%) / 30%);
+}
+.share-invite {
+  align-items: center;
+}
+.share-invite .file-editor-primary-action {
+  min-height: 1.75rem;
+  max-inline-size: 100%;
+  padding: var(--space-4) var(--space-8);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.share-manager .share-invite input[type=url] {
+  flex-basis: 12ch;
+  direction: ltr;
+  text-overflow: ellipsis;
+}
+.share-summary-stop {
+  margin-inline-start: var(--space-8);
+  vertical-align: middle;
+}
+.share-stop-action {
+  border-color: var(--danger-strong-border);
+  border-radius: var(--radius-sm);
+}
+.share-connected-indicator {
+  display: inline-flex;
+  margin-inline-start: var(--space-6);
+  vertical-align: middle;
+}
+.share-connected-indicator[hidden] {
+  display: none;
+}
+.share-manager-disclosure[open] > summary > .share-summary-stop {
+  display: none;
+}
+.share-sidebar-chat > summary[aria-disabled=true] {
+  display: block;
+  cursor: default;
+}
+.file-explorer-pane > .share-sidebar-conversations {
+  display: flex;
+  flex-direction: column;
+  max-height: none;
+  overflow: hidden;
+  border-top: 0;
+}
+.file-explorer-pane > .share-sidebar-conversations:has(> .share-sidebar-chat[open]:not([hidden])) {
+  flex-basis: var(--share-sidebar-size, 40%);
+}
+.share-sidebar-conversations:not(:has(> .share-sidebar-chat[open]:not([hidden]))) > .share-sidebar-resizer {
+  display: none;
+}
+.share-sidebar-conversations > .share-sidebar-chat[open]:not([hidden]) {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+}
+.share-sidebar-conversations > .share-sidebar-chat[open]::details-content {
+  display: contents;
+}
+.share-sidebar-conversations .share-sidebar-chat [role=log] {
+  flex: 1 1 0;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+}
+.share-sidebar-conversations .share-sidebar-chat :is(summary, form) {
+  flex: none;
+}
+.tex-preview-install-location,
+.tex-preview-manual-install {
+  margin-top: var(--space-8);
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.tex-preview-manual-install code {
+  color: var(--text);
+  font-family: var(--mono-font);
 }
 .file-editor-status-panel {
   min-height: 18px;
@@ -3640,6 +3939,15 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   color: var(--muted);
   font-weight: 400;
   white-space: nowrap;
+}
+.file-tree-row.tabber-row .tabber-repo-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: var(--ui-font-size-2xs);
+  font-weight: 400;
 }
 .file-tree-row.tabber-row .tabber-normal-description {
   grid-column: 1 / -1;

@@ -12,17 +12,37 @@ import (
 	"html"
 	"html/template"
 	"net/http"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
 
 	"github.com/keivenchang/yomux/internal/finder"
+	"github.com/keivenchang/yomux/internal/productenv"
 	"github.com/keivenchang/yomux/internal/yoagent"
 )
 
 //go:embed pages/*.gohtml
 var nativePageTemplates embed.FS
+
+func writeNativePreviewPopoutShell(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	// The opener mounts the preview after navigation without starting a second application.
+	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><link rel="icon" href="data:,"><title>YOmux</title><body data-preview-popout-shell></body>`))
+}
+
+func hostedLinearIssueBaseURL() string {
+	const fallback = "https://linear.app/issue"
+	value := strings.TrimRight(strings.TrimSpace(productenv.Value("LINEAR_ISSUE_BASE_URL")), "/")
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "linear.app" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" || !strings.HasSuffix(parsed.Path, "/issue") {
+		return fallback
+	}
+	return value
+}
 
 type nativePageView struct {
 	ctx                                                              context.Context
@@ -31,6 +51,7 @@ type nativePageView struct {
 	ToggleLabels                                                     map[string]string
 	SetupStrings                                                     map[string]string
 	StarterAuthConfig                                                bool
+	GuestWorkspace                                                   bool
 	SecurityHTML, AgentNoticeHTML                                    template.HTML
 	locales                                                          *pageLocales
 	version                                                          pageVersion
@@ -308,10 +329,11 @@ func (s *server) renderNativeHome(r *http.Request, user authUser, topology goTmu
 		"sessions": sessions, "recentSessions": sessions, "tmuxTopology": map[string]any{"generation": topology.generation, "epoch": s.metadataEpoch()},
 		"dev": false, "terminalOnly": false, "statsOnly": queryTrue(r.URL.Query().Get("stats_only")), "capabilities": s.capabilities.Snapshot(),
 		"sessionMutationsAllowed": user.role == "admin", "availableAgents": available, "terminalCommands": pageTerminalCommands(), "agentLaunchCommands": launches, "agentAuth": agents,
-		"accessRole": user.role, "authUsername": user.username, "homePath": home, "repoRoot": s.root, "maxSessionTabs": maxYomuxSessionTabs,
+		"shareMaxMinutes": shareMaxMinutes,
+		"accessRole":      user.role, "authUsername": user.username, "homePath": home, "repoRoot": s.root, "maxSessionTabs": maxYomuxSessionTabs,
 		"filesystemBatchLimits": map[string]int{"maxRequests": finder.MaxBatchRequests, "triggerCountLimit": finder.MaxBatchRequests},
 		"serverHostname":        hostname, "cpuTopology": pageCPUTopology(), "serverStartedAt": float64(s.startedAt.UnixNano()) / 1e9, "serverStartedAtMs": s.startedAt.UnixMilli(),
-		"linearIssueBaseUrl": "https://linear.app/issue", "backend": goRuntimeLabel(), "version": version, "versionStatus": view.version.Status, "backendLabel": goRuntimeLabel(),
+		"linearIssueBaseUrl": hostedLinearIssueBaseURL(), "backend": goRuntimeLabel(), "version": version, "versionStatus": view.version.Status, "backendLabel": goRuntimeLabel(),
 		"postReleaseCommits": view.version.Commits, "clientRevision": s.staticAssetRevision("yomux.js"), "devBundleRevision": s.staticAssetRevision("yomux.js") + "." + s.staticAssetRevision("yomux.css"),
 		"versionCommit": view.version.SHA, "versionCommitTime": view.version.TimePT, "versionCommitCount": view.version.Count, "settingsPayload": bootstrapSettingsPayload(settings),
 		"activitySummary": map[string]any{"enabled": false, "reason": "async_replacement_required"}, "statsWriterFence": map[string]int{"protocol_version": statsWriterProtocol, "schema_generation": statsSchemaGeneration},
@@ -326,6 +348,39 @@ func (s *server) renderNativeHome(r *http.Request, user authUser, topology goTmu
 		return nil, err
 	}
 	// encoding/json escapes HTML breakout characters, including user session names.
+	view.BootstrapJSON = template.JS(encoded)
+	return view.render("home")
+}
+
+// Guest pages share the home template without collecting host settings, paths,
+// agent credentials, or the host session roster into their bootstrap payload.
+func (s *server) renderNativeGuestWorkspace(r *http.Request) ([]byte, error) {
+	ctx, release, err := s.beginNativePage(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	view, err := s.pageView(ctx, "en", r.Header.Get("Accept-Language"))
+	if err != nil {
+		return nil, err
+	}
+	view.GuestWorkspace = true
+	encoded, err := json.Marshal(map[string]any{
+		"guestWorkspace": true, "sessions": []string{}, "recentSessions": []string{},
+		"accessRole": "admin", "sessionMutationsAllowed": false,
+		"version": version, "versionCommit": view.version.SHA, "versionCommitTime": view.version.TimePT,
+		"homePath": "/shared", "repoRoot": "", "maxSessionTabs": 64,
+		"capabilities": map[string]any{"capabilities": map[string]any{
+			"pane.tabber.v1":   map[string]bool{"available": true},
+			"finder.editor.v1": map[string]bool{"available": true},
+		}},
+		"settingsPayload": map[string]any{"settings": map[string]any{"general": map[string]any{"default_tabber_mode": "normal"}}},
+		"locale":          view.Locale, "localeRegistry": view.locales.registry(r.Header.Get("Accept-Language")), "strings": view.locales.catalogs,
+		"codeMirrorAssetUrl": s.staticAssetURL("codemirror.js"), "proseMirrorAssetUrl": s.staticAssetURL("prosemirror.js"),
+	})
+	if err != nil {
+		return nil, err
+	}
 	view.BootstrapJSON = template.JS(encoded)
 	return view.render("home")
 }

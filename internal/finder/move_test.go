@@ -535,3 +535,100 @@ func TestFinderCommittedMoveFollowsDisconnectedOpenFilesInTheirNamespaces(t *tes
 		})
 	}
 }
+
+func TestFinderReplaceRequiresCurrentConflict(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	s, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	destination := filepath.Join(root, "destination")
+	if err := os.Mkdir(destination, 0700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(root, "note.txt")
+	target := filepath.Join(destination, "note.txt")
+	write := func(path, value string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(source, "incoming")
+	write(target, "shown in dialog")
+	_, conflict := s.Move(ctx, []string{source}, destination)
+	if conflict == nil || conflict.Code != "target_exists" {
+		t.Fatalf("initial conflict = %v", conflict)
+	}
+	old := conflict.Details["replacement"].(string)
+	if err := os.Rename(target, target+".original"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(target, "keep.txt")
+	write(child, "new destination data")
+	_, conflict = s.MoveWithConflictResolutions(ctx, []string{source}, destination, map[string]string{source: old})
+	if conflict == nil || conflict.Code != "target_exists" || conflict.Details["target_kind"] != "dir" || conflict.Details["replacement"] == old {
+		t.Fatalf("changed destination conflict = %#v", conflict)
+	}
+	for path, want := range map[string]string{source: "incoming", child: "new destination data"} {
+		if data, err := os.ReadFile(path); err != nil || string(data) != want {
+			t.Fatalf("%s = %q, %v", path, data, err)
+		}
+	}
+	result, failure := s.MoveWithConflictResolutions(ctx, []string{source}, destination, conflict.Details["replacements"].(map[string]string))
+	if failure != nil || result["complete"] != true {
+		t.Fatalf("confirmed move = %#v, %v", result, failure)
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != "incoming" {
+		t.Fatalf("replacement = %q, %v", data, err)
+	}
+}
+
+func TestFinderKeepBothReservesBatchNames(t *testing.T) {
+	root := t.TempDir()
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	destination := filepath.Join(root, "destination")
+	sources := []string{filepath.Join(root, "one", "a.txt"), filepath.Join(root, "two", "a.txt")}
+	for _, dir := range []string{destination, filepath.Dir(sources[0]), filepath.Dir(sources[1])} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	original := filepath.Join(destination, "a.txt")
+	for index, path := range append([]string{original}, sources...) {
+		if err := os.WriteFile(path, []byte(fmt.Sprint(index)), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, failure := service.MoveWithConflictResolutions(context.Background(), sources, destination, map[string]string{sources[0]: "keep_both", sources[1]: "keep_both"})
+	if failure != nil || result["complete"] != true {
+		t.Fatalf("move = %#v, %v", result, failure)
+	}
+	moved := result["moved"].([]map[string]any)
+	if len(moved) != 2 {
+		t.Fatalf("receipt = %#v", result)
+	}
+	for index, name := range []string{"a.txt", "a copy.txt", "a copy 2.txt"} {
+		path := filepath.Join(destination, name)
+		if data, err := os.ReadFile(path); err != nil || string(data) != fmt.Sprint(index) {
+			t.Fatalf("%s = %q, %v", path, data, err)
+		}
+		if index > 0 {
+			if moved[index-1]["old_path"] != sources[index-1] || moved[index-1]["path"] != path {
+				t.Fatalf("receipt = %#v", moved)
+			}
+			if _, err := os.Stat(sources[index-1]); !os.IsNotExist(err) {
+				t.Fatalf("source remains: %v", err)
+			}
+		}
+	}
+}

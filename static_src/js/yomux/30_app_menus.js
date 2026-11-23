@@ -189,6 +189,10 @@ function currentActiveMenuItem() {
   return activePaneItems()[0] || null;
 }
 
+function aboutMenuCommand() {
+  return menuCommand(t('menu.help.about'), showAboutModal);
+}
+
 function currentSessionActionTarget() {
   const current = currentActiveMenuItem();
   if (isTmuxSession(current)) return current;
@@ -857,6 +861,7 @@ function fileMenuPanelCommands() {
 }
 
 function appMenuTree() {
+  if (bootstrap.guestWorkspace) return shareWorkspaceMenus();
   const activeTmux = currentTmuxMenuTarget();
   const openItems = orderedPaneItems(activePaneItems());
   const fileDestinationCommands = sortMenuCommandsByLabel([
@@ -865,6 +870,11 @@ function appMenuTree() {
       iconHtml: appMenuUiIcon('document'),
     }),
     ...fileMenuPanelCommands(),
+    menuCommand(t('sharing.title'), () => selectSession(shareItemId, {userInitiated: true}), {
+      disabled: readOnlyMode || !capabilityAvailable('sharing.scoped.v1'),
+      iconHtml: tabTypeIconHtml(shareItemId, {menu: true}),
+      targetItem: shareItemId,
+    }),
     menuCommand(t('common.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
       checked: itemInLayout(prefsItemId),
       detail: compactHomePath(settingsConfigPath()),
@@ -960,7 +970,7 @@ function appMenuTree() {
           }),
         ],
         [
-          menuCommand(t('menu.help.about'), showAboutModal),
+          aboutMenuCommand(),
         ]
       ),
     },
@@ -1223,20 +1233,26 @@ function renderSessionButtons(options = {}) {
 
 function renderSessionButtonsMeasured(options = {}) {
   if (!sessionButtons) return;
+  const inactiveGuest = bootstrap.guestWorkspace && !shareWorkspace.active;
   // An SSE/locale/status repaint can otherwise detach a touch target after pointerdown but before
   // the browser emits click. An open menu is an explicit interaction, so defer every repaint until
   // it closes; the existing pending render path preserves the newest requested chrome state.
-  if (appMenuIsOpen()) {
+  if (!inactiveGuest && appMenuIsOpen()) {
     if (options.force) pendingSessionButtonsRender = true;
     scheduleTopbarMetricsUpdate();
     return;
   }
-  if (!options.force && topbarControlIsActive()) {
+  if (!inactiveGuest && !options.force && topbarControlIsActive()) {
     pendingSessionButtonsRender = true;
     scheduleTopbarMetricsUpdate();
     return;
   }
   pendingSessionButtonsRender = false;
+  if (inactiveGuest) {
+    closeAppMenus();
+    sessionButtons.replaceChildren();
+    return;
+  }
   const openMenu = sessionButtons.querySelector('.app-menu.open');
   if (openMenu) {
     openAppMenuId = openMenu.dataset.appMenu || null;
@@ -1381,7 +1397,9 @@ function createTopbarSearch() {
 function createTopbarCenterTools() {
   const group = document.createElement('div');
   group.className = 'topbar-center-tools';
-  group.append(createTopbarNav(), createTopbarTabberToggle(), createTopbarSearch());
+  group.append(createTopbarNav());
+  if (!bootstrap.guestWorkspace) group.append(createTopbarTabberToggle());
+  group.append(createTopbarSearch());
   return group;
 }
 

@@ -17,6 +17,7 @@ Do not replace third-party notices with the YOmux project license. They are not 
 
 - Dockview Core 6.6.1 - `static/vendor/dockview-core.noStyle.js` and `static/vendor/dockview.css`; upstream package metadata and bundle headers report MIT license.
 - Mermaid 11.15.0 - `static/vendor/mermaid.min.js`; upstream package metadata and bundle headers report MIT license and include bundled notices for transitive components including DOMPurify, js-yaml, lodash, Underscore-derived code, and other browser-side libraries.
+- Viz.js 3.31.0 - `static/vendor/viz.js`; MIT license. The WebAssembly bundle includes [Graphviz 16.1.0](https://gitlab.com/graphviz/graphviz/-/tree/16.1.0) under EPL-2.0 and [Expat 2.8.5](https://github.com/libexpat/libexpat/tree/R_2_8_5) under the MIT license.
 - xterm.js 6.0.0 and Unicode11 addon 0.9.0 - `static/vendor/xterm.js`, `xterm.css` and `xterm-addon-unicode11.js`; MIT licenses.
 - Highlight.js 11.9.0 - `static/vendor/highlight.min.js` and `highlight-github-dark.min.css`; BSD-3-Clause license.
 - Marked 12.0.2 - `static/vendor/marked.min.js`; MIT license.
@@ -95,6 +96,32 @@ THE SOFTWARE.
 MIT License
 
 Copyright (c) 2021 mathuo
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### Viz.js 3.31.0
+
+```text
+MIT License
+
+Copyright (c) Michael Daines
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

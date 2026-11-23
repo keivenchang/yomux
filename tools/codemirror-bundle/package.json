@@ -6,6 +6,7 @@
     "build": "esbuild codemirror-entry.js --bundle --format=iife --global-name=YOmuxCodeMirrorBundle --outfile=../../static/codemirror.js --minify"
   },
   "dependencies": {
+    "@codemirror/collab": "6.1.1",
     "@codemirror/commands": "6.10.3",
     "@codemirror/lang-css": "6.3.1",
     "@codemirror/lang-html": "6.4.11",

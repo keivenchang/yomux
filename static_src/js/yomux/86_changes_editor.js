@@ -46,7 +46,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   if (item && panel?.contains?.(document.activeElement)) {
     scheduleFileExplorerActiveTabSync(item, {explicit: true});
   }
-  if (state.externalChanged && !state.externalChangeEditPrompted && !fileEditorSelfWritePending(path, state)) {
+  if (state.externalChanged && !state.externalChangeEditPrompted && !fileEditorSelfWritePending(path, state) && fileEditorPathHasFocus(path)) {
     promptExternalChangeBeforeEditing(path, panel);
   }
   if (state.dirty && options.deferAutosave !== true) scheduleFileAutosave(path);
@@ -107,6 +107,7 @@ function fileEditorToolbarHtml(item) {
               ariaLabel: t('editor.toggleWordWrap'),
               hidden: true,
             },
+            {className: 'file-editor-review-panel', action: 'editor-review', label: 'Δ', title: 'Review recent saved changes', ariaLabel: 'Recent changes', hidden: true},
             {
               className: 'file-editor-diff-panel',
               action: 'editor-diff',
@@ -209,22 +210,6 @@ function fileEditorToolbarHtml(item) {
                   title: t('editor.mode.split'),
                   ariaLabel: t('editor.mode.split'),
                 }),
-                toolbarButtonHtml({
-                  className: 'file-editor-popout-preview-panel',
-                  action: 'editor-popout-preview',
-                  html: '<span class="file-editor-icon file-editor-icon-popout-preview" aria-hidden="true"></span>',
-                  title: t('editor.popoutPreview'),
-                  ariaLabel: t('editor.popoutPreview'),
-                  hidden: true,
-                }),
-                toolbarButtonHtml({
-                  className: 'file-editor-popout-editor-panel',
-                  action: 'editor-popout-editor',
-                  html: '<span class="file-editor-icon file-editor-icon-popout-preview" aria-hidden="true"></span>',
-                  title: t('editor.popoutEditor'),
-                  ariaLabel: t('editor.popoutEditor'),
-                  hidden: true,
-                }),
               ].join(''),
             },
             {
@@ -290,6 +275,20 @@ function fileEditorToolbarHtml(item) {
           ],
         })}
       </div>
+      ${actionRowHtml({
+        className: 'file-editor-review-toolbar',
+        role: 'group',
+        ariaLabel: 'Recent changes controls',
+        hidden: true,
+        actions: [
+          {kind: 'custom', tagName: 'select', className: 'file-editor-review-range', ariaLabel: 'Recent changes range',
+            html: '<option value="0">Since review started</option>' + [1, 5, 15, 30].map(minutes => `<option value="${minutes}">Last ${minutes} min</option>`).join('')},
+          {className: 'file-editor-review-previous', action: 'editor-review-previous', label: '↑', title: 'Previous change', ariaLabel: 'Previous change'},
+          {className: 'file-editor-review-next', action: 'editor-review-next', label: '↓', title: 'Next change', ariaLabel: 'Next change'},
+          {className: 'file-editor-review-reset', action: 'editor-review-reset', label: 'New diff', title: 'Start new diff', ariaLabel: 'Start new diff'},
+          {kind: 'custom', tagName: 'span', className: 'file-editor-review-status', html: ''},
+        ],
+      })}
     </div>`;
 }
 
@@ -313,12 +312,13 @@ function relocalizeFileEditorPanel(panel, item) {
   renderFileEditorPanel(panel, item, {updateActiveFile: false, captureViewState: false});
   reconfigureCodeMirrorPanelLocale(panel);
   relocalizeVirtualPanelChrome(panel);
-  setFileEditorLocalizedLabel(panel, '[data-pane-close]', 'editor.closePane');
+  panel.querySelectorAll('[data-pane-close]').forEach(button => {
+    button.title = paneFrameCloseLabel(item);
+    button.setAttribute('aria-label', button.title);
+  });
   setFileEditorLocalizedLabel(panel, '.file-editor-toolbar', 'editor.toolbar.aria', {title: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-mode-control-panel', 'editor.mode.aria', {title: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-preview-font-panel', 'common.previewFontSize', {title: false});
-  setFileEditorLocalizedLabel(panel, '.file-editor-popout-preview-panel', 'editor.popoutPreview');
-  setFileEditorLocalizedLabel(panel, '.file-editor-popout-editor-panel', 'editor.popoutEditor');
   setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'editor.reloadFromDisk');
   setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'common.reload', {text: true, title: false, aria: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-upload-panel', 'pref.section.uploads');
@@ -341,6 +341,7 @@ function relocalizeFileEditorPanel(panel, item) {
 }
 
 function createFileEditorPanel(item) {
+  if (bootstrap.guestWorkspace && fileState.get(fileItemPath(item))?._guestTerminal) return createShareTerminalPanel(item);
   const path = fileItemPath(item);
   const panel = createFramedPanel({
     item,
@@ -354,9 +355,6 @@ function createFileEditorPanel(item) {
             actions: false,
             minimize: true,
             expand: true,
-            close: true,
-            closeTitle: t('editor.closePane'),
-            closeLabel: t('editor.closePane'),
           })}
         </div>`,
       afterHeadHtml: fileEditorToolbarHtml(item),
@@ -407,6 +405,10 @@ function createFileEditorPanel(item) {
     'editor-preview-font-step': (_event, target) => {
       setEditorPreviewFontSize(editorPreviewFontSize + Number(target?.dataset?.editorPreviewFontStep || 0));
     },
+    'editor-review': () => changeRecentFileReview(panel, path, 'toggle'),
+    'editor-review-reset': () => changeRecentFileReview(panel, path, 'reset'),
+    'editor-review-previous': () => navigateRecentFileReview(panel, false),
+    'editor-review-next': () => navigateRecentFileReview(panel, true),
     'editor-toggle-wrap': () => toggleEditorWrap(),
     'editor-find': async () => {
       await toggleEditorFind(panel);
@@ -428,17 +430,6 @@ function createFileEditorPanel(item) {
     },
     'editor-diff-expand': () => {
       toggleFileEditorDiffExpandUnchangedForItem(path, item);  // show all context vs collapse unchanged runs for this editor
-    },
-    'editor-popout-preview': () => {
-      if (fileEditorPanelState(panel)?.historical === true) return;
-      if (openFilePreviewPopout(path, panel)) {
-        setFileEditorViewMode(path, 'edit', item);
-        renderFileEditorPanel(panel, item);
-      }
-    },
-    'editor-popout-editor': () => {
-      if (fileEditorPanelState(panel)?.historical === true) return;
-      openLivePanePopout(item);
     },
     'editor-theme': () => cycleEditorThemeMode({includeVanilla: fileEditorPanelState(panel)?.kind === 'text'}),
   }, {skipDisabled: false});
@@ -502,6 +493,9 @@ function createFileEditorPanel(item) {
   panel.addEventListener('focusin', event => {
     if (event.target.closest?.('.file-editor-preview-pane-panel')) rememberFileEditorSearchSurface(panel, 'preview');
     else if (event.target.closest?.('.file-editor-codemirror-panel')) rememberFileEditorSearchSurface(panel, 'editor');
+  });
+  panel.addEventListener('focusout', event => {
+    if (!panel.contains(event.relatedTarget)) scheduleDeferredOpenFileReload(panel.dataset.filePath);
   });
   previewFindPanel?.addEventListener('submit', event => event.preventDefault());
   previewFindPanel?.addEventListener('input', event => {
@@ -674,7 +668,8 @@ function focusFileEditorPanelIfReady(panel, item) {
   if (!pendingFileEditorFocus.has(item) || focusedPanelItem !== item) return false;
   if (fileEditorStateForItem(fileItemPath(item), item)?.loading) return false;
   const mode = editorViewModeFor(fileItemPath(item), item);
-  if (mode === 'preview' && panel?._pmView) panel._pmView.focus();
+  if (panel?._guestTerminal) panel.querySelector('.share-screen').focus({preventScroll: true});
+  else if (mode === 'preview' && panel?._pmView) panel._pmView.focus();
   else if (panel?._cmView && mode !== 'preview') {
     if (!panel._cmView.hasFocus) preserveFileEditorPanelPassiveViewState(item, panel, {focus: true});
   }
@@ -721,21 +716,26 @@ function fileEditorVisibleLineNumber(view) {
 }
 
 function captureFileEditorPanelViewState(item, panel) {
+  if (panel?._guestTerminal) {
+    if (panel.getClientRects().length) fileEditorViewState.set(item, {terminalFocused: panel.contains(document.activeElement)});
+    return;
+  }
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
   const pmView = panel?._pmView;
   if (!isFileEditorItem(item) || (!view || !scrollDOM) && !pmView) return;
   if (pmView) {
     const selection = pmView.state?.selection;
-    const pmScrollDOM = pmView.dom?.parentElement;
+    const pmScrollDOM = fileEditorPanelPreviewPane(panel);
     const previous = fileEditorViewState.get(item) || {};
     fileEditorViewState.set(item, {
       ...previous,
       pmAnchor: Number(selection?.anchor || 0),
       pmHead: Number(selection?.head || selection?.anchor || 0),
-      pmScrollTop: Number(pmScrollDOM?.scrollTop || 0),
-      pmScrollLeft: Number(pmScrollDOM?.scrollLeft || 0),
-      pmFocused: Boolean(pmView.hasFocus),
+      ...(pmScrollDOM && fileEditorPanelViewStateCaptureHasLayout(panel, pmScrollDOM) ? {
+        pmScrollTop: pmScrollDOM.scrollTop,
+        pmScrollLeft: pmScrollDOM.scrollLeft,
+      } : {}),
     });
   }
   if (!view || !scrollDOM) return;
@@ -763,6 +763,13 @@ function captureFileEditorPanelViewStateForItem(item) {
 
 function restoreFileEditorPanelViewState(item, panel, options = {}) {
   const state = fileEditorViewState.get(item);
+  if (panel?._guestTerminal) {
+    if (state?.terminalFocused && document.activeElement === document.body && itemIsActivePaneTab(item)) {
+      requestFileEditorPanelFocus(item, {explicit: true});
+    }
+    if (state) state.terminalFocused = false;
+    return;
+  }
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
   if (!state) return;
@@ -798,7 +805,7 @@ function restoreProseMirrorPanelViewState(item, panel) {
   const state = fileEditorViewState.get(item);
   const view = panel?._pmView;
   if (!state || !view || !Number.isFinite(state.pmAnchor)) return false;
-  const scrollDOM = view.dom?.parentElement;
+  const scrollDOM = fileEditorPanelPreviewPane(panel);
   if (scrollDOM) {
     scrollDOM.scrollTop = Number(state.pmScrollTop || 0);
     scrollDOM.scrollLeft = Number(state.pmScrollLeft || 0);
@@ -810,7 +817,6 @@ function restoreProseMirrorPanelViewState(item, panel) {
     state.pmHead,
   );
   if (selection) view.dispatch(view.state.tr.setSelection(selection));
-  if (state.pmFocused === true) view.focus();
   if (scrollDOM) {
     scrollDOM.scrollTop = Number(state.pmScrollTop || 0);
     scrollDOM.scrollLeft = Number(state.pmScrollLeft || 0);
@@ -821,8 +827,8 @@ function restoreProseMirrorPanelViewState(item, panel) {
 function installDirtyFileNavigationGuard() {
   if (window.__yomuxDirtyFileNavigationGuard) return;
   const guard = event => {
-    for (const state of fileState.values()) {
-      if (state?.dirty !== true) continue;
+    const retainedGuestDrafts = bootstrap.guestWorkspace && shareWorkspace.drafts.size > 0;
+    if (retainedGuestDrafts || [...fileState.values()].some(state => state?.dirty === true)) {
       event.preventDefault();
       event.returnValue = 'Unsaved file changes';
       return event.returnValue;

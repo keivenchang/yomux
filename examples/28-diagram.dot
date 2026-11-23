@@ -1,0 +1,167 @@
+digraph YOmuxPreview {
+  graph [
+    label=<<B>YOmux Graphviz Preview</B><BR/><FONT POINT-SIZE="10">From DOT source to an interactive, zoomable view</FONT>>,
+    labelloc=t,
+    labeljust=l,
+    fontname="Arial",
+    fontsize=18,
+    fontcolor="#172b4d",
+    bgcolor="#ffffff",
+    pad=0.35,
+    nodesep=0.55,
+    ranksep=0.8,
+    splines=ortho,
+    compound=true,
+    newrank=true,
+    outputorder=edgesfirst
+  ];
+
+  node [
+    fontname="Arial",
+    fontsize=10,
+    color="#718096",
+    fontcolor="#172b4d",
+    penwidth=1.3,
+    style=filled,
+    fillcolor="#f7fafc",
+    margin="0.16,0.1"
+  ];
+
+  edge [
+    fontname="Arial",
+    fontsize=9,
+    color="#52667f",
+    fontcolor="#344563",
+    penwidth=1.4,
+    arrowsize=0.75
+  ];
+
+  subgraph cluster_authoring {
+    label=<<B>1  AUTHORING</B><BR/><FONT POINT-SIZE="9">A text file declares graph data and presentation</FONT>>;
+    labelloc=t;
+    labeljust=l;
+    fontname="Arial";
+    fontsize=12;
+    fontcolor="#245b8f";
+    color="#8bb8df";
+    fillcolor="#edf6ff";
+    style="rounded,filled";
+    penwidth=1.5;
+
+    author [shape=oval, fillcolor="#ffffff", color="#6f8ca8", label="Author"];
+    source [
+      shape=record,
+      fillcolor="#ffffff",
+      color="#4776a8",
+      label="{<file>28-diagram.dot|<body>digraph YOmuxPreview \{ ... \}}"
+    ];
+    author -> source:file [label="writes", color="#4776a8"];
+  }
+
+  subgraph cluster_engine {
+    label=<<B>2  RENDERING</B><BR/><FONT POINT-SIZE="9">A local worker runs the pinned WebAssembly renderer</FONT>>;
+    labelloc=t;
+    labeljust=l;
+    fontname="Arial";
+    fontsize=12;
+    fontcolor="#6b4e16";
+    color="#e0bd6d";
+    fillcolor="#fff9e8";
+    style="rounded,filled";
+    penwidth=1.5;
+
+    worker [
+      shape=component,
+      fillcolor="#ffffff",
+      color="#c49a37",
+      label=<<B>Browser worker</B><BR/><FONT POINT-SIZE="9">Isolated render job</FONT>>
+    ];
+    wasm [
+      shape=hexagon,
+      fillcolor="#fff0c2",
+      color="#c49a37",
+      label=<<B>Viz.js</B><BR/><FONT POINT-SIZE="9">Graphviz WebAssembly</FONT>>
+    ];
+    layout [
+      shape=diamond,
+      fillcolor="#ffffff",
+      color="#c49a37",
+      label="DOT\nlayout"
+    ];
+
+    worker -> wasm [label="loads locally", color="#a77c20"];
+    wasm -> layout [label="parses + lays out", color="#a77c20"];
+  }
+
+  subgraph cluster_preview {
+    label=<<B>3  PREVIEW</B><BR/><FONT POINT-SIZE="9">The result is shown as an image with viewport controls</FONT>>;
+    labelloc=t;
+    labeljust=l;
+    fontname="Arial";
+    fontsize=12;
+    fontcolor="#28624a";
+    color="#83bea0";
+    fillcolor="#eefaf3";
+    style="rounded,filled";
+    penwidth=1.5;
+
+    svg [
+      shape=note,
+      fillcolor="#ffffff",
+      color="#59a27d",
+      label=<<B>SVG image</B><BR/><FONT POINT-SIZE="9">Sanitized output surface</FONT>>
+    ];
+    viewport [
+      shape=box3d,
+      style="filled,rounded",
+      fillcolor="#d9f2e4",
+      color="#59a27d",
+      label=<<B>Preview viewport</B><BR/><FONT POINT-SIZE="9">Zoom  •  Fit  •  Pan</FONT>>
+    ];
+    edit [
+      shape=tab,
+      fillcolor="#ffffff",
+      color="#59a27d",
+      label="Edit / Split\nDOT source"
+    ];
+    svg -> viewport [label="displays", color="#37825d"];
+    viewport -> edit [
+      label="source remains available",
+      style=dashed,
+      arrowhead=none,
+      constraint=false,
+      color="#7a8f84",
+      fontcolor="#60746a"
+    ];
+  }
+
+  source:body:e -> worker:w [
+    label="source text",
+    ltail=cluster_authoring,
+    lhead=cluster_engine,
+    color="#4776a8",
+    minlen=2
+  ];
+  layout -> svg [
+    label="rendered SVG",
+    ltail=cluster_engine,
+    lhead=cluster_preview,
+    color="#37825d",
+    minlen=2
+  ];
+
+  { rank=same; author; worker; svg; }
+  { rank=same; source; wasm; viewport; }
+
+  legend [
+    shape=plain,
+    label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="5" CELLPADDING="3">
+      <TR><TD COLSPAN="3" ALIGN="LEFT"><B>EDGE KEY</B></TD></TR>
+      <TR>
+        <TD><FONT COLOR="#4776a8">━━▶</FONT></TD>
+        <TD ALIGN="LEFT">Main data flow</TD>
+        <TD ALIGN="LEFT"><FONT COLOR="#7a8f84">┄┄</FONT> Optional source view</TD>
+      </TR>
+    </TABLE>>
+  ];
+}

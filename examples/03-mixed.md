@@ -4,9 +4,9 @@ This file combines the previewer paths that tend to regress together.
 
 ## Local Images
 
-![Status card](./assets/status-card.svg)
+![Status card](./31-assets/status-card.svg)
 
-![Diagram with spaces](./assets/diagram%20with%20spaces.svg)
+![Diagram with spaces](./31-assets/diagram%20with%20spaces.svg)
 
 ## Tasks
 
@@ -48,7 +48,7 @@ flowchart LR
 
 ## Links
 
-- Relative link with parentheses: [notes](./notes(2026).md)
+- Relative link with parentheses: [notes](./24-notes(2026).md)
 - Safe external link: [Example](https://example.com/)
 - Local image path with spaces is above.
 
@@ -67,4 +67,4 @@ console.log(preview);
 
 ## Missing Image Fallback
 
-![Missing image](./assets/not-here.png)
+![Missing image](./31-assets/not-here.png)

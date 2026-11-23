@@ -36,11 +36,19 @@ func newJSONSSEWriter(writer http.ResponseWriter, contexts ...context.Context) (
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("Connection", "keep-alive")
 	writer.Header().Set("X-Accel-Buffering", "no")
-	stream := &jsonSSEWriter{writer: writer, controller: http.NewResponseController(writer), done: make(chan struct{}), writeTimeout: 5 * time.Second}
+	var ctx context.Context
 	if len(contexts) > 0 {
-		stream.context = contexts[0]
+		ctx = contexts[0]
+	}
+	return newResponseWriteOwner(writer, ctx), true
+}
+
+func newResponseWriteOwner(writer http.ResponseWriter, ctx context.Context) *jsonSSEWriter {
+	stream := &jsonSSEWriter{writer: writer, controller: http.NewResponseController(writer), done: make(chan struct{}), writeTimeout: 5 * time.Second}
+	if ctx != nil {
+		stream.context = ctx
 		stream.cancelDone = make(chan struct{})
-		stream.stopCancel = context.AfterFunc(contexts[0], func() {
+		stream.stopCancel = context.AfterFunc(ctx, func() {
 			defer close(stream.cancelDone)
 			stream.markClosed()
 			// net/http deadlines interrupt a concurrent blocked Write or Flush. This callback
@@ -48,7 +56,7 @@ func newJSONSSEWriter(writer http.ResponseWriter, contexts ...context.Context) (
 			_ = stream.controller.SetWriteDeadline(time.Now())
 		})
 	}
-	return stream, true
+	return stream
 }
 
 func (stream *jsonSSEWriter) markClosed() {

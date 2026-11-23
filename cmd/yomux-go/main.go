@@ -60,6 +60,7 @@ func goRuntimeLabel() string {
 }
 
 type server struct {
+	shares                 shareRegistry
 	producerContext        context.Context
 	runtimeMemory          runtimeMemoryState
 	cpuCaptureMu           sync.Mutex
@@ -111,6 +112,10 @@ type server struct {
 	updateJobMu                         sync.Mutex
 	texInstallMu                        work.ContextMutex
 	texCompileMu                        work.ContextMutex
+	texProgressMu                       sync.Mutex
+	texProgress                         map[string]texProgressState
+	officePreviewMu                     sync.Mutex
+	officePreviewActive                 int
 	updateJobPath                       string
 	statsPath                           string
 	statsNow                            func() time.Time
@@ -154,6 +159,7 @@ type server struct {
 	yolo                                *goYoloStore
 
 	gitMetadataSnapshotFn func(string) (goGitSnapshot, bool)
+	hostedWork            hostedWorkCache
 	terminalWriteTimeout  time.Duration
 	terminalActivity      terminalActivityState
 	tabberActivity        tabberActivityState
@@ -506,12 +512,15 @@ func (s *server) registerFilesystemRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/fs/git-history-stats-stream", s.protected(http.HandlerFunc(s.fsGitHistoryStatsStream)))
 	mux.Handle("/api/fs/git-commit", s.protected(http.HandlerFunc(s.fsGitCommit)))
 	mux.Handle("/api/fs/raw", s.protected(http.HandlerFunc(s.fsRaw)))
+	mux.Handle("/api/fs/sqlite-preview", s.protected(http.HandlerFunc(s.fsSQLitePreview)))
+	mux.Handle("/api/fs/office-preview", s.protected(http.HandlerFunc(s.officePreview)))
 	mux.Handle("/api/tex/compiler", s.protected(http.HandlerFunc(s.texCompilerStatus)))
 	mux.Handle("/api/tex/compiler/install", s.protected(http.HandlerFunc(s.texCompilerInstall)))
 	mux.Handle("/api/tex/preview", s.protected(http.HandlerFunc(s.texPreview)))
 	mux.Handle("/api/fs/search", s.protected(http.HandlerFunc(s.fsSearch)))
 	mux.Handle("/api/fs/search-stream", s.protected(http.HandlerFunc(s.fsSearch)))
 	mux.Handle("/api/fs/index-status", s.protected(http.HandlerFunc(s.fsIndexStatus)))
+	mux.Handle("/api/fs/review", s.protected(http.HandlerFunc(s.fsReview)))
 	mux.Handle("/api/fs/watch-diff", s.protected(http.HandlerFunc(s.fsWatchDiff)))
 	mux.Handle("/api/fs/resolve-file-candidates", s.protected(http.HandlerFunc(s.fsResolveCandidates)))
 	mux.Handle("/api/fs/write", s.protected(http.HandlerFunc(s.fsWrite)))
@@ -912,6 +921,7 @@ func main() {
 	mux.HandleFunc("/livez", s.health)
 	mux.HandleFunc("/login", s.login)
 	mux.HandleFunc("/logout", s.logout)
+	mux.Handle("GET /preview-popout", s.protected(http.HandlerFunc(writeNativePreviewPopoutShell)))
 	mux.HandleFunc("/api/auth-setup", s.authSetup)
 	mux.Handle("/api/ping", s.protected(http.HandlerFunc(s.ping)))
 	mux.Handle("/api/runtime/compatibility", s.protected(http.HandlerFunc(s.runtimeCompatibility)))
@@ -963,6 +973,7 @@ func main() {
 	mux.Handle("/api/yolo-rules", s.protected(http.HandlerFunc(s.yoloRules)))
 	mux.Handle("/api/yolo-rules/open", s.protected(http.HandlerFunc(s.yoloRulesOpen)))
 	mux.Handle("/api/yolo-rules/reload", s.protected(http.HandlerFunc(s.yoloRulesReload)))
+	s.registerShareRoutes(mux)
 	s.registerChatRoutes(mux)
 	s.registerAttentionAckRoute(mux)
 	mux.Handle("/api/background/claim", s.protected(http.HandlerFunc(s.backgroundClaim)))
@@ -2050,6 +2061,31 @@ func (s *server) fsGitCommit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *server) fsSQLitePreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	query := r.URL.Query()
+	path, page := query.Get("path"), 0
+	pageRaw := query.Get("page")
+	var err error
+	if pageRaw != "" {
+		page, err = strconv.Atoi(pageRaw)
+	}
+	if path == "" || err != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest,
+			Code: "invalid_request", MessageKey: "request.error.invalid", Message: "A path and valid page are required"})
+		return
+	}
+	product, failure := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		data, failure := s.finder.SQLitePreview(ctx, path, query.Get("table"), page, query.Get("recover_table") == "1")
+		return finderProduct{data: data}, failure
+	})
+	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, failure)
+}
+
 func (s *server) fsRaw(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2357,6 +2393,7 @@ func (s *server) fsWrite(w http.ResponseWriter, r *http.Request) {
 		Path           string  `json:"path"`
 		Content        string  `json:"content"`
 		ExpectedMtime  *int64  `json:"expected_mtime"`
+		ExactMtimeNS   *string `json:"expected_mtime_ns_exact"`
 		ExpectedFileID *string `json:"expected_file_id"`
 		CreateOnly     bool    `json:"create_only"`
 	}
@@ -2368,9 +2405,21 @@ func (s *server) fsWrite(w http.ResponseWriter, r *http.Request) {
 	if body.ExpectedFileID != nil {
 		expectedFileID = *body.ExpectedFileID
 	}
+	var exactMtimeNS int64
+	if body.ExactMtimeNS != nil {
+		var err error
+		exactMtimeNS, err = strconv.ParseInt(*body.ExactMtimeNS, 10, 64)
+		if err != nil || expectedFileID == "" || body.ExpectedMtime != nil || body.CreateOnly {
+			finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalid", Message: "invalid exact file version"})
+			return
+		}
+	}
 	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "write", body.Path, func(ctx context.Context) (map[string]any, *finder.Error) {
 		if body.CreateOnly {
 			return s.finder.CreateFile(ctx, body.Path, body.Content)
+		}
+		if body.ExactMtimeNS != nil {
+			return s.finder.WriteExact(ctx, body.Path, body.Content, exactMtimeNS, expectedFileID)
 		}
 		return s.finder.Write(ctx, body.Path, body.Content, body.ExpectedMtime, expectedFileID)
 	})
@@ -2442,15 +2491,16 @@ func (s *server) fsMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Paths       []string `json:"paths"`
-		Destination string   `json:"destination"`
+		Paths       []string          `json:"paths"`
+		Destination string            `json:"destination"`
+		Resolutions map[string]string `json:"resolutions"`
 	}
 	if err := decodeJSONBody(r.Body, 64*1024, &body); err != nil || len(body.Paths) == 0 || len(body.Paths) > finder.MaxBatchRequests || body.Destination == "" {
 		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalid", Message: "invalid move request"})
 		return
 	}
 	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "move", body.Destination, func(ctx context.Context) (map[string]any, *finder.Error) {
-		return s.finder.Move(ctx, body.Paths, body.Destination)
+		return s.finder.MoveWithConflictResolutions(ctx, body.Paths, body.Destination, body.Resolutions)
 	})
 }
 
@@ -5214,9 +5264,24 @@ func (s *server) killSession(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = r.FormValue("session")
 	}
+	if name == "" {
+		jsonResponse(w, http.StatusBadRequest, typedError("session is required", "session.error.required", false))
+		return
+	}
 	s.tmuxRosterFetchMu.Lock()
 	defer s.tmuxRosterFetchMu.Unlock()
-	err := s.tmuxCommand("kill-session", "-t", name).Run()
+	roster, err := s.tmuxSessionRosterSnapshotLocked(true)
+	if err != nil {
+		jsonResponse(w, http.StatusServiceUnavailable, typedError("session list unavailable", "common.requestFailed", true))
+		return
+	}
+	// tmux parses user-supplied names as selectors. Resolve the literal roster name first.
+	target, condition := tmuxSessionIdentityCondition(roster.observedIdentities[name])
+	if target == "" {
+		jsonResponse(w, http.StatusBadRequest, typedError("unknown session", "common.requestFailed", false))
+		return
+	}
+	err = s.tmuxCommand(tmuxIdentityGuardedCommand(target, condition, "kill-session -t "+strconv.Quote(target))...).Run()
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -5421,21 +5486,33 @@ func tmuxSessionNameForIdentity(topology goTmuxTopology, identity string) string
 }
 
 func tmuxRenameCommandArgs(topology goTmuxTopology, session, newName string) []string {
-	identity := strings.Fields(strings.NewReplacer("\x1f", "\t").Replace(topology.identities[session]))
+	target := "=" + session + ":"
+	_, condition := tmuxSessionIdentityCondition(topology.identities[session])
+	if condition != "" {
+		command := "rename-session -t " + strconv.Quote(target) + " -- " + strconv.Quote(newName)
+		return tmuxIdentityGuardedCommand(target, condition, command)
+	}
+	return []string{"rename-session", "-t", target, "--", newName}
+}
+
+func tmuxSessionIdentityCondition(rosterIdentity string) (target, condition string) {
+	identity := strings.Fields(strings.NewReplacer("\x1f", "\t").Replace(rosterIdentity))
 	if len(identity) == 3 && strings.HasPrefix(identity[0], "$") {
 		_, sessionIDErr := strconv.ParseUint(strings.TrimPrefix(identity[0], "$"), 10, 64)
 		_, createdErr := strconv.ParseUint(identity[1], 10, 64)
 		_, pidErr := strconv.ParseUint(identity[2], 10, 64)
 		if sessionIDErr == nil && createdErr == nil && pidErr == nil {
-			condition := fmt.Sprintf(
+			return identity[0], fmt.Sprintf(
 				"#{&&:#{==:#{session_id},%s},#{&&:#{==:#{session_created},%s},#{==:#{pid},%s}}}",
 				identity[0], identity[1], identity[2],
 			)
-			command := "rename-session -t " + strconv.Quote("="+session+":") + " -- " + strconv.Quote(newName)
-			return []string{"if-shell", "-F", "-t", "=" + session + ":", condition, command, "run-shell \"exit 1\""}
 		}
 	}
-	return []string{"rename-session", "-t", "=" + session + ":", "--", newName}
+	return "", ""
+}
+
+func tmuxIdentityGuardedCommand(target, condition, command string) []string {
+	return []string{"if-shell", "-F", "-t", target, condition, command, "run-shell \"exit 1\""}
 }
 
 func (s *server) publishTmuxSessionRenameAfterRosterFailureLocked(session, newName string, cached tmuxSessionRosterSnapshot) {
@@ -6271,4 +6348,21 @@ func writeFrame(w io.Writer, opcode byte, payload []byte) error {
 	}
 	_, err := w.Write(append(h, payload...))
 	return err
+}
+
+func (s *server) fsReview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body map[string]any
+	if err := decodeJSONBody(r.Body, 64*1024, &body); err != nil || body == nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", Message: "invalid JSON"})
+		return
+	}
+	product, err := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		data, err := s.finder.Review(body)
+		return finderProduct{data: data}, err
+	})
+	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, err)
 }

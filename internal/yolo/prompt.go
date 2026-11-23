@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -41,6 +42,7 @@ type Prompt struct {
 	Agent          PromptAgent
 	Type           PromptType
 	Hash           string
+	CommandRows    []string
 	Command        string
 	RuleInput      string
 	SelectedOption int
@@ -49,7 +51,6 @@ type Prompt struct {
 	Question       bool
 	Supported      bool
 	Actionable     bool
-	ManualApproval bool
 	Reason         string
 }
 
@@ -89,15 +90,22 @@ func ClassifyPrompt(visibleText, fullPaneText string) Prompt {
 	}
 	options, lastOptionLine, selected := promptOptions(lines, candidate.index)
 	prompt := Prompt{Agent: candidate.agent, Type: candidate.type_, Options: options, SelectedOption: selected}
-	if candidate.agent == AgentCodex && candidate.type_ == PromptShell && codexShellPromptHasBoundaryBeforeOptions(lines, candidate.index) {
-		prompt.Type = PromptUnknown
-		prompt.Reason = "visible output or another menu separates the shell prompt from its options"
-		return prompt
-	}
-	if candidate.agent == AgentCodex && candidate.type_ == PromptShell && !hasCodexShellConfirmationFooter(lines, candidate.index) {
-		prompt.Type = PromptUnknown
-		prompt.Reason = "Codex shell confirmation footer is not visible"
-		return prompt
+	if candidate.agent == AgentCodex && candidate.type_ == PromptShell {
+		prompt.CommandRows = codexShellCommand(lines, candidate.index)
+		prompt.Command = strings.Join(prompt.CommandRows, " ")
+		if len(prompt.CommandRows) == 1 {
+			prompt.Command = strings.TrimSpace(prompt.Command)
+		}
+		if prompt.Command == "" {
+			prompt.Type = PromptUnknown
+			prompt.Reason = "visible command block does not reach the shell approval options"
+			return prompt
+		}
+		if !hasCodexShellConfirmationFooter(lines, candidate.index) {
+			prompt.Type = PromptUnknown
+			prompt.Reason = "Codex shell confirmation footer is not visible"
+			return prompt
+		}
 	}
 	if candidate.type_ == PromptQuestion {
 		if hasLaterActivity(lines, lastOptionLine) {
@@ -130,23 +138,21 @@ func ClassifyPrompt(visibleText, fullPaneText string) Prompt {
 	prompt.Supported = true
 	prompt.RuleInput = candidate.text
 	if candidate.type_ == PromptShell {
-		prompt.Command = commandForPrompt(lines, candidate)
+		if candidate.agent != AgentCodex {
+			prompt.Command = claudeShellCommand(lines, candidate.index)
+		}
 		if prompt.Command == "" {
 			prompt.Supported = false
 			prompt.Reason = "shell approval command is not fully visible"
 			return prompt
 		}
 		prompt.RuleInput = prompt.Command
-		if candidate.agent == AgentCodex && strings.Contains(prompt.Command, "\n") {
-			// Tmux joins its own wraps with -J, but Codex can also wrap.
-			// The capture cannot distinguish those wraps from shell newlines.
-			prompt.ManualApproval = true
-			prompt.Reason = "multiline Codex command"
-			prompt.Hash = promptHash(candidate.agent, candidate.type_, candidate.text, prompt.RuleInput, options)
-			return prompt
-		}
 	}
-	prompt.Hash = promptHash(candidate.agent, candidate.type_, candidate.text, prompt.RuleInput, options)
+	identityInput := prompt.RuleInput
+	if len(prompt.CommandRows) > 0 {
+		identityInput = strconv.Quote(strings.Join(prompt.CommandRows, "\n"))
+	}
+	prompt.Hash = promptHash(candidate.agent, candidate.type_, candidate.text, identityInput, options)
 	prompt.Actionable = prompt.Supported && prompt.Approval && selected > 0
 	if !prompt.Actionable {
 		prompt.Reason = "approval evidence is incomplete"
@@ -164,50 +170,50 @@ func hasCodexShellConfirmationFooter(lines []string, promptIndex int) bool {
 	return false
 }
 
-func codexShellPromptHasBoundaryBeforeOptions(lines []string, promptIndex int) bool {
-	seenCommand := false
+func codexShellCommand(lines []string, promptIndex int) []string {
+	var parts []string
+	commandEnded := false
 	seenReason := false
 	seenEnvironment := false
 	for index := promptIndex + 1; index < len(lines); index++ {
 		rawLine := lines[index]
 		line := strings.TrimSpace(rawLine)
 		if optionPromptRE.MatchString(rawLine) {
-			return !seenCommand
+			return parts
 		}
 		if line == "" {
+			commandEnded = len(parts) > 0
 			continue
 		}
-		if isPromptFooter(line) {
-			return true
+		if commandEnded || isPromptFooter(line) {
+			return nil
 		}
 		if strings.HasPrefix(line, "$ ") {
-			if seenCommand {
-				return true
+			if len(parts) > 0 {
+				return nil
 			}
-			seenCommand = true
+			parts = append(parts, strings.TrimPrefix(strings.TrimLeft(rawLine, " \t"), "$ "))
 			continue
 		}
-		if !seenCommand && !seenReason && !seenEnvironment && line == "Environment: local" {
+		if len(parts) == 0 && !seenReason && !seenEnvironment && line == "Environment: local" {
 			seenEnvironment = true
 			continue
 		}
-		if !seenCommand && strings.HasPrefix(strings.ToLower(line), "reason:") {
+		if len(parts) == 0 && strings.HasPrefix(strings.ToLower(line), "reason:") {
 			seenReason = true
 			continue
 		}
-		if !seenCommand && seenReason && strings.TrimLeft(rawLine, " \t") != rawLine {
+		if len(parts) == 0 && seenReason && strings.TrimLeft(rawLine, " \t") != rawLine {
 			continue
 		}
-		if seenCommand && seenEnvironment {
-			// Keep multiline commands visible as manual approvals. The
-			// classifier will never authorize input for these rows.
+		if len(parts) > 0 && seenEnvironment {
+			// Codex wraps command text before drawing it in the terminal.
+			parts = append(parts, rawLine)
 			continue
 		}
-		// Codex captures join terminal wraps. Unknown rows before the choices are
-		// therefore a different UI block or completed output, not command text.
-		return true
+		return nil
 	}
-	return !seenCommand
+	return nil
 }
 
 func normalizePromptText(text string) string {
@@ -389,30 +395,9 @@ func hasLaterActivity(lines []string, lastOptionLine int) bool {
 	return false
 }
 
-func commandForPrompt(lines []string, candidate *promptCandidate) string {
-	if candidate.agent == AgentCodex {
-		for index := candidate.index + 1; index < len(lines) && index <= candidate.index+12; index++ {
-			trimmed := strings.TrimSpace(lines[index])
-			if strings.HasPrefix(trimmed, "$ ") {
-				parts := []string{strings.TrimSpace(strings.TrimPrefix(trimmed, "$ "))}
-				for next := index + 1; next < len(lines); next++ {
-					if optionPromptRE.MatchString(lines[next]) || isPromptFooter(lines[next]) {
-						break
-					}
-					if continuation := strings.TrimSpace(lines[next]); continuation != "" {
-						parts = append(parts, continuation)
-					}
-				}
-				return strings.Join(parts, "\n")
-			}
-			if optionPromptRE.MatchString(lines[index]) {
-				break
-			}
-		}
-		return ""
-	}
+func claudeShellCommand(lines []string, promptIndex int) string {
 	start := 0
-	for index := candidate.index - 1; index >= 0 && candidate.index-index < 16; index-- {
+	for index := promptIndex - 1; index >= 0 && promptIndex-index < 16; index-- {
 		trimmed := strings.TrimSpace(lines[index])
 		if strings.HasPrefix(trimmed, "Bash command") {
 			start = index + 1
@@ -423,7 +408,7 @@ func commandForPrompt(lines []string, candidate *promptCandidate) string {
 			break
 		}
 	}
-	for index := start; index < candidate.index; index++ {
+	for index := start; index < promptIndex; index++ {
 		line := strings.TrimSpace(lines[index])
 		if strings.HasPrefix(line, "● Bash(") || strings.HasPrefix(line, "• Bash(") {
 			open := strings.IndexByte(line, '(')
@@ -434,7 +419,7 @@ func commandForPrompt(lines []string, candidate *promptCandidate) string {
 		}
 	}
 	var parts []string
-	for index := start; index < candidate.index; index++ {
+	for index := start; index < promptIndex; index++ {
 		line := strings.TrimSpace(lines[index])
 		if line == "" || strings.HasPrefix(line, "Permission rule") || strings.HasPrefix(line, "Bash command") || strings.HasPrefix(line, "Running") || strings.HasPrefix(line, "Do you want") {
 			continue

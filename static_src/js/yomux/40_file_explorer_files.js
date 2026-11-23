@@ -1053,6 +1053,7 @@ function fileEntryStatusFromWatchFilePayload(item) {
       mtime,
       size: Number.isFinite(size) ? size : null,
       ...(Number.isInteger(signature[4]) ? {mode: signature[4]} : {}),
+      ...(typeof signature[5] === 'string' ? {file_id: signature[5]} : {}),
     },
     missing: false,
     error: '',
@@ -1318,8 +1319,8 @@ function cacheFileExplorerRepoInfo(path, repo, options = {}) {
   // Finder preserves the path the user opened while macOS APIs can return its physical alias
   // (/tmp versus /private/tmp). Keep both exact cache identities without rewriting the Git root.
   // A cache_path is an ALIAS OF the repo root, never a path inside it: stamping it on a descendant
-  // made every child of a repo satisfy the root-identity guard in fileTreeRepoBranch(), so every
-  // entry under an ancestor repo inherited that repo's branch label.
+  // made every child of a repo satisfy the root-identity guard in fileTreeRepoStatus(), so every
+  // entry under an ancestor repo inherited that repo's Git status.
   const aliasesRepoRoot = !repoRoot || repoRoot === normalized || !normalized.startsWith(`${repoRoot}/`);
   setLimitedMapEntry(
     fileExplorerRepoInfoCache,
@@ -1567,13 +1568,6 @@ function tmuxDirectoryForItem(item) {
   return path ? normalizeDirectoryPath(path) : '';
 }
 
-function tmuxGitRootForItem(item) {
-  if (!isTmuxSession(item)) return '';
-  const info = transcriptMetadataState.payload.sessions?.[item] || {};
-  const root = sessionWorkSummary(item, info).git?.root || '';
-  return root ? normalizeDirectoryPath(root) : '';
-}
-
 function activeTmuxDirectoryPath(preferredItem = null) {
   if (preferredItem && !isTmuxSession(preferredItem)) return '';
   for (const item of finderCandidateItems(preferredItem)) {
@@ -1636,9 +1630,15 @@ function fileExplorerRootForOpen(preferredItem = null) {
 function fileExplorerSyncSessionContext(session) {
   const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const pinned = sessionRepoDisplayRoot.has(session) ? selectedSessionRepo(session, info) : null;
-  return pinned && repoRootKey(pinned.root) === repoRootKey(sessionRepoDisplayRoot.get(session))
-    ? {repository: normalizeDirectoryPath(pinned.root), cwd: normalizeDirectoryPath(pinned.cwd || pinned.root)}
-    : {repository: tmuxGitRootForItem(session), cwd: tmuxDirectoryForItem(session)};
+  if (pinned && repoRootKey(pinned.root) === repoRootKey(sessionRepoDisplayRoot.get(session))) {
+    return {repository: normalizeDirectoryPath(pinned.root), cwd: normalizeDirectoryPath(pinned.cwd || pinned.root)};
+  }
+  if (!isTmuxSession(session)) return {repository: '', cwd: ''};
+  const summary = sessionTabWorkSummary(session, info, {currentPath: tmuxDirectoryForItem(session)});
+  return {
+    repository: summary.git?.root ? normalizeDirectoryPath(summary.git.root) : '',
+    cwd: summary.selectedPath ? normalizeDirectoryPath(summary.selectedPath) : '',
+  };
 }
 
 function fileExplorerSyncTargetKey(session, root) {
@@ -3897,28 +3897,32 @@ function fileTreeGitStatus(path) {
   return normalizeGitStatus(fileTreeChangedFile(path)?.status);
 }
 
-function fileTreeRepoBranch(path) {
+function fileTreeRepoStatus(path) {
   hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
-  if (!repo?.root || normalizeDirectoryPath(repo.cache_path || repo.root) !== normalized) return '';
-  return repoBranchDisplayText(repo);
+  if (!repo?.root || normalizeDirectoryPath(repo.cache_path || repo.root) !== normalized) return gitRepositoryStatusParts(null);
+  return gitRepositoryStatusParts(repo);
 }
 
-// Compact ahead/behind/dirty markers for a repo dir's inline annotation, read from cached repo info.
-function fileTreeRepoSyncMeta(path) {
-  hydrateFileExplorerRepoInfoCache();
-  const normalized = normalizeDirectoryPath(path);
-  const repo = fileExplorerRepoInfoCache.get(normalized);
-  if (!repo?.root || normalizeDirectoryPath(repo.cache_path || repo.root) !== normalized) return [];
-  const parts = [];
-  const ahead = Number(repo.ahead);
-  const behind = Number(repo.behind);
-  const dirty = Number(repo.dirty_count);
-  if (Number.isFinite(ahead) && ahead > 0) parts.push({cls: 'file-tree-repo-ahead', text: `↑${ahead}`});
-  if (Number.isFinite(behind) && behind > 0) parts.push({cls: 'file-tree-repo-behind', text: `↓${behind}`});
-  if (Number.isFinite(dirty) && dirty > 0) parts.push({cls: 'file-tree-repo-dirty', text: `●${dirty}`});
-  return parts;
+function gitRepositoryStatusParts(repo, options = {}) {
+  if (!repo || typeof repo !== 'object') return {branch: '', sync: [], text: []};
+  const branch = String(repoBranchDisplayText(repo) || '').trim();
+  const ahead = repo.ahead == null ? NaN : Number(repo.ahead);
+  const behind = repo.behind == null ? NaN : Number(repo.behind);
+  const dirty = repo.dirty_count == null ? NaN : Number(repo.dirty_count);
+  const sync = [];
+  if (Number.isFinite(ahead) && ahead > 0) sync.push({cls: 'file-tree-repo-ahead', text: `↑${ahead}`});
+  if (Number.isFinite(behind) && behind > 0) sync.push({cls: 'file-tree-repo-behind', text: `↓${behind}`});
+  if (Number.isFinite(dirty) && dirty > 0) sync.push({cls: 'file-tree-repo-dirty', text: `●${dirty}`});
+  if (options.includeClean === true && dirty === 0 && !sync.length) {
+    sync.push({cls: 'file-tree-repo-clean', text: '✓'});
+  }
+  return {branch, sync, text: [branch, ...sync.map(part => part.text)].filter(Boolean)};
+}
+
+function gitRepositoryStatusPartsHtml(parts) {
+  return parts.map(part => `<span class="${part.cls}">${esc(part.text)}</span>`).join(' ');
 }
 
 function fileTreeRepoDiffParts(path) {
@@ -3938,7 +3942,7 @@ function fileTreeRepoDiffParts(path) {
 }
 
 function fileTreeRepoBranchIsNonMain(path) {
-  const branch = fileTreeRepoBranch(path);
+  const branch = fileTreeRepoStatus(path).branch;
   return Boolean(branch && !['main', 'master'].includes(branch));
 }
 
@@ -3948,16 +3952,12 @@ function fileTreeDisplayParts(path, entry) {
   const linkSuffixText = linkTarget ? ` → ${linkTarget}` : '';
   const linkSuffixHtml = linkTarget ? ` <span class="file-tree-symlink-target">→ ${esc(linkTarget)}</span>` : '';
   if (entry.kind === 'dir' && entry.is_repo === true) {
-    const branch = fileTreeRepoBranch(path);
-    const sync = fileTreeRepoSyncMeta(path);
-    const textParts = [branch, ...sync.map(part => part.text)].filter(Boolean);
-    const htmlParts = [];
-    if (branch) htmlParts.push(`<span class="file-tree-repo-branch">${esc(branch)}</span>`);
-    for (const part of sync) htmlParts.push(`<span class="${part.cls}">${esc(part.text)}</span>`);
+    const status = fileTreeRepoStatus(path);
+    const parts = [...(status.branch ? [{cls: 'file-tree-repo-branch', text: status.branch}] : []), ...status.sync];
     return {
-      text: (textParts.length ? `${entry.name} [${textParts.join(' ')}]` : entry.name) + linkSuffixText,
-      html: (htmlParts.length
-        ? `${esc(entry.name)} <span class="file-tree-repo-meta">[${htmlParts.join(' ')}]</span>`
+      text: (status.text.length ? `${entry.name} [${status.text.join(' ')}]` : entry.name) + linkSuffixText,
+      html: (parts.length
+        ? `${esc(entry.name)} <span class="file-tree-repo-meta">[${gitRepositoryStatusPartsHtml(parts)}]</span>`
         : esc(entry.name)) + linkSuffixHtml,
     };
   }
@@ -5205,6 +5205,7 @@ function updateFileExplorerCurrentFileHighlightRows(rows) {
 }
 
 function scheduleFileExplorerActiveFileReveal(path = activeFile, options = {}) {
+  if (bootstrap.guestWorkspace) return;
   if (!path) {
     updateFileExplorerCurrentFileHighlight();
     return;
@@ -5432,9 +5433,9 @@ function sharedTreeRows(panel, options = {}) {
   });
 }
 
-function sharedTreeEventAllowed(event, options = {}) {
-  if (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event)) return false;
-  if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target)) return false;
+function sharedTreeEventAllowed(event) {
+  if (event?.defaultPrevented) return false;
+  if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target, {includeActiveElement: false})) return false;
   return true;
 }
 
@@ -5656,13 +5657,13 @@ function sharedTreeClickHandler(controller, options = {}) {
 
 function sharedTreeKeyboardHandler(controller, options = {}) {
   return function handleSharedTreeKeydown(event, panel) {
-    if (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event)) return false;
+    if (event.defaultPrevented || (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event))) return false;
     const intent = sharedTreeKeyIntent(event, options);
     if (!intent) return false;
     const rows = controller.rows(panel);
     if (!rows.length) return false;
     const eventTargetsOwnedPanel = panel?.contains?.(event?.target) || event?.target === panel;
-    if (!eventTargetsOwnedPanel && !fileExplorerKeyboardEventAllowsAction(event)) return false;
+    if (eventTargetsOwnedPanel ? !sharedTreeEventAllowed(event) : !fileExplorerKeyboardEventAllowsAction(event)) return false;
     claimFileExplorerScrollInputOwnership({target: rows[0]});
     const lead = controller.leadRow(panel);
     let leadIndex = lead ? rows.indexOf(lead) : -1;
@@ -6659,7 +6660,7 @@ function normalTabberPaneLayout(slots, options = {}) {
   return normalTabberLayoutSlotsForSelections(selected ? [selected] : [], selected, source);
 }
 
-function normalTabberPaneHeaderHidden(slot, slots = layoutSlots) {
+function normalTabberPaneTabStripHidden(slot, slots = layoutSlots) {
   return !tabberIsAdvanced() && !paneTabs(slot, slots).includes(tabberItemId);
 }
 
@@ -6768,7 +6769,7 @@ function applyTabberSidebarVisibility(visible, options = {}) {
 }
 
 function toggleTabberSidebar() {
-  if (tabberIsAdvanced()) return false;
+  if (bootstrap.guestWorkspace || tabberIsAdvanced()) return false;
   if (!tabberSidebarCanFit()) {
     tabberSidebarSinglePane = !tabberSidebarSinglePane;
     tabberSidebarVisible = false;
@@ -6784,7 +6785,7 @@ function toggleTabberSidebar() {
 }
 
 function scheduleTabberSidebarViewportSync() {
-  if (tabberSidebarResizeFrame) return;
+  if (bootstrap.guestWorkspace || tabberSidebarResizeFrame) return;
   tabberSidebarResizeFrame = requestAnimationFrame(() => {
     tabberSidebarResizeFrame = 0;
     if (tabberIsAdvanced() || !tabberSidebarRequestedVisible) return;
@@ -6798,7 +6799,7 @@ function scheduleTabberSidebarViewportSync() {
 }
 
 function installTabberSidebarResizeObserver() {
-  if (tabberSidebarResizeObserver) return;
+  if (bootstrap.guestWorkspace || tabberSidebarResizeObserver) return;
   const host = document.querySelector('#grid') || document.querySelector('.yomux-dockview');
   if (host && typeof ResizeObserver === 'function') {
     tabberSidebarResizeObserver = new ResizeObserver(scheduleTabberSidebarViewportSync);
@@ -6847,7 +6848,7 @@ function advancedTabberLayoutSlots(active = visualActivePaneItem(), sourceSlots 
 }
 
 function setTabberMode(value, options = {}) {
-  const next = normalizeTabberMode(value);
+  const next = bootstrap.guestWorkspace ? 'normal' : normalizeTabberMode(value);
   if (next === tabberMode) return false;
   tabberNormalPointerPreviewState.pendingWindowActivation = null;
   tabberNormalPointerPreviewState.defaultSelectionPending = false;
@@ -7388,7 +7389,8 @@ function buildTabberNormalRows() {
       if (windowData.type !== 'window') continue;
       const sessionName = sessionLabel(session) || session;
       const icon = tabberRowActivityHtml(windowData);
-      const description = tabberWindowDescription(session, windowData.windowIndex);
+      const description = tmuxWindowDescriptionForIndex(info, windowData.windowIndex);
+      const repository = sessionTabWorkSummary(session, info, {windowIndex: windowData.windowIndex}).selectedRepo;
       const visibleSession = windows.length === 1 ? sessionName : `${sessionName} `;
       const windowIdentity = windows.length > 1 ? String(windowData.label || '') : '';
       const path = tabberWindowPath(session, windowData.windowIndex);
@@ -7411,7 +7413,9 @@ function buildTabberNormalRows() {
           normalPaneItem,
           normalWindowView: windowView,
           label: `${visibleSession} ${description}`.trim(),
-          normalNameHtml: tabberNormalRowNameHtml(session, pinnedTabIconHtml(normalPaneItem) + icon, description, windowIdentity),
+          normalNameHtml: tabberNormalRowNameHtml(session, pinnedTabIconHtml(normalPaneItem) + icon, description, windowIdentity, repository),
+          branchText: repoBranchDisplayText(repository),
+          repoRoot: repository?.root || '',
         },
       });
     }
@@ -7500,11 +7504,6 @@ function renderTabberTree(groupsEl, options = {}) {
   syncTabberTreeLayoutState(container, {force: true});
 }
 
-function tabberWindowDescription(session, windowIndex) {
-  const info = transcriptMetadataState.payload.sessions?.[session];
-  return info?.window_metadata?.find(window => Number(window.window_index) === Number(windowIndex))?.description || '';
-}
-
 async function renameTabberDescription(session, windowIndex, windowId, description) {
   try {
     const payload = await apiFetchJson('/api/tabber-description', {
@@ -7526,17 +7525,31 @@ async function renameTabberDescription(session, windowIndex, windowId, descripti
   }
 }
 
-function tabberNormalRowNameHtml(session, leadingHtml, description, windowIdentity = '') {
+function tabberNormalRowNameHtml(session, leadingHtml, description, windowIdentity = '', repository = null) {
   const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const auto = autoApproveStates.get(session)?.enabled === true;
   const state = sessionState(session, info);
   const decorations = sessionTabStatusDecorations(session, info, auto, {state, toggle: false});
+  const identityHtml = windowIdentity ? `<span class="tabber-normal-window-identity">${esc(windowIdentity)}</span>` : '';
   const title = tmuxPaneTabHtml(session, info, state, auto, {
     leadingHtml: `${leadingHtml || ''}${decorations.stateMarker}${decorations.yoloHtml}`,
     showState: true, showBadges: true, showDetail: false,
-    windowIdentityHtml: windowIdentity ? `<span class="tabber-normal-window-identity">${esc(windowIdentity)}</span>` : '',
+    windowIdentityHtml: `${identityHtml}${tabberRepositoryStatusHtml(repository)}`,
   });
   return tabberRowNameHtml(stripTitleAttrs(title), description);
+}
+
+function tabberRepositoryStatusHtml(repository) {
+  if (!repository?.root) return '';
+  const status = gitRepositoryStatusParts(repository, {includeClean: true});
+  if (!status.branch && !status.sync.length) return '';
+  const branchHtml = status.branch
+    ? gitRepositoryStatusPartsHtml([{cls: 'file-tree-repo-branch', text: `⎇ ${status.branch}`}])
+    : '';
+  const syncHtml = gitRepositoryStatusPartsHtml(status.sync);
+  const branchLabel = status.branch ? `${esc(t('common.field.branch'))}: ${esc(status.branch)}` : '';
+  const label = [branchLabel, gitStatusHasFacts(repository) ? gitStatusText(repository) : ''].filter(Boolean).join(' · ');
+  return `<span class="tabber-repo-status" aria-label="${label}">${branchHtml}<span class="file-tree-repo-meta">${syncHtml}</span></span>`;
 }
 
 function tabberRowNameHtml(titleHtml, description) {
@@ -7650,7 +7663,7 @@ function tabberRowIsTabDragSource(row) {
 }
 
 function tabberRowDragIgnore(event) {
-  return Boolean(event.target.closest?.('[data-auto-session], [data-pane-tab-close], button, input, textarea, select, a, .file-tree-icon'));
+  return Boolean(event.target.closest?.('[data-auto-session], button, input, textarea, select, a, .file-tree-icon'));
 }
 
 function bindTabberRowDragSource(row) {
@@ -7763,7 +7776,7 @@ function tabberTabPath(item) {
 }
 
 function activeTabberRowPath() {
-  const item = visualActivePaneItem();
+  const item = bootstrap.guestWorkspace ? tabberNormalSelections?.[0] : visualActivePaneItem();
   if (!item || isFileExplorerItem(item)) return '';
   if (!isTmuxSession(item)) return tabberTabPath(item);
   const view = tabberViewDescriptorForSession(item);
@@ -7781,7 +7794,7 @@ function tabberSessionForNumericKey(key) {
 }
 
 function tabberNumericSessionKeyEventIsOwned(event) {
-  if (!tabberSessionForNumericKey(event?.key)) return false;
+  if (!tabberSessionForNumericKey(event?.key) || !sharedTreeEventAllowed(event)) return false;
   const panel = panelNodes.get(tabberItemId);
   return Boolean(panel && eventTargetIsFileExplorerSurface(event.target)
     && (panel === event.target || panel.contains(event.target)));
@@ -7951,7 +7964,7 @@ function syncTabberTreeLayoutState(panel = document, options = {}) {
     const paneItem = row.dataset.tabberPaneItem || (type === 'tab' ? item : '');
     const activeNormal = type === 'normal' && Boolean(paneItem) && visibleItems.has(paneItem);
     const activeTab = type === 'tab' && visibleItems.has(item);
-    const current = !tabberIsAdvanced() && paneItem
+    const current = !bootstrap.guestWorkspace && !tabberIsAdvanced() && paneItem
       ? focusedItem === paneItem
       : Boolean(currentPath && row.dataset.path === currentPath);
     row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
@@ -8081,6 +8094,7 @@ function bindTabberPanel(panel) {
     if (!itemInLayout(tabberItemId)) return;
     if (tabberTreeInteractionController.handleKeydown(event, panel)) return;
     if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    if (!sharedTreeEventAllowed(event)) return;
     const session = tabberSessionForNumericKey(event.key);
     if (!session) return;
     if (!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)) return;
@@ -8110,7 +8124,7 @@ function bindTabberPanel(panel) {
         anchor: tabRow,
         item: tabItem,
         sourceSlot: () => slotForItem(tabItem),
-        descriptionWindow: tabRow.dataset.tabberWindow === undefined ? null : Number(tabRow.dataset.tabberWindow),
+        descriptionWindow: tabRow.dataset.tabberWindow ? tmuxWindowNumber(tabRow.dataset.tabberWindow) : null,
         descriptionWindowId: tabRow.dataset.tabberWindowId || '',
       }, event);
       return;

@@ -117,3 +117,18 @@ func TestRouteCapabilityIsMethodAndOperationAware(t *testing.T) {
 		t.Fatal("implemented Finder and Tabber capabilities are not enabled")
 	}
 }
+
+func TestScopedSharingCapabilityRequiresAdminRoutes(t *testing.T) {
+	catalog := New("fixture")
+	if !catalog.Available("sharing.scoped.v1") {
+		t.Fatal("native sharing is unavailable")
+	}
+	for _, path := range []string{"/api/share", "/api/share/document", "/api/share/recovery", "/api/share/chat"} {
+		for _, method := range []string{"GET", "POST", "DELETE"} {
+			policy := Policy(method, path)
+			if policy.Role != "admin" || policy.Capability != "sharing.scoped.v1" {
+				t.Fatalf("%s %s: %+v", method, path, policy)
+			}
+		}
+	}
+}

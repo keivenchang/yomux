@@ -198,6 +198,9 @@
   --pr-link-merged-hover: var(--pr-status-merged);
   --pr-status-closed: #aeb8c7;
   --pr-number-chip-bg: var(--paint-black);
+  --hosted-request-open-bg: #166534;
+  --hosted-request-merged-bg: #6b21a8;
+  --hosted-request-draft-bg: #4b5563;
   --git-modified: var(--accent-gold);
   --git-modified-badge: var(--accent-gold);
   --git-untracked-name: #7ee787;
@@ -365,6 +368,7 @@
   --file-explorer-editor-inline-size: clamp(420px, 42vw, 640px);
   --file-explorer-open-inline-size: calc(var(--file-explorer-tree-inline-size) + var(--file-explorer-editor-inline-size));
   --min-split-pane-width: 300px;
+  --share-guest-pane-min-inline-size: 144px;
   --min-split-pane-height: 220px;
   --touch-row-height: var(--touch-target-min-size);
   --session-label-dir-max-inline-size: clamp(5rem, 12vw, 6.5rem);
@@ -637,6 +641,7 @@
   --panel-close-glyph-width: 8px;
   --panel-close-glyph-height: 1.4px;
   --icon-notify: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.3 21a2 2 0 0 0 3.4 0'/%3E%3Cpath d='M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9'/%3E%3C/svg%3E");
+  --icon-share: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='18' cy='5' r='3'/%3E%3Ccircle cx='6' cy='12' r='3'/%3E%3Ccircle cx='18' cy='19' r='3'/%3E%3Cpath d='m8.7 10.6 6.6-4.2M8.7 13.4l6.6 4.2'/%3E%3C/svg%3E");
   --icon-refresh: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 12a9 9 0 0 1-9 9 9.5 9.5 0 0 1-6.7-2.7'/%3E%3Cpath d='M3 12a9 9 0 0 1 9-9 9.5 9.5 0 0 1 6.7 2.7'/%3E%3Cpath d='M3 3v6h6'/%3E%3Cpath d='M21 21v-6h-6'/%3E%3C/svg%3E");
   --icon-tab-meta: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 9h16'/%3E%3Cpath d='M4 15h16'/%3E%3Cpath d='M10 3 8 21'/%3E%3Cpath d='M16 3l-2 18'/%3E%3C/svg%3E");
   --icon-logout: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'/%3E%3Cpath d='M16 17l5-5-5-5'/%3E%3Cpath d='M21 12H9'/%3E%3C/svg%3E");
@@ -1470,6 +1475,7 @@ body.editor-theme-light {
 .finder-move-target,
 .finder-move-dialog .file-editor-dialog-body,
 .file-get-info dd,
+.tex-preview-progress-output,
 .tex-preview-instructions {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1489,7 +1495,6 @@ body.editor-theme-light {
 .file-editor-diff-expand-panel,
 .file-editor-theme-panel,
 .file-editor-reload-panel,
-.file-editor-popout-preview-panel,
 .file-editor-blame-panel,
 .file-editor-save-panel,
 .pane-tab-close,
@@ -1650,7 +1655,8 @@ body.editor-theme-light {
 .js-debug-logs-toolbar,
 .js-debug-log-levels,
 .pdf-preview-body > .file-editor-preview-fallback,
-.js-debug-log-meta {
+.js-debug-log-meta,
+.finder-move-apply-all {
   display: flex;
   align-items: center;
   gap: var(--space-6);
@@ -1781,6 +1787,7 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .file-editor-title-name,
 .file-tree-row.tabber-row .tabber-window-text,
 .file-tree-row.tabber-row .tabber-normal-description,
+.file-tree-row.tabber-row .tabber-repo-status > .file-tree-repo-branch,
 .command-palette-group,
 .repo-chip-menu .repo-chip-branch,
 .repo-chip-menu .repo-chip-status,
@@ -1790,6 +1797,7 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .backend-health-indicator-text,
 .git-diff-path,
 .git-diff-commit-changes,
+.file-editor-review-status,
 .js-debug-cost-source-label {
   min-width: 0;
   overflow: hidden;
@@ -1831,7 +1839,8 @@ body {
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  overflow: hidden;
+  /* Focus can scroll an overflow-hidden ancestor even when its panels own scrolling. */
+  overflow: clip;
   background: var(--bg);
 }
 .app-overlay-root {

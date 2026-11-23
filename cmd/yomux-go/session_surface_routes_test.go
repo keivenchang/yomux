@@ -516,6 +516,91 @@ func TestSessionWorkGraphContainsTmuxPathAndActorEdges(t *testing.T) {
 	}
 }
 
+func TestSessionWorkGraphSeparatesServiceLaunchDirectoryFromWindowProject(t *testing.T) {
+	root, project, other := t.TempDir(), t.TempDir(), t.TempDir()
+	s := &server{root: root, gitMetadataSnapshotFn: func(path string) (goGitSnapshot, bool) {
+		return goGitSnapshot{Root: path, Branch: filepath.Base(path)}, true
+	}}
+	for _, tc := range []struct {
+		name, session, cwd, option, actor, selected, source, observed string
+	}{
+		{"inherited", "18205", root, "", root, "", "", ""},
+		{"assigned", "45451", root, project, root, project, "window-project", project},
+		{"independent actor", "653", root, "", project, "", "actor-cwd", project},
+		{"independent pane", "610", other, "", "", "", "pane-cwd", other},
+		{"service session", filepath.Base(root), root, "", "", "", "pane-cwd", root},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := strings.Join([]string{tc.session, "0", "agent", "0", "%1", tc.cwd, "sh", "", "0", "1", "1", "@1", "", root, tc.option}, "\t")
+			info := s.liveSessionMetadataFromOutputWithIndex(tc.session, []byte(row+"\n"), nil, nil)
+			if tc.actor != "" {
+				info["agents"] = []map[string]any{{"pane_target": "%1", "kind": "codex", "cwd": tc.actor}}
+			}
+			graph := s.sessionWorkGraph(tc.session, info, 1)
+			pane := graph["tmux_panes"].(map[string]any)[goGraphID("tmux-pane", tc.session+"|%1")].(map[string]any)
+			projectPath, hasOverride := pane["project_path"].(string)
+			if pane["current_path"] != tc.cwd || projectPath != tc.selected ||
+				hasOverride != (tc.cwd == root && tc.session != filepath.Base(root)) {
+				t.Fatalf("pane context = %#v", pane)
+			}
+			observations := graph["path_observations"].(map[string]any)
+			worktrees := graph["git_worktrees"].(map[string]any)
+			if tc.observed == "" {
+				if len(observations) != 0 || len(worktrees) != 0 {
+					t.Fatalf("inherited path produced project metadata: %#v, %#v", observations, worktrees)
+				}
+				return
+			}
+			id := goGraphID("path-observation", tc.session+"|%1|"+tc.observed)
+			observation, _ := observations[id].(map[string]any)
+			if len(observations) != 1 || observation["source"] != tc.source || observation["path"] != tc.observed ||
+				(observation["runtime_actor_id"] != nil) != (tc.source == "actor-cwd") || len(worktrees) != 1 {
+				t.Fatalf("observations = %#v, worktrees = %#v", observations, worktrees)
+			}
+		})
+	}
+}
+
+func TestSessionWorkGraphKeepsDistinctAgentAndPaneWorktrees(t *testing.T) {
+	panePath, agentPath, unrelatedPath := t.TempDir(), t.TempDir(), t.TempDir()
+	lookups := map[string]int{}
+	s := &server{gitMetadataSnapshotFn: func(path string) (goGitSnapshot, bool) {
+		lookups[path]++
+		return goGitSnapshot{Root: path, Branch: filepath.Base(path)}, true
+	}}
+	graph := s.sessionWorkGraph("work", map[string]any{
+		"panes": []map[string]any{{"target": "%1", "window": "0", "current_path": panePath}},
+		"agents": []map[string]any{
+			{"pane_target": "%1", "kind": "codex", "cwd": agentPath},
+			{"pane_target": "%other", "kind": "codex", "cwd": unrelatedPath},
+		},
+	}, 1)
+	observations := graph["path_observations"].(map[string]any)
+	paneID := goGraphID("tmux-pane", "work|%1")
+	pane := graph["tmux_panes"].(map[string]any)[paneID].(map[string]any)
+	actor := graph["runtime_actors"].(map[string]any)[pane["runtime_actor_ids"].([]string)[0]].(map[string]any)
+	for source, want := range map[string]struct {
+		node map[string]any
+		path string
+	}{
+		"pane-cwd":  {pane, panePath},
+		"actor-cwd": {actor, agentPath},
+	} {
+		ids := want.node["path_observation_ids"].([]string)
+		if len(ids) != 1 {
+			t.Fatalf("%s observation IDs = %#v", source, ids)
+		}
+		observation := observations[ids[0]].(map[string]any)
+		worktree := graph["git_worktrees"].(map[string]any)[observation["git_worktree_id"].(string)].(map[string]any)
+		if observation["source"] != source || observation["path"] != want.path || worktree["root"] != gitWorktreePathHint(want.path) {
+			t.Fatalf("%s observation = %#v, worktree = %#v", source, observation, worktree)
+		}
+	}
+	if len(lookups) != 2 || lookups[gitWorktreePathHint(panePath)] != 1 || lookups[gitWorktreePathHint(agentPath)] != 1 {
+		t.Fatalf("Git lookups = %#v", lookups)
+	}
+}
+
 func TestMetadataRefreshReadsGitSnapshotOncePerWorktree(t *testing.T) {
 	root := t.TempDir()
 	root, err := filepath.EvalSymlinks(root)

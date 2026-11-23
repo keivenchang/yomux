@@ -475,7 +475,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   // panels always pass their fixed `view` explicitly and never render from this global value.
   const view = options.view || (fileExplorerMode === 'tabber' ? 'tabber' : 'differ');
   if (view === 'tabber') {
-    return `
+    const toolbar = bootstrap.guestWorkspace ? '' : `
       <div class="changes-toolbar tabber-toolbar">
         <div class="app-menu tabber-new-chat-menu" data-app-menu="tabber-new-chat">
         <button type="button" class="app-menu-button tabber-new-chat" data-tabber-new-chat aria-label="New Chat" aria-haspopup="menu" aria-expanded="false">
@@ -488,7 +488,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
           <svg class="tabber-search-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.75" cy="10.75" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>
         </button>
         ${tabberIsAdvanced() ? `${tabberLookbackControlHtml()}${fileExplorerTreeSortSelectHtml('changes-sort-select-compact', 'tabber')}${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'tabber')}` : ''}
-      </div>
+      </div>`;
+    return `${toolbar}
       <div class="changes-groups" data-tabber-mode="${tabberIsAdvanced() ? 'advanced' : 'normal'}"></div>`;
   }
   const payload = fileExplorerSessionFilesState.payload;

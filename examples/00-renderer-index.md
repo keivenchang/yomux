@@ -1,6 +1,6 @@
 # Preview Renderer Sample Index
 
-Open these files directly in YOmux Preview to verify the useful rendered preview paths. This directory is intentionally curated: do not add samples that only demonstrate "same as text" behavior, broken-by-design media placeholders, archive fallbacks, or unsupported placeholders.
+Open these files directly in YOmux Preview to verify the rendered paths. Example files and their supporting directories use numeric prefixes at the top level of `examples/`.
 
 | Renderer | Sample file | Expected behavior |
 |---|---|---|
@@ -18,6 +18,12 @@ Open these files directly in YOmux Preview to verify the useful rendered preview
 | `structured` | `21-config.properties` | Bounded config Preview |
 | `table` | `22-table.csv` | Bounded CSV table Preview |
 | `table` | `23-table.tsv` | Bounded TSV table Preview |
+| `graphviz` | `28-diagram.dot` | Locally rendered Graphviz source with zoom and pan |
+| `sqlite` | `29-database.sqlite` | Read-only table and schema browser with paged rows |
+| `pdf` | `24-small.pdf` | Original one-page PDF under 10 KiB for direct viewing |
+| `office` | `25-document.docx` | Multi-page document with a heading, table, and small images, converted locally with LibreOffice |
+| `office` | `26-slides.pptx` | Two static slide pages with distinct titles, converted locally with LibreOffice |
 | `mixed` | `03-mixed.md` | Combined Markdown, local SVG, tasks, table, Mermaid, links, code, and sanitizer checks |
+| `TeX` | `30-tex/` | Numbered TeX source, Markdown math, and HTML math examples |
 
-Removed on purpose: `.log` and `.patch` look like ordinary text, DOT/PlantUML are not rendered diagrams yet, `.wav`/`.mp4` placeholders only show browser decode failures, and `.zip`/unsupported placeholders are not useful rendering examples.
+Supporting SVG files live in `31-assets/`. PlantUML and unsupported or broken-by-design media placeholders are omitted because they do not demonstrate a useful rendered preview.

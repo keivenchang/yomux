@@ -523,6 +523,7 @@ test('editor and Differ tab context menus offer Close through the shared close o
   const context = {
     differItemId: '__differ__',
     isFileEditorItem: item => item.startsWith('__file_editor__'),
+    gitDiffItemPath: item => item.startsWith('gitdiff:') ? '/repo' : null,
     itemLabel: item => item.slice('__file_editor__'.length),
     isPinnableTab: () => false,
     isTmuxSession: () => false,
@@ -533,6 +534,8 @@ test('editor and Differ tab context menus offer Close through the shared close o
     closeSessionContextMenu() {},
   };
   vm.createContext(context);
+  const facade = fs.readFileSync('static_src/js/yomux/98_terminal_runtime_facade.js', 'utf8');
+  vm.runInContext(facade.slice(facade.indexOf('function paneFrameCloseLabel('), facade.indexOf('function paneFrameControlsHtml(')), context);
   vm.runInContext(menuSource.slice(menuStart, menuEnd), context);
   context.appendTabActionCommands([], '__file_editor__/repo/file.txt');
   context.appendTabActionCommands([], '__differ__');
@@ -546,6 +549,7 @@ test('editor and Differ tab context menus offer Close through the shared close o
   const routed = [];
   const closeContext = {
     isFileEditorItem: item => item.startsWith('__file_editor__'),
+    gitDiffItemPath: () => null,
     fileItemPath: item => item.slice('__file_editor__'.length),
     closeFileTab: (path, options) => routed.push({kind: 'editor', path, options}),
     removeSessionFromLayout: item => routed.push({kind: 'layout', item}),
@@ -723,6 +727,7 @@ test('touch layout predicates skip viewport layout reads on fine pointers and re
   const source = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
   let coarse = false, tablet = false, reads = 0;
   const context = {
+    bootstrap: {guestWorkspace: false},
     nativeViewport: () => {reads++; return {width: 700, height: 900};},
     browserUsesCoarsePointer: () => coarse, browserUsesTabletViewport: () => tablet,
     tabletDesktopLayoutMinWidthPx: 1024, mobileSinglePaneMaxWidthPx: 600,
@@ -746,6 +751,9 @@ test('touch layout predicates skip viewport layout reads on fine pointers and re
   assert.equal(context.mobileSinglePaneMode({width: 400, height: 900}), false);
   assert.equal(context.narrowSingleColumnMode(), true, 'narrow tablets still honor minimum pane widths');
   assert.equal(reads, 2, 'explicit geometry never triggers another viewport read');
+  context.bootstrap.guestWorkspace = true;
+  assert.equal(context.narrowSingleColumnMode(), false, 'guest Tabber stays alongside the content on touch viewports');
+  assert.equal(reads, 2, 'guest policy skips the one-column viewport read');
 });
 
 test('width-only viewport policies do not read visual height and full viewport retains height recovery', () => {
@@ -1575,6 +1583,7 @@ test('user layout activation establishes terminal focus before mount reconciliat
       dockviewLayoutActiveOnlySignature: slots => JSON.stringify(slots.items), cloneLayoutSlots: slots => JSON.parse(JSON.stringify(slots)), cleanupRemovedDynamicLayoutItems() {},
       sessionsFromLayout: () => context.layoutSlots.items, clearFocusForInactiveLayout() {}, updateActiveSessionParam() {},
       isTmuxSession: item => ['first', 'second'].includes(item), dockviewLayoutActive: () => true,
+      isFileEditorItem: () => false, fileItemPath: () => '',
       rememberActivePaneItem() {}, clearPendingFileEditorFocusExcept() {}, dismissAttentionAlertsForSession() {},
       acknowledgeTerminalAttentionFromUserAction: (_session, _window, options) => {
         assert.equal(options.acknowledgeAgentWindow, false);
@@ -1625,10 +1634,13 @@ test('preserved Dockview tabs position only their open popover', () => {
   element.addEventListener = () => {};
   let positions = 0;
   let fileRefreshes = 0;
+  let hiddenNormalTab = true;
   const context = {
     createLifecycleScope: loadYomux().createLifecycleScopeForTest,
     document: {createElement: () => element}, dockviewLayoutState: {},
     bindPaneTabDismissInteraction() {},
+    normalTabberPaneTabStripHidden: () => hiddenNormalTab,
+    slotForItem: () => 'left',
     tabberIsAdvanced: () => true,
     dockviewEmptyPaneSlot: () => false, syncDockviewTabShell() {},
     paneTabShouldPreserve: () => true, syncPaneTabPinnedChrome() {},
@@ -1641,6 +1653,10 @@ test('preserved Dockview tabs position only their open popover', () => {
   vm.runInContext(source.slice(source.indexOf('function disposeDockviewRendererResources('), source.indexOf('function captureDockviewPreviousPaneBeforeTabActivation(')), context);
   const renderer = context.createDockviewTabRenderer();
   renderer.init({params: {item: 'file'}});
+  assert.equal(element.hidden, true);
+  assert.equal(element.dataset.paneTab, 'file', 'header refresh must find a tab that starts hidden');
+  hiddenNormalTab = false;
+  renderer.update();
   assert.equal(positions, 0, 'a closed hovered/preserved popover must not force layout');
   element.classList.add('popover-open');
   renderer.update();
@@ -1684,6 +1700,8 @@ test('Dockview native click restores input without repeating consumed activation
     const context = {
       createLifecycleScope: loadYomux().createLifecycleScopeForTest,
       tabberIsAdvanced: () => true,
+      normalTabberPaneTabStripHidden: () => false,
+      slotForItem: () => 'left',
       bindPaneTabDismissInteraction() {},
       document: {createElement: () => element, addEventListener: (type, listener) => {documentListeners[type] = listener;}, removeEventListener: type => {delete documentListeners[type];}, querySelectorAll: () => [element],
         getElementsByClassName: classes => classes.split(' ').every(name => element.classList.contains(name)) ? [element] : []},
@@ -2192,7 +2210,7 @@ async function runTabberSuite() {
     assert.deepStrictEqual(canonical(rows.filter(row => row.type === 'normal').map(row => row.path)), ['/s_synthetic-tab-a/w_0', '/s_synthetic-tab-b/w_0'], 'every global session appears as its single flat window row, even without an agent process');
   });
 
-  test('Normal conversation panes hide their single tab while Advanced retains headers', () => {
+  test('Normal conversation panes retain the action header for their single content item', () => {
     const api = loadYomux('?sessions=one,two', ['one', 'two']);
     const leaves = node => node.type === 'leaf' ? [node.data] : node.data.flatMap(leaves);
     api.setTabberModeForTest('normal');
@@ -2200,8 +2218,8 @@ async function runTabberSuite() {
     const normal = leaves(api.dockviewJsonFromLayoutSlots(api.layoutSlotsForTest()).grid.root);
     const conversations = normal.filter(group => group.views.some(item => ['one', 'two'].includes(item)));
     assert.ok(conversations.length > 0);
-    assert.ok(conversations.every(group => group.views.length === 1 && group.hideHeader === true));
-    assert.ok(normal.filter(group => !group.views.includes('__tabber__')).every(group => group.hideHeader === true && group.views.length === 1));
+    assert.ok(conversations.every(group => group.views.length === 1 && group.hideHeader === false));
+    assert.ok(normal.filter(group => !group.views.includes('__tabber__')).every(group => group.hideHeader === false && group.views.length === 1));
     assert.equal(normal.find(group => group.views.includes('__tabber__')).hideHeader, false, 'the home navigation remains visible in Normal');
     api.setTabberModeForTest('advanced');
     assert.ok(leaves(api.dockviewJsonFromLayoutSlots(api.layoutSlotsForTest()).grid.root).every(group => group.hideHeader === false));
@@ -3600,14 +3618,20 @@ async function runTabberSuite() {
     api.setFocusedPanelItem('1');
     api.setFileExplorerModeForTest('tabber');
     api.setTranscriptInfoForTest('1', {
+      window_metadata: [{window_index: 0, description: 'Old window summary'}, {window_index: 1, description: 'New window summary'}],
       panes: [
-        {window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo'},
-        {window: '1', pane: '0', window_active: false, active: true, process_label: 'bash', command: 'bash', current_path: '/tmp'},
+        {window: '0', pane: '0', target: '%1', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo'},
+        {window: '1', pane: '0', target: '%2', window_active: false, active: true, process_label: 'bash', command: 'bash', current_path: '/tmp'},
       ],
+      selected_pane: {window: '0', target: '%1'},
     });
 
     assert.equal(api.activeTabberRowPathForTest(), '/s_1/w_0', 'Tabber starts on the backend active tmux sub-window');
+    const info = api.transcriptInfoForTest('1');
     api.setTmuxWindowActiveIndexOverrideForTest('1', '1');
+    assert.equal(api.sessionTabDescriptionForTest('1', info), 'New window summary');
+    assert.match(api.tabMenuDetailText('1', info), /New window summary.*\/tmp/);
+    assert.match(api.tabMenuDetailText('file:/home/test/repo/note.md'), /\/repo\/note\.md/);
     assert.equal(api.activeTabberRowPathForTest(), '/s_1/w_1', 'known tmux sub-window override moves the active Tabber row before readback');
     let rows = api.tabberRenderedRowsForTest();
     assert.equal(rows.find(r => r.path === '/s_1/w_1')?.classes.includes('tabber-active-window'), true, 'Tabber row highlight honors the optimistic known-window override');
@@ -4903,14 +4927,17 @@ async function runTabberSuite() {
   });
 
   test('Tabber rows retain the status and repository badges shown on pane tabs', () => {
-    const api = loadYomux('', ['main-tag']);
+    const api = loadYomux('', ['main-tag', 'yo7110', '45451', '18205', '610']);
     api.setFileExplorerModeForTest('tabber');
     const info = {
-      panes: [{window: '0', window_index: 0, pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude'}],
+      panes: [{window: '0', window_index: 0, pane: '0', pane_id: '%pane', target: '%pane', current_path: '/repo', window_active: true, active: true, process_label: 'claude', command: 'claude'}],
+      window_metadata: [{window_index: 0, description: '[AI summary] Stage only the 29 tracked changes after verification', description_manual: false}],
       work_graph: {
         version: 1,
-        tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, runtime_actors: {}, path_observations: {},
-        git_worktrees: {worktree: {id: 'worktree', root: '/repo', local_repository_id: 'local', current_branch_id: 'branch', git: {root: '/repo'}}},
+        tmux_sessions: {}, tmux_windows: {}, runtime_actors: {},
+        tmux_panes: {pane: {id: 'pane', target: '%pane', active: true, path_observation_ids: ['observation']}},
+        path_observations: {observation: {id: 'observation', path: '/repo', git_worktree_id: 'worktree'}},
+        git_worktrees: {worktree: {id: 'worktree', root: '/repo', local_repository_id: 'local', current_branch_id: 'branch', git: {root: '/repo', ahead: 2, behind: 1, dirty_count: 3}}},
         local_repositories: {local: {id: 'local', local_branch_ids: ['branch']}},
         hosted_repositories: {}, local_branches: {branch: {id: 'branch', name: 'main'}},
         pull_requests: {}, linear_issues: {}, worktree_branch_activity: {},
@@ -4927,6 +4954,53 @@ async function runTabberSuite() {
     assert.match(row?.tabber?.normalNameHtml || '', />ASK<\/span>/, 'the Tabber row mirrors the pane tab question label');
     assert.match(paneTab, />MAIN<\/span>/, 'the pane tab exposes the current default-branch label');
     assert.match(row?.tabber?.normalNameHtml || '', />MAIN<\/span>/, 'the Tabber row mirrors the pane tab default-branch label');
+    assert.ok(paneTab.includes('Stage only the 29 tracked changes after verification'), 'pane tabs use the matching tmux window description');
+    assert.ok(!paneTab.includes('[AI summary]'), 'pane tabs omit the AI summary prefix');
+    assert.ok(row?.tabber?.normalNameHtml.includes('[AI summary] Stage only the 29 tracked changes after verification'), 'Tabber preserves the description label');
+    assert.match(row?.tabber?.normalNameHtml || '', /tabber-repo-status[\s\S]*file-tree-repo-branch[^>]*>⎇ main[\s\S]*file-tree-repo-ahead[^>]*>↑2[\s\S]*file-tree-repo-behind[^>]*>↓1[\s\S]*file-tree-repo-dirty[^>]*>●3/, 'the Tabber row shows the pane worktree branch and colored sync markers');
+    const mismatchedTarget = {
+      ...info,
+      selected_pane: {target: '%missing', current_path: '/home/keiven/dev/worktrees/yo7110'},
+    };
+    const unmatchedPaneTab = api.tmuxPaneTabHtml('45451', mismatchedTarget, null, false);
+    assert.ok(!unmatchedPaneTab.includes('yo7110'), 'an unmatched AI tab target cannot inherit the selected path from another pane');
+    const splitWindow = api.tmuxWindowRecords([
+      {window: '0', window_name: 'claude', pane_id: '%inactive', target: '%inactive', current_path: '/stale', active: false, window_active: true},
+      {window: '0', window_name: 'claude', pane_id: '%active', target: '%active', current_path: '/repo', active: true, window_active: true},
+    ])[0];
+    assert.equal(splitWindow.paneTarget, '%active', 'repository metadata follows the active pane within a split window');
+    assert.equal(splitWindow.currentPath, '/repo', 'repository metadata uses that active pane path');
+    api.setTranscriptInfoForTest('main-tag', {...info,
+      window_metadata: [{window_index: 0, description: '[AI summary] Keep this manual text', description_manual: true}]});
+    const manualPaneTab = api.tmuxPaneTabHtml('main-tag', api.transcriptInfoForTest('main-tag'), null, false);
+    assert.ok(manualPaneTab.includes('[AI summary] Keep this manual text'), 'manually written descriptions keep their authored prefix');
+
+    const independentSessionInfo = (session, root) => ({
+      panes: [{window: '0', window_index: 0, pane: '0', pane_id: `%${session}`, target: `%${session}`, current_path: root, window_active: true, active: true, process_label: 'claude', command: 'claude'}],
+      work_graph: {
+        version: 1, tmux_sessions: {}, tmux_windows: {}, runtime_actors: {},
+        tmux_panes: {pane: {id: 'pane', target: `%${session}`, active: true, path_observation_ids: ['observation']}},
+        path_observations: {observation: {id: 'observation', path: root, git_worktree_id: 'worktree'}},
+        git_worktrees: {worktree: {id: 'worktree', root, local_repository_id: 'local', current_branch_id: 'branch', git: {root}}},
+        local_repositories: {local: {id: 'local', local_branch_ids: ['branch']}},
+        hosted_repositories: {}, local_branches: {branch: {id: 'branch', name: 'main'}},
+        pull_requests: {}, linear_issues: {}, worktree_branch_activity: {},
+      },
+    });
+    for (const session of ['yo7110', '45451', '18205']) {
+      api.setTranscriptInfoForTest(session, independentSessionInfo(session, `/home/keiven/dev/worktrees/${session}`));
+    }
+    const independentRows = new Map(api.buildTabberNormalRowsForTest()
+      .map(entry => [entry.tabber?.session, entry.tabber?.repoRoot]));
+    for (const session of ['yo7110', '45451', '18205']) {
+      assert.equal(independentRows.get(session), `/home/keiven/dev/worktrees/${session}`, `${session} uses only its own associated worktree directory`);
+    }
+    const detached = independentSessionInfo('610', '/parser-toolkits/610');
+    detached.work_graph.local_branches.branch.name = '';
+    Object.assign(detached.work_graph.git_worktrees.worktree.git, {head_sha: 'bf64a7d17', dirty_count: 0});
+    api.setTranscriptInfoForTest('610', detached);
+    const detachedRow = api.buildTabberNormalRowsForTest().find(entry => entry.tabber?.session === '610');
+    assert.match(detachedRow?.tabber?.normalNameHtml || '', /⎇ detached.*file-tree-repo-clean[^>]*>✓/s);
   });
 
   test('Tabber window recency uses one timestamp for display, sorting, and parent bubbling', () => {

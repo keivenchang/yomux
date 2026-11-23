@@ -15,10 +15,13 @@ from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
 from yomux_lib import filesystem
 from yomux_lib import web
 
+from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
+
 from tests.latency_calibration import certification_phase_fixture, write_latency_evidence, run_browser_latency_calibration, browser_calibration_qualification, merged_qualification, assert_fixed_ceiling
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
+from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_errors
 from tests.browser_helpers.native_file_actions import rename_finder_file_with_native_input
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 from tools.bazel_go_browser_e2e import git_stats_done_hold_source
@@ -1801,7 +1804,7 @@ def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
             const contextLine = contextItem.querySelector('.context-menu-line');
             const contextIcon = contextItem.querySelector('.context-menu-icon');
             const contextLabel = contextItem.querySelector('.context-menu-label');
-            const appItem = [...document.querySelectorAll('.app-menu-command')].find(item => !item.querySelector('.app-menu-detail'));
+            const appItem = document.querySelector('.app-menu[data-app-menu="help"] .app-menu-command[aria-label="About"]');
             const contextStyle = getComputedStyle(contextItem);
             const appStyle = getComputedStyle(appItem);
             return {
@@ -1817,7 +1820,7 @@ def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
               font: contextStyle.font,
               appFont: appStyle.font,
               menuPadding: getComputedStyle(contextMenu).padding,
-              appMenuPadding: getComputedStyle(document.querySelector('.app-menu-popover')).padding,
+              appMenuPadding: getComputedStyle(appItem.closest('.app-menu-popover')).padding,
             };
           };
           const folderRow = document.querySelector('.file-tree-row[data-path="/home/test/project"]');
@@ -2780,7 +2783,7 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
             snapshot_cursor: 'alignment-snapshot',
             next_cursor: '',
             truncated: false,
-            commits: [{sha, short: sha.slice(0, 9), parents: [], subject: 'Release YOmux 0.10.8', author: '', signature_status: 'N', decorations: ['HEAD -> yo7111', 'tag: v0.10.8', 'origin/main', 'yo7110', 'main'], authored_at: 1786931640, files: 556, added: 87420, removed: 214022, binary_files: 0}],
+            commits: [{sha, short: sha.slice(0, 9), parents: [], subject: 'Release YOmux 0.10.8', author: '', signature_status: 'N', decorations: ['HEAD -> yo7111', 'tag: v0.10.8', 'origin/main', 'yo7110', 'main'], authored_at: 1786931640, files: 1, added: 2, removed: 1, binary_files: 0}],
             worktree_status: {
               available: true,
               dirty: true,
@@ -2810,6 +2813,24 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
             return candidate?.querySelector('.git-diff-worktree-summary')
               && candidate?.querySelector('.git-diff-commit-row[data-git-diff-commit]') ? candidate : null;
           });
+          const fieldNames = ['caret', 'sha', 'date', 'changes', 'author', 'description'];
+          const measureFields = () => {
+            const dirty = panel.querySelector('.git-diff-worktree-summary');
+            const commit = panel.querySelector('.git-diff-commit-row[data-git-diff-commit]');
+            return fieldNames.map((name, index) => {
+              const dirtyField = dirty.children[index];
+              const commitField = commit.children[index];
+              return {
+                name,
+                dirtyConnected: dirtyField.isConnected,
+                commitConnected: commitField.isConnected,
+                visible: getComputedStyle(dirtyField).display !== 'none' && getComputedStyle(commitField).display !== 'none',
+                delta: Math.abs(dirtyField.getBoundingClientRect().left - commitField.getBoundingClientRect().left),
+              };
+            });
+          };
+          const firstFields = measureFields();
+          const inlineTracks = panel.querySelector('.git-diff-worktree-summary').style.gridTemplateColumns;
           const firstDirtyChanges = panel.querySelector('.git-diff-worktree-summary .git-diff-commit-changes');
           const firstDirtyRange = document.createRange();
           firstDirtyRange.selectNodeContents(firstDirtyChanges);
@@ -2823,26 +2844,23 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
           panel.style.width = '1800px';
           await new Promise(resolve => requestAnimationFrame(resolve));
           const initialDirtyRow = panel.querySelector('.git-diff-worktree-summary');
+          const commitDescription = panel.querySelector('.git-diff-commit-row[data-git-diff-commit] .git-diff-commit-description');
+          const descriptionBeforeStats = commitDescription.getBoundingClientRect().left;
+          applyGitDiffStatsPayload(item, gitDiffTabState.get(item), {
+            shallow_boundary: 'complete',
+            commits: [{sha, files: 556, added: 87420, removed: 214022, binary_files: 0, signature_status: 'N'}],
+          });
+          const commitDescriptionShift = commitDescription.getBoundingClientRect().left - descriptionBeforeStats;
+          const immediateStatsFields = measureFields();
           const completeWorktree = await waitFor(() => worktreeResponses.shift());
           completeWorktree();
           await waitFor(() => !gitDiffTabState.get(item)?.worktreeController);
-          const fieldNames = ['caret', 'sha', 'date', 'changes', 'author', 'description'];
           await new Promise(resolve => requestAnimationFrame(resolve));
           // Worktree refresh retains the mounted Dirty summary and commit rows.
           // Measure that connected pair after its content update.
           const dirtyRow = panel.querySelector('.git-diff-worktree-summary');
           const commitRow = panel.querySelector('.git-diff-commit-row[data-git-diff-commit]');
-          const fields = fieldNames.map((name, index) => {
-            const dirtyField = dirtyRow.children[index];
-            const commitField = commitRow.children[index];
-            return {
-              name,
-              dirtyConnected: dirtyField.isConnected,
-              commitConnected: commitField.isConnected,
-              visible: getComputedStyle(dirtyField).display !== 'none' && getComputedStyle(commitField).display !== 'none',
-              delta: Math.abs(dirtyField.getBoundingClientRect().left - commitField.getBoundingClientRect().left),
-            };
-          });
+          const fields = measureFields();
           const dirtyChangesWide = dirtyRow.querySelector('.git-diff-commit-changes');
           const dirtyDescriptionWide = dirtyRow.querySelector('.git-diff-commit-description');
           const dirtyCountText = document.createRange();
@@ -2858,26 +2876,25 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
             decorationTextLeft: commitDecorationText.getBoundingClientRect().left,
           };
           panel.style.width = '900px';
+          // Measure during this transaction, before a ResizeObserver or another response can repair the row.
+          const immediateMediumFields = measureFields();
           await new Promise(resolve => requestAnimationFrame(resolve));
-          const mediumDirtyRow = panel.querySelector('.git-diff-worktree-summary');
-          const mediumCommitRow = panel.querySelector('.git-diff-commit-row[data-git-diff-commit]');
-          const mediumFields = fieldNames.map((name, index) => {
-            const dirtyField = mediumDirtyRow.children[index];
-            const commitField = mediumCommitRow.children[index];
-            return {
-              name,
-              visible: getComputedStyle(dirtyField).display !== 'none' && getComputedStyle(commitField).display !== 'none',
-              delta: Math.abs(dirtyField.getBoundingClientRect().left - commitField.getBoundingClientRect().left),
-            };
-          });
+          const mediumFields = measureFields();
           panel.style.width = '500px';
+          const immediateNarrowFields = measureFields();
           await new Promise(resolve => requestAnimationFrame(resolve));
           const dirtyChangesNarrow = panel.querySelector('.git-diff-worktree-summary .git-diff-commit-changes');
           const dirtyDescriptionNarrow = panel.querySelector('.git-diff-worktree-summary .git-diff-commit-description');
           done({
             firstDirtyLayout,
+            firstFields,
+            immediateStatsFields,
+            commitDescriptionShift,
+            inlineTracks,
             fields,
+            immediateMediumFields,
             mediumFields,
+            immediateNarrowFields,
             dirtyRetained: dirtyRow === initialDirtyRow && initialDirtyRow.isConnected,
             dirtyChangesText: dirtyChangesWide.textContent,
             dirtyChangesClientWidth: dirtyWide.changesClientWidth,
@@ -2898,6 +2915,10 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
         sha,
     )
     assert not metrics.get("error"), metrics
+    assert metrics["commitDescriptionShift"] > 1, metrics
+    for sample in ["firstFields", "immediateStatsFields", "immediateMediumFields", "immediateNarrowFields"]:
+        assert all(not field["visible"] or field["delta"] <= 1 for field in metrics[sample]), metrics[sample]
+    assert metrics["inlineTracks"] == "", metrics["inlineTracks"]
     assert metrics["firstDirtyLayout"]["lines"] == 1, metrics["firstDirtyLayout"]
     assert metrics["dirtyRetained"], metrics
     assert all(field["dirtyConnected"] and field["commitConnected"] and field["visible"] and field["delta"] <= 1 for field in metrics["fields"]), metrics["fields"]
@@ -3344,8 +3365,8 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
                   sha: shaA,
                   short: shaA.slice(0, 9),
                   parents: [parentA, secondParent],
-                  subject: 'Merge exact history #123',
-                  decorations: ['HEAD -> yo7110', 'tag: v0.8.8', 'origin/main'],
+                  subject: 'Merge exact history #123 ' + 'with a long description '.repeat(12).trim(),
+                  decorations: ['HEAD -> yo7110', 'tag: v0.8.8', 'origin/main', 'tag: ' + 'long-tag-'.repeat(20)],
                   author: 'Keiven Chang',
                   authored_at: 1786931640,
                   files: 3,
@@ -3378,8 +3399,8 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
               parents: [parentA, secondParent],
               from_ref: parentA,
               to_ref: shaA,
-              subject: 'Merge exact history',
-              message: 'Merge exact history\\n\\nBody text',
+              subject: 'Merge exact history #123 ' + 'with a long description '.repeat(12).trim(),
+              message: 'Merge exact history #123 ' + 'with a long description '.repeat(12).trim() + '\\n\\nBody text',
               authored_at: 1786931640,
               message_truncated: false,
               files_truncated: false,
@@ -3544,6 +3565,24 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           const firstDetail = details.find(detail => detail.dataset.gitDiffCommitDetail === shaA);
           const secondDetail = details.find(detail => detail.dataset.gitDiffCommitDetail === shaB);
           const focusAfterAsync = document.activeElement?.dataset?.gitDiffCommit || '';
+          rootPanel.style.width = '420px';
+          const expandedMessage = firstDetail.querySelector('.git-diff-commit-message');
+          const expandedRefs = [...firstDetail.querySelectorAll('.git-diff-commit-decoration')];
+          const lineCount = node => {
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            return new Set([...range.getClientRects()].map(rect => rect.top)).size;
+          };
+          const descriptionPlacement = {
+            rowDescription: rootRows[0].querySelector('.git-diff-commit-description')?.textContent || '',
+            refs: expandedRefs.map(node => node.textContent),
+            refsFit: expandedRefs.every(node => node.scrollWidth <= node.clientWidth + 1),
+            longRefWraps: expandedRefs.length > 0 && lineCount(expandedRefs.at(-1)) > 1,
+            subjectWraps: lineCount(expandedMessage) > 4,
+            messageFits: expandedMessage.scrollWidth <= expandedMessage.clientWidth + 1,
+            changeLink: expandedMessage.querySelector('.git-diff-change-link')?.href || '',
+          };
+          rootPanel.style.width = '';
           const firstFileTree = firstDetail.querySelector('.git-diff-file-tree');
           const firstTreeRows = Array.from(firstFileTree.querySelectorAll('.file-tree-row[data-path]'));
           firstTreeRows[0].focus();
@@ -3803,6 +3842,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             rowDensity,
             commitRoving,
             focusAfterAsync,
+            descriptionPlacement,
             fileRoving,
             dirToggle,
             expanded: Array.from(rootPanel.querySelectorAll('.git-diff-commit-row')).map(row => row.getAttribute('aria-expanded')),
@@ -3838,6 +3878,8 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           });
         })().catch(error => done({error: String(error?.stack || error), requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')})).finally(() => {
           window.fetch = originalFetch;
+          const dirtyFixture = fileState.get(historicalPath);
+          if (dirtyFixture) dirtyFixture.dirty = false;
         });
         """,
         repo,
@@ -3859,11 +3901,13 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
     )
     assert metrics["rootItem"] == root_item and metrics["nestedItem"] == nested_item, metrics
     assert metrics["commitOrder"] == [sha_a, sha_b], metrics
+    expected_refs = ["HEAD -> yo7110", "tag: v0.8.8", "origin/main", "tag: " + "long-tag-" * 20]
+    subject = "Merge exact history #123 " + ("with a long description " * 12).strip()
     assert metrics["repoSurface"] == {
         "meta": "Branch: yo7110 · Scope: repository root · 2 newest commits",
         "dirtyCount": "2 dirty",
         "dirtyEntries": ["[ M]README.md", "[??]new file.txt"],
-        "decorations": ["HEAD -> yo7110", "tag: v0.8.8", "origin/main"],
+        "decorations": expected_refs,
         "summaryImmediatelyBeforeCommits": True,
     }, metrics
     assert metrics["cleanSummaryText"] == "clean", metrics
@@ -3907,7 +3951,16 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
         "childPresentAfterReexpand": True,
     }, metrics["dirToggle"]
     assert metrics["expanded"][:2] == ["true", "true"], metrics
-    assert metrics["messages"] == ["Merge exact history\n\nBody text", "Older ordinary change\n\nSecond body"], metrics
+    assert metrics["descriptionPlacement"] == {
+        "rowDescription": "",
+        "refs": expected_refs,
+        "refsFit": True,
+        "longRefWraps": True,
+        "subjectWraps": True,
+        "messageFits": True,
+        "changeLink": "https://github.com/example/project/pull/123",
+    }, metrics["descriptionPlacement"]
+    assert metrics["messages"] == [subject + "\n\nBody text", "Older ordinary change\n\nSecond body"], metrics
     assert "FROM bbbbbbbbb" in metrics["refs"] and "TO aaaaaaaaa" in metrics["refs"] and "first parent" in metrics["refs"], metrics
     assert metrics["detailRoles"] == ["group", "group"] and metrics["treeRoles"] == ["tree", "tree"], metrics
     assert metrics["changedRows"][historical_path]["name"] == "src/old.js → src/new.js", metrics
@@ -5415,7 +5468,7 @@ def test_sync_mode_active_file_reveal_keeps_manual_collapse(browser, tmp_path):
 
 def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, tmp_path):
     fs_entries = {
-        "/home/test/yolomux.dev3/examples/preview": [
+        "/home/test/yolomux.dev3/examples": [
             {"name": "03-mixed.md", "kind": "file", "size": 128, "mtime_ns": 1781300000000000000},
         ],
     }
@@ -5424,10 +5477,10 @@ def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, t
         """
         const done = arguments[arguments.length - 1];
         const fetchStart = window.__bootFetches.length;
-        const path = '/home/test/yolomux.dev3/examples/preview/03-mixed.md';
+        const path = '/home/test/yolomux.dev3/examples/03-mixed.md';
         fetchFileEntryStatus(path)
           .then(result => {
-            setFileExplorerFsResourceValue('list', '/home/test/yolomux.dev3/examples/preview', [
+            setFileExplorerFsResourceValue('list', '/home/test/yolomux.dev3/examples', [
               {name: '03-mixed.md', kind: 'file', size: 129, mtime: 1781300001, mtime_ns: 1781300001000000000},
             ]);
             const newer = freshCachedFileEntryStatus(path);
@@ -7669,7 +7722,7 @@ def test_finder_drag_move_yes_no_and_theme_guides(browser, tmp_path, mode):
             assert browser.find_elements(By.CSS_SELECTOR, source_selector)
     WebDriverWait(browser, 10).until(lambda driver: not driver.find_elements(By.CSS_SELECTOR, source_selector))
     assert browser.execute_script('return window.__finderMoveRequests') == [
-        {'paths': ['/home/test/move.txt'], 'destination': '/home/test/destination'}]
+        {'paths': ['/home/test/move.txt'], 'destination': '/home/test/destination', 'resolutions': {}}]
     metrics = browser.execute_async_script('''
       const done = arguments[0];
       (async () => {
@@ -7765,7 +7818,7 @@ def repo_diff_interaction_snapshot(browser):
       const p=window.__repoDiffInteraction;
       return {message:p.panel.querySelector('.git-diff-commit-message')===p.message,
         scroll:p.panel.querySelector('.git-diff-commit-message').scrollTop,
-        expectedScroll:p.expectedScroll,bodyScroll:p.panel.querySelector('.git-diff-panel-body').scrollTop,
+        bodyScroll:p.panel.querySelector('.git-diff-panel-body').scrollTop,
         expectedBodyScroll:p.expectedBodyScroll,focused:document.activeElement===p.focused,
         focusedPath:document.activeElement?.dataset?.path||'',selection:String(getSelection()),expectedSelection:p.selection,
         worktree:p.panel.querySelector('.git-diff-worktree-status')===p.worktree,
@@ -7775,6 +7828,17 @@ def repo_diff_interaction_snapshot(browser):
     return result
 
 
+def scroll_repo_diff_message(browser, message):
+    body_scroll = browser.execute_script(
+        "return window.__repoDiffInteraction.panel.querySelector('.git-diff-panel-body').scrollTop"
+    )
+    ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(message), 0, 160).perform()
+    WebDriverWait(browser, 5).until(lambda d: d.execute_script("""
+      const p=window.__repoDiffInteraction;
+      return p.message.scrollTop === 0 && p.panel.querySelector('.git-diff-panel-body').scrollTop > arguments[0] + 40;
+    """, body_scroll))
+
+
 def finish_repo_diff_interaction_fixture(browser):
     browser.execute_script("""
       const p=window.__repoDiffInteraction;if(!p)return;
@@ -7782,15 +7846,15 @@ def finish_repo_diff_interaction_fixture(browser):
     """)
 
 
-def test_repo_diff_disclosure_keeps_scrolled_commit_message(browser, tmp_path):
+def test_repo_diff_disclosure_keeps_pane_scroll_position(browser, tmp_path):
     message = load_repo_diff_interaction_fixture(browser, tmp_path)
     try:
-        ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(message), 0, 160).perform()
-        WebDriverWait(browser, 5).until(lambda d: d.execute_script('return window.__repoDiffInteraction.message.scrollTop>40'))
+        scroll_repo_diff_message(browser, message)
         browser.execute_script("""
-          const p=window.__repoDiffInteraction;p.expectedScroll=p.message.scrollTop;
-          p.expectedBodyScroll=p.panel.querySelector('.git-diff-panel-body').scrollTop;
+          const p=window.__repoDiffInteraction;
           p.focused=p.panel.querySelector('.git-diff-commit-detail .file-tree-row[data-kind="dir"]');
+          p.focused.scrollIntoView({block:'center'});
+          p.expectedBodyScroll=p.panel.querySelector('.git-diff-panel-body').scrollTop;
           p.worktree=p.panel.querySelector('.git-diff-worktree-status');
         """)
         browser.find_element(By.CSS_SELECTOR, '.git-diff-commit-detail .file-tree-row[data-kind="dir"]').click()
@@ -7799,7 +7863,7 @@ def test_repo_diff_disclosure_keeps_scrolled_commit_message(browser, tmp_path):
         settled = repo_diff_interaction_snapshot(browser)
         for result in [immediate, settled]:
             assert result['message'] is True, result
-            assert abs(result['scroll'] - result['expectedScroll']) <= 1, result
+            assert result['scroll'] == 0, result
             assert result['focused'] is True and result['file'] is True, result
             assert abs(result['bodyScroll'] - result['expectedBodyScroll']) <= 1, result
     finally:
@@ -7811,8 +7875,7 @@ def test_repo_diff_disclosure_keeps_scrolled_commit_message(browser, tmp_path):
 def test_repo_diff_passive_render_preserves_live_interaction(browser, tmp_path, refresh, focus_surface):
     message = load_repo_diff_interaction_fixture(browser, tmp_path)
     try:
-        ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(message), 0, 160).perform()
-        WebDriverWait(browser, 5).until(lambda d: d.execute_script('return window.__repoDiffInteraction.message.scrollTop>40'))
+        scroll_repo_diff_message(browser, message)
         browser.execute_script("""
           const p=window.__repoDiffInteraction;
           p.focused=p.panel.querySelector(arguments[0]==='worktree'
@@ -7822,7 +7885,7 @@ def test_repo_diff_passive_render_preserves_live_interaction(browser, tmp_path, 
           p.focused.focus({preventScroll:true});
           const range=document.createRange();range.setStart(p.message.firstChild,0);range.setEnd(p.message.firstChild,32);
           getSelection().removeAllRanges();getSelection().addRange(range);p.selection=String(getSelection());
-          p.expectedScroll=p.message.scrollTop;p.expectedBodyScroll=p.panel.querySelector('.git-diff-panel-body').scrollTop;
+          p.expectedBodyScroll=p.panel.querySelector('.git-diff-panel-body').scrollTop;
           p.worktree=p.panel.querySelector('.git-diff-worktree-status');
         """, focus_surface)
         assert browser.execute_script('return document.activeElement === window.__repoDiffInteraction.focused'), focus_surface
@@ -7843,7 +7906,7 @@ def test_repo_diff_passive_render_preserves_live_interaction(browser, tmp_path, 
         settled = repo_diff_interaction_snapshot(browser)
         for result in [immediate, settled]:
             assert result['message'] is True, result
-            assert abs(result['scroll'] - result['expectedScroll']) <= 1, result
+            assert result['scroll'] == 0, result
             assert abs(result['bodyScroll'] - result['expectedBodyScroll']) <= 1, result
             assert result['focused'] is True and result['file'] is True, result
             assert result['selection'] == result['expectedSelection'], result
@@ -7902,10 +7965,9 @@ def test_repo_diff_same_snapshot_refresh_keeps_loaded_reading_window(browser, tm
           p.focused.focus({preventScroll:true});p.worktree=p.panel.querySelector('.git-diff-worktree-status');
         """, next_cursor)
         message = browser.find_element(By.CSS_SELECTOR, '.git-diff-commit-message')
-        ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(message), 0, 160).perform()
-        WebDriverWait(browser, 5).until(lambda d: d.execute_script('return window.__repoDiffInteraction.message.scrollTop>40'))
+        scroll_repo_diff_message(browser, message)
         browser.execute_script("""
-          const p=window.__repoDiffInteraction;p.expectedScroll=p.message.scrollTop;
+          const p=window.__repoDiffInteraction;
           p.expectedBodyScroll=p.panel.querySelector('.git-diff-panel-body').scrollTop;
           const range=document.createRange();range.setStart(p.message.firstChild,0);range.setEnd(p.message.firstChild,32);
           getSelection().removeAllRanges();getSelection().addRange(range);p.selection=String(getSelection());
@@ -7919,9 +7981,88 @@ def test_repo_diff_same_snapshot_refresh_keeps_loaded_reading_window(browser, tm
         for _ in range(2):
             snapshot = repo_diff_interaction_snapshot(browser)
             assert snapshot['message'] and snapshot['file'] and snapshot['focused'], snapshot
-            assert abs(snapshot['scroll'] - snapshot['expectedScroll']) <= 1, snapshot
+            assert snapshot['scroll'] == 0, snapshot
             assert abs(snapshot['bodyScroll'] - snapshot['expectedBodyScroll']) <= 1, snapshot
             assert snapshot['selection'] == snapshot['expectedSelection'], snapshot
             browser.execute_async_script('const done=arguments[arguments.length-1];requestAnimationFrame(()=>requestAnimationFrame(done));')
     finally:
         finish_repo_diff_interaction_fixture(browser)
+
+
+@pytest.mark.browser
+def test_finder_replace_reconfirms_changed_destination(browser, isolated_dev_server_factory, request):
+    server = isolated_dev_server_factory('replace-changed-destination')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    root = server.paths.workspace_dir
+    destination = root / 'destination'
+    destination.mkdir()
+    source = root / 'note.txt'
+    target = destination / source.name
+    source.write_bytes(b'incoming')
+    target.write_bytes(b'original target')
+    browser.get(server.base_url + '/?layout=left&tabs=left:__finder__')
+    wait = WebDriverWait(browser, 20)
+    wait.until(lambda driver: driver.execute_script("return typeof confirmFinderMove === 'function' && initialAppShellPainted"))
+    browser.execute_script('window.__replaceMove = confirmFinderMove([arguments[0]], arguments[1]);', str(source), str(destination))
+    wait.until(lambda driver: driver.find_element(By.CSS_SELECTOR, '.finder-move-dialog [data-dialog-action="yes"]')).click()
+    replace_selector = '.finder-move-conflict-dialog [data-dialog-action="replace"]'
+    first = wait.until(lambda driver: driver.find_element(By.CSS_SELECTOR, replace_selector))
+    target.rename(destination / 'prior-target.txt')
+    target.mkdir()
+    child = target / 'keep.txt'
+    child.write_bytes(b'new target data')
+    first.click()
+    second = wait.until(lambda driver: (button := driver.find_element(By.CSS_SELECTOR, replace_selector)) != first and button)
+    assert source.read_bytes() == b'incoming'
+    assert child.read_bytes() == b'new target data'
+    second.click()
+    assert browser.execute_async_script('window.__replaceMove.then(arguments[arguments.length-1])') is True
+    assert not source.exists()
+    assert target.read_bytes() == b'incoming'
+    assert (destination / 'prior-target.txt').read_bytes() == b'original target'
+    consume_only_expected_js_debug_api_errors(browser, [{'path': '/api/fs/move', 'status': 409, 'ok': False, 'method': 'POST'}] * 2)
+
+
+@pytest.mark.browser
+def test_finder_keep_both_apply_all_moves_duplicate_basenames(browser, isolated_dev_server_factory, request):
+    server = isolated_dev_server_factory('keep-both-batch')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    root = server.paths.workspace_dir
+    destination = root / 'destination'
+    sources = [root / 'one' / 'a.txt', root / 'two' / 'a.txt']
+    for directory in [destination, *(source.parent for source in sources)]:
+        directory.mkdir()
+    original = destination / 'a.txt'
+    for index, path in enumerate([original, *sources]):
+        path.write_bytes(str(index).encode())
+    browser.get(server.base_url + '/?layout=left&tabs=left:__finder__')
+    wait = WebDriverWait(browser, 20)
+    wait.until(lambda driver: driver.execute_script("return typeof confirmFinderMove === 'function' && initialAppShellPainted"))
+    browser.execute_script("""
+      const original = apiFetchJson;
+      window.__batchMoveReceipts = [];
+      apiFetchJson = async (...args) => {
+        const result = await original(...args);
+        if (args[0] === '/api/fs/move') window.__batchMoveReceipts.push(result);
+        return result;
+      };
+      window.__batchMove = confirmFinderMove(arguments[0], arguments[1]);
+    """, [str(path) for path in sources], str(destination))
+    wait.until(lambda driver: driver.find_elements(By.CSS_SELECTOR, '.finder-move-dialog [data-dialog-action="yes"]'))
+    browser.find_element(By.CSS_SELECTOR, '.finder-move-dialog [data-dialog-action="yes"]').click()
+    wait.until(lambda driver: driver.find_elements(By.CSS_SELECTOR, '[data-move-apply-all]'))
+    browser.find_element(By.CSS_SELECTOR, '[data-move-apply-all]').click()
+    browser.find_element(By.CSS_SELECTOR, '[data-dialog-action="keep_both"]').click()
+    assert browser.execute_async_script('window.__batchMove.then(arguments[arguments.length-1])') is True
+    receipts = browser.execute_script('return window.__batchMoveReceipts')
+    assert len(receipts) == 1, receipts
+    moved = receipts[0]['moved']
+    assert receipts[0]['complete'] is True
+    for index, name in enumerate(['a.txt', 'a copy.txt', 'a copy 2.txt']):
+        target = destination / name
+        assert target.read_bytes() == str(index).encode()
+        if index:
+            assert moved[index - 1]['old_path'] == str(sources[index - 1])
+            assert moved[index - 1]['path'] == str(target)
+            assert not sources[index - 1].exists()
+    consume_only_expected_js_debug_api_error(browser, path='/api/fs/move', status=409, method='POST', query={})

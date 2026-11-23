@@ -19,12 +19,15 @@
     ],
     "preview_renderers": [
       "audio",
+      "graphviz",
       "html",
       "image",
       "json-lines-table",
       "markdown",
       "mermaid",
+      "office",
       "pdf",
+      "sqlite",
       "structured",
       "table",
       "tex",
@@ -1563,6 +1566,8 @@
       "tests/test_browser_editor_lifecycle.py:test_finder_delete_preserves_native_unsaved_edits:1",
       "tests/test_browser_editor_lifecycle.py:test_native_retired_conflict_dialog_preserves_reopened_dirty_editor:1",
       "tests/test_browser_editor_lifecycle.py:test_new_file_action_preserves_existing_bytes:1",
+      "tests/test_browser_editor_lifecycle.py:test_recent_changes_keeps_source_editor_and_unsaved_draft:1",
+      "tests/test_browser_editor_lifecycle.py:test_recent_changes_keeps_source_editor_and_unsaved_draft:2",
       "tests/test_browser_layout.py:test_static_browser_fixtures_have_one_write_and_navigation_owner:1",
       "tests/test_browser_stats_coverage.py:test_current_stats_fixture_uses_canonical_resolution_policy:1",
       "tests/test_browser_stats_coverage.py:test_current_stats_fixture_uses_canonical_resolution_policy:2",
@@ -1809,7 +1814,7 @@
       "tests/test_yostats_active_browser_window.py:test_deterministic_operation_batch_quiesces_existing_operations_before_freezing_ack_flushes:8",
       "tests/test_yostats_active_browser_window.py:test_deterministic_operation_batch_quiesces_existing_operations_before_freezing_ack_flushes:9"
     ],
-    "inventory_sha256": "6b88c448d97176f73584f51ad3771b10a23e9662d80c0958dd2cca1ec5a3491c",
+    "inventory_sha256": "88933f82690faa0c8f2b5a82b43126280fcd51a44196da60b34b6466fbc36746",
     "unallowlisted": [],
     "validation_errors": []
   },

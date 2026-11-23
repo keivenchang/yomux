@@ -3,7 +3,6 @@
 
 import pytest
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
@@ -18,15 +17,19 @@ def test_native_preferences_search_matches_translated_terms_and_rejects_unmatche
     browser.get(server.base_url + '/?sessions=__prefs__')
     wait = WebDriverWait(browser, 20)
     wait.until(lambda driver: driver.find_elements(By.CSS_SELECTOR, '[data-preferences-search]'))
-    modifier = Keys.COMMAND if browser.capabilities['platformName'].lower() in {'mac', 'macos', 'darwin'} else Keys.CONTROL
 
     def search(query):
-        field = browser.find_element(By.CSS_SELECTOR, '[data-preferences-search]')
-        field.send_keys(modifier, 'a')
-        field.send_keys(Keys.BACKSPACE)
-        for character in query:
-            browser.find_element(By.CSS_SELECTOR, '[data-preferences-search]').send_keys(character)
-        wait.until(lambda driver: driver.execute_script('return preferencesSearchText===arguments[0]', query))
+        assert browser.execute_script("""
+          const input = document.querySelector('[data-preferences-search]');
+          input.focus({preventScroll:true});
+          input.select();
+          return document.activeElement === input;
+        """)
+        browser.execute_cdp_cmd('Input.insertText', {'text': query})
+        wait.until(lambda driver: driver.execute_script("""
+          return preferencesSearchText === arguments[0] &&
+            document.querySelector('[data-preferences-search]')?.value === arguments[0];
+        """, query))
 
     search('language')
     browser.execute_script("""

@@ -624,6 +624,7 @@ I18N_ALLOWED_IDENTICAL_TERMS = {
     "yo!chat", "yo!info", "yo!stats", "yolo", "yomux", "yolomux",
 }
 I18N_ALLOWED_IDENTICAL_KEYS = frozenset({
+    "sharing.title",
     "app.documentTitle",
     "brand.marker",
     "brand.tab.agent",

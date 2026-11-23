@@ -39,13 +39,18 @@ if str(_SCRIPT_SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_SOURCE_ROOT))
 
 from tests.browser_helpers.webdriver_lease import WebDriverLease
-from tests.browser_helpers.native_keyboard import native_document_end, native_logical_text
+from tests.browser_helpers.native_keyboard import native_document_end, native_document_start, native_logical_text
 from tools.product_environment import product_env, product_env_name, require_product_env
 from tools.browser_runtime import resolve_browser_executables
 from tools.instance_isolation import synthetic_test_environment as isolated_test_environment
 from tools.instance_isolation import normalize_yomux_environment
 from tools.tmux_paths import short_tmux_socket_path
-from tools.tabber_browser_journey import isolated_attention_journey, normal_multiwindow_journey, normal_tabber_journey
+from tools.tabber_browser_journey import (
+    NORMAL_PANE_CONTROLS_SOURCE,
+    isolated_attention_journey,
+    normal_multiwindow_journey,
+    normal_tabber_journey,
+)
 
 
 def focus_native_text_editor_end(driver, path):
@@ -1421,9 +1426,12 @@ exec /bin/sleep 300
                     raise SystemExit(f"Go Phase 6 TextEdit save failed: {save_result}")
                 if source_file.read_text(encoding="utf-8") != expected_saved_text:
                     raise SystemExit("Go Phase 6 TextEdit disk content did not match the native editor input")
-                local_conflict_suffix = "\n// local unsaved conflict"
+                local_conflict_prefix = "// local unsaved conflict "
+                expected_conflict_draft = local_conflict_prefix + expected_saved_text
+                external_conflict_text = "package external\n" + expected_saved_text.partition("\n")[2]
                 focus_native_text_editor_end(driver, source_file)
-                native_logical_text(driver, local_conflict_suffix)
+                native_document_start(driver)
+                native_logical_text(driver, local_conflict_prefix)
                 try:
                     WebDriverWait(driver, 12).until(
                         lambda current: current.execute_script(
@@ -1433,10 +1441,10 @@ exec /bin/sleep 300
                             const panel = fileEditorPanelsForPath(path)[0];
                             const text = panel?._cmView?.state?.doc?.toString?.() || '';
                             const state = fileState.get(path);
-                            return text.endsWith(expected) && state?.content === text && state?.dirty === true;
+                            return text === expected && state?.content === text && state?.dirty === true;
                             """,
                             str(source_file),
-                            local_conflict_suffix,
+                            expected_conflict_draft,
                         )
                     )
                 except TimeoutException as error:
@@ -1449,14 +1457,13 @@ exec /bin/sleep 300
                         activeClass:document.activeElement?.className || ''};
                     """, str(source_file))
                     raise SystemExit(f"Go Phase 6 local unsaved conflict input did not reach file state: {diagnostics}") from error
-                source_file.write_text("external replacement\n", encoding="utf-8")
+                source_file.write_text(external_conflict_text, encoding="utf-8")
                 conflict = driver.execute_async_script(
                     """
                     const done = arguments[arguments.length - 1];
                     const path = arguments[0];
                     const panel = fileEditorPanelsForPath(path)[0];
                     let finished = false;
-                    let externalAction = 'not-present';
                     const finish = value => {
                       if (finished) return;
                       finished = true;
@@ -1464,30 +1471,17 @@ exec /bin/sleep 300
                     };
                     const deadline = performance.now() + 12000;
                     const observe = () => {
-                      const externalDialog = document.querySelector('.file-editor-external-change-dialog');
-                      if (externalDialog) {
-                        const keepEditing = [...externalDialog.querySelectorAll('button')]
-                          .find(button => /^keep editing$/i.test(button.textContent?.trim() || ''));
-                        if (!keepEditing) {
-                          finish({error: 'external-change dialog has no Keep editing action', text: externalDialog.textContent || ''});
-                          return;
-                        }
-                        externalAction = 'keep-editing';
-                        keepEditing.click();
-                        setTimeout(observe, 0);
-                        return;
-                      }
-                      const dialog = document.querySelector('.file-editor-conflict-dialog');
+                      const dialog = document.querySelector('.file-editor-merge-dialog');
                       if (dialog) {
-                        const buttons = [...dialog.querySelectorAll('button')];
-                        const cancel = buttons.find(button => /^cancel$/i.test(button.textContent?.trim() || ''));
-                        if (!cancel) {
-                          finish({error: 'conflict dialog has no Cancel action', text: dialog.textContent || ''});
+                        const cancel = dialog.querySelector('[data-dialog-action="cancel"]');
+                        const keepDraft = dialog.querySelector('[data-dialog-action="merge-draft"]');
+                        const keepDisk = dialog.querySelector('[data-dialog-action="merge-disk"]');
+                        if (!cancel || !keepDraft || !keepDisk) {
+                          finish({error: 'merge dialog is missing a conflict action', text: dialog.textContent || ''});
                           return;
                         }
-                        const dialogText = dialog.textContent || '';
                         cancel.click();
-                        savePromise.then(result => finish({dialog: true, cancelled: result === false, result, externalAction, text: dialogText, editor: panel?._cmView?.state?.doc?.toString?.() || '', dirty: fileState.get(path)?.dirty === true}), error => finish({error: String(error?.stack || error)}));
+                        savePromise.then(result => finish({dialog: true, cancelled: result === false, editor: panel?._cmView?.state?.doc?.toString?.() || '', dirty: fileState.get(path)?.dirty === true}), error => finish({error: String(error?.stack || error)}));
                         return;
                       }
                       if (performance.now() >= deadline) {
@@ -1501,8 +1495,11 @@ exec /bin/sleep 300
                     """,
                     str(source_file),
                 )
-                if conflict.get('error') or conflict.get('dialog') is not True or conflict.get('cancelled') is not True or conflict.get('dirty') is not True or local_conflict_suffix not in conflict.get('editor', ''):
-                    raise SystemExit(f"Go Phase 6 expected-mtime conflict failed: {conflict}")
+                if (conflict.get('error') or conflict.get('dialog') is not True or conflict.get('cancelled') is not True
+                        or conflict.get('dirty') is not True or conflict.get('editor') != expected_conflict_draft):
+                    raise SystemExit(f"Go Phase 6 merge conflict failed: {conflict}")
+                if source_file.read_text(encoding="utf-8") != external_conflict_text:
+                    raise SystemExit("Go Phase 6 cancelling the merge conflict changed the external file")
                 markdown = driver.execute_async_script("""
                     const done = arguments[arguments.length - 1];
                     const path = arguments[0];
@@ -1646,7 +1643,7 @@ exec /bin/sleep 300
                         const panel = fileEditorPanelsForPath(path)[0];
                         return {
                           error: String(arguments[1]),
-                          modal: document.querySelector('.file-editor-external-change-dialog')?.textContent?.trim() || document.querySelector('.file-editor-conflict-dialog')?.textContent?.trim() || '',
+                          modal: document.querySelector('.file-editor-merge-dialog, .file-editor-conflict-dialog')?.textContent?.trim() || '',
                           state: state ? {content: state.content || '', original: state.original || '', dirty: state.dirty === true, externalChanged: state.externalChanged || null, externalMissing: state.externalMissing === true, externalError: state.externalError || ''} : null,
                           panelMode: panel ? fileEditorPanelMode(panel) : '',
                           pmSource: panel?._pmSource || null,
@@ -2457,6 +2454,7 @@ exec /bin/sleep 300
                     roster_driver.get(f"https://127.0.0.1:{port}/?sessions={exited_session}&layout=left&tabs=left:{exited_session}")
                     try:
                         WebDriverWait(roster_driver, 10).until(lambda current: current.execute_script(
+                            NORMAL_PANE_CONTROLS_SOURCE +
                             "const visible = node => Boolean(node?.getClientRects().length"
                             " && getComputedStyle(node).display !== 'none'"
                             " && getComputedStyle(node).visibility !== 'hidden');"
@@ -2464,9 +2462,7 @@ exec /bin/sleep 300
                             "&& (tabberIsAdvanced()"
                             " ? visible(document.querySelector(`.dockview-pane-tab[data-pane-tab=\"${CSS.escape(arguments[0])}\"]`))"
                             " : dockviewLayoutState.api.groups.every(group => group.panels.length === 1)"
-                            " && dockviewLayoutState.api.groups.some(group => group.panels.some(panel => panel.id !== '__tabber__'))"
-                            " && dockviewLayoutState.api.groups.filter(group => group.panels.some(panel => panel.id !== '__tabber__'))"
-                            " .every(group => group.header.hidden))"
+                            " && normalPaneControlsAreVisible(arguments[0]))"
                             "&& clientEventTransportState.connected === true;",
                             exited_session,
                         ))

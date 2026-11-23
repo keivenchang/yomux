@@ -1705,6 +1705,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         hostedRepositoryKey,
         hostedRepositoryLabel,
         hostedRepositoryTitle,
+        hostedRepositoryProvider: row?.hostedRepositoryProvider || '',
         branchKey: branch || '__no_branch__',
         branchLabel: branch || t('info.missing.branch'),
         branchTitle: branch || t('info.missing.branch'),
@@ -1716,6 +1717,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         prNumber: Number.isFinite(prNumber) ? prNumber : null,
         prUrl: String(row?.prUrl || ''),
         prValues: Array.isArray(row?.prValues) ? row.prValues.slice() : [],
+        githubIssues: Array.isArray(row?.githubIssues) ? row.githubIssues : [],
         prLookupState: String(row?.prLookupState || ''),
         prClass: String(row?.prClass || ''),
         prLifecycleText: String(row?.prLifecycleText || ''),
@@ -2123,9 +2125,9 @@ function infoRecordPrDescHtml(record) {
       const lifecycle = pullRequestLifecycleStatus(value);
       const ci = pullRequestCiStatus(value);
       return [
-        infoHighlightedLinkHtml(href, numberText, href || title || numberText, pullRequestStatusClass(value), highlight),
+        value.provider ? pullRequestLinkHtml(value) : infoHighlightedLinkHtml(href, numberText, href || title || numberText, pullRequestStatusClass(value), highlight),
         title ? (highlight ? infoSearchHighlightHtml(title) : esc(title)) : '',
-        lifecycle?.text ? infoStatusBadgeHtml(record, lifecycle.text, lifecycle.className, {highlight}) : '',
+        !value.provider && lifecycle?.text ? infoStatusBadgeHtml(record, lifecycle.text, lifecycle.className, {highlight}) : '',
         ci?.text ? infoStatusBadgeHtml(record, ci.text, ci.className, {highlight}) : '',
       ].filter(Boolean).join(' ');
     }).join('<br>');
@@ -2397,6 +2399,10 @@ function infoRecordMainChipsHtml(record, options = {}) {
   if (!hiddenDimensions.has('linear') && linearDesc) fields.push(infoRecordFieldHtml('linear', linearDesc, record.linearTitle));
   const prDesc = infoRecordPrDescHtml(record);
   if (!hiddenDimensions.has('pr') && prDesc) fields.push(infoRecordFieldHtml('pr', `${prDesc}${infoRecordPrCountHtml(record)}`, record.prTitle));
+  for (const issue of record.githubIssues || []) fields.push(infoRecordFieldHtml('pr', githubIssueLinkHtml(issue), issue.title));
+  if (!record.prValues?.length && record.hostedRepositoryKey !== '__no_hosted_repository__' && record.hostedRepositoryTitle?.startsWith('https://')) {
+    fields.push(infoRecordFieldHtml('path', hostedRepositoryLinkHtml({url: record.hostedRepositoryTitle, provider: record.hostedRepositoryProvider}), record.hostedRepositoryTitle));
+  }
   if (!hiddenDimensions.has('tab') && infoRecordHasTab(record)) {
     fields.push(infoRecordFieldHtml('tab', infoRecordTabValueHtml(record), record.tabTitle));
   }
@@ -3081,7 +3087,7 @@ function infoBranchRowForSource(source, branch, ownsSession) {
   const linearHtml = linearSourceItems.length
     ? linearSourceItems.map(issue => linearIssueHtml(issue)).join(' ')
     : linearIds.map(linearIssueLinkHtml).filter(Boolean).join(' ');
-  const prValues = currentPr?.number ? [currentPr] : branchPullRequests;
+  const prValues = branchPullRequests.length ? branchPullRequests : (currentPr?.number ? [currentPr] : []);
   const prValue = prValues[0] || null;
   const prHtml = prValues.map(pullRequestLinkHtml).filter(Boolean).join(' ');
   const prTitle = pullRequestTextForBranch(prValue, branch.subject || '');
@@ -3090,7 +3096,7 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     ? [`#${value.number}`, value.title || value.description || branch.subject || ''].filter(Boolean).join(' ')
     : '').filter(Boolean).join(' · ');
   const repoUrl = infoSourceRepositoryUrl(source);
-  const prUrl = prValue?.url || (prValue?.number && repoUrl ? `${repoUrl}/pull/${prValue.number}` : '');
+  const prUrl = prValue?.url || hostedPullRequestUrlFromGit({github_repo: {...source.hostedRepository, url: repoUrl}}, prValue?.number);
   const prLabel = prValue?.number ? pullRequestLinkLabel(prValue) : '';
   const prClass = prValue?.number ? pullRequestStatusClass(prValue) : '';
   const prLifecycle = prValue?.number ? pullRequestLifecycleStatus(prValue) : null;
@@ -3151,6 +3157,7 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     hostedRepositoryId: String(source?.hostedRepositoryId || ''),
     hostedRepositoryLabel: String(source?.hostedRepositoryLabel || git?.github_repo?.url || ''),
     hostedRepositoryTitle: String(source?.hostedRepositoryTitle || git?.github_repo?.url || ''),
+    hostedRepositoryProvider: source?.hostedRepository?.provider || '',
     branch: branch.name || '',
     branchId,
     branchState,
@@ -3169,6 +3176,7 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     prUrl,
     prLabel,
     prValues,
+    githubIssues: branch.github_issues || [],
     prLookupState: String(branch.pull_request_lookup_state || 'not-requested'),
     prNumber: Number.isFinite(prNumber) ? prNumber : null,
     prClass,
@@ -3323,27 +3331,6 @@ function bindPanelControls(panel, session) {
     event.preventDefault();
     event.stopPropagation();
     cancelTmuxWindowSwitchLoading(button.dataset.terminalConnectionCancel || session);
-  });
-  delegate(panel, 'click', '[data-pane-close]', (event, button) => {
-    event.preventDefault();
-    event.stopPropagation();
-    closePaneFrameItem(button.dataset.paneClose);
-  });
-  delegate(panel, 'click', '[data-pane-minimize]', (event, button) => {
-    event.preventDefault();
-    event.stopPropagation();
-    minimizePaneFromLayout(button.dataset.paneMinimize);
-  });
-  delegate(panel, 'click', '[data-pane-expand]', (event, button) => {
-    event.preventDefault();
-    event.stopPropagation();
-    expandPaneFromLayout(button.dataset.paneExpand);
-  });
-  delegate(panel, 'click', '[data-pane-actions]', (event, button) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const rect = button.getBoundingClientRect();
-    showSessionContextMenu(button.dataset.paneActions || session, rect.left, rect.bottom + 4);
   });
   if (isTmuxSession(session)) {
     panel.querySelector('.panel-head')?.addEventListener('contextmenu', event => {
@@ -4621,7 +4608,7 @@ function updatePaneExpandButton(panel, session) {
   const button = panel.querySelector('[data-pane-expand]');
   if (button) button.hidden = !canPaneExpand(session);
   const minimize = panel.querySelector('[data-pane-minimize]');
-  if (minimize) minimize.hidden = !tabLayoutManipulationAllowed();
+  if (minimize) minimize.hidden = !canPaneMinimize(session);
 }
 
 function scheduleTerminalReferenceUnderlineRepaint(session) {
@@ -7493,6 +7480,7 @@ async function checkRuntimeCompatibilityOnce() {
 }
 
 async function boot() {
+  if (bootstrap.guestWorkspace) return bootShareWorkspace();
   installNativeAppViewportOwner();
   installPreviewScrollOwnershipCapture();
   installTouchContextMenuOwner();

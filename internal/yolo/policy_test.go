@@ -6,6 +6,7 @@ package yolo
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -268,5 +269,95 @@ func TestLoadAndEvaluateMissingOrMalformedRulesFailsClosed(t *testing.T) {
 		if decision.Action != Ask || decision.ReasonCode != "rules_file_unavailable" || decision.Error == "" {
 			t.Fatalf("LoadAndEvaluate(%q) = %#v, want fail-closed ask", path, decision)
 		}
+	}
+}
+
+func TestShellNewlineSafety(t *testing.T) {
+	policy := mustParse(t, "default: approve\nrules: []\n")
+	for _, command := range []string{
+		"echo safe\nrm -rf /",
+		"echo safe\nmkfs.ext4 /dev/sda1",
+		"\\\n rm -rf /",
+		"echo safe; \\\n \\\n rm -rf /",
+		"echo $\\\n(rm -rf /)",
+		"echo \"$\\\n(rm -rf /)\"",
+		"echo safe >\\\n /dev/sda",
+		"echo safe >/dev/s\\\nda",
+		"bash -c 'echo safe >\\\n /dev/sda'",
+		"echo $(echo safe >\\\n /dev/sda)",
+	} {
+		if got := Evaluate(policy, command, false); got.Action != Block {
+			t.Fatalf("%q = %+v, want block", command, got)
+		}
+	}
+	for _, command := range []string{"echo '\n' rm -rf /", "echo \"\n\" rm -rf /", "echo 'safe\nrm -rf /'", "echo safe\\\nrm -rf /", "echo \"safe\\\nrm -rf /\""} {
+		if got := Evaluate(policy, command, false); got.Action != Approve {
+			t.Fatalf("%q = %+v, want approve", command, got)
+		}
+	}
+	if got := Evaluate(policy, "echo safe # comment \\\n rm -rf /", false); got.Action != Ask {
+		t.Fatalf("continuation in a possible comment = %+v, want manual approval", got)
+	}
+}
+
+func TestShellContinuationDoesNotCreateAToken(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  []string
+	}{
+		{"\\\nprintf ok", []string{"printf", "ok"}},
+		{"printf \\\n ok", []string{"printf", "ok"}},
+		{"pri\\\nntf ok", []string{"printf", "ok"}},
+		{"printf \"\\\n\" ok", []string{"printf", "", "ok"}},
+		{"printf '\\\n' ok", []string{"printf", "\\\n", "ok"}},
+		{"printf \\\\\nnext", []string{"printf", "\\", ";", "next"}},
+		{"printf ok &\\\n& printf next", []string{"printf", "ok", "&&", "printf", "next"}},
+	} {
+		got, err := shellTokens(test.input)
+		if err != nil || !slices.Equal(got, test.want) {
+			t.Errorf("shellTokens(%q) = %q, %v, want %q", test.input, got, err, test.want)
+		}
+	}
+}
+
+func TestCodexCommandRowInterpretations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules.yaml")
+	for _, test := range []struct {
+		name, rows, rules string
+		want              Action
+	}{
+		{"escaped space before newline", "echo harmless \\ \nrm -rf /", "default: approve\n", Block},
+		{"newline hard floor", "echo harmless\nrm -rf /", "default: approve\n", Block},
+		{"continued command hard floor", "echo harmless; \\\nrm -rf /", "default: approve\n", Block},
+		{"continued substitution hard floor", "echo $\\\n(rm -rf /)", "default: approve\n", Block},
+		{"mixed hard floor", "echo harmless\nrm\n-rf /", "default: approve\n", Block},
+		{"mixed soft decision", "echo harmless\nrm\n/tmp/fixture", "default: approve\nrules:\n  - type: regex\n    match: '^echo harmless\\nrm /tmp/fixture$'\n    action: decline\n", Ask},
+		{"wrapped safe", "echo harmless\nfixture", "default: approve\n", Approve},
+		{"wrapped word crosses rule boundary", "echo /tmp/private-\nfixture", "default: approve\nrules:\n  - type: regex\n    match: '/tmp/private-fixture'\n    action: decline\n", Ask},
+		{"limit", strings.Repeat("echo harmless\n", 9) + "fixture", "default: approve\n", Ask},
+		{"unsupported exec", "echo harmless\nexec rm -rf /", "default: approve\n", Ask},
+		{"unsupported trap", "echo harmless\ntrap 'rm -rf /' EXIT", "default: approve\n", Ask},
+		{"single row normalization", "echo harmless  ", "default: ask\nrules:\n  - type: regex\n    match: '^echo harmless$'\n    action: approve\n", Approve},
+		{"unsupported control flow", "echo harmless\nif true; then rm -rf /; fi", "default: approve\n", Ask},
+		{"unsupported nested control flow", "echo harmless\nbash -c 'if true; then rm -rf /; fi'", "default: approve\n", Ask},
+		{"unsupported heredoc", "cat <<EOF\nfixture\nEOF", "default: approve\n", Ask},
+		{"unsupported", "echo harmless\n$COMMAND", "default: approve\n", Ask},
+		{"soft block", "echo harmless\nfixture", "default: block\n", Ask},
+		{"decline", "echo harmless\nfixture", "default: decline\n", Ask},
+		{"five breaks", strings.Repeat("echo harmless\n", 5) + "fixture", "default: approve\n", Approve},
+		{"six breaks", strings.Repeat("echo harmless\n", 6) + "fixture", "default: approve\n", Ask},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(test.rules), 0600); err != nil {
+				t.Fatal(err)
+			}
+			prompt := ClassifyPrompt("Would you like to run the following command?\nEnvironment: local\n$ "+test.rows+"\n› 1. Yes, proceed (y)\n  2. No (esc)\nPress enter to confirm or esc to cancel", "")
+			if !prompt.Actionable {
+				t.Fatalf("fixture = %+v", prompt)
+			}
+			if got := LoadAndEvaluatePrompt(path, prompt, false); got.Action != test.want {
+				t.Fatalf("decision = %+v, want %s", got, test.want)
+			}
+		})
 	}
 }

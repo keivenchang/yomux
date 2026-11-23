@@ -69,10 +69,10 @@ function relocalizeModalChrome(options = {}) {
   return true;
 }
 
-function globalShortcutTargetAllowsAppAction(target) {
+function globalShortcutTargetAllowsAppAction(target, {includeActiveElement = true} = {}) {
   const nodes = [
     typeof Element !== 'undefined' && target instanceof Element ? target : null,
-    document.activeElement,
+    includeActiveElement ? document.activeElement : null,
   ].filter(Boolean);
   if (!nodes.length) return true;
   const blocked = ['.xterm', '.terminal-pane', '.cm-editor', 'input', 'textarea', 'select', '[contenteditable="true"]'];
@@ -130,7 +130,7 @@ function handlePendingGlobalShortcutChord(event, key) {
 }
 
 function itemCanCloseWithAppShortcut(item) {
-  return isFileEditorItem(item) || isImageViewerItem(item);
+  return isFileEditorItem(item) || Boolean(gitDiffItemPath(item));
 }
 
 function toggleFileExplorerShortcut() {
@@ -234,6 +234,9 @@ function handleFocusedPanelSearchShortcut(event, {mod = appModifier(event), key 
 }
 
 function handleGlobalShortcutKeydown(event) {
+  if (bootstrap.guestWorkspace && event.ctrlKey
+      && event.target.closest?.('.share-screen')?.closest('[data-share-writable="true"]')
+      && shareTerminalControlInput(event) !== null) return;
   if (handleMarkdownFormattingShortcut(event)) return;
   if (handleFocusedTerminalCopyShortcut(event)) return;
   const focusedTerminalItem = focusedTerminal ? terminals.get(focusedTerminal) : null;
@@ -280,7 +283,7 @@ function handleGlobalShortcutKeydown(event) {
     event.preventDefault();
     event.stopPropagation();
     const item = currentActiveMenuItem();
-    if (itemCanCloseWithAppShortcut(item)) removeSessionFromLayout(item);
+    if (itemCanCloseWithAppShortcut(item)) closeLayoutTabItem(item);
     return;
   }
   if (mod && key === 'p' && platformActionAllowed) {
@@ -304,7 +307,7 @@ function handleGlobalShortcutKeydown(event) {
     if ((key === 'backspace' || key === 'delete') && globalShortcutTargetAllowsAppAction(event.target)) {
       event.preventDefault();
       const item = currentActiveMenuItem();
-      if (itemCanCloseWithAppShortcut(item)) removeSessionFromLayout(item);
+      if (itemCanCloseWithAppShortcut(item)) closeLayoutTabItem(item);
       return;
     }
     if (globalShortcutShouldToggleFinder(event, key, mod)) {

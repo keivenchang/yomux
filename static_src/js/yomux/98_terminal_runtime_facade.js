@@ -28,6 +28,20 @@ function currentClientEventTransportLifecycleScope() {
   return clientEventTransportLifecycleScope;
 }
 
+function paneItemHasCloseAction(item) {
+  return isTmuxSession(item) || isFileEditorItem(item) || Boolean(gitDiffItemPath(item));
+}
+
+function paneItemCloseDisabled(item) {
+  return isTmuxSession(item) && readOnlyMode;
+}
+
+function paneFrameCloseLabel(item) {
+  if (isTmuxSession(item)) return t('menu.tmux.kill');
+  if (isFileEditorItem(item) || gitDiffItemPath(item)) return t('finder.close', {name: itemLabel(item)});
+  return t('pane.closeTab');
+}
+
 function paneFrameControlsHtml(session, options = {}) {
   const role = paneRoleForSlot(options.slot || slotForItem(session));
   const controlOptions = role.controls === 'minimize-only'
@@ -40,7 +54,7 @@ function paneFrameControlsHtml(session, options = {}) {
   const add = spec => controls.push(toolbarButtonHtml({
     className: ['tab', spec.className, spec.platformKind ? platformWindowControlClass(spec.platformKind) : '', spec.active ? 'active' : ''].filter(Boolean).join(' '),
     dataset: disabled ? {} : spec.dataset,
-    disabled,
+    disabled: disabled || spec.disabled === true,
     hidden: spec.hidden === true,
     title: disabled ? unavailableTitle : spec.title,
     ariaLabel: spec.label,
@@ -49,9 +63,7 @@ function paneFrameControlsHtml(session, options = {}) {
   }));
   const includeActions = controlOptions.actions ?? isTmuxSession(session);
   const includeDetails = controlOptions.details === true;
-  const includeMinimize = controlOptions.minimize !== false
-    && !urlFlagEnabled('pane_popout')
-    && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
+  const includeMinimize = controlOptions.minimize !== false && canPaneMinimize(session);
   const includeExpand = controlOptions.expand !== false;
   const includePopout = controlOptions.popout === true && !urlFlagEnabled('pane_popout');
   if (includeActions) {
@@ -68,12 +80,13 @@ function paneFrameControlsHtml(session, options = {}) {
     add({className: 'pane-expand', platformKind: 'zoom', dataset: {paneExpand: session}, title: t('pane.expand'), label: t('pane.expand'), hidden: !canPaneExpand(session)});
   }
   if (includeMinimize) {
-    add({className: 'pane-minimize', platformKind: 'minimize', dataset: {paneMinimize: session}, title: t('pane.minimize'), label: t('pane.minimize'), hidden: !tabLayoutManipulationAllowed() && session !== tabberItemId});
+    add({className: 'pane-minimize', platformKind: 'minimize', dataset: {paneMinimize: session}, title: t('pane.minimize'), label: t('pane.minimize')});
   }
-  if (controlOptions.close) {
-    const closeLabel = controlOptions.closeLabel || t('pane.closeTab');
+  if (controlOptions.close ?? paneItemHasCloseAction(session)) {
+    const closeLabel = controlOptions.closeLabel || paneFrameCloseLabel(session);
     const closeTitle = controlOptions.closeTitle || closeLabel;
-    add({className: ['pane-close', controlOptions.closeClass || ''].filter(Boolean).join(' '), platformKind: 'close', dataset: {paneClose: session}, title: closeTitle, label: closeLabel});
+    const killDisabled = paneItemCloseDisabled(session);
+    add({className: ['pane-close', controlOptions.closeClass || ''].filter(Boolean).join(' '), platformKind: 'close', dataset: {paneClose: session}, title: killDisabled ? t('menu.common.adminOnly') : closeTitle, label: closeLabel, disabled: killDisabled});
   }
   return controls.join('');
 }
@@ -118,9 +131,6 @@ function panelControlsHtml(session, options = {}) {
       disabled,
       actions: isTmuxSession(session),
       details: true,
-      // In a one-column touch layout, X and minus remove only this selected tab. Showing them here
-      // makes the ordinary pane controls useful without offering a blank-the-last-pane action.
-      close: narrowPaneFrameActionTargetsTab(session),
     });
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
           ${terminalButtonHtml}
@@ -130,7 +140,7 @@ function panelControlsHtml(session, options = {}) {
 
 function virtualPanelControlsHtml(session, options = {}) {
   return `<div class="tabs virtual-panel-controls" role="tablist">
-          ${paneFrameControlsHtml(session, {actions: false, close: false, ...options})}
+          ${paneFrameControlsHtml(session, {actions: false, ...options})}
         </div>`;
 }
 

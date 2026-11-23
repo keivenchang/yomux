@@ -444,6 +444,7 @@ function stopPopoverEvent(event) {
 
 function closeOtherSessionPopovers(current, options = {}) {
   const force = options.force === true;
+  if (force) tabDescriptionOverlay.close({returnFocus: false});
   let changed = false;
   for (const other of Array.from(document.getElementsByClassName('popover-open'))) {
     if (!other.matches('.pane-tab, .panel-popover-zone')) continue;
@@ -1010,7 +1011,7 @@ function syncSessionTabLeadingActivityChrome(sessionNames = sessions) {
 
 function pullRequestCompactBadgesHtml(session, pr) {
   const numberHtml = pullRequestNumberIndicatorHtml(session, pr);
-  const statusHtml = pullRequestStatusIndicatorHtml(session, pr);
+  const statusHtml = pr?.provider ? '' : pullRequestStatusIndicatorHtml(session, pr);
   const ciHtml = pullRequestCiIndicatorHtml(session, pr);
   const reviewHtml = pullRequestApprovalIndicatorHtml(session, pr);
   return [numberHtml, statusHtml, ciHtml, reviewHtml].filter(Boolean).join('');
@@ -1067,16 +1068,17 @@ function subjectWithoutPullRequestNumber(subject) {
   return String(subject || '').replace(/\s*\(#\d+\)\s*$/, '').trim();
 }
 
-function githubPullRequestUrlFromGit(git, number) {
+function hostedPullRequestUrlFromGit(git, number) {
   const repoUrl = git?.github_repo?.url;
-  return repoUrl && number ? `${repoUrl}/pull/${number}` : '';
+  const path = git?.github_repo?.provider === 'gitlab' ? '/-/merge_requests/' : '/pull/';
+  return repoUrl && number ? `${repoUrl}${path}${number}` : '';
 }
 
 function pullRequestWithUrl(git, pr) {
   if (!pr?.number) return null;
   return {
     ...pr,
-    url: pr.url || githubPullRequestUrlFromGit(git, pr.number),
+    url: pr.url || hostedPullRequestUrlFromGit(git, pr.number),
   };
 }
 
@@ -1091,7 +1093,7 @@ function defaultBranchHeadPullRequestForGit(info, git) {
     number,
     title,
     description,
-    url: githubPullRequestUrlFromGit(git, number),
+    url: hostedPullRequestUrlFromGit(git, number),
     checks: {state: 'unknown'},
     // A (#NNNN) in the default branch's HEAD merge commit means that PR is, by definition, merged
     // (it is in main's history). Keep that fact semantic; shared lifecycle rendering localizes it.
@@ -1136,6 +1138,9 @@ function pullRequestAggregateLabel(pullRequests = []) {
 
 function pullRequestSummaryBadgesHtml(session, info) {
   const summary = sessionWorkSummary(session, info);
+  if (summary.pullRequests.some(pr => pr.provider === 'github' || pr.provider === 'gitlab')) {
+    return summary.pullRequests.map(pr => pullRequestCompactBadgesHtml(session, pr)).join('');
+  }
   if (summary.graphBacked && summary.pullRequests.length > 1) {
     return `<span class="${metadataBadgeClasses(session, 'pr', 'pr-number-indicator tab-symbol pr-aggregate-indicator')} badge-base">${esc(pullRequestAggregateLabel(summary.pullRequests))}</span>`;
   }
@@ -1179,14 +1184,15 @@ function defaultBranchBadgeHtml(session, info) {
   return `<span class="${metadataBadgeClasses(session, 'main', 'ci-indicator tab-symbol chip-base branch-indicator')}">MAIN</span>`;
 }
 
-function sessionWorkDescriptionSource(session, info) {
-  const summary = sessionWorkSummary(session, info);
+function sessionWorkDescriptionSource(session, info, options = {}) {
+  const summary = sessionTabWorkSummary(session, info, options);
   const git = summary.git;
   if (summary.graphBacked && summary.pullRequests.length > 1) return pullRequestAggregateLabel(summary.pullRequests);
-  const pr = summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, git)) : displayPullRequest(info);
+  const pr = summary.focusedPullRequest;
   if (pr?.number) {
     const title = pr.title || pr.description || '';
     const prefix = pullRequestLinkLabel(pr);
+    if (title && options.omitPullRequestPrefix === true) return title;
     return title ? `${prefix}: ${title}` : prefix;
   }
   const linear = summary.linearIssues;
@@ -1195,51 +1201,78 @@ function sessionWorkDescriptionSource(session, info) {
   const subject = currentBranchSubject(git);
   if (subject) return subject;
   if (git?.branch) return shortBranch(git.branch);
-  return projectDirName(session, info);
+  return projectDirName(session, info, summary);
 }
 
-function sessionWorkDescription(session, info, limit = 96) {
-  const description = sessionWorkDescriptionSource(session, info);
+function sessionWorkDescription(session, info, limit = 96, options = {}) {
+  const description = sessionWorkDescriptionSource(session, info, options);
   return Number.isFinite(limit) && limit > 0 ? shortText(description, limit) : description;
 }
 
 function sessionTabDescription(session, info) {
+  const windowDescription = sessionWindowDescriptionForPaneTab(session, info);
+  if (windowDescription) return shortText(windowDescription, 72);
   // A fresh Xterm can be fully interactive before transcript/repository metadata exists. Its tab
   // already identifies the session and tmux window, so a generic "Loading..." description implies
   // the terminal itself is blocked. Omit only this tab-local metadata until a real description arrives.
   if (!info) return '';
-  const summary = sessionWorkSummary(session, info);
-  if (summary.graphBacked && summary.pullRequests.length > 1) return pullRequestAggregateLabel(summary.pullRequests);
-  const pr = summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, summary.git)) : displayPullRequest(info);
-  if (pr?.number) {
-    const title = pr.title || pr.description || '';
-    if (title) return shortText(title, 72);
-  }
-  return sessionWorkDescription(session, info, 72);
+  return shortText(sessionWorkDescriptionSource(session, info, {omitPullRequestPrefix: true}), 72);
 }
 
-function tabMenuDetailText(item, info = transcriptMetadataState.payload.sessions?.[item]) {
+function sessionWindowDescriptionForPaneTab(session, info, options = {}) {
+  const context = paneTabWorkContext(session, info, options);
+  return tmuxWindowDescriptionForIndex(context.sourceInfo, context.windowIndex, {omitAutoSummaryPrefix: true});
+}
+
+function sessionTabDetailDescription(item, info, options = {}) {
+  return sessionWindowDescriptionForPaneTab(item, info, options) || sessionWorkDescriptionSource(item, info, options);
+}
+
+function tabSessionDescriptionPopover(item, options) {
+  const info = transcriptMetadataState.payload.sessions?.[item];
+  const {sourceSession, sourceInfo, windowIndex} = paneTabWorkContext(item, info, options);
+  const windowId = String(options.windowId || '');
+  const window = windowId ? sourceInfo?.window_metadata?.find(record => record.window_id === windowId) : null;
+  const index = window?.window_index ?? windowIndex;
+  const indexedWindow = tmuxWindowMetadataForIndex(sourceInfo, index);
+  if (windowId && indexedWindow?.window_id && indexedWindow.window_id !== windowId) return null;
+  const scopedInfo = sessionMetadataForLayoutItem(sourceSession, sourceInfo, index);
+  const agent = agentForPane(scopedInfo, scopedInfo?.selected_pane);
+  const auto = autoApproveStates.get(sourceSession)?.enabled === true;
+  return sessionPopoverNodeFromHtml(sessionPopoverHtml(sourceSession, scopedInfo, agent?.kind || '', auto,
+    undefined, {description: options.description, windowIndex: index}));
+}
+
+function tabMenuDetailText(item, info = transcriptMetadataState.payload.sessions?.[item], options = {}) {
   if (isInfoItem(item)) return t('tab.info.detail');
-  const summary = sessionWorkSummary(item, info);
-  const git = summary.git;
-  const parts = [];
-  if (git?.branch) parts.push(git.branch);
-  const path = panelFullPath(item, info);
-  if (path) parts.push(compactHomePath(path));
-  const pr = displayPullRequest(info);
+  if (isFileEditorItem(item)) return compactHomePath(fileItemPath(item));
+  const summary = sessionTabWorkSummary(item, info, options);
+  const desc = sessionTabDetailDescription(item, info, options);
+  const parts = desc ? [desc] : [];
+  for (const repo of summary.focusedRepositories || []) {
+    const branch = repoBranchDisplayText(repo);
+    if (branch) parts.push(branch);
+    if (repo.root) parts.push(compactHomePath(repo.root));
+  }
+  const paths = [summary.selectedPath, ...summary.focusedPaths];
+  for (const path of paths) if (path) parts.push(compactHomePath(path));
+  const pr = summary.focusedPullRequest;
   const linear = summary.linearIssues.map(issue => issue.identifier).filter(Boolean).join(', ');
   if (linear) parts.push(linear);
   if (summary.graphBacked && summary.pullRequests.length > 1) parts.push(pullRequestAggregateLabel(summary.pullRequests));
   else if (pr?.number) {
-    parts.push(pullRequestLinkLabel(pr));
+    const pullRequestLabel = pullRequestLinkLabel(pr);
+    if (!desc.includes(pullRequestLabel)) parts.push(pullRequestLabel);
   }
-  const desc = sessionWorkDescription(item, info, 180);
-  if (desc && !parts.includes(desc)) parts.push(desc);
-  return parts.join(' · ') || itemLabel(item);
+  return [...new Set(parts)].join(' · ') || itemLabel(item);
 }
 
-function projectDirName(session, info) {
+function projectDirName(session, info, workSummary = sessionTabWorkSummary(session, info)) {
   if (!info) return t('common.loading');
+  if (workSummary.graphBacked && workSummary.target) {
+    const path = workSummary.selectedPath || workSummary.selectedRepo?.cwd || '';
+    return pathBasename(path) || t('info.missing.path');
+  }
   const {gitRoot, gitCwd, selectedPath} = sessionTranscriptInfo(session);
   const repo = selectedSessionRepo(session, info);
   // Transcript/repository discovery can lag an already-connected terminal, especially for a
@@ -1274,7 +1307,7 @@ function filePopoverRows(path, state = {}) {
   const kind = state.kind === 'image' ? t('popover.kind.image') : state.kind === 'text' ? t('popover.kind.text') : state.kind || t('popover.kind.file');
   const status = state.dirty ? t('state.modified') : state.loading ? t('common.loading') : state.error ? String(state.error) : kind;
   const rows = [
-    popoverRow(t('common.field.path'), filePopoverPathHtml(path)),
+    popoverRow(t('common.field.path'), popoverPathHtml(path)),
   ];
   if (status && status !== kind) rows.push(popoverPairRow(t('popover.type'), esc(kind), t('popover.status'), esc(status)));
   else rows.push(popoverRow(t('popover.type'), esc(kind)));
@@ -1296,11 +1329,13 @@ function popoverCopyValueHtml(value, options = {}) {
   return `<span class="popover-copy-value">${esc(text)}</span>${pathCopyButtonHtml(text, {className: options.className || 'popover-copy-button', title: copyLabel, ariaLabel: options.ariaLabel || copyLabel})}`;
 }
 
-function filePopoverPathHtml(path) {
-  return `<span class="popover-copy-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'popover-copy-button'})}`;
+function popoverPathHtml(path, display = path) {
+  return path
+    ? `<span class="popover-copy-value">${esc(display)}</span>${pathCopyButtonHtml(path, {className: 'popover-copy-button'})}`
+    : esc(display);
 }
 
-function sessionPopoverSubtitleHtml(session, info, fallback = '') {
+function sessionPopoverSubtitleHtml(session, info, fallback = '', description) {
   const summary = sessionWorkSummary(session, info);
   const git = summary.git;
   const pr = pullRequestWithUrl(git, displayPullRequest(info));
@@ -1308,9 +1343,9 @@ function sessionPopoverSubtitleHtml(session, info, fallback = '') {
   if (isDefaultBranch(git)) chips.push(defaultBranchBadgeHtml(session, info));
   if (summary.graphBacked && summary.pullRequests.length > 1) chips.push(`<span class="popover-chip">${esc(pullRequestAggregateLabel(summary.pullRequests))}</span>`);
   else if (pr?.number) chips.push(pullRequestNumberChipLinkHtml(session, pr));
-  const text = pr?.number
+  const text = description ?? (pr?.number
     ? shortText(pr.title || pr.description || '', 220)
-    : String(fallback || '');
+    : String(fallback || ''));
   const textHtml = text ? `<span class="popover-subtitle-text">${esc(text)}</span>` : '';
   return `<div class="popover-subtitle">${chips.join('')}${textHtml}</div>`;
 }
@@ -1417,10 +1452,11 @@ function sessionPopoverActiveWindowIndex(session, info) {
   return tmuxWindowIndexKey(pane?.window ?? pane?.window_index);
 }
 
-function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
+function sessionPopoverSortedAgentWindows(session, info, autoPayload, windowIndex = null) {
   const activeWindowIndex = sessionPopoverActiveWindowIndex(session, info);
   const pidByIndex = sessionPopoverWindowPidByIndex(info);
   return sessionAgentWindowStatusPayloads(session, info, autoPayload)
+    .filter(agent => windowIndex == null || agentWindowIndex(agent) === String(windowIndex))
     .map((agent, index) => ({
       ...agent,
       _session: session,
@@ -1514,7 +1550,7 @@ function windowMetadataBranchHtml(git) {
 }
 
 function worktreePopoverValueHtml(worktree) {
-  return esc(worktreeDisplayText(worktree));
+  return popoverPathHtml(worktree.path, worktreeDisplayText(worktree));
 }
 
 function windowMetadataRowsHtml(row) {
@@ -1523,9 +1559,9 @@ function windowMetadataRowsHtml(row) {
   const rows = [];
   const paths = Array.isArray(row.paths) ? row.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
   const displayPaths = paths.length ? paths : (row.path ? [String(row.path)] : []);
-  for (const path of displayPaths) rows.push(popoverRow(t('common.field.path'), filePopoverPathHtml(path)));
+  for (const path of displayPaths) rows.push(popoverRow(t('common.field.path'), popoverPathHtml(path)));
   if (git.branch) rows.push(popoverRow(t('common.field.branch'), windowMetadataBranchHtml(git)));
-  if (git.root && !displayPaths.includes(git.root)) rows.push(popoverRow(t('popover.repo'), esc(git.root)));
+  if (git.root && !displayPaths.includes(git.root)) rows.push(popoverRow(t('popover.repo'), popoverPathHtml(git.root)));
   if (git.worktree) rows.push(popoverRow(t('popover.worktree'), worktreePopoverValueHtml(git.worktree)));
   if (git.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
   if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
@@ -1550,34 +1586,38 @@ function agentTranscriptRowsHtml(agent) {
   return rows.join('');
 }
 
-function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
+function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info), options = {}) {
   const summary = sessionWorkSummary(session, info);
   const git = summary.git;
-  const pr = pullRequestWithUrl(git, displayPullRequest(info));
+  const requests = summary.pullRequests.map(pr => pullRequestWithUrl(git, pr)).filter(Boolean);
+  const branch = git?.other_branches?.branches?.find(branch => branch.current);
   const linear = summary.linearIssues;
-  const pane = info?.selected_pane;
   const description = sessionWorkDescription(session, info, 220);
   const title = `${tmuxSessionDescriptorLabel(sessionLabel(session))} · ${projectDirName(session, info)}`;
-  const subtitle = description || git?.branch || pane?.current_path || t('git.noCheckout');
-  const subtitleHtml = sessionPopoverSubtitleHtml(session, info, subtitle);
+  const fullPath = panelFullPath(session, info);
+  const subtitle = description || git?.branch || fullPath || t('git.noCheckout');
+  const subtitleHtml = sessionPopoverSubtitleHtml(session, info, subtitle, options.description);
   const rows = [];
-  const stateValue = `${sessionStateHtml(state)} <span class="meta-muted">${esc(state.reason)}</span>`;
   const autoPayload = autoApproveStates.get(session);
+  const agentRows = sessionPopoverSortedAgentWindows(session, info, autoPayload, options.windowIndex);
+  const detailState = options.windowIndex == null ? state
+    : sessionAgentWindowStateForSummary(agentWindowStatusSummary(agentRows, session, {info}))
+      || stateValue(STATE_KEY.idle, stateReason('noActiveAgent'));
+  const stateHtml = `${sessionStateHtml(detailState)} <span class="meta-muted">${esc(detailState.reason)}</span>`;
   const autoElsewhere = autoApproveEnabledElsewhere(autoPayload);
   const autoText = autoEnabled ? t('yolo.on') : (autoElsewhere ? t('yolo.elsewhere') : '');
   const agentValue = agentKind
     ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}`
     : (autoText || `<span data-locale-text-key="agent.notDetected">${esc(t('agent.notDetected'))}</span>`);
-  const displayPath = panelFullPath(session, info) || pane?.current_path || t('common.notAvailable');
-  const agentRows = sessionPopoverSortedAgentWindows(session, info, autoPayload);
+  const displayPath = fullPath || t('common.notAvailable');
   const windowMetadataItems = sessionPopoverWindowMetadataItems(session, info, agentRows);
   const agentWindowsHtml = sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows, windowMetadataItems);
   const perWindowMetadata = Boolean(windowMetadataItems.length);
-  if (!perWindowMetadata) rows.push(popoverPairRow(t('common.stateLabel'), stateValue, t('common.agentLabel'), agentValue));
+  if (!perWindowMetadata) rows.push(popoverPairRow(t('common.stateLabel'), stateHtml, t('common.agentLabel'), agentValue));
   const activityText = popoverActivityText(session, git);
   if (activityText) rows.push(popoverRow(yoagentTabLabel(), esc(activityText)));
   if (!perWindowMetadata) {
-    rows.push(popoverRow(t('common.field.path'), esc(displayPath)));
+    rows.push(popoverRow(t('common.field.path'), popoverPathHtml(fullPath, displayPath)));
     if (git?.branch) rows.push(popoverRow(t('common.field.branch'), sessionBranchValueHtml(session, info)));
   }
   let linearValue = '';
@@ -1588,12 +1628,12 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
     if (linearValue) rows.push(popoverRow(t('info.field.linear'), linearValue));
     if (linearDesc) rows.push(popoverRow(t('common.details'), linearDesc));
   }
-  if (pr?.number) {
-    rows.push(popoverRow(t('common.pullRequestShort'), pullRequestPopoverRowHtml(session, pr)));
-  }
+  for (const pr of requests) rows.push(popoverRow(t('common.pullRequestShort'), pullRequestPopoverRowHtml(session, pr)));
+  for (const issue of branch?.github_issues || []) rows.push(popoverRow('GitHub', githubIssueLinkHtml(issue)));
+  if (!requests.length && git?.github_repo?.provider) rows.push(popoverRow(t('popover.repo'), hostedRepositoryLinkHtml(git.github_repo)));
   const subject = currentBranchSubject(git);
-  if (subject && !pr?.number) rows.push(popoverRow(t('common.descriptionShort'), `<div class="popover-desc">${esc(subject)}</div>`));
-  if (!perWindowMetadata && git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), esc(git.root)));
+  if (subject && !requests.length) rows.push(popoverRow(t('common.descriptionShort'), `<div class="popover-desc">${esc(subject)}</div>`));
+  if (!perWindowMetadata && git?.root && git.root !== fullPath) rows.push(popoverRow(t('popover.repo'), popoverPathHtml(git.root)));
   // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
   if (!perWindowMetadata && git?.worktree) rows.push(popoverRow(t('popover.worktree'), worktreePopoverValueHtml(git.worktree)));
   if (!perWindowMetadata && git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
@@ -1631,7 +1671,7 @@ function linearInlineHtml(issues) {
   for (const issue of issues || []) {
     const label = issue.identifier || '';
     if (!label) continue;
-    const link = linkHtml(issue.url, label, issue.title || '');
+    const link = linkHtml(issue.url || linearIssueUrl(label), label, issue.title || '');
     if (!link) continue;
     const state = issue.state ? `<span class="meta-muted"> ${esc(issue.state)}</span>` : '';
     parts.push(`${link}${state}`);
@@ -1663,7 +1703,16 @@ function branchLinkHtml(git, branchName) {
 
 function linearIssueHtml(issue) {
   const label = `${issue.identifier}${issue.state ? ` ${issue.state}` : ''}`;
-  return linkHtml(issue.url, label, issue.title || '');
+  return linkHtml(issue.url || linearIssueUrl(issue.identifier), label, issue.title || '');
+}
+
+function githubIssueLinkHtml(issue) {
+  return linkHtml(issue.url, `GitHub Issue ${issue.identifier}`, issue.title || '');
+}
+
+function hostedRepositoryLinkHtml(repo) {
+  const label = repo.provider === 'gitlab' ? 'GitLab' : 'GitHub';
+  return linkHtml(repo.url, label, repo.url);
 }
 
 function linearIssueUrl(identifier) {
@@ -1679,9 +1728,8 @@ function linearIssueLinkHtml(identifier) {
 
 function pullRequestLinkForBranch(git, branch) {
   const pr = branch?.pull_request;
-  const repoUrl = git?.github_repo?.url;
   if (!pr?.number) return '';
-  const url = pr.url || (repoUrl ? `${repoUrl}/pull/${pr.number}` : '');
+  const url = pr.url || hostedPullRequestUrlFromGit(git, pr.number);
   return linkHtml(url, pullRequestLinkLabel(pr), pr.title || pr.description || branch.subject || '', pullRequestStatusClass(pr));
 }
 

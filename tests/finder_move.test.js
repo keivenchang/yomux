@@ -27,7 +27,10 @@ function setup(answer = 'no') {
     fileExplorerSyncUserExpansionState: new Map(), fileExplorerSyncManualCollapsedPaths: new Set(), fileExplorerSyncTargetRecords: new Map(), fileExplorerSelectionLead: null,
     fileExplorerSelectionAnchor: '/from/a/child', fileTreeRenamePath: null,
     fileEditorSaveOwners: new Map(), fileState: new Map(),
-    showFileEditorDecisionDialog: async options => { calls.push(['modal', options]); return answer; },
+    showFileEditorDecisionDialog: async options => {
+      calls.push(['modal', options]);
+      return options.className === 'finder-move-dialog' ? 'yes' : answer;
+    },
     apiFetchJson: async (url, options) => { calls.push(['request', url, JSON.parse(options.body)]); return {complete: true, moved: [{old_path: '/from/a', path: '/to/a'}]}; },
     fileErrorMessageSnapshot: error => String(error),
     syncOpenFileContentFromPanels: () => {},
@@ -82,25 +85,55 @@ const transfer = text => ({types: ['text/plain'], files: [], getData: type => ty
     }
   }
   let {context, calls} = setup();
-  assert.equal(context.finderMoveDestinationHtml('/a/b/c/d', '/a/b/x/y'), '/a/b/<strong>x/y</strong>');
-  assert.equal(context.finderMoveDestinationHtml('/a/b/c/file.md', '/a/b/x/file.md'), '/a/b/<strong>x</strong>/file.md');
-  assert.equal(context.finderMoveDestinationHtml('/a/b/file.md', '/a/file.md'), '/a/file.md');
-  assert.equal(context.finderMoveDestinationHtml('/a/file.md', '/a/x/file.md'), '/a/<strong>x</strong>/file.md');
-  assert.equal(context.finderMoveDestinationHtml('/a/file.md', '/a/<img>/file.md'), '/a/<strong>&lt;img&gt;</strong>/file.md');
-  assert.equal(context.finderMoveDestinationHtml('/a/b/c/d/file.md', '/a/x/c/y/file.md'), '/a/<strong>x</strong>/c/<strong>y</strong>/file.md');
+  const accent = text => `<strong class="finder-move-diff">${text}</strong>`;
+  const compare = (source, target) => ({...context.finderMovePathDiffHtml(source, target)});
+  assert.deepEqual(compare('/a/b/c/file.md', '/a/b/x/file.md'), {
+    sourceHtml: `/a/b/${accent('c')}/file.md`, targetHtml: `/a/b/${accent('x')}/file.md`,
+  });
+  assert.deepEqual(compare('/a/file.md', '/a/<img>/file.md'), {
+    sourceHtml: '/a/file.md', targetHtml: `/a/${accent('&lt;img&gt;')}/file.md`,
+  });
+  assert.deepEqual(compare('/a/file.md', '/a/file.md'), {
+    sourceHtml: '/a/file.md', targetHtml: '/a/file.md',
+  });
   assert.equal(context.finderMoveTargetPath('/a/file.md', '/'), '/file.md');
-  assert.equal(context.finderMoveDestinationHtml('/a/file.md', '/file.md'), '/file.md');
-  assert.equal(context.finderMoveDestinationHtml('/a/a/file.md', '/a/b/a/file.md'), '/a/<strong>b</strong>/a/file.md');
-  const batch = context.finderMoveConfirmationHtml(['/from/one.md', '/from/two.md'], '/to');
-  assert.equal((batch.match(/class="finder-move-comparison"/g) || []).length, 2);
-  assert(batch.includes('/<strong>to</strong>/one.md') && batch.includes('/<strong>to</strong>/two.md'));
   assert.deepEqual([...context.moveSources(transfer('/a\n/a/b\n/a\n/b c'))], ['/a', '/b c']);
   assert.deepEqual([...context.moveSources(transfer('file:///tmp/a%20b'))], ['/tmp/a b']);
   for (const text of ['relative', 'https://example.com/a', 'file://other-host/a', 'file:///a#b', '']) assert.throws(() => context.moveSources(transfer(text)));
   assert.throws(() => context.moveSources({types: ['Files'], files: [{name: 'a'}]}));
-  await context.move(['/from/a'], '/to');
-  assert.equal(calls.filter(call => call[0] === 'request').length, 0, 'No must never mutate');
-  assert.equal(calls[0][1].focusSelector, '[data-dialog-action="no"]');
+  ({context, calls} = setup({action: 'stop'}));
+  const destination = '/home/keivenc/dev/yomux/deleteme';
+  const target = `${destination}/dangling-link`;
+  context.apiFetchJson = async (url, options) => {
+    calls.push(['request', url, JSON.parse(options.body)]);
+    throw Object.assign(new Error('collision'), {payload: {
+      error: {code: 'target_exists', details: {path: target, source_kind: 'file', target_kind: 'symlink'}},
+    }});
+  };
+  assert.equal(await context.move([`${destination}/keep-reference-dir/dangling-link`], destination), false);
+  assert.deepEqual(calls.filter(call => call[0] === 'request').map(call => call[2].resolutions), [{}]);
+  const dialog = calls.find(call => call[0] === 'modal' && call[1].className.includes('conflict'))[1];
+  assert.equal(dialog.focusSelector, '[data-dialog-action="stop"]');
+  assert(dialog.bodyHtml.includes(`<span>${destination}/${accent('keep-reference-dir')}/dangling-link</span>`));
+  assert(dialog.bodyHtml.includes(`<span>${target}</span>`));
+  ({context, calls} = setup({action: 'keep_both', applyToAll: true}));
+  context.__batchMappings = [];
+  context.applyFileTreePathMapping = (oldPath, newPath) => context.__batchMappings.push([oldPath, newPath]);
+  const batchSources = ['/one/a.txt', '/two/a.txt'];
+  const batchReceipt = batchSources.map((old_path, index) => ({old_path, path: `/destination/a copy${index ? ' 2' : ''}.txt`}));
+  context.apiFetchJson = async (url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push(['request', url, body]);
+    if (!Object.keys(body.resolutions).length) throw Object.assign(new Error('collision'), {
+      payload: {error: {code: 'target_exists', details: {path: '/destination/a.txt', source_kind: 'file', target_kind: 'file'}}},
+    });
+    assert.deepEqual(body.resolutions, {'/one/a.txt': 'keep_both', '/two/a.txt': 'keep_both'});
+    return {complete: true, moved: batchReceipt};
+  };
+  assert.equal(await context.move(batchSources, '/destination'), true);
+  assert.equal(calls.filter(call => call[0] === 'modal' && call[1].className.includes('conflict')).length, 1, 'Apply to All asks once');
+  assert.equal(calls.filter(call => call[0] === 'request').length, 2);
+  assert.deepEqual(context.__batchMappings, batchReceipt.map(row => [row.old_path, row.path]));
   ({context, calls} = setup('yes'));
   let release;
   context.apiFetchJson = async () => { calls.push(['request']); return new Promise(resolve => { release = resolve; }); };

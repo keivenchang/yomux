@@ -48,6 +48,7 @@ go_test_pair(
     race_shard_count = 4,
     shard_count = 4,
     deps = [
+        "//internal/atomicfile:atomicfile_lib",
         "//internal/testsupport:testsupport_lib",
         "@com_github_go_git_go_billy_v5//:go_default_library",
     ],

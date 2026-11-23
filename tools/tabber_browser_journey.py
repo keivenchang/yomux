@@ -26,6 +26,18 @@ function numericVisibleHistoryLines(term) {
 }
 """
 
+NORMAL_PANE_CONTROLS_SOURCE = """
+function normalPaneControlsAreVisible(item) {
+  const visible = node => Boolean(node?.getClientRects().length
+    && getComputedStyle(node).visibility === 'visible');
+  const key = CSS.escape(item);
+  const actions = '.dockview-pane-header-actions';
+  return !visible(document.querySelector(`.dockview-pane-tab[data-pane-tab="${key}"]`))
+    && visible(document.querySelector(`${actions} [data-pane-minimize="${key}"]`))
+    && visible(document.querySelector(`${actions} [data-pane-close="${key}"]`));
+}
+"""
+
 
 def normal_journey_resource_snapshot(driver, tmux):
     """Retain namespace and scheduling evidence without exposing ambient environment values."""
@@ -300,8 +312,7 @@ def normal_tabber_journey(driver, tmux, sessions, file_path=None):
     for close in driver.find_elements("css selector", "[data-toast-close]"):
         if close.is_displayed():
             close.click()
-    # Conversation chrome belongs to the sidebar; each terminal has a headerless singleton.
-    geometry = driver.execute_script('''
+    geometry = driver.execute_script(NORMAL_PANE_CONTROLS_SOURCE + '''
       const groups = dockviewLayoutState.api.groups;
       const row = document.querySelector('#panel-__tabber__ .file-tree-row[data-tabber-session="' + arguments[1] + '"]');
       const title = row.querySelector('.tabber-normal-primary').getBoundingClientRect();
@@ -310,7 +321,20 @@ def normal_tabber_journey(driver, tmux, sessions, file_path=None):
       const date = dateElement.getBoundingClientRect();
       const contentGroups = groups.filter(group => group.panels.some(panel => panel.id !== '__tabber__'));
       return {singleton: groups.every(group => group.panels.length === 1),
-        hidden: contentGroups.length > 0 && contentGroups.every(group => group.header.hidden),
+        frameControls: contentGroups.length > 0
+          && contentGroups.every(group => normalPaneControlsAreVisible(group.panels[0].id)),
+        frameState: contentGroups.map(group => {
+          const item = group.panels[0].id;
+          const key = CSS.escape(item);
+          const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${key}"]`);
+          const header = tab?.closest('.dv-groupview')?.querySelector('.dockview-pane-header-actions');
+          const state = node => node ? {rects:node.getClientRects().length, visibility:getComputedStyle(node).visibility, hidden:node.hidden} : null;
+          return {item, active:group.activePanel?.id, groupHeader:group.header.hidden, slot:slotForItem(item),
+            selected:[...tabberNormalSelections], tab:state(tab), header:state(header),
+            minimize:state(header?.querySelector(`[data-pane-minimize="${key}"]`)),
+            close:state(header?.querySelector(`[data-pane-close="${key}"]`)),
+            headerActions:[...header?.querySelectorAll('button[data-pane-close], button[data-pane-minimize]') || []].map(button => ({...button.dataset}))};
+        }),
         twoLineClass: row.classList.contains('tabber-normal-row'),
         secondLine: description.top >= title.bottom, dateVisible: date.width > 0 && dateElement.textContent.trim().endsWith('ago'),
         dateAligned: !date.width || Math.abs(title.top-date.top) < 4,
@@ -433,14 +457,13 @@ def normal_tabber_journey(driver, tmux, sessions, file_path=None):
         wait.until(lambda browser: browser.execute_script('return !itemInLayout(arguments[0]);', result))
         click_visible_selector(driver, selector)
         wait.until(lambda browser: browser.execute_script('return itemInLayout(arguments[0]);', result))
-        assert driver.execute_script('''
+        assert driver.execute_script(NORMAL_PANE_CONTROLS_SOURCE + '''
           return panelNodes.get(arguments[0]) === window.__normalFilePanel
             && panelNodes.get(arguments[0])._cmView === window.__normalFileView
             && window.__normalFileView.state.doc.toString() === arguments[1]
             && fileState.get(arguments[2]).content === arguments[1]
           && dockviewLayoutState.api.groups.every(group => group.panels.length === 1)
-          && dockviewLayoutState.api.groups.filter(group => group.panels.some(panel => panel.id !== '__tabber__'))
-            .every(group => group.header.hidden);
+          && normalPaneControlsAreVisible(arguments[0]);
         ''', result, state['text'], str(file_path))
         selected([result])
     # Advanced re-enables the same drag owner and native Dockview admission.
@@ -617,7 +640,7 @@ def normal_multiwindow_journey(driver, tmux, session):
       const input = arguments[0];
       return {value: input.value, focused: document.activeElement === input, connected: input.isConnected,
         selectionStart: input.selectionStart, selectionEnd: input.selectionEnd,
-        modelDescription: tabberWindowDescription(arguments[1], 1)};
+        modelDescription: tmuxWindowDescriptionForIndex(transcriptMetadataState.payload.sessions[arguments[1]], 1)};
     ''', value, session)
     print('Go Normal description typed: ' + json.dumps(typed_description, sort_keys=True), flush=True)
     dialog.find_element('css selector', '.session-rename-submit').click()

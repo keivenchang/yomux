@@ -22,6 +22,7 @@ function fileEditorWrapForPath(path, state = null) {
 
 function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
+  if (fileState.get(path)?._shareActive && mode !== 'edit' && mode !== 'split' && !(bootstrap.guestWorkspace && mode === 'preview')) mode = 'edit';
   const state = fileEditorStateForItem(path, item);
   if (state?.historical === true && mode !== 'preview' && mode !== 'diff') mode = 'diff';
   if (state?.historical !== true && mode !== 'diff' && previewRendererForPath(path, state)?.previewOnly === true) mode = 'preview';
@@ -807,8 +808,7 @@ function setEditorWrapEnabled(enabled) {
   applyEditorWrapPreference();
 }
 
-// toggle inline git blame. Fetch the blame payload for each open text file first (so the
-// re-rendered editor's blame ViewPlugin has data), then re-render with each panel's OWN item.
+// Reconfigure blame in place so shared editor revisions and local undo survive the preference change.
 async function applyEditorBlamePreference() {
   for (const panel of document.querySelectorAll('.file-editor-panel')) {
     const blameButton = panel.querySelector('.file-editor-blame-panel');
@@ -818,7 +818,7 @@ async function applyEditorBlamePreference() {
     updateFileEditorBlameButton(blameButton, path, state, item);
     if (!path || state?.kind !== 'text') continue;
     if (fileEditorBlameEnabled && editorViewModeFor(path, item) === 'edit' && fileEditorBlameControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
-    renderFileEditorPanel(panel, item);
+    if(!reconfigureCodeMirrorPanelBlame(panel))renderFileEditorPanel(panel,item);
   }
 }
 
@@ -1525,9 +1525,7 @@ function applySettingsPayload(payload, options = {}) {
   } else if (groupChanged.previewPopouts) {
     refreshFilePreviewPopouts();
   }
-  // the blame ViewPlugin decorates per fileEditorBlameAllLines at build time + the editor
-  // config signature carries it, so re-render open editors when the toggle changes (only matters while
-  // blame is on).
+  // Existing views keep their collaboration and history fields while blame decorations change.
   if (previousBlameAllLines !== fileEditorBlameAllLines && fileEditorBlameEnabled) applyEditorBlamePreference();
   // i18n: when general.language changes, load the new catalog and re-render localized surfaces.
   const nextLocale = resolveLocalePref(initialSetting('general.language', 'system'));

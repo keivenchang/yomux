@@ -3,6 +3,8 @@
 """Live editor settings and late callbacks preserve editor ownership."""
 
 import json
+import os
+import sqlite3
 import subprocess
 import time
 from urllib.parse import quote
@@ -19,7 +21,7 @@ from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.browser_helpers.browser_layout import BROWSER_WAIT_HELPER_SOURCE, browser_screenshot_rgb, select_current_value
 from tests.browser_helpers.browser_console import assert_only_expected_browser_network_error
 from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
-from tests.browser_helpers.native_pointer import click_visible_selector
+from tests.browser_helpers.native_pointer import cdp_drag_hold, cdp_release, click_visible_selector
 from tests.browser_helpers.native_file_actions import rename_finder_file_with_native_input
 from tests.browser_helpers.native_keyboard import native_document_start, native_editor_modifier, native_logical_key
 from tests.gate_harness import _retire_fixture_background_producers
@@ -187,6 +189,221 @@ def test_finder_delete_preserves_native_unsaved_edits(browser, isolated_dev_serv
     else:
         assert path.read_text(encoding='utf-8') == 'disk bytes\n'
         consume_only_expected_js_debug_api_error(browser, path='/api/fs/delete', status=403, method='POST', query={})
+
+
+@pytest.mark.parametrize('trigger', ['watch', 'held-reload', 'atomic-replacement', 'hidden-tab'])
+def test_markdown_disk_update_keeps_xterm_focus(browser, isolated_dev_server_factory, request, trigger):
+    server = isolated_dev_server_factory('markdown-disk-focus', session_count=2 if trigger == 'hidden-tab' else 1)
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    path = server.paths.home_dir / 'external.md'
+    path.write_text('# Original\n', encoding='utf-8')
+    _open_relocation_editor(browser, server, path)
+    session = server.tmux.sessions[0]
+    peer = server.tmux.sessions[1] if trigger == 'hidden-tab' else ''
+    setup = browser.execute_async_script("""
+      const [path, session, peer, trigger, done] = arguments;
+      (async () => {
+        const item = fileEditorTabItemsForPath(path)[0];
+        setFileEditorViewMode(path, 'preview', item);
+        applyLayoutSlots({[layoutTreeKey]: splitNode('row', leafNode('left'), leafNode('right'), 50),
+          left: paneStateWithTabs([session], session), right: paneStateWithTabs([item], item)});
+        const terminal = () => terminals.get(session)?.term?.textarea;
+        const view = () => panelNodes.get(item)?._pmView;
+        await window.__yomuxTestWaitFor(() => view()?.dom.isConnected && terminal()?.isConnected,
+          {timeoutMs: 10000});
+        if (trigger === 'watch' || trigger === 'held-reload') {
+          view().focus();
+          if (document.activeElement !== view().dom) throw new Error('Markdown did not receive focus');
+        } else {
+          if (trigger === 'hidden-tab') {
+            applyLayoutSlots({[layoutTreeKey]:splitNode('row',leafNode('left'),leafNode('right'),50),
+              left:paneStateWithTabs([session],session),right:paneStateWithTabs([peer,item],peer)});
+            if (visibleFileEditorWatchFiles().includes(path)) throw new Error('Markdown tab was not hidden');
+          }
+          terminals.get(session).term.focus();
+        }
+        await syncServerWatchRoots({immediate:true,force:true});
+        await window.__yomuxTestWaitFor(() => serverWatchRootsState.registered && !serverWatchRootsState.inFlight,
+          {timeoutMs:10000});
+        window.__markdownDiskFocusEvents = [];
+        document.addEventListener('focusin', e => window.__markdownDiskFocusEvents.push(e.target === view()?.dom ? 'markdown' : 'other'));
+        if (trigger === 'held-reload') {
+          const fetchOriginal = window.fetch;
+          window.fetch = (url, options) => {
+            const response = fetchOriginal(url, options);
+            if (!String(url).startsWith('/api/fs/read?') || new URL(url, location.href).searchParams.get('path') !== path) return response;
+            window.fetch = fetchOriginal;
+            return new Promise(resolve => { window.__releaseMarkdownRead = () => resolve(response); });
+          };
+        }
+        return {item};
+      })().then(done, error => done({error:String(error.stack || error)}));
+    """, str(path), session, peer, trigger)
+    assert 'error' not in setup, setup
+    if trigger == 'held-reload':
+        browser.execute_script("""
+          const original=handleClientPushEvent;
+          handleClientPushEvent=(type,payload,envelope) =>
+            ['fs_changed','files_changed'].includes(type) ? undefined : original(type,payload,envelope);
+        """)
+    expected = '# Edited externally\n'
+    if trigger == 'atomic-replacement':
+        expected = '# Replaced\n'
+        old_info = path.stat()
+        replacement = path.with_suffix('.tmp')
+        replacement.write_text(expected, encoding='utf-8')
+        os.utime(replacement, ns=(old_info.st_atime_ns, old_info.st_mtime_ns))
+        replacement.replace(path)
+        assert (path.stat().st_size, path.stat().st_mtime_ns) == (old_info.st_size, old_info.st_mtime_ns)
+    else:
+        path.write_text(expected, encoding='utf-8')
+    if trigger == 'watch':
+        WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
+            'return !!fileState.get(arguments[0])?.externalReloadDeferred', str(path)))
+    elif trigger == 'held-reload':
+        browser.execute_script('window.__markdownReload = reloadOpenFileFromDisk(arguments[0]);', str(path))
+        WebDriverWait(browser, 10).until(lambda driver: driver.execute_script('return !!window.__releaseMarkdownRead'))
+    clicked = browser.execute_script("""
+      const terminal=terminals.get(arguments[0]).term;
+      terminal.focus();
+      return document.activeElement === terminal.textarea;
+    """, session)
+    assert clicked
+    if trigger == 'held-reload':
+        browser.execute_script('window.__releaseMarkdownRead();')
+    if trigger == 'hidden-tab':
+        browser.execute_script("""
+          const [session,peer,item]=arguments;
+          applyLayoutSlots({[layoutTreeKey]:splitNode('row',leafNode('left'),leafNode('right'),50),
+            left:paneStateWithTabs([session],session),right:paneStateWithTabs([peer,item],item)},
+            {activeOnlyActivation:true});
+        """, session, peer, setup['item'])
+    WebDriverWait(browser, 6).until(lambda driver: driver.execute_script("""
+      return panelNodes.get(arguments[0])?._pmView?.state.doc.textContent === arguments[1];
+    """, setup['item'], expected.removeprefix('# ').strip()))
+    result = browser.execute_async_script("""
+      const [session,path,done]=arguments;
+      requestAnimationFrame(() => requestAnimationFrame(() => done({
+        terminalFocused:document.activeElement === terminals.get(session).term.textarea,
+        pane:focusedPanelItem,
+        markdownFocused:window.__markdownDiskFocusEvents.includes('markdown'),
+        content:fileState.get(path).original
+      })));
+    """, session, str(path))
+    assert result == {'terminalFocused': True, 'pane': session, 'markdownFocused': False,
+                      'content': expected}, result
+
+
+@pytest.mark.parametrize('format_name', ['graphviz', 'invalid-graphviz', 'sqlite'])
+def test_file_preview_graphviz_and_sqlite(browser, isolated_dev_server_factory, request, format_name):
+    server = isolated_dev_server_factory('graph-and-database-preview')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    home = server.paths.home_dir
+    if format_name == 'sqlite':
+        path = home / 'fixture.sqlite'
+        with sqlite3.connect(path) as database:
+            database.execute('CREATE TABLE records (id INTEGER PRIMARY KEY, name TEXT)')
+            database.executemany('INSERT INTO records VALUES (?, ?)', [(i, f'row {i}') for i in range(1, 56)])
+            database.execute('CREATE TABLE sample (value TEXT)')
+            database.execute("INSERT INTO sample VALUES ('<b>literal</b>')")
+        database.close()
+    else:
+        path = home / ('diagram.dot' if format_name == 'graphviz' else 'bad.gv')
+        path.write_text('digraph G { Start -> Finish }' if format_name == 'graphviz' else 'digraph { Start -> }',
+                        encoding='utf-8')
+    session = server.tmux.sessions[0]
+    browser.get(server.base_url + f'/?sessions={session}&layout=left&tabs=left:{session}')
+    browser.execute_script(BROWSER_WAIT_HELPER_SOURCE)
+    opened = browser.execute_async_script("""
+      const [path, done] = arguments;
+      (async () => {
+        await window.__yomuxTestWaitFor(() => typeof openFileInEditor === 'function' && initialAppShellPainted);
+        return await openFileInEditor(path, basenameOf(path), {userInitiated:true});
+      })().then(item => done({item}), error => done({error:String(error.stack || error)}));
+    """, str(path))
+    assert opened.get('item'), opened
+    item = opened['item']
+    if format_name == 'graphviz':
+        WebDriverWait(browser, 15).until(lambda driver: driver.execute_script("""
+          const host = panelNodes.get(arguments[0])?.querySelector('.graphviz-preview-result');
+          return host?.querySelector('img')?.naturalWidth > 0 && host.querySelector('[data-preview-zoom-action="fit"]');
+        """, item))
+        assert browser.execute_async_script("""
+          const [path, done] = arguments;
+          (async () => {
+            const snapshot = await renderedPreviewSnapshotAsync(path, fileState.get(path).content);
+            const root = document.createElement('div');
+            applyPreviewSnapshotRoot(root, snapshot);
+            const image = root.querySelector('.graphviz-preview-result img');
+            await image.decode();
+            return image.naturalWidth > 0;
+          })().then(done, error => done(String(error)));
+        """, str(path)) is True
+        return
+    if format_name == 'invalid-graphviz':
+        WebDriverWait(browser, 15).until(lambda driver: driver.execute_script("""
+          return panelNodes.get(arguments[0])?.querySelector('.graphviz-preview-result')?.textContent.includes('Graphviz parse error');
+        """, item))
+        return
+    WebDriverWait(browser, 15).until(lambda driver: driver.execute_script("""
+      const host = panelNodes.get(arguments[0])?.querySelector('.sqlite-preview-result');
+      return host?.querySelectorAll('tbody tr').length === 50 && host.querySelector('details pre').textContent.includes('CREATE TABLE');
+    """, item))
+    host_selector = '.sqlite-preview-result'
+    browser.find_element(By.CSS_SELECTOR, f'{host_selector} .sqlite-preview-pages button:last-child').click()
+    WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("""
+      return document.querySelector('.sqlite-preview-result tbody td')?.textContent === '51';
+    """))
+    reload_button = browser.find_element(By.CSS_SELECTOR, f'{host_selector} > button')
+
+    def refresh_from_disk():
+        refreshed = browser.execute_async_script("""
+          const [path, done] = arguments;
+          refreshOpenFilesIfChanged({paths:[path], fresh:true}).then(() => done(true), error => done(String(error)));
+        """, str(path))
+        assert refreshed is True, refreshed
+
+    browser.execute_script("""
+      window.__sqliteFetch = window.fetch;
+      window.fetch = async (...args) => {
+        const url = new URL(String(args[0]), location.href);
+        const response = await window.__sqliteFetch(...args);
+        if (url.pathname !== '/api/fs/sqlite-preview' || url.searchParams.get('table') !== 'sample') return response;
+        window.fetch = window.__sqliteFetch;
+        return new Promise(resolve => { window.__releaseSQLiteSelection = () => resolve(response); });
+      };
+    """)
+    try:
+        select_current_value(browser, f'{host_selector} select', 'sample')
+        WebDriverWait(browser, 10).until(lambda driver: driver.execute_script('return !!window.__releaseSQLiteSelection'))
+        browser.execute_script('document.activeElement.blur()')
+        with sqlite3.connect(path) as database:
+            database.execute("INSERT INTO sample VALUES ('new row')")
+        database.close()
+        refresh_from_disk()
+        WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("""
+          return document.querySelector('.sqlite-preview-result tbody tr:last-child td')?.textContent === 'new row';
+        """))
+    finally:
+        browser.execute_script('window.fetch = window.__sqliteFetch; window.__releaseSQLiteSelection?.()')
+    WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("""
+      const cell = document.querySelector('.sqlite-preview-result tbody td');
+      return cell?.textContent === '<b>literal</b>' && cell.children.length === 0;
+    """))
+    with sqlite3.connect(path) as database:
+        database.execute('DROP TABLE sample')
+    database.close()
+    refresh_from_disk()
+    WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("""
+      const preview = document.querySelector('.sqlite-preview-result');
+      return preview?.querySelector('select').value === 'records' &&
+        preview.querySelectorAll('tbody tr').length === 50;
+    """))
+    assert browser.find_element(By.CSS_SELECTOR, f'{host_selector} > button') == reload_button
+    reload_button.click()
+    WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("""
+      return document.querySelector('.sqlite-preview-result tbody tr:last-child td')?.textContent === '50';
+    """))
 
 
 def test_delayed_watch_snapshot_keeps_identity_from_native_save(browser, isolated_dev_server_factory, request):
@@ -792,7 +1009,7 @@ def test_native_save_close_discard_reopen(browser, isolated_dev_server_factory, 
         assert watched['original'] == disk and watched['dirty'] is False, evidence
 
 
-@pytest.mark.parametrize("action", ["reload", "compare"])
+@pytest.mark.parametrize("action", ["merge-draft", "merge-disk"])
 def test_native_retired_conflict_dialog_preserves_reopened_dirty_editor(browser, isolated_dev_server_factory, request, action):
     server = isolated_dev_server_factory('editor-conflict-lifetime')
     request.addfinalizer(lambda: browser.get('about:blank'))
@@ -824,7 +1041,7 @@ def test_native_retired_conflict_dialog_preserves_reopened_dirty_editor(browser,
       window.__conflictPriorOperations = new Set(apiOperationState.records.keys());
       window.__oldConflictSave = saveFileEditor(path,panelNodes.get(arguments[1]));
     """, str(path), setup['item'])
-    WebDriverWait(browser, 5).until(lambda driver: driver.find_element(By.CSS_SELECTOR, '.file-editor-conflict-dialog').is_displayed())
+    WebDriverWait(browser, 5).until(lambda driver: driver.find_element(By.CSS_SELECTOR, '.file-editor-merge-dialog').is_displayed())
     receipts = browser.execute_script("""
       const path = arguments[0];
       return [...apiOperationState.records.values()].filter(record =>
@@ -858,7 +1075,7 @@ def test_native_retired_conflict_dialog_preserves_reopened_dirty_editor(browser,
       })().then(done,error => done({error:String(error.stack || error)}));
     """, str(path))
     assert 'error' not in reopened and reopened['closed'] is True, reopened
-    browser.find_element(By.CSS_SELECTOR, f'.file-editor-conflict-dialog [data-dialog-action="{action}"]').click()
+    browser.find_element(By.CSS_SELECTOR, f'.file-editor-merge-dialog [data-dialog-action="{action}"]').click()
     settled = browser.execute_async_script("""
       const path = arguments[0], item = arguments[1], done = arguments[arguments.length-1];
       (async () => ({saved:await window.__oldConflictSave,content:fileState.get(path)?.content,
@@ -1494,3 +1711,259 @@ def test_new_file_action_preserves_existing_bytes(browser, isolated_dev_server_f
         assert path.read_text(encoding='utf-8') == 'keep these bytes\n'
     assert (path.parent / 'created.py').read_bytes() == b''
     consume_only_expected_js_debug_api_error(browser, path='/api/fs/write', status=409, method='POST', query={})
+
+
+def test_native_file_editor_merges_compatible_edits_and_asks_for_overlap(browser, isolated_dev_server_factory, request):
+    server = isolated_dev_server_factory('editor-three-way-merge')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    path = server.paths.home_dir / 'merge.txt'
+    path.write_text('start\ncontext\nmiddle\ncontext two\nfinish\n', encoding='utf-8')
+    item = _open_relocation_editor(browser, server, path)
+    wait = WebDriverWait(browser, 15)
+    local = 'mine\ncontext\nmiddle\ncontext two\nfinish'
+    _type_relocation_text(browser, item, local)
+    external = 'start\ncontext\nmiddle\ncontext two\ntheirs\n'
+    path.write_text(external, encoding='utf-8')
+    combined = 'mine\ncontext\nmiddle\ncontext two\ntheirs\n'
+    wait.until(lambda d: d.execute_script("""
+      const [path, item, text] = arguments, state = fileState.get(path);
+      return state.dirty && !state.externalChanged && state.content === text
+        && panelNodes.get(item)._cmView.state.doc.toString() === text;
+    """, str(path), item, combined))
+    assert path.read_text(encoding='utf-8') == external
+    assert not browser.find_elements(By.CSS_SELECTOR, '.file-editor-dialog')
+    local_overlap = 'mine next\ncontext\nlocal middle\ncontext two\ntheirs'
+    _type_relocation_text(browser, item, local_overlap)
+    wait.until(lambda d: d.execute_script("""
+      const [path, item, draft] = arguments;
+      return fileState.get(path).content === draft && !panelNodes.get(item)._cmSerializeTimer;
+    """, str(path), item, local_overlap))
+    browser.execute_script('document.activeElement.blur()')
+    external = 'start\ncontext\ndisk middle\ncontext two\ntheirs\n'
+    path.write_text(external, encoding='utf-8')
+    wait.until(lambda d: d.execute_script('return Boolean(fileState.get(arguments[0]).externalChanged)', str(path)))
+    browser.find_element(By.CSS_SELECTOR, '.file-editor-save-panel:not([hidden])').click()
+    choose = wait.until(lambda d: d.find_element(By.CSS_SELECTOR, '.file-editor-merge-dialog [data-dialog-action="merge-disk"]'))
+    assert path.read_text(encoding='utf-8') == external
+    choose.click()
+    expected = 'mine next\ncontext\ndisk middle\ncontext two\ntheirs\n'
+    wait.until(lambda d: d.execute_script("""
+      const [path] = arguments, owner = fileEditorSaveOwners.get(path);
+      return !owner?.active && !owner?.conflict && !document.querySelector('.file-editor-merge-dialog');
+    """, str(path)))
+    assert path.read_text(encoding='utf-8') == expected, browser.execute_script("""
+      const state = fileState.get(arguments[0]);
+      return {draft: state.content, original: state.original, dirty: state.dirty, outside: state.externalChanged};
+    """, str(path))
+    wait.until(lambda d: d.execute_script("""
+      const [path, item, text] = arguments, state = fileState.get(path);
+      return !state.dirty && state.original === text && panelNodes.get(item)._cmView.state.doc.toString() === text;
+    """, str(path), item, expected))
+
+
+@pytest.mark.parametrize('extension', ['md', 'txt'])
+def test_recent_changes_keeps_source_editor_and_unsaved_draft(browser, isolated_dev_server_factory, request, extension):
+    server = isolated_dev_server_factory('recent-changes')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    path = server.paths.home_dir / f'review.{extension}'
+    original = '# Original\n\n' + '\n'.join(f'Context {i}' for i in range(18)) + '\nOld ending\n'
+    if extension == 'md':
+        original = original.replace('Context 0', '- Entry 04 — reviewed and approved')
+    updated = original.replace('# Original', '# Updated').replace('Old ending', 'New ending')
+    if extension == 'md':
+        updated = updated.replace('reviewed and approved', 'reviewed and approved222')
+    path.write_text(original, encoding='utf-8')
+    item = _open_relocation_editor(browser, server, path)
+    button = browser.find_element(By.CSS_SELECTOR, '.file-editor-review-panel:not([hidden])')
+    gutter = browser.find_element(By.CSS_SELECTOR, '.file-editor-gutter-panel:not([hidden])')
+    for control in (gutter, button):
+        appearance = browser.execute_script('''const style=getComputedStyle(arguments[0]);
+          return {border:style.borderTopStyle, background:style.backgroundColor, width:style.width}''', control)
+        assert appearance['border'] == 'solid' and appearance['background'] != 'rgba(0, 0, 0, 0)', appearance
+        assert float(appearance['width'].removesuffix('px')) <= 30, appearance
+        assert control.get_attribute('title')
+    assert button.tag_name == 'button'
+    assert button.text == 'Δ'
+    assert button.get_attribute('aria-label') == 'Recent changes'
+    review_toolbar = browser.find_element(By.CSS_SELECTOR, '.file-editor-review-toolbar')
+    assert not review_toolbar.is_displayed()
+    offset = browser.execute_script('''
+      const button = arguments[0], box = button.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(button);
+      const text = range.getBoundingClientRect();
+      return Math.abs((box.left + box.right - text.left - text.right) / 2);
+    ''', button)
+    assert offset <= 1, offset
+    button.click()
+    WebDriverWait(browser, 15).until(lambda d: d.execute_script(
+        'return Boolean(fileState.get(arguments[0])?.recentReview?.id || fileState.get(arguments[0])?.recentReview?.error)', str(path)))
+    assert browser.execute_script('return fileState.get(arguments[0]).recentReview.error || ""', str(path)) == ''
+    baseline = browser.execute_script('return fileState.get(arguments[0]).recentReview.original', str(path))
+    assert baseline == original
+    geometry = browser.execute_script('''
+      const row = arguments[0], main = arguments[1].closest('.file-editor-toolbar');
+      const controls = [...row.querySelectorAll('button')];
+      return {
+        below: row.getBoundingClientRect().top >= main.getBoundingClientRect().bottom,
+        aligned: controls.every(control => control.getBoundingClientRect().top === controls[0].getBoundingClientRect().top),
+        titles: controls.map(control => control.title),
+      };
+    ''', review_toolbar, button)
+    assert geometry == {'below': True, 'aligned': True, 'titles': ['Previous change', 'Next change', 'Start new diff']}
+    assert review_toolbar.find_element(By.CSS_SELECTOR, '.file-editor-review-reset').text == 'New diff'
+    status = browser.find_element(By.CSS_SELECTOR, '.file-editor-review-status')
+    assert status.text == 'Watching saves'
+    assert browser.execute_script('return getComputedStyle(arguments[0]).whiteSpace', status) == 'nowrap'
+    browser.execute_script('window.__reviewView = panelNodes.get(arguments[0])._cmView; window.__reviewView.focus()', item)
+    subprocess.run(['python3', '-c', 'from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2], encoding="utf-8")', str(path), updated], check=True)
+    WebDriverWait(browser, 15).until(lambda d: d.execute_script(
+        'return panelNodes.get(arguments[0])?._cmView?.state.doc.toString() === arguments[1]', item, updated))
+    metrics = browser.execute_script('''
+      const panel=panelNodes.get(arguments[0]), view=panel._cmView;
+      return {same:view===window.__reviewView, focused:view.hasFocus,
+        green:panel.querySelectorAll('.cm-insertedLine').length,
+        red:panel.querySelectorAll('.cm-deletedChunk').length,dirty:fileState.get(arguments[1]).dirty};
+    ''', item, str(path))
+    assert metrics['same'] and metrics['focused'] and not metrics['dirty'], metrics
+    assert metrics['green'] >= 2 and metrics['red'] >= 2, metrics
+    if extension == 'md':
+        clipboard_permissions = {
+            'origin': server.base_url, 'permissions': ['clipboardReadWrite', 'clipboardSanitizedWrite'],
+        }
+        browser.execute_cdp_cmd('Browser.grantPermissions', clipboard_permissions)
+        request.addfinalizer(lambda: browser.execute_cdp_cmd('Browser.resetPermissions', {}))
+        browser.execute_script("""
+          const clipboard = navigator.clipboard, writeText = clipboard.writeText;
+          window.__reviewCopyWrites = [];
+          window.__deferReviewCopy = false;
+          clipboard.writeText = function(text) {
+            window.__reviewCopyWrites.push(text);
+            if (window.__deferReviewCopy) return new Promise(() => {});
+            return writeText.call(this, text);
+          };
+        """)
+        paint = {}
+        word = 'reviewed and approved'
+        for side, selector in (('red', '.cm-deletedChunk .cm-deletedLine'), ('green', '.cm-insertedLine')):
+            target = browser.execute_script("""
+              const [selector, word] = arguments;
+              const line = [...window.__reviewView.dom.querySelectorAll(selector)].find(candidate => candidate.textContent.includes(word));
+              const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+              for (let node; (node = walker.nextNode());) {
+                const index = node.textContent.indexOf(word);
+                if (index < 0) continue;
+                const range = document.createRange();
+                range.setStart(node, index);
+                range.setEnd(node, index + word.length);
+                const rect = range.getBoundingClientRect();
+                const y = Math.round(rect.top + rect.height / 2);
+                return {start:{x:Math.ceil(rect.left),y}, end:{x:Math.floor(rect.right),y},
+                  rect:rect.toJSON(), dpr:devicePixelRatio};
+              }
+              throw new Error('Missing diff text for selection');
+            """, selector, word)
+            unselected = browser_screenshot_rgb(browser)
+            cdp_drag_hold(browser, target['start'], target['end'], steps=8)
+            selected = browser_screenshot_rgb(browser)
+            cdp_release(browser, target['end'])
+            rect, scale = target['rect'], target['dpr']
+            pixels = [
+                (x, y)
+                for x in range(round((rect['left'] + 2) * scale), round((rect['right'] - 2) * scale))
+                for y in range(round((rect['top'] + 2) * scale), round((rect['bottom'] - 2) * scale))
+            ]
+            changed = sum(
+                sum(abs(a - b) for a, b in zip(unselected.getpixel(point), selected.getpixel(point))) > 45
+                for point in pixels
+            )
+            if side == 'red':
+                browser.execute_script('window.__reviewView.contentDOM.blur()')
+                assert browser.execute_script('return getSelection().toString()') == word
+            browser.execute_async_script("navigator.clipboard.writeText('before copy').then(arguments[0])")
+            browser.execute_script('window.__reviewCopyWrites.length = 0; window.__deferReviewCopy = arguments[0]', side == 'red')
+            browser.execute_cdp_cmd('Browser.resetPermissions', {})
+            native_logical_key(browser, 'c', [native_editor_modifier(browser)], commands=('copy',))
+            browser.execute_cdp_cmd('Browser.grantPermissions', clipboard_permissions)
+            copied = browser.execute_async_script('navigator.clipboard.readText().then(arguments[0])')
+            browser.execute_script('window.__deferReviewCopy = false')
+            paint[side] = {
+                'changed': changed, 'samples': len(pixels), 'copied': copied,
+                'writes': browser.execute_script('return window.__reviewCopyWrites'),
+            }
+        for side in ('red', 'green'):
+            assert paint[side]['copied'] == word, paint
+            assert paint[side]['changed'] > paint[side]['samples'] * 0.55, paint
+        assert paint['red']['writes'] == [], paint
+        page_copy = browser.execute_script("""
+          const line = [...window.__reviewView.dom.querySelectorAll('.cm-deletedChunk del')]
+            .find(candidate => candidate.textContent.includes('Entry 04'));
+          const selection = document.getSelection();
+          selection.selectAllChildren(line);
+          const clipboardData = new DataTransfer();
+          const event = new ClipboardEvent('copy', {clipboardData, bubbles: true, cancelable: true});
+          document.body.dispatchEvent(event);
+          const result = {expected: selection.toString(), copied: clipboardData.getData('text/plain'), handled: event.defaultPrevented};
+          selection.removeAllRanges();
+          return result;
+        """)
+        assert page_copy['handled'] and page_copy['copied'] == page_copy['expected'], page_copy
+        assert 'Entry 04' in page_copy['copied'] and word in page_copy['copied'], page_copy
+        assert browser.execute_script('return window.__reviewView.state.doc.toString()') == updated
+    browser.execute_script('window.__reviewView.focus(); window.__reviewView.dispatch({selection:{anchor:5,head:8}})')
+    WebDriverWait(browser, 5).until(lambda d: d.execute_script("""
+      const view = window.__reviewView;
+      const layer = view.dom.querySelector('.cm-selectionLayer');
+      const highlight = layer?.querySelector('.cm-selectionBackground');
+      const line = view.dom.querySelector('.cm-insertedLine').getBoundingClientRect();
+      const box = highlight?.getBoundingClientRect();
+      return getComputedStyle(layer).zIndex === '1' && box?.width > 0 && box.top < line.bottom && box.bottom > line.top;
+    """))
+    selection = browser.execute_script('return window.__reviewView.state.selection.toJSON()')
+    range_select = browser.find_element(By.CSS_SELECTOR, '.file-editor-review-range')
+    assert [option.get_attribute('value') for option in range_select.find_elements(By.TAG_NAME, 'option')] == ['0', '1', '5', '15', '30']
+    select_current_value(browser, '.file-editor-review-range', '1')
+    WebDriverWait(browser, 10).until(lambda d: d.execute_script(
+        'return fileState.get(arguments[0]).recentReview.minutes === 1', str(path)))
+    assert browser.execute_script('return window.__reviewView.state.selection.toJSON()') == selection
+    assert path.read_text(encoding='utf-8') == updated
+    select_current_value(browser, '.file-editor-review-range', '0')
+    browser.find_element(By.CSS_SELECTOR, '.file-editor-review-next:not([hidden])').click()
+    assert browser.execute_script('return panelNodes.get(arguments[0])._cmView === window.__reviewView', item)
+    if extension == 'md':
+        browser.execute_script('setFileEditorViewMode(arguments[1],"split",arguments[0]);renderFileEditorPanel(panelNodes.get(arguments[0]),arguments[0])', item, str(path))
+        WebDriverWait(browser, 10).until(lambda d: d.execute_script(
+            'return Boolean(panelNodes.get(arguments[0])?.querySelector(".cm-deletedChunk"))', item))
+        preview = browser.execute_script('''const panel=panelNodes.get(arguments[0]), preview=panel.querySelector('.file-editor-preview-pane-panel');
+          return {text:preview.textContent, deletions:preview.querySelectorAll('.cm-deletedChunk').length}''', item)
+        assert 'Updated' in preview['text'] and 'Original' not in preview['text'] and preview['deletions'] == 0, preview
+    if extension == 'md':
+        review_id = browser.execute_script('return fileState.get(arguments[0]).recentReview.id', str(path))
+        browser.refresh()
+        WebDriverWait(browser, 15).until(lambda d: d.execute_script('return typeof openFileInEditor === "function" && typeof openFileEditorPane === "function"'))
+        reopened = browser.execute_async_script("""
+          const path=arguments[0], done=arguments[arguments.length-1];
+          (async()=>{const item=await openFileInEditor(path,basenameOf(path),{viewMode:'edit',userInitiated:true});
+            await openFileEditorPane(path,{item});return item})().then(done,error=>done({error:String(error)}));
+        """, str(path))
+        assert isinstance(reopened, str), reopened
+        item = reopened
+        WebDriverWait(browser, 15).until(lambda d: d.execute_script(
+            'return Boolean(fileState.get(arguments[0])?.recentReview?.original || fileState.get(arguments[0])?.recentReview?.error)', str(path)))
+        restored = browser.execute_script('const r=fileState.get(arguments[0]).recentReview;return {id:r.id,original:r.original,error:r.error}', str(path))
+        assert restored['id'] == review_id and restored['original'] == original, restored
+    browser.execute_script('setFileEditorViewMode(arguments[1],"edit",arguments[0]);renderFileEditorPanel(panelNodes.get(arguments[0]),arguments[0])', item, str(path))
+    _type_relocation_text(browser, item, 'unsaved draft')
+    WebDriverWait(browser, 10).until(lambda d: d.execute_script(
+        'return fileState.get(arguments[0]).content === "unsaved draft" && fileState.get(arguments[0]).dirty && !panelNodes.get(arguments[1])._cmSerializeTimer', str(path), item))
+    browser.execute_script('document.activeElement.blur()')
+    subprocess.run(['python3', '-c', 'from pathlib import Path; import sys; Path(sys.argv[1]).write_text("external conflict\\n", encoding="utf-8")', str(path)], check=True)
+    WebDriverWait(browser, 15).until(lambda d: d.execute_script(
+        'return Boolean(fileState.get(arguments[0]).externalChanged)', str(path)))
+    assert browser.execute_script('return panelNodes.get(arguments[0])._cmView.state.doc.toString()', item) == 'unsaved draft'
+    assert path.read_text(encoding='utf-8') == 'external conflict\n'
+    browser.find_element(By.CSS_SELECTOR, '.file-editor-review-reset:not([hidden])').click()
+    WebDriverWait(browser, 10).until(lambda d: d.execute_script(
+        'return fileState.get(arguments[0]).recentReview.original === "external conflict\\n"', str(path)))
+    assert browser.execute_script('return panelNodes.get(arguments[0])._cmView.state.doc.toString()', item) == 'unsaved draft'
+    assert path.read_text(encoding='utf-8') == 'external conflict\n'

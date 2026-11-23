@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 
+from tests.helpers.fixture_tools import fixture_install_update_source
 from tests.isolated_dev_server import go_test_server_binary
 from tools.instance_isolation import synthetic_test_environment
 
@@ -18,7 +19,8 @@ def test_installed_entrypoint_aliases_forward_to_native_cli(tmp_path):
         "YOMUX_GO_BINARY": str(binary),
     })
     prefix = tmp_path / "installed"
-    installed = subprocess.run([str(REPO_ROOT / "tools/install.sh"), "--prefix", str(prefix)],
+    source = fixture_install_update_source(tmp_path, environment)
+    installed = subprocess.run([str(REPO_ROOT / "tools/install.sh"), "--prefix", str(prefix), "--source-root", str(source)],
                                env=environment, capture_output=True, text=True, timeout=30)
     assert installed.returncode == 0, installed.stderr
     for name in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"):

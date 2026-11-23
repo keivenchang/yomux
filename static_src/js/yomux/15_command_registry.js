@@ -33,6 +33,7 @@ function commandRoute(specification = {}) {
 const COMMAND_ROUTES = Object.freeze({
   'tex-compiler-install': commandRoute({id: 'tex-compiler-install', method: 'POST', path: '/api/tex/compiler/install', contractClass: 'pending'}),
   'tex-preview': commandRoute({id: 'tex-preview', method: 'POST', path: '/api/tex/preview', contractClass: 'pending'}),
+  'office-preview': commandRoute({id: 'office-preview', method: 'POST', path: '/api/fs/office-preview', contractClass: 'pending'}),
   'tmux-status-cycle': commandRoute({id: 'tmux-status-cycle', method: 'POST', path: '/api/tmux-status', contractClass: 'pending'}),
   'terminal-upload': commandRoute({id: 'terminal-upload', method: 'POST', path: '/api/upload', contractClass: 'pending'}),
   'editor-upload': commandRoute({id: 'editor-upload', method: 'POST', path: '/api/upload', contractClass: 'pending'}),
@@ -90,6 +91,7 @@ const COMMAND_ROUTES = Object.freeze({
   'finder-move': commandRoute({id: 'finder-move', method: 'POST', path: '/api/fs/move', contractClass: 'optimistic'}),
   'finder-rename': commandRoute({id: 'finder-rename', method: 'POST', path: '/api/fs/rename', contractClass: 'optimistic'}),
   'finder-chmod': commandRoute({id: 'finder-chmod', method: 'POST', path: '/api/fs/chmod', contractClass: 'pending'}),
+  'file-review': commandRoute({id: 'file-review', method: 'POST', path: '/api/fs/review', contractClass: 'background'}),
   'watch-roots-sync': commandRoute({id: 'watch-roots-sync', method: 'POST', path: '/api/watch/roots', contractClass: 'background', applyResult: acceptedWatchRootsCommandResult}),
 });
 

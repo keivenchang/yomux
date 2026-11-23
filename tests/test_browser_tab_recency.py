@@ -101,7 +101,8 @@ def test_global_tab_recency_native_navigation_close_and_tmux_exit(browser, isola
         selector = '[data-pane-tab="' + item.replace('"', '\\"') + '"]'
         tab = next(tab for tab in browser.find_elements(By.CSS_SELECTOR, selector) if tab.is_displayed())
         ActionChains(browser).move_to_element(tab).perform()
-        close = tab.find_element(By.CSS_SELECTOR, '[data-pane-tab-close]')
+        action = "close" if item == editor else "minimize"
+        close = tab.find_element(By.CSS_SELECTOR, f'[data-pane-tab-{action}]')
         if keyboard:
             browser.execute_script('arguments[0].focus()', close)
             close.send_keys(Keys.ENTER)
@@ -172,6 +173,44 @@ def test_global_tab_recency_native_navigation_close_and_tmux_exit(browser, isola
     assert_focus(editor, False)
     WebDriverWait(browser, 10).until(lambda driver: driver.execute_script('return !editorNav.stack.includes(arguments[0])', c))
     assert browser.execute_script('return editorNav.stack') == [editor]
+
+    browser.execute_async_script("selectSession(arguments[0], {userInitiated:true}).then(arguments[arguments.length-1])", a)
+    assert_focus(a)
+    click_visible_selector(browser, f'[data-pane-tab="{a}"] [data-pane-tab-close]')
+    confirmation = WebDriverWait(browser, 10).until(lambda driver: driver.switch_to.alert)
+    prompt = confirmation.text
+    if a not in prompt:
+        confirmation.dismiss()
+        pytest.fail(f"Unexpected terminal kill confirmation: {prompt}")
+    confirmation.accept()
+
+    def kill_snapshot():
+        return browser.execute_script("""
+          const session = arguments[0];
+          const selector = '[data-pane-tab="' + CSS.escape(session) + '"]';
+          return {
+            roster: sessions.includes(session),
+            layout: itemInLayout(session),
+            dockviewPanel: Boolean(dockviewLayoutState.api.getPanel(session)),
+            visibleTabs: [...document.querySelectorAll(selector)]
+              .filter(tab => tab.getClientRects().length && getComputedStyle(tab).visibility === 'visible')
+              .map(tab => tab.className),
+            requests: jsDebugEvents.filter(event => event.endpoint === '/api/kill-session'),
+          };
+        """, a)
+
+    def kill_converged(_):
+        snapshot = kill_snapshot()
+        return not (snapshot["roster"] or snapshot["layout"] or snapshot["dockviewPanel"] or snapshot["visibleTabs"])
+
+    try:
+        WebDriverWait(browser, 10).until(kill_converged)
+    except TimeoutException:
+        remaining = run_isolated_tmux(server.tmux, 'list-sessions', '-F', '#{session_name}')
+        raise AssertionError((kill_snapshot(), remaining.stdout, remaining.stderr)) from None
+    remaining = run_isolated_tmux(server.tmux, 'list-sessions', '-F', '#{session_name}')
+    assert remaining.returncode == 0, remaining.stderr
+    assert remaining.stdout.splitlines() == [b]
 
 
 def test_terminal_refocus_during_native_focusout_preserves_logical_focus(browser, isolated_dev_server_factory, request):

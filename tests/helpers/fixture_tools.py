@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import shlex
+import subprocess
 import sys
 import tempfile
 
@@ -46,6 +47,12 @@ def fixture_executable(name):
 
 def fixture_command(name, *arguments):
     return shlex.join([fixture_executable(name), *arguments])
+
+def fixture_install_update_source(tmp_path, environment):
+    """Own install provenance independently of the checkout's container mount alias."""
+    source = tmp_path / "install-update-source"
+    subprocess.run(["git", "init", "--quiet", str(source)], env=environment, check=True, capture_output=True)
+    return source
 
 
 def fixture_script(source):

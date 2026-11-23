@@ -769,6 +769,54 @@ func TestWatchSignatureUsesPinnedDescriptorAndPythonShape(t *testing.T) {
 	}
 }
 
+func TestWatchPollingReportsSameMtimeAtomicReplacement(t *testing.T) {
+	service, root := newTestService(t, nil)
+	path := filepath.Join(root, "watched.md")
+	replacement := filepath.Join(root, "replacement.tmp")
+	if err := os.WriteFile(path, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, failure := service.WatchRoots(context.Background(), map[string]any{
+		"client_id": "atomic-replacement", "roots": []any{}, "files": []any{path},
+	})
+	if failure != nil {
+		t.Fatal(failure)
+	}
+	if err := os.WriteFile(replacement, []byte("edited"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) || before.Size() != after.Size() || fileID(before) == fileID(after) {
+		t.Fatalf("replacement fixture changed size or mtime, or reused the original inode: %v %v", before, after)
+	}
+	service.pollWatches()
+	diff, failure := service.WatchDiff(context.Background(), registration["watch_token"].(string), false)
+	if failure != nil {
+		t.Fatal(failure)
+	}
+	files := diff["files"].([]any)
+	if len(files) != 1 {
+		t.Fatalf("watch diff files = %v, want one changed file", files)
+	}
+	signature := files[0].(map[string]any)["signature"].([]any)
+	if len(signature) != 6 || signature[0] != path || signature[5] != fileID(after) {
+		t.Fatalf("watch diff signature = %v, want current file ID %q", signature, fileID(after))
+	}
+}
+
 func TestSymlinkToAnyReadablePathIsAllowedAfterOpen(t *testing.T) {
 	service, root := newTestService(t, nil)
 	outside := filepath.Join(t.TempDir(), "outside.txt")
@@ -4079,6 +4127,43 @@ func TestFinderWriteRejectsInPlaceEditAfterInitialConflictCheck(t *testing.T) {
 	}
 	if string(got) != "external edit\n" {
 		t.Fatalf("in-place edit was overwritten: %q", got)
+	}
+}
+
+func TestFinderExactWriteRejectsEditWithinLegacyMtimeTolerance(t *testing.T) {
+	service, root := newTestService(t, nil)
+	path := filepath.Join(root, "note.md")
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshMtime := before.ModTime().Add(2 * time.Millisecond)
+	service.beforeWriteConflictRecheck = func() {
+		if err := os.WriteFile(path, []byte("external edit\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, freshMtime, freshMtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, writeErr := service.WriteExact(context.Background(), path, "merged draft\n", before.ModTime().UnixNano(), fileID(before))
+	if writeErr == nil || writeErr.Code != "changed_on_disk" {
+		t.Fatalf("exact write after external change = %#v", writeErr)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != "external edit\n" {
+		t.Fatalf("external bytes = %q, %v", content, err)
+	}
+	fresh, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mtimeMatches(before.ModTime().UnixNano(), fresh.ModTime().UnixNano(), fresh.ModTime().Unix()) {
+		t.Fatal("test did not exercise an edit inside legacy tolerance")
+	}
+	service.beforeWriteConflictRecheck = nil
+	if _, err := service.WriteExact(context.Background(), path, "merged draft\n", fresh.ModTime().UnixNano(), fileID(fresh)); err != nil {
+		t.Fatal(err)
 	}
 }
 

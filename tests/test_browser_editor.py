@@ -531,7 +531,6 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
                   diffHidden: panel.querySelector('.file-editor-diff-panel')?.hidden === true,
                   diffExpandHidden: panel.querySelector('.file-editor-diff-expand-panel')?.hidden === true,
                   diffRefsHidden: panel.querySelector('.file-editor-diff-ref-panel')?.hidden === true,
-                  popoutHidden: panel.querySelector('.file-editor-popout-preview-panel')?.hidden === true,
                   reloadHidden: panel.querySelector('.file-editor-reload-panel')?.hidden === true,
                   saveHidden: panel.querySelector('.file-editor-save-panel')?.hidden === true,
                   themeHidden: panel.querySelector('.file-editor-theme-panel')?.hidden === true,
@@ -564,7 +563,6 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
     assert metrics["preview"]["modeHidden"] is False, metrics
     assert metrics["preview"]["diffExpandHidden"] is True, metrics
     assert metrics["preview"]["diffRefsHidden"] is True, metrics
-    assert metrics["preview"]["popoutHidden"] is False, metrics
     assert metrics["preview"]["themeHidden"] is False, metrics
     assert metrics["preview"]["fontHidden"] is False, metrics
     assert metrics["preview"]["pathText"] == "~/repo/DONE.md", metrics
@@ -971,11 +969,20 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
     ]
     items = ['file:' + path for path in paths]
     encoded = [quote(item, safe='') for item in items]
+    sources = [
+        "# File 1\n\n" + "\n".join(f"- Large ViewEditor row {row + 1}" for row in range(1800)),
+        "# File 2\n\nDockview tab content 2.",
+    ]
+    entries = [
+        {"name": path.rsplit("/", 1)[-1], "kind": "file", "content": source, "mtime_ns": 1, "size": len(source)}
+        for path, source in zip(paths, sources)
+    ]
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,
         f"?sessions=1&layout=left&tabs=left:{encoded[0]}*,{encoded[1]}",
         sessions=["1"],
+        fs_entries={"/home/test/yolomux.dev": entries},
     )
     wait_for_dockview(browser, min_tabs=2)
     initialized = browser.execute_async_script(
@@ -990,7 +997,8 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
               const source = index === 0
                 ? `# File 1\\n\\n${Array.from({length: 1800}, (_, row) => `- Large ViewEditor row ${row + 1}`).join('\\n')}`
                 : '# File 2\\n\\nDockview tab content 2.';
-              setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+              setFileState(path, {...fileStateFor(path), kind: 'text', content: source, original: source,
+                dirty: false, language: 'markdown', size: source.length, mtime: 1});
               setFileEditorViewMode(path, 'preview', item);
               const panel = panelNodes.get(item);
               destroyProseMirrorPanel(panel);
@@ -3695,7 +3703,6 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
           previewPaneHidden: panel.querySelector('.file-editor-preview-pane-panel')?.hidden === true,
           codeMirrorHidden: panel.querySelector('.file-editor-codemirror-panel')?.hidden === true,
           modeControlHidden: panel.querySelector('.file-editor-mode-control-panel')?.hidden === true,
-          popoutHidden: panel.querySelector('.file-editor-popout-preview-panel')?.hidden === true,
         });
         const result = {
           png: imageInfo(png),
@@ -3815,11 +3822,9 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
     assert metrics["code"]["mode"] == "preview", metrics
     assert metrics["code"]["previewPaneHidden"] is False, metrics
     assert metrics["code"]["modeControlHidden"] is False, metrics
-    assert metrics["code"]["popoutHidden"] is False, metrics
     assert metrics["text"]["mode"] == "preview", metrics
     assert metrics["text"]["previewPaneHidden"] is False, metrics
     assert metrics["text"]["modeControlHidden"] is False, metrics
-    assert metrics["text"]["popoutHidden"] is False, metrics
     assert metrics["unsupported"]["modeControlHidden"] is True, metrics
     assert "File is too large to preview" in metrics["unsupported"]["text"], metrics
     assert "binary preview blocked" in metrics["unsupported"]["text"], metrics
@@ -4258,7 +4263,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
     browser.set_window_size(1200, 900)
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     mermaid_uri = fixture_asset_url("static", "vendor", "mermaid.min.js")
-    mermaid_source = (REPO_ROOT / "examples" / "preview" / "14-mermaid.mmd").read_text(encoding="utf-8")
+    mermaid_source = (REPO_ROOT / "examples" / "14-mermaid.mmd").read_text(encoding="utf-8")
     assert "flowchart TD" in mermaid_source
     assert "direction LR" in mermaid_source
     assert "subgraph MarkdownFlow" in mermaid_source
@@ -4307,7 +4312,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
             const probeNativeLabelTexts = Array.from(new DOMParser().parseFromString(probeSvgText, 'image/svg+xml').querySelectorAll('text'))
               .map(node => String(node.textContent || '').trim())
               .filter(Boolean);
-            const path = '/home/test/repo/examples/preview/14-mermaid.mmd';
+            const path = '/home/test/repo/examples/14-mermaid.mmd';
             const item = fileEditorItemFor(path);
             setFileState(path, {kind: 'text', content: mermaidSource, original: mermaidSource, dirty: false, language: 'mermaid'});
             setFileEditorViewMode(path, 'preview', item);
@@ -5337,7 +5342,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
 
 def test_tex_vieweditor_native_typing_preserves_math(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
-    source = (Path(__file__).resolve().parents[1] / "examples/tex/math.md").read_text()
+    source = (Path(__file__).resolve().parents[1] / "examples/30-tex/math.md").read_text()
     ready = browser.execute_async_script(
         r"""
         const done = arguments[arguments.length - 1];
@@ -7077,25 +7082,6 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
             iframe.style.left = '0';
             iframe.style.top = '0';
             document.body.append(iframe);
-            const realOpen = window.open;
-            let openedUrl = '';
-            window.open = (url) => {
-              openedUrl = String(url || '');
-              return iframe.contentWindow;
-            };
-            panel.querySelector('.file-editor-popout-preview-panel').click();
-            await frame();
-            await frame();
-            window.open = realOpen;
-            const afterPopoutButtonClick = {
-              mode: editorViewModeFor(path, item),
-              openedUrl,
-              hasRecord: filePreviewPopouts.has(path),
-              editMode: panel.querySelector('.file-editor-content')?.classList.contains('edit-mode') === true,
-              editorThemeText: panel.querySelector('.file-editor-theme-panel')?.dataset?.editorThemeShort || '',
-              editorThemeClass: panel.querySelector('.file-editor-theme-panel')?.className || '',
-            };
-            filePreviewPopouts.delete(path);
             setFileEditorViewMode(path, 'preview', item);
             renderFileEditorPanel(panel, item);
             filePreviewPopouts.set(path, {window: iframe.contentWindow});
@@ -7469,11 +7455,11 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               closeCount: previewCloseCount,
               hasRecord: filePreviewPopouts.has(path),
             };
+            deleteFileState(path);
             done({
               errors: jsDebugFailureEvents('error'),
               rejections: jsDebugFailureEvents('rejection'),
               initialGeometry,
-              afterPopoutButtonClick,
               initial,
               afterEditorFont,
               afterEditorContent,
@@ -7514,12 +7500,6 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
     assert geometry["themeRight"] >= geometry["headerRight"] - 2, metrics
     assert geometry["themeLeft"] > geometry["fontCenter"], metrics
     assert abs(geometry["headerTop"]) <= 1, metrics
-    assert metrics["afterPopoutButtonClick"]["mode"] == "edit", metrics
-    assert metrics["afterPopoutButtonClick"]["editMode"] is True, metrics
-    assert metrics["afterPopoutButtonClick"]["hasRecord"] is True, metrics
-    assert metrics["afterPopoutButtonClick"]["openedUrl"].startswith("/preview-popout?path="), metrics
-    assert metrics["afterPopoutButtonClick"]["editorThemeText"] == "Bright", metrics
-    assert "theme-with-label" in metrics["afterPopoutButtonClick"]["editorThemeClass"], metrics
     assert metrics["initial"]["popupValue"] == "14", metrics
     assert metrics["initial"]["editorValue"] == "14", metrics
     assert "Original pop-out text" in metrics["initial"]["popupText"], metrics
@@ -7609,7 +7589,6 @@ def test_preview_popout_delayed_navigation_write_is_generation_bound(browser, tm
           const path = '/home/test/repo/DELAYED.md';
           const writes = [];
           const loadCallbacks = [];
-          const timeoutCallbacks = [];
           const asyncControls = new Map();
           const originalRendered = renderedPreviewSnapshot;
           const originalRenderedAsync = renderedPreviewSnapshotAsync;
@@ -7624,13 +7603,9 @@ def test_preview_popout_delayed_navigation_write_is_generation_bound(browser, tm
             const previewWindow = {
               closed: false,
               location: {pathname: '/pending-preview'},
-              document: {readyState: 'loading'},
+              document: {readyState: 'loading', URL: 'about:blank', querySelector: () => ({})},
               addEventListener(type, callback) {
                 if (type === 'load') loadCallbacks.push(callback);
-              },
-              setTimeout(callback) {
-                timeoutCallbacks.push(callback);
-                return timeoutCallbacks.length;
               },
               focus() {},
             };
@@ -7652,18 +7627,24 @@ def test_preview_popout_delayed_navigation_write_is_generation_bound(browser, tm
             const readyBeforeWinningLoad = filePreviewPopoutScrollSyncReady(record);
             const winningCompletion = record.previewAsync.promise;
             const winningLoadIndex = loadCallbacks.length - 1;
+            previewWindow.document.readyState = 'complete';
+            previewWindow.document.URL = 'https://localhost/preview-popout';
             loadCallbacks[winningLoadIndex]();
             await winningCompletion;
             await Promise.resolve();
             const writesAfterWinningLoad = [...writes];
             const readyAfterWinningLoad = filePreviewPopoutScrollSyncReady(record);
 
+            previewWindow.document.readyState = 'loading';
+            previewWindow.document.URL = 'about:blank';
             writeFilePreviewPopoutWhenReady(path, previewWindow, 'reject');
             const rejectedCompletion = record.previewAsync.promise;
             asyncControls.get('reject').reject(new Error('expected async render rejection'));
             await rejectedCompletion;
             await Promise.resolve();
             const readyAfterRejectBeforeInitialLoad = filePreviewPopoutScrollSyncReady(record);
+            previewWindow.document.readyState = 'complete';
+            previewWindow.document.URL = 'https://localhost/preview-popout';
             loadCallbacks[loadCallbacks.length - 1]();
             await Promise.resolve();
             done({

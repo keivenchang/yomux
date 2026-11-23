@@ -239,7 +239,7 @@ func gitRemoteURLs(config []byte) [][2]string {
 	return remotes
 }
 
-func hostedGitRemoteURL(rawURL string) map[string]string {
+func HostedGitRemoteURL(rawURL string) map[string]string {
 	if rawURL == "" || strings.ContainsAny(rawURL, "\x00\r\n") {
 		return nil
 	}
@@ -304,7 +304,7 @@ func hostedGitRemote(config []byte) map[string]string {
 	var selected map[string]string
 	selectedPriority, selectedIndex := 3, len(remotes)
 	for index, remote := range remotes {
-		parsed := hostedGitRemoteURL(remote[1])
+		parsed := HostedGitRemoteURL(remote[1])
 		if parsed == nil {
 			continue
 		}

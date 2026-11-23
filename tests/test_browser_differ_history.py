@@ -461,23 +461,39 @@ def test_repo_diff_native_finder_open_preserves_scrolled_reading_during_refresh(
         ''', panel))
         raise
     commit.click()
-    message_node = wait.until(lambda _: panel.find_element(By.CSS_SELECTOR, '.git-diff-commit-message'))
+    # The subject is visible during the detail request. Start the reading
+    # checks after the file tree confirms that the full message has arrived.
+    wait.until(lambda _: panel.find_elements(By.CSS_SELECTOR, '.git-diff-commit-detail .git-diff-file-tree'))
+    message_node = panel.find_element(By.CSS_SELECTOR, '.git-diff-commit-message')
     assert message_node.text.rstrip() == message
     wait.until(lambda _: panel.find_elements(By.CSS_SELECTOR, '.git-diff-worktree-summary .git-diff-commit-added'))
     browser.execute_script("""
       const p=window.__nativeRepoReading;p.panel=arguments[0];p.message=arguments[1];
       p.body=p.panel.querySelector('.git-diff-panel-body');p.expectedText=p.message.textContent;
+      p.beforeWheel=p.body.scrollTop;
     """, panel, message_node)
+    message_geometry = browser.execute_script("""
+      const p=__nativeRepoReading;
+      const files=p.message.parentElement.querySelector('.git-diff-file-tree');
+      return {height:p.message.clientHeight, scrollHeight:p.message.scrollHeight,
+        messageBottom:p.message.getBoundingClientRect().bottom, filesTop:files.getBoundingClientRect().top};
+    """)
+    assert 0 < message_geometry['height'] == message_geometry['scrollHeight'], message_geometry
+    assert message_geometry['filesTop'] >= message_geometry['messageBottom'], message_geometry
     ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(message_node), 0, 180).perform()
-    wait.until(lambda driver: driver.execute_script('return __nativeRepoReading.message.scrollTop>40'))
+    wait.until(lambda driver: driver.execute_script("""
+      const p=__nativeRepoReading;
+      return p.body.scrollTop > p.beforeWheel + 40 && p.message.scrollTop === 0;
+    """))
     directory = panel.find_element(By.CSS_SELECTOR, '.git-diff-commit-detail .file-tree-row[data-kind="dir"]')
     browser.execute_script("""
-      const p=__nativeRepoReading;p.beforeDisclosure={scroll:p.message.scrollTop,body:p.body.scrollTop};
-    """)
+      arguments[0].scrollIntoView({block:'center'});
+      const p=__nativeRepoReading;p.beforeDisclosure=p.body.scrollTop;
+    """, directory)
     directory.click()
     browser.execute_script("""
       const p=__nativeRepoReading;p.focus=arguments[0];const rect=p.message.getBoundingClientRect();
-      p.expected={scroll:p.message.scrollTop,body:p.body.scrollTop,top:rect.top,height:rect.height};
+      p.expected={body:p.body.scrollTop,top:rect.top,height:rect.height};
       p.expanded=p.focus.getAttribute('aria-expanded');
     """, directory)
 
@@ -499,7 +515,7 @@ def test_repo_diff_native_finder_open_preserves_scrolled_reading_during_refresh(
                 browser.execute_async_script('const done=arguments[arguments.length-1];requestAnimationFrame(()=>requestAnimationFrame(done));')
             state = snapshot()
             assert state['sameMessage'] and state['focused'] and state['connected'], state
-            assert abs(state['scroll'] - state['expected']['scroll']) <= 1, state
+            assert state['scroll'] == 0, state
             assert abs(state['body'] - state['expected']['body']) <= 1, state
             assert abs(state['top'] - state['expected']['top']) <= 1, state
             assert abs(state['height'] - state['expected']['height']) <= 1, state
@@ -507,8 +523,7 @@ def test_repo_diff_native_finder_open_preserves_scrolled_reading_during_refresh(
             assert state['text'] == state['expectedText'], state
     assert_reading()
     disclosure = browser.execute_script('return __nativeRepoReading.beforeDisclosure')
-    assert abs(snapshot()['scroll'] - disclosure['scroll']) <= 1, snapshot()
-    assert abs(snapshot()['body'] - disclosure['body']) <= 1, snapshot()
+    assert abs(snapshot()['body'] - disclosure) <= 1, snapshot()
     screenshot = Path(os.environ.get('YOMUX_E2E_EVIDENCE_DIR', str(tmp_path))) / f'repo-diff-native-reading-{refresh}.png'
     assert browser.save_screenshot(str(screenshot))
     initial = browser.execute_script("""
@@ -524,7 +539,7 @@ def test_repo_diff_native_finder_open_preserves_scrolled_reading_during_refresh(
     held = snapshot()
     print('Native held refresh geometry:', json.dumps({key: value for key, value in held.items() if key not in {'text', 'expectedText'}}))
     assert held['busy'] == 'true' and held['refreshDisabled'], held
-    assert held['sameMessage'] and abs(held['scroll'] - held['expected']['scroll']) <= 1, held
+    assert held['sameMessage'] and held['scroll'] == 0, held
     assert abs(held['body'] - held['expected']['body']) <= 1, held
     assert abs(held['top'] - held['expected']['top']) <= 1, held
     assert abs(held['height'] - held['expected']['height']) <= 1, held

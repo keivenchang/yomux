@@ -596,6 +596,24 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   border-color: var(--pr-number-chip-bg);
   padding: 0 var(--space-4);
 }
+.ci-indicator.pr-number-chip.hosted-request-number {
+  color: var(--paint-white);
+  text-decoration: none;
+  background: var(--hosted-request-chip-bg);
+  border-color: var(--hosted-request-chip-bg);
+}
+.ci-indicator.hosted-request-number.pr-status-open {
+  --hosted-request-chip-bg: var(--hosted-request-open-bg);
+}
+.ci-indicator.hosted-request-number.pr-status-merged {
+  --hosted-request-chip-bg: var(--hosted-request-merged-bg);
+}
+.ci-indicator.hosted-request-number.pr-status-closed {
+  --hosted-request-chip-bg: var(--paint-black);
+}
+.ci-indicator.hosted-request-number.pr-status-draft {
+  --hosted-request-chip-bg: var(--hosted-request-draft-bg);
+}
 .popover-chip-link {
   display: inline-flex;
   align-items: center;
